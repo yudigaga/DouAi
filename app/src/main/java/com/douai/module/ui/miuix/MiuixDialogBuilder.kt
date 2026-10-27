@@ -75,6 +75,22 @@ class MiuixDialogBuilder(context: Context, private val enabled: Boolean) :
     private val spec = DialogSpec(context)
 
     companion object {
+        /** Replace a searchable picker's visible rows without replacing its input or dialog. */
+        @JvmStatic fun updateSingleChoiceItems(dialog: AlertDialog, labels: Array<out CharSequence>,
+                                              checkedItem: Int, listener: DialogInterface.OnClickListener) {
+            if (dialog is MiuixAlertDialog) {
+                dialog.updateSingleChoiceItems(labels, checkedItem, listener)
+                return
+            }
+            val list = requireNotNull(dialog.listView) { "单选列表尚未创建" }
+            require(list.choiceMode == ListView.CHOICE_MODE_SINGLE) { "当前弹窗不是单选列表" }
+            list.adapter = ArrayAdapter(dialog.context, android.R.layout.simple_list_item_single_choice,
+                labels.map { it.toString() })
+            list.clearChoices()
+            if (checkedItem in labels.indices) list.setItemChecked(checkedItem, true)
+            list.setOnItemClickListener { _, _, position, _ -> listener.onClick(dialog, position) }
+        }
+
         @JvmStatic fun prompt(context: Context, enabled: Boolean, title: String, initial: String,
                               save: java.util.function.Consumer<String>): AlertDialog {
             val input = EditText(ModuleTheme.themedContext(context)).apply {
@@ -440,6 +456,7 @@ private class MiuixAlertDialog(
     private var messageState by mutableStateOf(spec.message)
     private var customTitleState by mutableStateOf(spec.customTitle)
     private var customViewState by mutableStateOf(spec.customView)
+    private var choiceState by mutableStateOf(spec.choice)
     private var selectedIndex by mutableIntStateOf(spec.choice?.selectedIndex ?: -1)
     private val checkedItems = mutableStateListOf<Boolean>().apply {
         val choice = spec.choice
@@ -483,7 +500,20 @@ private class MiuixAlertDialog(
 
     override fun getButton(whichButton: Int): AndroidButton? = buttons[whichButton]
 
-    override fun getListView(): ListView? = if (spec.choice == null) null else choiceList
+    override fun getListView(): ListView? = if (choiceState == null) null else choiceList
+
+    fun updateSingleChoiceItems(labels: Array<out CharSequence>, checkedItem: Int,
+                                listener: DialogInterface.OnClickListener) {
+        require(choiceState?.mode == ChoiceMode.SINGLE) { "当前弹窗不是单选列表" }
+        val next = ChoiceSpec(labels.map { it.toString() }, ChoiceMode.SINGLE,
+            selectedIndex = if (checkedItem in labels.indices) checkedItem else -1, clickListener = listener)
+        choiceState = next
+        selectedIndex = next.selectedIndex
+        checkedItems.clear()
+        choiceList.adapter = ArrayAdapter(activity, android.R.layout.simple_list_item_1, next.labels)
+        choiceList.clearChoices()
+        if (selectedIndex >= 0) choiceList.setItemChecked(selectedIndex, true)
+    }
 
     override fun setTitle(title: CharSequence?) {
         super.setTitle(title)
@@ -588,7 +618,7 @@ private class MiuixAlertDialog(
     }
 
     private fun activateChoice(index: Int) {
-        val choice = spec.choice ?: return
+        val choice = choiceState ?: return
         if (index !in choice.labels.indices) return
         when (choice.mode) {
             ChoiceMode.ITEMS -> {
@@ -640,7 +670,7 @@ private class MiuixAlertDialog(
                         .testTag("miuix.dialog.message"),
                 )
             }
-            val choice = spec.choice
+            val choice = choiceState
             if (choice != null) {
                 LazyColumn(
                     Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 452.dp)
@@ -650,7 +680,7 @@ private class MiuixAlertDialog(
                         BasicComponent(
                             title = label,
                             modifier = Modifier.fillMaxWidth().testTag("miuix.dialog.choice.$index"),
-                            onClick = { activateChoice(index) },
+                            onClick = { if (choice === choiceState) activateChoice(index) },
                             endActions = {
                                 when (choice.mode) {
                                     ChoiceMode.ITEMS -> Unit

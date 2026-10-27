@@ -11,6 +11,27 @@ import static com.douai.module.config.ConfigurationCatalog.Feature.*;
 import static org.junit.Assert.*;
 
 public final class ConfigurationCatalogTest {
+    @Test public void fishSettingsTransferIndependentlyAndReuseTheSharedSpeechRefreshContract() {
+        for (String key : FishSpeechSettings.KEYS) {
+            if (FishSpeechSettings.REFERENCE_SAMPLES.equals(key)) assertFalse(ConfigKeys.TYPES.containsKey(key));
+            else assertEquals("string", ConfigKeys.TYPES.get(key));
+            assertConsumers(key, EnumSet.of(REPLY, COMMENT_AUTOMATION, COMMENT_REPLY,
+                    AUTOMATION_DISPATCH, DIRECT_MESSAGE_SPEECH, NATIVE_COMMENT_SPEECH));
+        }
+        for (String cache : new String[]{FishSpeechSettings.VOICE_SAMPLE, FishSpeechSettings.MODEL_SAMPLE,
+                FishSpeechSettings.MODEL_SOURCE}) assertFalse(ConfigKeys.TYPES.containsKey(cache));
+    }
+
+    @Test public void breezeSettingsTransferAndRefreshSpeechConsumersWithoutExportingRuntimeCatalogs() {
+        for (String key : BreezeSpeechSettings.KEYS) {
+            assertEquals("string", ConfigKeys.TYPES.get(key));
+            assertConsumers(key, EnumSet.of(REPLY, COMMENT_AUTOMATION, COMMENT_REPLY,
+                    AUTOMATION_DISPATCH, DIRECT_MESSAGE_SPEECH, NATIVE_COMMENT_SPEECH));
+        }
+        for (String runtime : new String[]{BreezeSpeechSettings.VOICE_SAMPLE, BreezeSpeechSettings.MODEL_SAMPLE,
+                BreezeSpeechSettings.MODEL_SOURCE}) assertFalse(ConfigKeys.TYPES.containsKey(runtime));
+    }
+
     @Test public void explicitAnalyticsSettingsTransferWithoutRestartingAutomaticFeatures() {
         for (String key : new String[]{AnalyticsAiSettings.MODEL_ID, AnalyticsAiSettings.SECONDARY_PROMPT}) {
             assertEquals("string", ConfigKeys.TYPES.get(key));

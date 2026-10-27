@@ -26,6 +26,52 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class SpeechHttpClientTest {
+    @Test public void providerJsonUsesItsOwnMethodAndRequiresTheDeclaredSuccessStatus() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setResponseCode(202).setBody("{\"generation_job_id\":\"job\"}"));
+            assertTrue(request.postProviderJson(server.url("/job").toString(),"{}","{\"text\":\"正文\"}","breeze",202).contains("job"));
+            RecordedRequest sent = server.takeRequest(2,TimeUnit.SECONDS);
+            assertEquals("POST",sent.getMethod()); assertTrue(sent.getHeader("Content-Type").startsWith("application/json"));
+            server.enqueue(new MockResponse().setResponseCode(202).setBody("not-ready"));
+            Exception failure=assertThrows(Exception.class,()->request.getProviderJson(server.url("/job").toString(),"{}","breeze"));
+            assertEquals("Breeze Blue 语音 GET 返回 HTTP 202",failure.getMessage()); assertEquals(2,server.getRequestCount());
+        }
+    }
+
+    @Test public void providerAudioGetRejectsPartialSuccessAndNeverKeepsAnIncompleteFile() throws Exception {
+        java.io.File target=java.io.File.createTempFile("douai-job-audio", ".audio");
+        try(MockWebServer server=new MockWebServer();SpeechHttpClient.Request request=new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setResponseCode(206).setBody("ID3partial"));
+            assertThrows(Exception.class,()->request.getProviderAudio(server.url("/audio").toString(),"{}",target,"breeze"));
+            assertFalse(target.exists()); assertEquals(1,server.getRequestCount());
+        } finally {java.nio.file.Files.deleteIfExists(target.toPath());}
+    }
+
+    @Test public void absoluteProviderBudgetDisconnectsABlockedReadAndDeletesItsOutput() throws Exception {
+        ExecutorService worker=Executors.newSingleThreadExecutor();
+        java.io.File target=java.io.File.createTempFile("douai-budget-audio", ".audio");
+        try(MockWebServer server=new MockWebServer();SpeechHttpClient.Request request=new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            String endpoint=server.url("/audio").toString();
+            request.limitDeadline(System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(800),"breeze");
+            Future<?> result=worker.submit(()->request.getProviderAudio(endpoint,"{}",target,"breeze"));
+            assertNotNull(server.takeRequest(2,TimeUnit.SECONDS));
+            ExecutionException failure=assertThrows(ExecutionException.class,()->result.get(3,TimeUnit.SECONDS));
+            assertTrue(failure.getCause().getMessage().contains("超时"));assertFalse(target.exists());
+            assertEquals(1,server.getRequestCount());
+        } finally {worker.shutdownNow();java.nio.file.Files.deleteIfExists(target.toPath());}
+    }
+
+    @Test public void nativeNotReadyStatusKeepsOnlyTheNumericRetryDelay() throws Exception {
+        try(MockWebServer server=new MockWebServer();SpeechHttpClient.Request request=new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setResponseCode(425).setHeader("Retry-After","2").setBody("private-response"));
+            SpeechHttpClient.ProviderHttpFailure failure=assertThrows(SpeechHttpClient.ProviderHttpFailure.class,
+                    ()->request.getProviderAudio(server.url("/audio").toString(),"{}",null,"breeze"));
+            assertEquals(425,failure.status);assertEquals(2,failure.retryAfterSeconds);
+            assertEquals("Breeze Blue 语音 GET 返回 HTTP 425",failure.getMessage());assertNull(failure.getCause());
+        }
+    }
+
     @Test public void streamedAudioKeepsOnlyItsProbeInMemoryAndPreservesExactFileBytes() throws Exception {
         java.io.File target = java.io.File.createTempFile("douai-stream-audio", ".audio");
         byte[] audio = new byte[2 * 1024 * 1024];

@@ -57,9 +57,9 @@ public final class SpeechSynthesis implements AutoCloseable {
             return request;
         }
         SpeechSettings settings = new SpeechSettings(options);
-        request.operation.stage("provider_selected", "provider=" + (settings.minimax ? "minimax" : settings.thirdParty ? "third_party" : "local")
+        request.operation.stage("provider_selected", "provider=" + provider(settings)
                 + "; text_chars=" + (text == null ? 0 : text.length()));
-        if (!settings.thirdParty && !settings.minimax) {
+        if (settings.local) {
             request.operation.wrap(() -> request.local = LocalSpeechSynthesis.synthesize(context, text, options, request::complete)).run();
             return request;
         }
@@ -70,7 +70,7 @@ public final class SpeechSynthesis implements AutoCloseable {
         Context application = context.getApplicationContext();
         Context use = application == null ? context : application;
         request.main.postDelayed(request.operation.wrap(() -> request.complete(null,
-                settings.minimax ? "MiniMax 语音生成超时" : "第三方语音生成超时")), 60_000);
+                settings.fish ? "Fish Audio 语音生成超时" : settings.breeze ? "Breeze Blue 语音生成超时" : settings.minimax ? "MiniMax 语音生成超时" : "第三方语音生成超时")), 60_000);
         try {
             request.operation.stage("queued", "business_result=pending; timeout_ms=60000");
             request.worker = WORKERS.submit(request.operation.wrap(() -> request.generate(use, text, settings)));
@@ -87,9 +87,13 @@ public final class SpeechSynthesis implements AutoCloseable {
             ensureCacheDirectory(cache);
             cleanOldFiles(cache);
             output = new File(cache, UUID.randomUUID() + ".audio");
-            operation.stage("provider_request", "provider=" + (settings.minimax ? "minimax" : "third_party"));
+            operation.stage("provider_request", "provider=" + provider(settings));
             SpeechHttpClient.Resource response;
-            if (settings.minimax) {
+            if (settings.fish) {
+                response = FishSpeechClient.synthesize(http, text, settings.fishSettings, output, context);
+            } else if (settings.breeze) {
+                response = BreezeSpeechClient.synthesize(http, text, settings.breezeSettings, output);
+            } else if (settings.minimax) {
                 response = MiniMaxSpeechClient.synthesize(http, text, settings, output);
             } else {
                 String url = SpeechHttpClient.resolveTemplate(settings.getTemplate, text, settings.selectedVoice);
@@ -124,16 +128,22 @@ public final class SpeechSynthesis implements AutoCloseable {
             operation.error("provider_or_audio_validation", failure);
             String message = failure.getMessage();
             // Parsing/IO failures must not leak text, credentials or provider response content.
-            if (message == null || !(message.startsWith("第三方语音") || message.startsWith("MiniMax 语音") || message.startsWith("所选语音字段")
+            if (message == null || !(message.startsWith("第三方语音") || message.startsWith("MiniMax 语音")
+                    || message.startsWith("Breeze Blue 语音") || message.startsWith("Fish Audio 语音") || message.startsWith("所选语音字段")
                     || message.equals("返回了多个语音链接，请选择音频字段")
                     || message.equals("返回了多个链接，请选择音频字段") || message.equals("无法创建语音缓存")
                     || message.equals("生成的语音文件无效"))) {
-                message = settings.minimax ? "MiniMax 语音生成失败，请检查配置" : "第三方语音生成失败，请检查接口及音频字段";
+                message = settings.fish ? "Fish Audio 语音生成失败，请检查配置" : settings.breeze ? "Breeze Blue 语音生成失败，请检查配置" : settings.minimax
+                        ? "MiniMax 语音生成失败，请检查配置" : "第三方语音生成失败，请检查接口及音频字段";
             }
             complete(null, message);
         } finally {
             if (finished.get()) deleteFailedOutput();
         }
+    }
+
+    private static String provider(SpeechSettings settings) {
+        return settings.fish ? "fish" : settings.breeze ? "breeze" : settings.minimax ? "minimax" : settings.thirdParty ? "third_party" : "local";
     }
 
     static void ensureCacheDirectory(File cache) {

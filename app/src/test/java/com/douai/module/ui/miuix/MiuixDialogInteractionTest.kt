@@ -75,6 +75,48 @@ class MiuixDialogInteractionTest {
         }
     }
 
+    @Test fun searchableChoicesUpdateRenderedRowsAndCallbackWithoutReplacingTheHeader() {
+        var selected = ""
+        lateinit var header: android.widget.EditText
+        compose.runOnUiThread {
+            header = android.widget.EditText(compose.activity).apply { setText("温柔") }
+            dialog = MiuixDialogBuilder(compose.activity, true).setCustomTitle(header)
+                .setSingleChoiceItems(arrayOf("old-a", "old-b"), 0) { _, _ -> selected = "old" }
+                .setNegativeButton("关闭", null).create()
+            dialog!!.show()
+            MiuixDialogBuilder.updateSingleChoiceItems(dialog!!, arrayOf("温柔（Soft Voice）"), -1) { _, index ->
+                selected = "filtered-$index"
+            }
+        }
+        compose.onNodeWithText("温柔（Soft Voice）").assertIsDisplayed()
+        compose.onNodeWithTag("miuix.dialog.choice.1").assertDoesNotExist()
+        compose.onNodeWithTag("miuix.dialog.choice.0").performClick()
+        compose.runOnIdle {
+            assertEquals("filtered-0", selected)
+            assertEquals("温柔", header.text.toString())
+            assertTrue(header.isShown)
+            assertEquals(1, dialog!!.listView.count)
+            assertEquals(0, dialog!!.listView.checkedItemPosition)
+            assertTrue(dialog!!.isShowing)
+        }
+    }
+
+    @Test fun searchableNativeChoicesHandleEmptyResultsThenRestoreTheCorrectCallback() {
+        var selected = ""
+        compose.runOnUiThread {
+            dialog = MiuixDialogBuilder(compose.activity, false).setTitle("音色")
+                .setSingleChoiceItems(arrayOf("A", "B"), 1) { _, _ -> selected = "old" }.create()
+            dialog!!.show()
+            MiuixDialogBuilder.updateSingleChoiceItems(dialog!!, emptyArray(), -1) { _, _ -> selected = "empty" }
+            assertEquals(0, dialog!!.listView.count)
+            assertEquals(-1, dialog!!.listView.checkedItemPosition)
+            MiuixDialogBuilder.updateSingleChoiceItems(dialog!!, arrayOf("B"), 0) { _, index -> selected = "B-$index" }
+            dialog!!.listView.performItemClick(null, 0, 0)
+            assertEquals("B-0", selected)
+            assertEquals(0, dialog!!.listView.checkedItemPosition)
+        }
+    }
+
     @Test fun customViewDetailsCopyMetadataThroughTheMiuixAction() {
         var information = ""
         compose.runOnUiThread {

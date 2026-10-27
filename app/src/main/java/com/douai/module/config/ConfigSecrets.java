@@ -73,6 +73,7 @@ final class ConfigSecrets {
     }
 
     static boolean sensitive(String key) {
+        if (FishSpeechSettings.MAX_NEW_TOKENS.equals(key)) return false;
         String name = key.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
         // Token budgets are generation settings. Their numeric/boolean types remain validated separately.
         if (java.util.Arrays.asList("maxtokens", "maxtokensenabled", "maxoutputtokens", "maxcompletiontokens",
@@ -93,6 +94,8 @@ final class ConfigSecrets {
     private static boolean isEndpointField(String key) {
         return ThirdPartyDownloadSettings.GET_TEMPLATE.equals(key) || SpeechSettings.GET_TEMPLATE.equals(key)
                 || SpeechSettings.VOICE_GET_TEMPLATE.equals(key) || SpeechSettings.MINIMAX_BASE_URL.equals(key)
+                || BreezeSpeechSettings.BASE_URL.equals(key)
+                || FishSpeechSettings.BASE_URL.equals(key)
                 || "streak_content_api".equals(key);
     }
 
@@ -158,6 +161,8 @@ final class ConfigSecrets {
     static String endpointKey(String key) {
         if (key.startsWith("third_party_")) return ThirdPartyDownloadSettings.GET_TEMPLATE;
         if (key.startsWith("tts_minimax_")) return SpeechSettings.MINIMAX_BASE_URL;
+        if (key.startsWith("tts_breeze_")) return BreezeSpeechSettings.BASE_URL;
+        if (key.startsWith("tts_fish_")) return FishSpeechSettings.BASE_URL;
         if (key.startsWith("tts_voice_")) return SpeechSettings.VOICE_GET_TEMPLATE;
         if (key.startsWith("tts_")) return SpeechSettings.GET_TEMPLATE;
         if (key.equals("streak_content_api")) return key;
@@ -170,6 +175,8 @@ final class ConfigSecrets {
         if (SpeechSettings.GET_TEMPLATE.equals(key)) return redactText(SpeechSettings.DEFAULT_GET_TEMPLATE);
         if (SpeechSettings.VOICE_GET_TEMPLATE.equals(key)) return redactText(SpeechSettings.DEFAULT_VOICE_GET_TEMPLATE);
         if (SpeechSettings.MINIMAX_BASE_URL.equals(key)) return SpeechSettings.DEFAULT_MINIMAX_BASE_URL;
+        if (BreezeSpeechSettings.BASE_URL.equals(key)) return BreezeSpeechSettings.DEFAULT_BASE_URL;
+        if (FishSpeechSettings.BASE_URL.equals(key)) return FishSpeechSettings.DEFAULT_BASE_URL;
         if (ThirdPartyDownloadSettings.GET_TEMPLATE.equals(key)) return redactText(ThirdPartyDownloadSettings.DEFAULT_GET_TEMPLATE);
         return "";
     }

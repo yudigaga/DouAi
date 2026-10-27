@@ -6,6 +6,8 @@ public final class SpeechSettings {
     public static final String LOCAL = "local";
     public static final String THIRD_PARTY = "third_party";
     public static final String MINIMAX = "minimax";
+    public static final String BREEZE = "breeze";
+    public static final String FISH = "fish";
     public static final String MINIMAX_API_KEY = "tts_minimax_api_key";
     public static final String MINIMAX_BASE_URL = "tts_minimax_base_url";
     public static final String MINIMAX_MODEL = "tts_minimax_model";
@@ -43,6 +45,8 @@ public final class SpeechSettings {
 
     public final boolean thirdParty;
     public final boolean minimax;
+    public final boolean breeze;
+    public final boolean fish;
     public final boolean local;
     public final String minimaxApiKey;
     public final String minimaxBaseUrl;
@@ -53,6 +57,8 @@ public final class SpeechSettings {
     public final float minimaxVolume;
     public final int minimaxPitch;
     public final MiniMaxSpeechOptions minimaxOptions;
+    public final BreezeSpeechSettings breezeSettings;
+    public final FishSpeechSettings fishSettings;
     private final LocalOptions options;
     public final float rate;
     public final float pitch;
@@ -71,7 +77,11 @@ public final class SpeechSettings {
         this.options = options;
         thirdParty = THIRD_PARTY.equals(options.text(PROVIDER, LOCAL));
         minimax = MINIMAX.equals(options.text(PROVIDER, LOCAL));
-        local = !thirdParty && !minimax;
+        breeze = BREEZE.equals(options.text(PROVIDER, LOCAL));
+        fish = FISH.equals(options.text(PROVIDER, LOCAL));
+        local = !thirdParty && !minimax && !breeze && !fish;
+        breezeSettings = new BreezeSpeechSettings(options);
+        fishSettings = new FishSpeechSettings(options);
         minimaxApiKey = options.text(MINIMAX_API_KEY, "").trim();
         minimaxBaseUrl = options.text(MINIMAX_BASE_URL, DEFAULT_MINIMAX_BASE_URL).trim();
         minimaxModel = options.text(MINIMAX_MODEL, DEFAULT_MINIMAX_MODEL).trim();
@@ -115,8 +125,11 @@ public final class SpeechSettings {
         minimaxOptions.validate();
     }
 
+    public void validateBreeze() { breezeSettings.validateForSynthesis(); }
+    public void validateFish() { fishSettings.validateForSynthesis(); }
+
     public static String validateProvider(String value) {
-        if (!LOCAL.equals(value) && !THIRD_PARTY.equals(value) && !MINIMAX.equals(value)) {
+        if (!LOCAL.equals(value) && !THIRD_PARTY.equals(value) && !MINIMAX.equals(value) && !BREEZE.equals(value) && !FISH.equals(value)) {
             throw new IllegalArgumentException("语音来源无效");
         }
         return value;

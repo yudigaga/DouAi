@@ -12,4 +12,9 @@
     <string name="module_settings_location">抖音内功能设置独立保存在抖音应用，本页只显示模块应用状态。</string>
     <string name="module_open_host">打开抖音</string>
     <string name="module_host_unavailable">未安装抖音或无法打开应用。</string>
+    <string name="voice_quick_catalog_status">已缓存 %1$d 项 · 匹配 %2$d 项%3$s</string>
+    <string name="voice_quick_catalog_empty">\n未找到匹配音色，可清空搜索或到完整设置搜索全部音色。</string>
+    <string name="fish_catalog_public_title">单说话人音色 · 公开音色</string>
+    <string name="fish_catalog_self_title">单说话人音色 · 我的音色</string>
+    <string name="breeze_catalog_title">Breeze Blue 音色 · %1$s</string>
 </resources>

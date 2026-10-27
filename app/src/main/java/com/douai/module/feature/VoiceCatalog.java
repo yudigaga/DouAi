@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -20,6 +21,8 @@ import java.util.regex.Pattern;
 public final class VoiceCatalog {
     private static final int MAX_BYTES = 2 * 1024 * 1024;
     private static final int MAX_ENTRIES = 2048;
+    static final int MAX_LABELS = 8;
+    static final int MAX_LABEL_CHARS = 48;
     private static final String[] LIST_NAMES = {"voices", "voice", "speakers", "list", "items", "data", "result"};
     private static final String[] ID_NAMES = {"id", "voice", "voice_id", "speaker_id", "speaker", "code", "value"};
     private static final String[] NAME_NAMES = {"name", "voice_name", "speaker_name", "title", "label", "nickname"};
@@ -31,14 +34,18 @@ public final class VoiceCatalog {
     public static final class Entry {
         public final String id;
         public final String name;
+        public final List<String> labels;
 
-        public Entry(String id, String name) {
+        public Entry(String id, String name) { this(id, name, Collections.emptyList()); }
+
+        public Entry(String id, String name, List<String> labels) {
             if (id == null || id.trim().isEmpty() || id.length() > 256
                     || name == null || name.trim().isEmpty() || name.length() > 512) {
                 throw new IllegalArgumentException("音色编号或名称无效");
             }
             this.id = id.trim();
             this.name = name.trim();
+            this.labels = cleanLabels(labels);
         }
     }
 
@@ -110,7 +117,8 @@ public final class VoiceCatalog {
             if (id == null && empty(idPath)) id = mapId;
             String name = scalar(empty(namePath) ? first(object, NAME_NAMES) : atPath(item, namePath));
             if (name == null && empty(namePath)) name = id;
-            put(entries, id, name);
+            Object labels = object.get("labels");
+            put(entries, id, name, labels instanceof List ? (List<?>) labels : Collections.emptyList());
         } else if (empty(idPath) && empty(namePath)) {
             String value = scalar(item);
             put(entries, mapId == null ? value : mapId, value);
@@ -118,12 +126,36 @@ public final class VoiceCatalog {
     }
 
     private static void put(Map<String, Entry> entries, String id, String name) {
+        put(entries, id, name, Collections.emptyList());
+    }
+
+    private static void put(Map<String, Entry> entries, String id, String name, List<?> labels) {
         if (id == null || name == null || id.trim().isEmpty() || name.trim().isEmpty()) return;
-        Entry entry = new Entry(id, name);
+        Entry entry = new Entry(id, name, cleanLabels(labels));
         if (entries.size() >= MAX_ENTRIES && !entries.containsKey(entry.id)) {
             throw new IllegalArgumentException("音色数量超过 2048");
         }
         if (!entries.containsKey(entry.id)) entries.put(entry.id, entry);
+    }
+
+    /** Optional display metadata never invalidates an otherwise valid voice. */
+    static List<String> cleanLabels(List<?> labels) {
+        if (labels == null || labels.isEmpty()) return Collections.emptyList();
+        LinkedHashSet<String> clean = new LinkedHashSet<>();
+        for (Object candidate : labels) {
+            if (!(candidate instanceof String)) continue;
+            String value = (String) candidate;
+            if (value.length() > MAX_LABEL_CHARS || value.codePoints().anyMatch(point -> {
+                int type = Character.getType(point);
+                return type == Character.CONTROL || type == Character.FORMAT || type == Character.SURROGATE
+                        || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR;
+            })) continue;
+            String trimmed = value.trim();
+            if (trimmed.isEmpty()) continue;
+            clean.add(trimmed);
+            if (clean.size() == MAX_LABELS) break;
+        }
+        return Collections.unmodifiableList(new ArrayList<>(clean));
     }
 
     private static Object autoList(Object value, int depth) {

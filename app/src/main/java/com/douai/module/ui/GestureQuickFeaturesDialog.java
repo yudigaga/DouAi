@@ -9,6 +9,9 @@ import com.douai.module.config.AutomationMessageSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.SpeechSettings;
+import com.douai.module.config.FishSpeechSettings;
+import com.douai.module.feature.VoiceCatalog;
+import com.douai.module.feature.VoiceNameTranslationCache;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixSettingsViews;
 
@@ -38,12 +41,26 @@ public final class GestureQuickFeaturesDialog {
         content.addView(autoReply.getView(), row);
 
         SpeechSettings speech = speechSettings(store);
-        String voice = speech.minimax ? speech.minimaxVoiceName.isEmpty() ? speech.minimaxVoiceId
+        String voice = speech.fish ? fishVoiceSummary(speech.fishSettings)
+                : speech.breeze ? speech.breezeSettings.voiceName.isEmpty() ? speech.breezeSettings.voiceId
+                : speech.breezeSettings.voiceName + " · " + speech.breezeSettings.voiceId
+                : speech.minimax ? speech.minimaxVoiceName.isEmpty() ? speech.minimaxVoiceId
                 : speech.minimaxVoiceName + " · " + speech.minimaxVoiceId
                 : speech.thirdParty ? speech.selectedVoiceName.isEmpty() ? speech.selectedVoice
                 : speech.selectedVoiceName + " · " + speech.selectedVoice : "系统语音引擎";
+        if (speech.breeze || speech.fish && "single".equals(speech.fishSettings.voiceMode)) {
+            String id = speech.breeze ? speech.breezeSettings.voiceId : speech.fishSettings.referenceId;
+            String original = speech.breeze ? speech.breezeSettings.voiceName : speech.fishSettings.referenceName;
+            if (!id.isEmpty() && !original.isEmpty()) {
+                try {
+                    VoiceCatalog.Entry entry = new VoiceCatalog.Entry(id, original);
+                    voice = VoiceNameTranslationCache.read(store).displayName(VoiceNameTranslationCache.scope(speech), entry)
+                            + " · " + id;
+                } catch (IllegalArgumentException ignored) { /* Keep the existing summary for an unfinished draft. */ }
+            }
+        }
         MiuixSettingsViews.Option voiceOption = new MiuixSettingsViews.Option(activity, "切换音色",
-                speech.minimax ? "MiniMax" : speech.thirdParty ? "第三方语音" : "系统语音引擎",
+                speech.fish ? "Fish Audio" : speech.breeze ? "Breeze Blue" : speech.minimax ? "MiniMax" : speech.thirdParty ? "第三方语音" : "系统语音引擎",
                 voice, true, switchVoice);
         content.addView(voiceOption.getView(), row);
 
@@ -60,6 +77,16 @@ public final class GestureQuickFeaturesDialog {
         } catch (RuntimeException failure) {
             if (onError != null) onError.accept(failure.getMessage() == null ? "设置保存失败" : failure.getMessage());
         }
+    }
+
+    private static String fishVoiceSummary(FishSpeechSettings fish) {
+        if ("multi".equals(fish.voiceMode)) return "多说话人 · " + fish.referenceIds.size() + " 位";
+        if ("references".equals(fish.voiceMode)) {
+            try { return "参考音频 · " + fish.referenceGroups().size() + " 个分组"; }
+            catch (RuntimeException invalid) { return "参考音频 · 待重新配置"; }
+        }
+        return fish.referenceId.isEmpty() ? "接口默认音色" : fish.referenceName.isEmpty()
+                ? fish.referenceId : fish.referenceName + " · " + fish.referenceId;
     }
 
     private static SpeechSettings speechSettings(SettingsStore store) {

@@ -29,6 +29,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,9 +39,27 @@ import java.util.regex.Pattern;
 public final class SpeechHttpClient {
     public static final int MAX_AUDIO_BYTES = 20 * 1024 * 1024;
     public static final int MAX_TEXT_BYTES = 2 * 1024 * 1024;
+    static final int MAX_REFERENCE_REQUEST_BYTES = 10 * 1024 * 1024;
     private static final Pattern HEADER_NAME = Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
     private static final Pattern CHARSET = Pattern.compile(
             "(?:^|;)\\s*charset\\s*=\\s*(?:\"([^\"]+)\"|([^;\\s]+))", Pattern.CASE_INSENSITIVE);
+    private static final ScheduledThreadPoolExecutor DEADLINES = deadlineExecutor();
+
+    private static ScheduledThreadPoolExecutor deadlineExecutor() {
+        ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1, work -> {
+            Thread thread = new Thread(work, "douai-tts-deadline"); thread.setDaemon(true); return thread;
+        });
+        executor.setRemoveOnCancelPolicy(true);
+        return executor;
+    }
+
+    static final class ProviderHttpFailure extends IOException {
+        final int status, retryAfterSeconds;
+        ProviderHttpFailure(String operation, int status, int retryAfterSeconds) {
+            super(operation + " 返回 HTTP " + status);
+            this.status = status; this.retryAfterSeconds = retryAfterSeconds;
+        }
+    }
 
     private SpeechHttpClient() { }
 
@@ -168,6 +189,36 @@ public final class SpeechHttpClient {
         private boolean cancelled;
         private boolean inProgress;
         private HttpURLConnection connection;
+        private ScheduledFuture<?> deadlineTask;
+        private long deadlineGeneration;
+        private boolean deadlineExpired;
+        private String deadlineMessage = "语音请求超时";
+
+        void limitDeadline(long absoluteNanos, String provider) {
+            synchronized (this) {
+                ensureActive();
+                clearDeadline();
+                deadlineMessage = providerOperation(provider, "POST").replace(" POST", "") + "请求超时";
+                long generation = ++deadlineGeneration;
+                deadlineTask = DEADLINES.schedule(() -> expireDeadline(generation),
+                        Math.max(0, absoluteNanos - System.nanoTime()), TimeUnit.NANOSECONDS);
+            }
+        }
+
+        private void expireDeadline(long generation) {
+            HttpURLConnection active;
+            synchronized (this) {
+                if (generation != deadlineGeneration || cancelled) return;
+                deadlineExpired = true; active = connection;
+            }
+            if (active != null) active.disconnect();
+        }
+
+        synchronized void clearDeadline() {
+            deadlineGeneration++;
+            if (deadlineTask != null) deadlineTask.cancel(false);
+            deadlineTask = null; deadlineExpired = false;
+        }
 
         public Resource fetchResource(String url, String headers) throws IOException {
             return fetch(url, headers, MAX_AUDIO_BYTES);
@@ -187,6 +238,51 @@ public final class SpeechHttpClient {
             String text = fetch(url, headers, MAX_TEXT_BYTES, body).text();
             ensureActive();
             return text;
+        }
+
+        Resource postAudioResource(String url, String headers, String body, java.io.File destination) throws IOException {
+            return postAudioResource(url, headers, body, destination, "breeze");
+        }
+
+        Resource postAudioResource(String url, String headers, String body, java.io.File destination, String provider) throws IOException {
+            String operation = providerOperation(provider, "POST");
+            return fetch(url, headers, MAX_AUDIO_BYTES, body, destination, operation, true);
+        }
+
+        public String postProviderJson(String url, String headers, String body, String provider, int expectedStatus) throws IOException {
+            if (expectedStatus != 200 && expectedStatus != 202) throw new IllegalArgumentException("语音响应状态设置无效");
+            String operation = providerOperation(provider, "POST");
+            String text = fetch(url, headers, MAX_TEXT_BYTES, encodeBody(body, operation), null,
+                    operation, true, "application/json; charset=utf-8", expectedStatus, MAX_TEXT_BYTES).text();
+            ensureActive();
+            return text;
+        }
+
+        public String getProviderJson(String url, String headers, String provider) throws IOException {
+            String text = fetch(url, headers, MAX_TEXT_BYTES, (byte[]) null, null, providerOperation(provider, "GET"),
+                    true, null, 200, MAX_TEXT_BYTES).text();
+            ensureActive();
+            return text;
+        }
+
+        public Resource getProviderAudio(String url, String headers, java.io.File destination, String provider) throws IOException {
+            return fetch(url, headers, MAX_AUDIO_BYTES, (byte[]) null, destination, providerOperation(provider, "GET"),
+                    true, null, 200, MAX_TEXT_BYTES);
+        }
+
+        Resource postReferenceAudio(String url, String headers, byte[] body, java.io.File destination) throws IOException {
+            return fetch(url, headers, MAX_AUDIO_BYTES, body, destination, providerOperation("fish", "POST"),
+                    true, "application/msgpack", 200, MAX_REFERENCE_REQUEST_BYTES);
+        }
+
+        private static String providerOperation(String provider, String method) {
+            if (!"breeze".equals(provider) && !"fish".equals(provider)) throw new IllegalArgumentException("语音来源无效");
+            return ("fish".equals(provider) ? "Fish Audio" : "Breeze Blue") + " 语音 " + method;
+        }
+
+        private static byte[] encodeBody(String body, String operation) {
+            if (body == null || body.length() > MAX_TEXT_BYTES) throw new IllegalArgumentException(operation + " 请求过大");
+            return body.getBytes(StandardCharsets.UTF_8);
         }
 
         public List<VoiceCatalog.Entry> fetchVoices(SpeechSettings settings) throws IOException {
@@ -209,9 +305,21 @@ public final class SpeechHttpClient {
         }
 
         private Resource fetch(String url, String headersJson, int limit, String body, java.io.File destination) throws IOException {
+            return fetch(url, headersJson, limit, body, destination,
+                    body == null ? "第三方语音 GET" : "MiniMax 语音 POST", false);
+        }
+
+        private Resource fetch(String url, String headersJson, int limit, String body, java.io.File destination,
+                               String operation, boolean completeAudio) throws IOException {
+            return fetch(url, headersJson, limit, body == null ? null : encodeBody(body, operation), destination,
+                    operation, completeAudio, "application/json; charset=utf-8", completeAudio ? 200 : 0, MAX_TEXT_BYTES);
+        }
+
+        private Resource fetch(String url, String headersJson, int limit, byte[] body, java.io.File destination,
+                               String operation, boolean completeAudio, String contentType, int expectedStatus,
+                               int requestLimit) throws IOException {
             URI endpoint = endpoint(url);
             Map<String, String> headers = headers(headersJson);
-            String operation = body == null ? "第三方语音 GET" : "MiniMax 语音 POST";
             synchronized (this) {
                 ensureActive();
                 if (inProgress) throw new IllegalStateException("第三方语音请求正在进行");
@@ -234,14 +342,14 @@ public final class SpeechHttpClient {
                     opened.setRequestProperty(header.getKey(), header.getValue());
                 }
                 if (body != null) {
-                    byte[] encoded = body.getBytes(StandardCharsets.UTF_8);
-                    if (encoded.length > MAX_TEXT_BYTES) throw new IllegalArgumentException("MiniMax 语音请求过大");
+                    if (body.length > requestLimit) throw new IllegalArgumentException(
+                            completeAudio ? operation.replace(" POST", "") + "请求过大" : "MiniMax 语音请求过大");
                     opened.setDoOutput(true);
-                    opened.setFixedLengthStreamingMode(encoded.length);
-                    opened.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                    opened.setFixedLengthStreamingMode(body.length);
+                    opened.setRequestProperty("Content-Type", contentType);
                     try (OutputStream output = opened.getOutputStream()) {
                         ensureActive();
-                        output.write(encoded);
+                        output.write(body);
                     }
                 }
                 int status = opened.getResponseCode();
@@ -251,7 +359,10 @@ public final class SpeechHttpClient {
                 if (status >= 300 && status < 400) {
                     throw new IllegalArgumentException(operation + " 不跟随重定向，请填写最终地址");
                 }
-                if (status < 200 || status >= 300) throw new IOException(operation + " 返回 HTTP " + status);
+                if (status < 200 || status >= 300 || expectedStatus != 0 && status != expectedStatus) {
+                    if (expectedStatus != 0) throw new ProviderHttpFailure(operation, status, retryAfter(opened.getHeaderField("Retry-After")));
+                    throw new IOException(operation + " 返回 HTTP " + status);
+                }
                 if (opened.getContentLengthLong() > limit) throw tooLarge(limit);
                 ByteArrayOutputStream memory = destination == null ? new ByteArrayOutputStream() : null;
                 Probe probe = new Probe();
@@ -270,6 +381,9 @@ public final class SpeechHttpClient {
                 }
                 ensureActive();
                 if (System.nanoTime() > deadline) throw new SocketTimeoutException();
+                if (completeAudio && opened.getContentLengthLong() >= 0 && total != opened.getContentLengthLong()) {
+                    throw new IllegalArgumentException(operation.replace(" POST", "").replace(" GET", "") + "响应不完整");
+                }
                 if (total == 0) throw new IllegalArgumentException("第三方语音响应为空");
                 transportEvent("body_read", "bounded_response", "bytes=" + total + "; result=validating");
                 Resource resource = destination == null ? new Resource(memory.toByteArray(), opened.getContentType())
@@ -281,16 +395,19 @@ public final class SpeechHttpClient {
                 throw new IOException(operation + " 请求超时");
             } catch (IOException failure) {
                 ensureActive();
+                if (failure instanceof ProviderHttpFailure) throw failure;
                 // Never retain URL-bearing transport exceptions or provider response bodies.
                 String message = failure.getMessage();
-                if (message != null && message.matches("(?:第三方语音 GET|MiniMax 语音 POST) 返回 HTTP [0-9]{3}")) {
+                if (message != null && message.matches("(?:第三方语音 GET|MiniMax 语音 POST|(?:Breeze Blue|Fish Audio) 语音 (?:GET|POST)) 返回 HTTP [0-9]{3}")) {
                     throw new IOException(message);
                 }
                 throw new IOException(operation + " 请求失败");
             } catch (IllegalArgumentException failure) {
                 ensureActive();
                 if (failure.getMessage() != null && (failure.getMessage().startsWith("第三方语音")
-                        || failure.getMessage().startsWith("MiniMax 语音"))) throw failure;
+                        || failure.getMessage().startsWith("MiniMax 语音")
+                        || failure.getMessage().startsWith("Breeze Blue 语音")
+                        || failure.getMessage().startsWith("Fish Audio 语音"))) throw failure;
                 throw new IllegalArgumentException(operation + " 请求无效");
             } finally {
                 synchronized (this) { connection = null; inProgress = false; }
@@ -303,7 +420,7 @@ public final class SpeechHttpClient {
 
         public void cancel() {
             HttpURLConnection active;
-            synchronized (this) { cancelled = true; active = connection; }
+            synchronized (this) { cancelled = true; clearDeadline(); active = connection; }
             if (active != null) active.disconnect();
         }
 
@@ -311,20 +428,35 @@ public final class SpeechHttpClient {
             if (cancelled || Thread.currentThread().isInterrupted()) {
                 throw new CancellationException("第三方语音请求已停止");
             }
+            if (deadlineExpired) throw new IllegalArgumentException(deadlineMessage);
         }
 
         @Override public void close() { cancel(); }
+
+        private static int retryAfter(String header) {
+            try {
+                if (header != null && header.matches("[0-9]+")) return (int) Math.min(3600, Long.parseLong(header));
+            } catch (NumberFormatException ignored) { }
+            return 1;
+        }
     }
 
     interface CatalogWork<T> { List<T> run() throws IOException; }
+    interface CatalogResultWork<T> { T run() throws IOException; }
     private static void transportEvent(String event, String reason, String evidence) {
         DouAiLog.Operation operation = DouAiLog.current();
         if (operation != null) operation.stage(event, "reason=" + reason + "; " + evidence);
         else DouAiLog.event("speech_transport", event, reason, evidence);
     }
     static <T> List<T> observeCatalog(String feature, CatalogWork<T> work) throws IOException {
+        return observeCatalogResult(feature, work::run,
+                result -> "entries=" + result.size() + "; selection_saved=false");
+    }
+
+    static <T> T observeCatalogResult(String feature, CatalogResultWork<T> work,
+                                     java.util.function.Function<T, String> evidence) throws IOException {
         DouAiLog.Operation operation = DouAiLog.begin(feature, "load_catalog");
-        java.util.concurrent.atomic.AtomicReference<List<T>> result = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<T> result = new java.util.concurrent.atomic.AtomicReference<>();
         IOException[] checked = new IOException[1];
         try {
             operation.wrap(() -> {
@@ -332,7 +464,7 @@ public final class SpeechHttpClient {
                 catch (IOException failure) { checked[0] = failure; }
             }).run();
             if (checked[0] != null) throw checked[0];
-            operation.finish(DouAiLog.Outcome.SUCCESS, "catalog_parsed", "entries=" + result.get().size() + "; selection_saved=false");
+            operation.finish(DouAiLog.Outcome.SUCCESS, "catalog_parsed", evidence.apply(result.get()));
             return result.get();
         } catch (IOException | RuntimeException failure) {
             operation.error("catalog_fetch_or_parse", failure);

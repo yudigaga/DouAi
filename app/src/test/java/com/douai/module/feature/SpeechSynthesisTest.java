@@ -6,6 +6,8 @@ import android.media.MediaMetadataRetriever;
 import android.speech.tts.TextToSpeech;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.BreezeSpeechSettings;
+import com.douai.module.config.FishSpeechSettings;
 import com.douai.module.config.SpeechSettings;
 import com.douai.module.diagnostics.DebugLog;
 
@@ -54,6 +56,155 @@ public final class SpeechSynthesisTest {
     }
 
     @Before public void resetMetadata() { AudioMetadata.duration = "1000"; AudioMetadata.hasVideo = "no"; }
+
+    @Test public void fishSpeechUsesItsOwnPostAndTransfersOneValidatedOriginalFile() throws Exception {
+        try (MockWebServer server = new MockWebServer(); MockWebServer other = new MockWebServer()) {
+            server.enqueue(wav());
+            AtomicReference<LocalSpeechSynthesis.Result> result = new AtomicReference<>();
+            AtomicReference<String> failure = new AtomicReference<>();
+            AtomicInteger calls = new AtomicInteger();
+            LocalOptions options = fishSettings(server).withDefault(SpeechSettings.GET_TEMPLATE,
+                    other.url("/unused") + "?text={text}").withDefault(SpeechSettings.MINIMAX_BASE_URL, other.url("/").toString());
+            SpeechSynthesis request = SpeechSynthesis.synthesize(context(), "Fish Audio 正文", options,
+                    (audio, error) -> { result.set(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls);
+            assertEquals(1, calls.get()); assertNull(failure.get()); assertNotNull(result.get());
+            assertEquals(1000, result.get().durationMillis); assertTrue(result.get().file.getName().endsWith(".wav"));
+            assertEquals("RIFF0000WAVEfixture", Files.readString(result.get().file.toPath()));
+            okhttp3.mockwebserver.RecordedRequest sent = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(sent); assertEquals("/v1/tts", sent.getPath());
+            assertEquals("Bearer private-fish-key", sent.getHeader("Authorization"));
+            assertEquals(0, other.getRequestCount());
+            request.close(); ShadowLooper.idleMainLooper();
+            assertTrue(result.get().file.isFile()); Files.delete(result.get().file.toPath());
+        }
+    }
+
+    @Test public void fishFailureDoesNotSwitchProvidersOrLeaveAnOutput() throws Exception {
+        try (MockWebServer server = new MockWebServer(); MockWebServer other = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(429).setBody("private-fish-key private-text"));
+            AtomicInteger calls = new AtomicInteger();
+            AtomicReference<String> failure = new AtomicReference<>();
+            LocalOptions options = fishSettings(server).withDefault(SpeechSettings.GET_TEMPLATE,
+                    other.url("/unused") + "?text={text}");
+            SpeechSynthesis.synthesize(context(), "private-text", options,
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls);
+            assertTrue(failure.get().startsWith("Fish Audio 语音")); assertTrue(failure.get().contains("HTTP 429"));
+            assertFalse(failure.get().contains("private-"));
+            assertEquals(1, server.getRequestCount()); assertEquals(0, other.getRequestCount());
+            assertEquals(0, cachedAudioCount());
+        }
+    }
+
+    @Test public void cancellingFishSpeechDisconnectsAndCompletesOnce() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            AtomicInteger calls = new AtomicInteger();
+            AtomicReference<String> failure = new AtomicReference<>();
+            SpeechSynthesis request = SpeechSynthesis.synthesize(context(), "正文", fishSettings(server),
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            request.close(); request.close(); await(calls);
+            assertEquals(1, calls.get()); assertEquals("语音生成已停止", failure.get());
+            assertEquals(0, cachedAudioCount());
+        }
+    }
+
+    @Test public void fishBinaryStillRequiresAudioMetadataBeforeSuccess() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            AudioMetadata.hasVideo = "yes"; server.enqueue(wav());
+            AtomicInteger calls = new AtomicInteger(); AtomicReference<String> failure = new AtomicReference<>();
+            SpeechSynthesis.synthesize(context(), "正文", fishSettings(server),
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls); assertEquals("生成的语音文件无效", failure.get()); assertEquals(0, cachedAudioCount());
+        }
+    }
+
+    @Test public void fishReferenceModeUsesTheHostContextAndTheExistingValidatedAudioHandoff() throws Exception {
+        Context context=context(); File folder=new File(context.getFilesDir(),"douai-voice-source");
+        assertTrue(folder.isDirectory()||folder.mkdirs()); File sample=new File(folder,"tts-reference.flac");
+        Files.writeString(sample.toPath(),"fLaCfixture");
+        try(MockWebServer server=new MockWebServer()) {
+            server.enqueue(wav());
+            Map<String,Object> values=new java.util.HashMap<>();
+            values.put(SpeechSettings.PROVIDER,SpeechSettings.FISH); values.put(FishSpeechSettings.API_KEY,"key");
+            values.put(FishSpeechSettings.BASE_URL,server.url("/").toString()); values.put(FishSpeechSettings.VOICE_MODE,"references");
+            values.put(FishSpeechSettings.REFERENCE_SAMPLES,new org.json.JSONArray().put(new org.json.JSONArray().put(
+                    new org.json.JSONObject().put("path",sample.getAbsolutePath()).put("text","参考原文"))).toString());
+            AtomicReference<LocalSpeechSynthesis.Result> result=new AtomicReference<>(); AtomicReference<String> error=new AtomicReference<>();
+            AtomicInteger calls=new AtomicInteger();
+            SpeechSynthesis.synthesize(context,"合成正文",new LocalOptions(values),(audio,failure)->{result.set(audio);error.set(failure);calls.incrementAndGet();});
+            await(calls); assertEquals(1,calls.get()); assertNull(error.get()); assertNotNull(result.get());
+            assertEquals("RIFF0000WAVEfixture",Files.readString(result.get().file.toPath()));
+            assertEquals("application/msgpack",server.takeRequest(2,TimeUnit.SECONDS).getHeader("Content-Type"));
+            Files.delete(result.get().file.toPath());
+        } finally {Files.delete(sample.toPath());}
+    }
+
+    @Test public void breezeSpeechUsesItsOwnPostAndTransfersOneValidatedOriginalFile() throws Exception {
+        try (MockWebServer server = new MockWebServer(); MockWebServer other = new MockWebServer()) {
+            server.enqueue(wav());
+            AtomicReference<LocalSpeechSynthesis.Result> result = new AtomicReference<>();
+            AtomicReference<String> failure = new AtomicReference<>();
+            AtomicInteger calls = new AtomicInteger();
+            LocalOptions options = breezeSettings(server).withDefault(SpeechSettings.GET_TEMPLATE,
+                    other.url("/unused") + "?text={text}").withDefault(SpeechSettings.MINIMAX_BASE_URL, other.url("/").toString());
+            SpeechSynthesis request = SpeechSynthesis.synthesize(context(), "Breeze 正文", options,
+                    (audio, error) -> { result.set(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls);
+            assertEquals(1, calls.get()); assertNull(failure.get()); assertNotNull(result.get());
+            assertEquals(1000, result.get().durationMillis); assertTrue(result.get().file.getName().endsWith(".wav"));
+            assertEquals("RIFF0000WAVEfixture", Files.readString(result.get().file.toPath()));
+            okhttp3.mockwebserver.RecordedRequest sent = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(sent); assertTrue(sent.getPath().startsWith("/v1/text-to-speech/voice-one?"));
+            assertEquals("private-breeze-key", sent.getHeader("xi-api-key"));
+            assertEquals(0, other.getRequestCount());
+            request.close(); ShadowLooper.idleMainLooper();
+            assertTrue(result.get().file.isFile()); Files.delete(result.get().file.toPath());
+        }
+    }
+
+    @Test public void breezeFailureDoesNotSwitchProvidersOrLeaveAnOutput() throws Exception {
+        try (MockWebServer server = new MockWebServer(); MockWebServer other = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(429).setBody("private-breeze-key private-text"));
+            AtomicInteger calls = new AtomicInteger();
+            AtomicReference<String> failure = new AtomicReference<>();
+            LocalOptions options = breezeSettings(server).withDefault(SpeechSettings.GET_TEMPLATE,
+                    other.url("/unused") + "?text={text}");
+            SpeechSynthesis.synthesize(context(), "private-text", options,
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls);
+            assertTrue(failure.get().startsWith("Breeze Blue 语音")); assertTrue(failure.get().contains("HTTP 429"));
+            assertFalse(failure.get().contains("private-"));
+            assertEquals(1, server.getRequestCount()); assertEquals(0, other.getRequestCount());
+            assertEquals(0, cachedAudioCount());
+        }
+    }
+
+    @Test public void cancellingBreezeSpeechDisconnectsAndCompletesOnce() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            AtomicInteger calls = new AtomicInteger();
+            AtomicReference<String> failure = new AtomicReference<>();
+            SpeechSynthesis request = SpeechSynthesis.synthesize(context(), "正文", breezeSettings(server),
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            request.close(); request.close(); await(calls);
+            assertEquals(1, calls.get()); assertEquals("语音生成已停止", failure.get());
+            assertEquals(0, cachedAudioCount());
+        }
+    }
+
+    @Test public void breezeBinaryStillRequiresAudioMetadataBeforeSuccess() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            AudioMetadata.hasVideo = "yes"; server.enqueue(wav());
+            AtomicInteger calls = new AtomicInteger(); AtomicReference<String> failure = new AtomicReference<>();
+            SpeechSynthesis.synthesize(context(), "正文", breezeSettings(server),
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls); assertEquals("生成的语音文件无效", failure.get()); assertEquals(0, cachedAudioCount());
+        }
+    }
 
     @Test public void http200AudioBytesRequireMetadataEvidenceBeforeBusinessSuccess() throws Exception {
         java.util.List<String> records = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -333,6 +484,17 @@ public final class SpeechSynthesisTest {
     private static LocalOptions miniMaxSettings(MockWebServer server) {
         return new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX,
                 SpeechSettings.MINIMAX_BASE_URL, server.url("/").toString(), SpeechSettings.MINIMAX_API_KEY, "private-key"));
+    }
+
+    private static LocalOptions fishSettings(MockWebServer server) {
+        return new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.FISH,
+                FishSpeechSettings.BASE_URL, server.url("/").toString(), FishSpeechSettings.API_KEY, "private-fish-key"));
+    }
+
+    private static LocalOptions breezeSettings(MockWebServer server) {
+        return new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.BREEZE,
+                BreezeSpeechSettings.BASE_URL, server.url("/").toString(), BreezeSpeechSettings.API_KEY, "private-breeze-key",
+                BreezeSpeechSettings.VOICE_ID, "voice-one"));
     }
 
     private static MockResponse wav() {

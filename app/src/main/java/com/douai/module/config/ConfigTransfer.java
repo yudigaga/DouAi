@@ -65,6 +65,8 @@ public final class ConfigTransfer {
         try {
             Map<String, ?> source = store.snapshot(); JSONObject values = new JSONObject();
             new MiniMaxSpeechOptions(new LocalOptions(source)).validate();
+            new BreezeSpeechSettings(new LocalOptions(source)).validateOptions();
+            new FishSpeechSettings(new LocalOptions(source)).validateOptions();
             for (Map.Entry<String, ?> entry : new TreeMap<>(source).entrySet()) {
                 String key = entry.getKey(); if (!ConfigKeys.TYPES.containsKey(key)) continue;
                 Object value = entry.getValue(); ConfigKeys.validate(key, value);
@@ -192,6 +194,10 @@ public final class ConfigTransfer {
             }
             reason = Reason.MINIMAX_OPTIONS; field = null;
             new MiniMaxSpeechOptions(new LocalOptions(result)).validate();
+            reason = Reason.BREEZE_OPTIONS;
+            new BreezeSpeechSettings(new LocalOptions(result)).validateOptions();
+            reason = Reason.FISH_OPTIONS;
+            new FishSpeechSettings(new LocalOptions(result)).validateOptions();
             reason = Reason.MERGED_SETTINGS;
             return new Preview(before, result, incoming.size(), redacted, missing[0], (String) version, secrets, mode);
         } catch (Exception | LinkageError failure) {
@@ -251,7 +257,9 @@ public final class ConfigTransfer {
         Reason reason = key.endsWith("headers") ? Reason.STRUCTURED_HEADERS
                 : AiModelSettings.KEY.equals(key) ? Reason.STRUCTURED_MODELS
                 : CustomViewLocator.SETTINGS_KEY.equals(key) ? Reason.STRUCTURED_COMPONENTS
-                : key.startsWith("tts_minimax_") ? Reason.MINIMAX_OPTIONS : Reason.STRUCTURED_FIELDS;
+                : key.startsWith("tts_minimax_") ? Reason.MINIMAX_OPTIONS
+                : key.startsWith("tts_breeze_") ? Reason.BREEZE_OPTIONS
+                : key.startsWith("tts_fish_") ? Reason.FISH_OPTIONS : Reason.STRUCTURED_FIELDS;
         try {
             if (SpeechSettings.PROVIDER.equals(key) && value instanceof String) SpeechSettings.validateProvider((String) value);
             if (key.startsWith("tts_minimax_") && value instanceof String) {
@@ -259,6 +267,8 @@ public final class ConfigTransfer {
                 if (SpeechSettings.MINIMAX_VOICE_ID.equals(key)) SpeechSettings.validateMiniMaxVoiceId((String) value, false);
                 else SpeechSettings.validateMiniMaxValue(key, (String) value);
             }
+            if (key.startsWith("tts_breeze_") && value instanceof String) BreezeSpeechSettings.validateValue(key, (String) value);
+            if (key.startsWith("tts_fish_") && value instanceof String) FishSpeechSettings.validateValue(key, (String) value);
             if (!(value instanceof String) || ((String) value).isEmpty()) return;
             String text = (String) value;
             if (AiModelSettings.KEY.equals(key)) {

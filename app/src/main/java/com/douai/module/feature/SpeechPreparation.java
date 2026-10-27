@@ -129,7 +129,9 @@ final class SpeechPreparation {
             super("语音准备失败", cause);
             sourceDurationMillis = Math.max(0, sourceDuration);
             providerCode = code(cause.getMessage(), "^MiniMax 语音接口返回错误码 ([0-9]{1,9})(?:[^0-9].*)?$", 1);
-            httpCode = code(cause.getMessage(), "^(?:第三方语音 GET|MiniMax 语音(?: POST|音频下载)?) ?返回 HTTP ([1-5][0-9]{2})$", 1);
+            int previousHttp = code(cause.getMessage(), "^(?:第三方语音 GET|MiniMax 语音(?: POST|音频下载)?) ?返回 HTTP ([1-5][0-9]{2})$", 1);
+            httpCode = previousHttp >= 0 ? previousHttp : code(cause.getMessage(),
+                    "^(?:Breeze Blue|Fish Audio) 语音(?:合成| POST)? ?返回 HTTP ([1-5][0-9]{2})(?:，.*)?$", 1);
             reason = httpCode < 0 ? reason(cause.getMessage()) : "http_" + httpCode;
             diagnostic = "stage=" + stage + "; reason=" + reason
                     + "; sourceMillis=" + sourceDuration + "; encodedMillis=" + encodedDuration
@@ -159,7 +161,9 @@ final class SpeechPreparation {
             switch (message) {
                 case "语音生成超时": case "第三方语音生成超时":
                 case "第三方语音 GET 请求超时": case "本地语音生成超时":
-                case "MiniMax 语音生成超时": case "MiniMax 语音 POST 请求超时": return "timeout";
+                case "MiniMax 语音生成超时": case "MiniMax 语音 POST 请求超时":
+                case "Breeze Blue 语音生成超时": case "Breeze Blue 语音合成请求超时":
+                case "Fish Audio 语音生成超时": case "Fish Audio 语音合成请求超时": return "timeout";
                 case "生成的语音文件无效": return "invalid_audio";
                 case "语音内容为空或过长": return "engine_text_limit";
                 case "语音超过当前发送入口的时长限制": return "duration_limit";
@@ -174,7 +178,11 @@ final class SpeechPreparation {
                 case "所选语音字段应包含一个音频链接":
                 case "返回了多个语音链接，请选择音频字段":
                 case "返回了多个链接，请选择音频字段": return "audio_field";
-                case "第三方语音链接未返回音频文件": return "not_audio";
+                case "第三方语音链接未返回音频文件":
+                case "Breeze Blue 语音接口未返回完整音频文件":
+                case "Fish Audio 语音接口未返回完整音频文件": return "not_audio";
+                case "Breeze Blue 语音响应不完整": case "Fish Audio 语音响应不完整": return "incomplete_audio";
+                case "Breeze Blue 语音合成文本超过接口最高 2000 字符限制": return "provider_text_limit";
                 case "第三方语音 GET 请求失败": return "network";
                 default: return "provider_or_audio_failure";
             }

@@ -99,6 +99,10 @@ public final class ConfigurationCatalog {
         add(keys, "string", AiModelSettings.REPLY_MODEL_ID + " " + AiModelSettings.COMMENT_MODEL_ID);
         add(keys, "string", AnalyticsAiSettings.MODEL_ID + " " + AnalyticsAiSettings.SECONDARY_PROMPT);
         for (String key : MiniMaxSpeechOptions.KEYS) keys.put(key, "string");
+        for (String key : BreezeSpeechSettings.KEYS) keys.put(key, "string");
+        for (String key : FishSpeechSettings.KEYS) {
+            if (!FishSpeechSettings.REFERENCE_SAMPLES.equals(key)) keys.put(key, "string");
+        }
         for (String prefix : Arrays.asList("reply", "comment")) add(keys, "string", prefix + "_daily_limit "
                 + prefix + "_user_cooldown_minutes " + prefix + "_delay_seconds " + prefix + "_notice_seconds "
                 + prefix + "_scope_mode " + prefix + "_scope_relations " + prefix + "_scope_keywords "

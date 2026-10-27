@@ -177,6 +177,32 @@ public final class SpeechPreparationTest {
         assertFalse(source.exists());
     }
 
+    @Test public void fishDiagnosticsKeepNumericStatusAndControlledFailureKinds() {
+        SpeechPreparation.Failure rate = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalArgumentException("Fish Audio 语音合成返回 HTTP 429，并发或容量受限，请稍后再试"));
+        assertEquals(429, rate.httpCode()); assertTrue(rate.diagnostic().contains("reason=http_429"));
+        assertFalse(rate.diagnostic().contains("请稍后"));
+        SpeechPreparation.Failure timeout = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalArgumentException("Fish Audio 语音生成超时"));
+        assertTrue(timeout.diagnostic().contains("reason=timeout"));
+        SpeechPreparation.Failure incomplete = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalArgumentException("Fish Audio 语音响应不完整"));
+        assertTrue(incomplete.diagnostic().contains("reason=incomplete_audio"));
+    }
+
+    @Test public void breezeDiagnosticsKeepNumericStatusAndControlledFailureKinds() {
+        SpeechPreparation.Failure rate = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalArgumentException("Breeze Blue 语音合成返回 HTTP 429，并发或容量受限，请稍后再试"));
+        assertEquals(429, rate.httpCode()); assertTrue(rate.diagnostic().contains("reason=http_429"));
+        assertFalse(rate.diagnostic().contains("请稍后"));
+        SpeechPreparation.Failure timeout = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalArgumentException("Breeze Blue 语音生成超时"));
+        assertTrue(timeout.diagnostic().contains("reason=timeout"));
+        SpeechPreparation.Failure incomplete = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalArgumentException("Breeze Blue 语音响应不完整"));
+        assertTrue(incomplete.diagnostic().contains("reason=incomplete_audio"));
+    }
+
     @Test public void providerAndHttpDiagnosticCodesAreNumericWithoutKeepingResponseText() {
         SpeechPreparation.Failure limited = new SpeechPreparation.Failure("synthesis", 0, 0,
                 new IllegalArgumentException("MiniMax 语音接口返回错误码 1002，private-text https://provider/?key=private-key"));

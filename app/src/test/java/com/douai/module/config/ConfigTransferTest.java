@@ -18,6 +18,164 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void fishSettingsRoundTripWithoutMistakingAudioTokenBudgetForASecret() throws Exception {
+        MemoryStore source = fishStore(), target = new MemoryStore();
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, true)));
+        assertEquals(source.values, target.values);
+        assertFalse(ConfigSecrets.sensitive(FishSpeechSettings.MAX_NEW_TOKENS));
+        assertTrue(ConfigSecrets.sensitive(FishSpeechSettings.API_KEY));
+        String redacted = ConfigTransfer.export(source, false);
+        assertFalse(redacted.contains("fixture-fish-key"));
+        JSONObject values = new JSONObject(redacted).getJSONObject("values");
+        assertEquals("2048", values.getJSONObject(FishSpeechSettings.MAX_NEW_TOKENS).getString("value"));
+        assertEquals("s2.1-pro-free", new FishSpeechSettings(new LocalOptions(source.values)).engine);
+    }
+
+    @Test public void fishSpeakerIdsArePortableButImportedAudioBindingsNeverLeaveThisDevice() throws Exception {
+        MemoryStore source = new MemoryStore(), portable = new MemoryStore();
+        source.values.put(FishSpeechSettings.VOICE_MODE, "multi");
+        source.values.put(FishSpeechSettings.REFERENCE_IDS, "[\"voice-b\",\"voice-a\",\"voice-b\"]");
+        String local = "[[{\"path\":\"/module/private-reference.wav\",\"text\":\"private exact reference transcript\",\"name\":\"本机音频\"}]]";
+        source.values.put(FishSpeechSettings.REFERENCE_SAMPLES, local);
+        for (boolean includeSecrets : new boolean[]{false, true}) {
+            String backup = ConfigTransfer.export(source, includeSecrets);
+            JSONObject values = new JSONObject(backup).getJSONObject("values");
+            assertFalse(values.has(FishSpeechSettings.REFERENCE_SAMPLES));
+            assertFalse(backup.contains("private-reference")); assertFalse(backup.contains("private exact reference transcript"));
+            ConfigTransfer.apply(portable, ConfigTransfer.inspect(portable, backup));
+            assertEquals("multi", portable.values.get(FishSpeechSettings.VOICE_MODE));
+            assertEquals(source.values.get(FishSpeechSettings.REFERENCE_IDS), portable.values.get(FishSpeechSettings.REFERENCE_IDS));
+            assertFalse(portable.values.containsKey(FishSpeechSettings.REFERENCE_SAMPLES));
+        }
+        MemoryStore sameDevice = new MemoryStore();
+        sameDevice.values.put(FishSpeechSettings.REFERENCE_SAMPLES, local);
+        for (ConfigTransfer.Mode mode : ConfigTransfer.Mode.values()) {
+            ConfigTransfer.apply(sameDevice, ConfigTransfer.inspect(sameDevice, ConfigTransfer.export(source, false), mode));
+            assertEquals(local, sameDevice.values.get(FishSpeechSettings.REFERENCE_SAMPLES));
+        }
+    }
+
+    @Test public void aBackupCannotInjectAReferenceAudioPathEvenWhenItClaimsToIncludeSecrets() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        target.values.put(FishSpeechSettings.REFERENCE_SAMPLES, "[[{\"path\":\"/module/local.wav\",\"text\":\"local\"}]]");
+        Map<String, Object> before = new LinkedHashMap<>(target.values);
+        JSONObject incoming = new JSONObject(ConfigTransfer.export(source, true));
+        incoming.getJSONObject("values").put(FishSpeechSettings.REFERENCE_SAMPLES,
+                new JSONObject().put("type", "string").put("value", "[[{\"path\":\"/arbitrary/private.wav\",\"text\":\"private\"}]]"));
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> ConfigTransfer.inspect(target, incoming.toString()));
+        assertFalse(failure.getMessage().contains("arbitrary")); assertEquals(before, target.values); assertEquals(0, target.commits);
+    }
+
+    @Test public void fishKeysRestoreOnlyForTheirOwnEndpointAndNeverBorrowOtherProviderKeys() {
+        MemoryStore source = fishStore(), target = new MemoryStore();
+        target.values.put(FishSpeechSettings.API_KEY, "local-fish-key");
+        target.values.put(BreezeSpeechSettings.API_KEY, "local-breeze-key");
+        target.values.put(SpeechSettings.MINIMAX_API_KEY, "local-minimax-key");
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, false)));
+        assertEquals("local-fish-key", target.values.get(FishSpeechSettings.API_KEY));
+        assertEquals("local-breeze-key", target.values.get(BreezeSpeechSettings.API_KEY));
+        assertEquals("local-minimax-key", target.values.get(SpeechSettings.MINIMAX_API_KEY));
+        source.values.put(FishSpeechSettings.BASE_URL, "https://different-fish.example.test");
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, false)));
+        assertEquals("", target.values.get(FishSpeechSettings.API_KEY));
+        assertEquals("local-breeze-key", target.values.get(BreezeSpeechSettings.API_KEY));
+        assertEquals("local-minimax-key", target.values.get(SpeechSettings.MINIMAX_API_KEY));
+    }
+
+    @Test public void fishRuntimeCatalogsAreNotBackedUpAndInvalidParametersHaveControlledDiagnostics() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(FishSpeechSettings.VOICE_SAMPLE, "runtime-fish-voices");
+        source.values.put(FishSpeechSettings.MODEL_SAMPLE, "runtime-fish-models");
+        source.values.put(FishSpeechSettings.MODEL_SOURCE, "api");
+        String valid = ConfigTransfer.export(source, true);
+        assertFalse(valid.contains("runtime-fish-voices")); assertFalse(valid.contains("runtime-fish-models"));
+        assertFalse(valid.contains(FishSpeechSettings.MODEL_SOURCE));
+        String[][] invalid = {{FishSpeechSettings.ENGINE, "reference-voice-id"}, {FishSpeechSettings.VOLUME_DB, "21"},
+                {FishSpeechSettings.FORMAT, "pcm"}, {FishSpeechSettings.MAX_NEW_TOKENS, "0"},
+                {FishSpeechSettings.LANGUAGE, "中文"}, {FishSpeechSettings.PRONUNCIATION_DICTIONARY, "[{\"id\":\"missing-version\"}]"}};
+        for (String[] row : invalid) {
+            JSONObject incoming = new JSONObject(valid);
+            incoming.getJSONObject("values").put(row[0], new JSONObject().put("type", "string").put("value", row[1]));
+            assertDiagnostic(target, incoming.toString(), BackupValidationException.Reason.FISH_OPTIONS, row[0]);
+        }
+        source.values.put(FishSpeechSettings.FORMAT, "opus");
+        target.values.put(FishSpeechSettings.SAMPLE_RATE, "44100");
+        assertDiagnostic(target, ConfigTransfer.export(source, true), BackupValidationException.Reason.FISH_OPTIONS, "");
+        assertEquals("44100", target.values.get(FishSpeechSettings.SAMPLE_RATE));
+    }
+
+    @Test public void breezeSettingsRoundTripAndRedactedKeysStayBoundToTheBreezeEndpoint() {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(SpeechSettings.PROVIDER, SpeechSettings.BREEZE);
+        source.values.put(BreezeSpeechSettings.API_KEY, "fixture-breeze-key");
+        source.values.put(BreezeSpeechSettings.BASE_URL, BreezeSpeechSettings.DEFAULT_BASE_URL);
+        source.values.put(BreezeSpeechSettings.MODEL, "breeze-tts-2-multilingual");
+        source.values.put(BreezeSpeechSettings.VOICE_ID, "voc_fixture");
+        source.values.put(BreezeSpeechSettings.VOICE_NAME, "测试音色");
+        source.values.put(BreezeSpeechSettings.VOICE_TYPE, "personal");
+        source.values.put(BreezeSpeechSettings.VOICE_SEARCH, "自然 女声");
+        source.values.put(BreezeSpeechSettings.VOICE_LANGUAGE, "ja");
+        source.values.put(BreezeSpeechSettings.SPEED, "1.5");
+        source.values.put(BreezeSpeechSettings.VOLUME, "0.8");
+        source.values.put(BreezeSpeechSettings.GUIDANCE_SCALE, "5");
+        source.values.put(BreezeSpeechSettings.SPEAKER_BOOST, "true");
+        source.values.put(BreezeSpeechSettings.INSTRUCTIONS, "自然朗读，保留段间停顿。\n不要急促。");
+        source.values.put(BreezeSpeechSettings.LANGUAGE_CODE, "zh");
+        source.values.put(BreezeSpeechSettings.OUTPUT_FORMAT, "mp3_44100_128");
+        source.values.put(BreezeSpeechSettings.DELIVERY, "stream");
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, true)));
+        assertEquals(source.values, target.values);
+        target.values.put(BreezeSpeechSettings.API_KEY, "local-breeze-key");
+        target.values.put(SpeechSettings.MINIMAX_API_KEY, "local-minimax-key");
+        String redacted = ConfigTransfer.export(source, false);
+        assertFalse(redacted.contains("fixture-breeze-key"));
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, redacted));
+        assertEquals("local-breeze-key", target.values.get(BreezeSpeechSettings.API_KEY));
+        assertEquals("local-minimax-key", target.values.get(SpeechSettings.MINIMAX_API_KEY));
+        source.values.put(BreezeSpeechSettings.BASE_URL, "https://different-breeze.example.test");
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, false)));
+        assertEquals("", target.values.get(BreezeSpeechSettings.API_KEY));
+        assertEquals("local-minimax-key", target.values.get(SpeechSettings.MINIMAX_API_KEY));
+    }
+
+    @Test public void breezeAutomaticModelAndAsyncDeliveryRoundTripWhileInvalidStreamCombinationsRejectAtomically() {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(BreezeSpeechSettings.MODEL, BreezeSpeechSettings.AUTO_MODEL);
+        source.values.put(BreezeSpeechSettings.DELIVERY, "async");
+        source.values.put(BreezeSpeechSettings.OUTPUT_FORMAT, "flac_48000");
+        source.values.put(BreezeSpeechSettings.LANGUAGE_CODE, "ja");
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, false)));
+        assertEquals(source.values, target.values);
+        MemoryStore invalidSource = new MemoryStore(); invalidSource.values.put(BreezeSpeechSettings.DELIVERY, "stream");
+        assertDiagnostic(target, ConfigTransfer.export(invalidSource, false), BackupValidationException.Reason.BREEZE_OPTIONS, "");
+        assertEquals(source.values, target.values);
+    }
+
+    @Test public void breezeCatalogCachesStayOutOfBackupsAndInvalidFieldsHaveProviderSpecificDiagnostics() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(BreezeSpeechSettings.VOICE_SAMPLE, "runtime-breeze-voices");
+        source.values.put(BreezeSpeechSettings.MODEL_SAMPLE, "runtime-breeze-models");
+        source.values.put(BreezeSpeechSettings.MODEL_SOURCE, "api");
+        String valid = ConfigTransfer.export(source, true);
+        assertFalse(valid.contains("runtime-breeze-voices")); assertFalse(valid.contains("runtime-breeze-models"));
+        assertFalse(valid.contains(BreezeSpeechSettings.MODEL_SOURCE));
+        String[][] invalid = {{BreezeSpeechSettings.SPEED, "4"}, {BreezeSpeechSettings.VOLUME, "0"},
+                {BreezeSpeechSettings.GUIDANCE_SCALE, "11"}, {BreezeSpeechSettings.SPEAKER_BOOST, "yes"},
+                {BreezeSpeechSettings.BASE_URL, "https://user:secret@example.test"},
+                {BreezeSpeechSettings.LANGUAGE_CODE, "zh-CN"}, {BreezeSpeechSettings.MODEL, "m".repeat(121)}};
+        for (String[] item : invalid) {
+            JSONObject incoming = new JSONObject(valid);
+            incoming.getJSONObject("values").put(item[0], new JSONObject().put("type", "string").put("value", item[1]));
+            assertDiagnostic(target, incoming.toString(), BackupValidationException.Reason.BREEZE_OPTIONS, item[0]);
+            assertTrue(target.values.isEmpty());
+        }
+        source.values.put(BreezeSpeechSettings.MODEL, "breeze-tts-2");
+        target.values.put(BreezeSpeechSettings.LANGUAGE_CODE, "ja");
+        assertDiagnostic(target, ConfigTransfer.export(source, true), BackupValidationException.Reason.BREEZE_OPTIONS, "");
+        assertEquals("ja", target.values.get(BreezeSpeechSettings.LANGUAGE_CODE));
+    }
+
     @Test public void localAnalysisModelAndSecondaryPromptRoundTripIndependentlyFromAutomation() throws Exception {
         for (boolean includeSecrets : new boolean[]{false, true}) {
             MemoryStore source = new MemoryStore(), target = new MemoryStore();
@@ -738,6 +896,30 @@ public final class ConfigTransferTest {
         MemoryStore source = new MemoryStore(); source.values.put("auto_play", true); source.values.put("keyword", "complete");
         ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, false)));
         assertEquals(source.values, target.snapshot());
+    }
+
+    private static MemoryStore fishStore() {
+        MemoryStore source = new MemoryStore();
+        source.values.put(SpeechSettings.PROVIDER, SpeechSettings.FISH);
+        source.values.put(FishSpeechSettings.API_KEY, "fixture-fish-key");
+        source.values.put(FishSpeechSettings.BASE_URL, FishSpeechSettings.DEFAULT_BASE_URL);
+        source.values.put(FishSpeechSettings.ENGINE, "fish-audio/s2.1-pro-free");
+        source.values.put(FishSpeechSettings.REFERENCE_ID, "reference-fixture");
+        source.values.put(FishSpeechSettings.REFERENCE_NAME, "参考音色");
+        source.values.put(FishSpeechSettings.SPEED, "1.5"); source.values.put(FishSpeechSettings.VOLUME_DB, "-6");
+        source.values.put(FishSpeechSettings.NORMALIZE_LOUDNESS, "true");
+        source.values.put(FishSpeechSettings.FORMAT, "opus"); source.values.put(FishSpeechSettings.SAMPLE_RATE, "48000");
+        source.values.put(FishSpeechSettings.MP3_BITRATE, "128"); source.values.put(FishSpeechSettings.OPUS_BITRATE, "64000");
+        source.values.put(FishSpeechSettings.TEMPERATURE, "0.8"); source.values.put(FishSpeechSettings.TOP_P, "0.9");
+        source.values.put(FishSpeechSettings.NORMALIZE, "false"); source.values.put(FishSpeechSettings.LANGUAGE, "ja-JP");
+        source.values.put(FishSpeechSettings.LATENCY, "balanced"); source.values.put(FishSpeechSettings.CHUNK_LENGTH, "200");
+        source.values.put(FishSpeechSettings.MIN_CHUNK_LENGTH, "50"); source.values.put(FishSpeechSettings.MAX_NEW_TOKENS, "2048");
+        source.values.put(FishSpeechSettings.REPETITION_PENALTY, "1.5");
+        source.values.put(FishSpeechSettings.CONDITION_ON_PREVIOUS_CHUNKS, "true");
+        source.values.put(FishSpeechSettings.EARLY_STOP_THRESHOLD, "0.8"); source.values.put(FishSpeechSettings.QUALITY_GUARD, "true");
+        source.values.put(FishSpeechSettings.PRONUNCIATION_DICTIONARY, "[{\"id\":\"dictionary-fixture\",\"version\":\"v1\"}]");
+        source.values.put(FishSpeechSettings.VOICE_SCOPE, "public"); source.values.put(FishSpeechSettings.VOICE_SEARCH, "自然");
+        return source;
     }
 
     private static String model(String endpoint, String key, String headers, String parameters) throws Exception {
