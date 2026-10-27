@@ -323,7 +323,13 @@ class ReleaseGateTest(unittest.TestCase):
         inventory = gate.test_inventory(project)
         nested = "com.douai.module.ui.SpeechSettingsDialogTest$MiuixPreviewTest"
         self.assertEqual({"narrowMiuixPageAndParameterEditorKeepTheirControlsVisible",
-                          "landscapeMiuixPageAndParameterEditorKeepTheirControlsVisible"},
+                          "landscapeMiuixPageAndParameterEditorKeepTheirControlsVisible",
+                          "breezeSettingsUseTheSameNarrowHostDialogsWithTheirOwnControls",
+                          "fishSettingsSeparateTheEngineReferenceVoiceAndSupportedGroupsInMiuix",
+                          "fishReferenceAudioAndSpeakerEditorsRemainReachableInTheNarrowMiuixPage",
+                          "publicFishWindowKeepsItsChoicesVisibleInMiuix",
+                          "filteredCatalogHeaderAndLocalSearchRemainUsableInNarrowMiuix",
+                          "allBreezeCatalogFiltersAndMultipleSelectionsAreReachableInMiuix"},
                          set(inventory["suites"][nested]))
         self.assertFalse(set(inventory["suites"][nested]) &
                          set(inventory["suites"]["com.douai.module.ui.SpeechSettingsDialogTest"]))
