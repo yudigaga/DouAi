@@ -74,9 +74,9 @@ public final class BehaviorHookGroupTest {
                 "pause_auto_on_comments", "smart_swipe", "spoof_profile" }) assertFalse(defaults.enabled(key));
     }
 
-    @Test public void playbackSpeedRejectsNonFiniteAndBoundsHostRange() {
+    @Test public void playbackSpeedRejectsNonFiniteAndBoundsSupportedPresets() {
         assertEquals(2f, PlaybackBehaviorHooks.playbackSpeed(new LocalOptions(Map.of("playback_speed", "NaN"))), 0f);
-        assertEquals(0.25f, PlaybackBehaviorHooks.playbackSpeed(new LocalOptions(Map.of("playback_speed", -1))), 0f);
+        assertEquals(0.75f, PlaybackBehaviorHooks.playbackSpeed(new LocalOptions(Map.of("playback_speed", -1))), 0f);
         assertEquals(4f, PlaybackBehaviorHooks.playbackSpeed(new LocalOptions(Map.of("playback_speed", 20))), 0f);
         assertEquals(1.5f, PlaybackBehaviorHooks.playbackSpeed(new LocalOptions(Map.of("playback_speed", "1.5"))), 0f);
     }

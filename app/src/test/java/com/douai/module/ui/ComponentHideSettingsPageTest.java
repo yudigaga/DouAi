@@ -150,7 +150,7 @@ public final class ComponentHideSettingsPageTest {
                 {"INTERFACE", "界面相关", "13项"},
                 {"FILTER", "视频筛选", "16项"},
                 {"DOWNLOAD", "下载相关", "14项"},
-                {"AUTOPLAY", "自动播放", "6项"},
+                {"AUTOPLAY", "自动播放", "7项"},
                 {"AUTO_REPLY", "自动回复", "13项"},
                 {"AUTO_COMMENT", "自动评论", "8项"},
                 {"COMMENT", "评论相关", "11项"},
