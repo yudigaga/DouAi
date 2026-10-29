@@ -33,6 +33,7 @@ import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.ConfigurationCatalog;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.PlaybackSpeedPresets;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.feature.FeedGestureToolsHook;
 import com.douai.module.feature.TopTabFilterHook;
@@ -106,6 +107,8 @@ public final class ModuleSettingsScreen {
             new SearchEntry("analytics", "本地数据分析与报告", "扩展功能 > 本地数据分析", "本地分析 统计 图表 浏览历史 AI分析 报告 导出 长图 PNG PDF 分享", SearchDestination.ANALYTICS),
             new SearchEntry("debug-logs", "调试与日志", "关于 > 调试与日志", "调试 debug 日志 log LSPosed 详细 简要 JSON 刷新 清空 复制 导出", SearchDestination.DEBUG_LOGS),
             new SearchEntry("speed", "自动倍速与自动播放", "自动播放 > 倍速数值", "倍速 播放速度 自动滑动 智能滑动 暂停评论", SearchDestination.AUTOPLAY),
+            new SearchEntry("module-only-speed", "仅模块控制倍速", "自动播放 > 仅模块控制倍速", "倍速 独占 模块控制 官方倍速 长按 手动优先 1x 4x", SearchDestination.AUTOPLAY,
+                    "settings.toggle.仅模块控制倍速"),
             new SearchEntry("interaction", "互动自动化", "自动播放 > 互动自动化", "自动点赞 自动关注 停止自动化", SearchDestination.INTERACTION),
             new SearchEntry("feed-filter", "视频筛选", "视频筛选 > 过滤总开关", "过滤 广告 直播 图集 关键词 时长 低赞 推荐商家 商品卡 购物卡 热点榜单", SearchDestination.FILTER),
             new SearchEntry("component-hide", "组件隐藏", "组件隐藏 > 隐藏与透明度", "界面 隐藏 透明度 自定义控件 暂停显示", SearchDestination.COMPONENT_HIDE),
@@ -525,9 +528,8 @@ public final class ModuleSettingsScreen {
                 addLocalSwitch("禁用双击点赞", "", "disable_double_tap_like");
                 addLocalSwitch("不允许系统跳过已隐藏视频", "", "prevent_skip_hidden");
                 addLocalSwitch("不允许中途插入视频", "", "prevent_insert_video");
-                addLocalSwitch("拦截长按倍数启用场景", "", "block_long_press_speed");
-                addLocalSwitch("拦截系统长按手势", "",
-                        LocalOptions.INTERCEPT_NATIVE_LONG_PRESS);
+                addNativeLongPressSwitch("拦截长按倍数启用场景", "block_long_press_speed");
+                addNativeLongPressSwitch("拦截系统长按手势", LocalOptions.INTERCEPT_NATIVE_LONG_PRESS);
                 addOption("长按事件", "", null, true, () -> showGestureSettings("长按事件", "long_press"));
                 addOption("双击事件", "", null, true, () -> showGestureSettings("双击事件", "double_tap"));
                 addOption("沉浸式全屏", "", null, true, this::showSystemBarSettings);
@@ -550,10 +552,7 @@ public final class ModuleSettingsScreen {
                 addSwitch("自动滑动到下一个视频", "",
                         repository.getBoolean("auto_play", false), true,
                         value -> repository.putBoolean("auto_play", value));
-                addLocalSwitch("自动倍速播放", "", "auto_speed");
-                addEditableOption("倍速数值", "", effectivePlaybackSpeed(
-                                repository.getString(ConfigurationCatalog.PLAYBACK_SPEED, ConfigurationCatalog.PLAYBACK_SPEED_DEFAULT)), true, true, false,
-                        value -> repository.putString(ConfigurationCatalog.PLAYBACK_SPEED, ConfigurationCatalog.validatePlaybackSpeed(value)));
+                buildPlaybackSpeedControls();
                 addLocalSwitch("打开评论时,不滑动视频", "", "pause_auto_on_comments");
                 addSwitch("滑动智能判断上下", "",
                         repository.getBoolean("smart_swipe", true), true,
@@ -905,6 +904,39 @@ public final class ModuleSettingsScreen {
                 value -> repository.putBoolean(key, value));
     }
 
+    private void buildPlaybackSpeedControls() {
+        ToggleControl[] automatic = new ToggleControl[1];
+        Runnable refresh = () -> {
+            boolean moduleOnly = repository.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false);
+            automatic[0].setEnabled(!moduleOnly);
+            automatic[0].setSummary(moduleOnly ? "仅模块模式下手动切换优先，已保留原设置。" : "");
+        };
+        addSwitch("仅模块控制倍速", "默认使用 1x，长按在所选倍速与 1x 间切换，切换视频保持选择；官方倍速不接管。",
+                repository.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false), true, value -> {
+                    repository.putBoolean(LocalOptions.MODULE_ONLY_SPEED, value);
+                    refresh.run();
+                });
+        automatic[0] = addSwitch("自动倍速播放", "", repository.getBoolean("auto_speed", false), true,
+                false, value -> {
+                    if (!repository.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false)) {
+                        repository.putBoolean("auto_speed", value);
+                    }
+                });
+        addChoiceOption("倍速数值", ConfigurationCatalog.PLAYBACK_SPEED, PlaybackSpeedPresets.labels(),
+                PlaybackSpeedPresets.values(), PlaybackSpeedPresets.DEFAULT, null,
+                ModuleSettingsScreen::effectivePlaybackSpeed);
+        refresh.run();
+    }
+
+    private void addNativeLongPressSwitch(String title, String key) {
+        boolean moduleOnly = repository.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false);
+        addSwitch(title, moduleOnly ? "由仅模块控制倍速启用" : "",
+                moduleOnly || repository.getBoolean(key, false), !moduleOnly,
+                value -> {
+                    if (!repository.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false)) repository.putBoolean(key, value);
+                });
+    }
+
     private void addProfileCount(String title, String key) {
         addEditableOption(title, "", repository.getString(key, ""),
                 true, true, false, value -> repository.putString(key, value));
@@ -1139,12 +1171,18 @@ public final class ModuleSettingsScreen {
     }
 
     private void addChoiceOption(String title, String key, String[] labels, String[] values, String fallback, Runnable changed) {
-        String selected = repository.getString(key, fallback);
+        addChoiceOption(title, key, labels, values, fallback, changed, value -> value);
+    }
+
+    private void addChoiceOption(String title, String key, String[] labels, String[] values, String fallback,
+                                 Runnable changed, java.util.function.UnaryOperator<String> effectiveValue) {
+        String selected = effectiveValue.apply(repository.getString(key, fallback));
         int initial = java.util.Arrays.asList(values).indexOf(selected);
         int selectedIndex = Math.max(0, initial);
         OptionRow[] preview = new OptionRow[1];
         OptionRow row = addOption(title, "", labels[selectedIndex], true, () -> {
-            int current = Math.max(0, java.util.Arrays.asList(values).indexOf(repository.getString(key, fallback)));
+            int current = Math.max(0, java.util.Arrays.asList(values).indexOf(
+                    effectiveValue.apply(repository.getString(key, fallback))));
             showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle(title)
                     .setSingleChoiceItems(labels, current, (dialog, which) -> {
                         repository.putString(key, values[which]);
@@ -1929,7 +1967,7 @@ public final class ModuleSettingsScreen {
     }
 
     private static String effectivePlaybackSpeed(String value) {
-        return ConfigurationCatalog.normalizedPlaybackSpeed(value);
+        return PlaybackSpeedPresets.normalize(value);
     }
 
     private static int parseNonNegative(String value) {
@@ -2040,7 +2078,7 @@ public final class ModuleSettingsScreen {
         INTERFACE("界面相关", 13),
         FILTER("视频筛选", 16),
         DOWNLOAD("下载相关", 14),
-        AUTOPLAY("自动播放", 6),
+        AUTOPLAY("自动播放", 7),
         AUTO_REPLY("自动回复", 13),
         AUTO_COMMENT("自动评论", 8),
         COMMENT("评论相关", 11),

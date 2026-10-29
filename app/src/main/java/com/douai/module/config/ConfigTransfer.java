@@ -70,6 +70,7 @@ public final class ConfigTransfer {
             for (Map.Entry<String, ?> entry : new TreeMap<>(source).entrySet()) {
                 String key = entry.getKey(); if (!ConfigKeys.TYPES.containsKey(key)) continue;
                 Object value = entry.getValue(); ConfigKeys.validate(key, value);
+                value = ConfigurationCatalog.normalizedTransferValue(key, value);
                 validateStructured(key, value);
                 if (!includeSecrets && value instanceof String) value = ConfigSecrets.redact(key, (String) value);
                 values.put(key, new JSONObject().put("type", ConfigKeys.TYPES.get(key)).put("value", value));
@@ -148,7 +149,9 @@ public final class ConfigTransfer {
                     if (!(value instanceof Long) || (Long) value < Integer.MIN_VALUE || (Long) value > Integer.MAX_VALUE) throw ConfigJson.invalid();
                     value = ((Long) value).intValue();
                 }
-                ConfigKeys.validate(key, value); validateStructured(key, value);
+                ConfigKeys.validate(key, value);
+                value = ConfigurationCatalog.normalizedTransferValue(key, value);
+                validateStructured(key, value);
                 if (value instanceof String) {
                     reason = Reason.SECRET_POLICY;
                     String text = (String) value; redacted += ConfigSecrets.count(text);
@@ -190,7 +193,9 @@ public final class ConfigTransfer {
             }
             for (Map.Entry<String, Object> entry : result.entrySet()) if (ConfigKeys.TYPES.containsKey(entry.getKey())) {
                 field = entry.getKey();
-                ConfigKeys.validate(entry.getKey(), entry.getValue()); validateStructured(entry.getKey(), entry.getValue());
+                ConfigKeys.validate(entry.getKey(), entry.getValue());
+                entry.setValue(ConfigurationCatalog.normalizedTransferValue(entry.getKey(), entry.getValue()));
+                validateStructured(entry.getKey(), entry.getValue());
             }
             reason = Reason.MINIMAX_OPTIONS; field = null;
             new MiniMaxSpeechOptions(new LocalOptions(result)).validate();

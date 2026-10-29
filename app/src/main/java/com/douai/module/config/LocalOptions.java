@@ -8,8 +8,9 @@ import java.util.Map;
 
 /** Immutable host-local snapshot for independently registered feature options. */
 public final class LocalOptions {
-    /** Prevents the host from handling long-press gestures when no module action is assigned. */
+    /** Reserves feed long presses for module actions and blocks all native long-press regions. */
     public static final String INTERCEPT_NATIVE_LONG_PRESS = "intercept_native_long_press";
+    public static final String MODULE_ONLY_SPEED = "module_only_speed";
     public static final String DOWNLOAD_SAVE_TREE = "download_directory_uri";
     public static final String OFFICIAL_DOWNLOAD_DIRECT = "download_official_direct";
     public static final String REPLY_VOICE = "reply_voice";
@@ -65,8 +66,14 @@ public final class LocalOptions {
     public boolean enabled(String key) { return enabled(key, false); }
 
     public boolean enabled(String key, boolean fallback) {
+        if ((INTERCEPT_NATIVE_LONG_PRESS.equals(key) || "block_long_press_speed".equals(key))
+                && moduleOnlySpeedControl()) return true;
         Object value = values.get(key);
         return value instanceof Boolean ? (Boolean) value : fallback;
+    }
+
+    public boolean moduleOnlySpeedControl() {
+        return Boolean.TRUE.equals(values.get(MODULE_ONLY_SPEED));
     }
 
     public boolean interceptNativeLongPress() {

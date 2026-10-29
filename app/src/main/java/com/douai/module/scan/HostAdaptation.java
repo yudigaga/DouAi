@@ -12,14 +12,14 @@ public final class HostAdaptation {
     public static final long VERIFIED_VERSION_CODE = 400801L;
     public static final long VERIFIED_UPDATE_VERSION_CODE = 40809900L;
     public static final String VERIFIED_RULES_FINGERPRINT =
-            "ab5215b527416778cf4a773880af43d9d073ce0512935ee99dfbd6e89c55a6f1";
+            "7b1cdd08e2b976b8a2fa7a7896df67072d18c577743d9f3088e2d3b1ae3653d1";
     private static final Map<Integer, String> FEED_RESOURCES = feedResources();
 
     private HostAdaptation() { }
 
     public static final Profile PROFILE_406 = new Profile("40.6.0", 400601L,
             "douyin-host-rules-40.6.0.tsv",
-            "ed977e2ee39436476e4242f1db148d412377e50b256afc5408918a311a1b4e9b", legacyFeedResources());
+            "ecda2db82b867d00f65adf5ac588a45217bc3e9313dbc3713b8ae38a52fcb9f0", legacyFeedResources());
     public static final Profile PROFILE_408 = new Profile("40.8.0", 400801L,
             RULES_ASSET, VERIFIED_RULES_FINGERPRINT, FEED_RESOURCES);
     private static volatile Profile currentProfile;

@@ -95,6 +95,31 @@ public final class ApkArtifactContractTest {
 
     @Test public void releaseHostReflectionNamesAndScannerOpcodeTextSurviveR8() throws Exception {
         DexFacts release = dexFacts("DOUAI_VERIFY_RELEASE_APK");
+        for (String marker : new String[]{"module_only_speed", "仅模块控制倍速", "倍速锁定目标：", "已选择正常播放：1x"}) {
+            assertTrue("Missing module speed control marker: " + marker, release.strings.contains(marker));
+        }
+        assertFalse("The old retry toast would contradict a retained speed choice",
+                release.strings.contains("倍速尚未确认生效，请重试"));
+        assertMethod(release, "Lcom/douai/module/feature/HostPlaybackSpeedAccess;",
+                "readEffective(Ljava/lang/Object;)F", 0, false);
+        assertMethod(release, "Lcom/douai/module/feature/GestureSpeedOverride;",
+                "registerGlobal()V", 0, false);
+        assertMethod(release, "Lcom/douai/module/feature/GestureSpeedOverride;",
+                "captureScope()Lcom/douai/module/feature/GestureSpeedOverride$ScopeToken;", 0, true);
+        assertMethod(release, "Lcom/douai/module/feature/EnginePlaybackSpeedHooks;",
+                "close()V", 0, false);
+        assertMethod(release, "Lcom/douai/module/feature/EnginePlaybackSpeedHooks;",
+                "deoptimizeSdkCallers(Lio/github/libxposed/api/XposedInterface;Lcom/douai/module/scan/HostScanReport;Ljava/lang/ClassLoader;)V",
+                0, false);
+        assertMethod(release, "Lcom/douai/module/feature/GestureSpeedOverride;",
+                "restorationSpeed(Ljava/lang/Object;F)F", 0, false);
+        assertMethod(release, "Lcom/douai/module/feature/SpeedGestureNativeGate;",
+                "hold(Landroid/view/View;Landroid/view/MotionEvent;)Lcom/douai/module/feature/SpeedGestureNativeGate$Lease;",
+                0, false);
+        for (String operation : new String[]{"replayDown", "discard"}) {
+            assertMethod(release, "Lcom/douai/module/feature/SpeedGestureNativeGate$Lease;",
+                    operation + "()V", 0, false);
+        }
         assertMethod(release, "Lcom/douai/module/feature/CommentReplyHook;",
                 "generationFailureDiagnostic(Ljava/lang/Exception;)Ljava/lang/String;", 0, true);
         assertMethod(release, "Lcom/douai/module/feature/CommentReplyHook$SharedReplyGenerator;",

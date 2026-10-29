@@ -23,11 +23,13 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextReplacement
 import com.douai.module.config.HostSettingsStore
 import com.douai.module.config.AiModelConfig
 import com.douai.module.config.AiModelSettings
 import com.douai.module.config.ThirdPartyDownloadSettings
+import com.douai.module.config.LocalOptions
 import com.douai.module.analytics.LocalAnalytics
 import com.douai.module.analytics.LocalPortraitContext
 import org.json.JSONObject
@@ -70,6 +72,69 @@ class MiuixHostSettingsTest {
     @After
     fun closeSettings() {
         compose.runOnUiThread { screen.close() }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun playbackUsesSevenMiuixChoicesAndSelectsTheNearestLegacyPresetWithoutAnEditor() {
+        compose.runOnUiThread { store.putString("playback_speed", "2.75") }
+        compose.onNodeWithTag("settings.category.4").performScrollTo().performClick()
+        compose.onNodeWithTag("settings.toggle.仅模块控制倍速").assertIsEnabled()
+        compose.runOnIdle { assertFalse(store.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false)) }
+        compose.onNodeWithText("3x").assertIsDisplayed()
+        compose.onNodeWithTag("settings.option.倍速数值").performClick()
+        compose.runOnIdle {
+            val choices = ShadowDialog.getLatestDialog() as android.app.AlertDialog
+            assertEquals(7, choices.listView.count)
+            assertEquals(5, choices.listView.checkedItemPosition)
+            assertEquals("4x", choices.listView.getItemAtPosition(6).toString())
+            assertNull(choices.window!!.decorView.findViewWithTag<View>("settings.input.倍速数值"))
+            assertEquals("2.75", store.getString("playback_speed", ""))
+        }
+        compose.onNodeWithTag("miuix.dialog.choices").performScrollToIndex(6)
+        compose.onNodeWithTag("miuix.dialog.choice.6").performClick()
+        compose.runOnIdle { assertEquals("4", store.getString("playback_speed", "")) }
+        compose.onNodeWithText("4x").assertIsDisplayed()
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun moduleOnlySpeedDisablesDependentMiuixControlsAndRestoresTheirRawChoices() {
+        compose.runOnUiThread {
+            store.putBoolean("auto_speed", true)
+            store.putBoolean("block_long_press_speed", false)
+            store.putBoolean(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, true)
+        }
+        compose.onNodeWithTag("settings.category.4").performScrollTo().performClick()
+        compose.runOnIdle { assertFalse(store.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false)) }
+        compose.onNodeWithTag("settings.toggle.仅模块控制倍速").performClick()
+        compose.onNodeWithTag("settings.toggle.自动倍速播放").assertIsNotEnabled()
+        compose.onNodeWithText("仅模块模式下手动切换优先，已保留原设置。").assertExists()
+        compose.runOnIdle {
+            assertTrue(store.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false))
+            assertTrue(store.getBoolean("auto_speed", false))
+            assertFalse(store.getBoolean("block_long_press_speed", true))
+            assertTrue(store.getBoolean(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, false))
+        }
+        compose.runOnUiThread { screen.dismissChildPages() }
+        compose.onNodeWithTag("settings.category.1").performScrollTo().performClick()
+        compose.onNodeWithTag("settings.toggle.拦截长按倍数启用场景").assertIsNotEnabled()
+        compose.onNodeWithTag("settings.toggle.拦截系统长按手势").assertIsNotEnabled()
+        compose.runOnUiThread { screen.dismissChildPages() }
+
+        compose.onNodeWithTag("settings.category.4").performScrollTo().performClick()
+        compose.onNodeWithTag("settings.toggle.仅模块控制倍速").performClick()
+        compose.onNodeWithTag("settings.toggle.自动倍速播放").assertIsEnabled()
+        compose.runOnUiThread { screen.dismissChildPages() }
+        compose.onNodeWithTag("settings.category.1").performScrollTo().performClick()
+        compose.onNodeWithTag("settings.toggle.拦截长按倍数启用场景").assertIsEnabled()
+        compose.onNodeWithTag("settings.toggle.拦截系统长按手势").assertIsEnabled()
+        compose.runOnIdle {
+            assertFalse(store.getBoolean(LocalOptions.MODULE_ONLY_SPEED, true))
+            assertTrue(store.getBoolean("auto_speed", false))
+            assertFalse(store.getBoolean("block_long_press_speed", true))
+            assertTrue(store.getBoolean(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, false))
+        }
     }
 
     @Test

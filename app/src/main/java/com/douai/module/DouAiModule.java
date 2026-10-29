@@ -691,11 +691,11 @@ public final class DouAiModule extends XposedModule {
                 hook.setOptions(options);
             }
             if (hostBehaviorHooks != null && (initial || changes.affects(Feature.HOST_BEHAVIOR))) hostBehaviorHooks.setOptions(options);
+            if (feedGestureToolsHook != null && gestureChanged) feedGestureToolsHook.setOptions(options);
             if (playbackBehaviorHooks != null && playbackChanged) playbackBehaviorHooks.setOptions(options);
             if (profileSpoofHook != null && spoofChanged) profileSpoofHook.setOptions(options);
             if (nativeMessagingHooks != null && (replyChanged || messageRecallChanged)) nativeMessagingHooks.setOptions(options);
             if (recallHighlightHook != null && messageRecallChanged) recallHighlightHook.setOptions(options);
-            if (feedGestureToolsHook != null && gestureChanged) feedGestureToolsHook.setOptions(options);
             if (directMessageSpeechHook != null && (initial || changes.affects(Feature.DIRECT_MESSAGE_SPEECH))) {
                 directMessageSpeechHook.setOptions(options);
             }

@@ -2,6 +2,8 @@ package com.douai.module.feature;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
+import com.douai.module.diagnostics.DebugLog;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -10,6 +12,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.FrameLayout;
@@ -27,6 +30,7 @@ import org.robolectric.shadows.ShadowAlertDialog;
 import org.robolectric.shadows.ShadowToast;
 
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
@@ -36,6 +40,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.time.Duration;
 
 import static org.junit.Assert.assertEquals;
@@ -167,6 +172,23 @@ public final class FeedGestureToolsHookTest {
         @Override public float getSpeed() { return 0f; }
         @Override public void setSpeed(float speed) { actualSpeed = speed; }
     }
+    public static final class FixedEngineReadbackPlayerManager implements IPlayerManager {
+        final float engineReported;
+        float lastRequested = 1f;
+        FixedEngineReadbackPlayerManager(float engineReported) { this.engineReported = engineReported; }
+        @Override public void resumePlay() { }
+        @Override public String play() { return null; }
+        @Override public float getSpeed() { return engineReported; }
+        @Override public void setSpeed(float speed) { lastRequested = speed; }
+    }
+    public static final class FrameRateReadbackPlayerManager implements IPlayerManager {
+        float actualSpeed = 1f;
+        final List<Float> writes = new ArrayList<>();
+        @Override public void resumePlay() { }
+        @Override public String play() { return null; }
+        @Override public float getSpeed() { return 30f; }
+        @Override public void setSpeed(float speed) { actualSpeed = speed; writes.add(speed); }
+    }
     public static final class TouchLayout extends View {
         public float lastRawX;
         public float lastRawY;
@@ -205,6 +227,43 @@ public final class FeedGestureToolsHookTest {
         int nativeCalls;
         LongPress(TouchLayout layout) { a = layout; }
         @Override public void run() { nativeCalls++; }
+    }
+    public static final class NativeDetector {
+        final Handler main = new Handler(Looper.getMainLooper());
+        final List<Integer> events = new ArrayList<>();
+        final List<Float> xs = new ArrayList<>();
+        final List<Float> ys = new ArrayList<>();
+        final List<Long> eventTimes = new ArrayList<>();
+        final String name;
+        final List<String> dispatchOrder;
+        final Runnable restoreSpeed;
+        NativeDetector(String name, List<String> dispatchOrder, Runnable restoreSpeed) {
+            this.name = name;
+            this.dispatchOrder = dispatchOrder;
+            this.restoreSpeed = restoreSpeed;
+        }
+        public void input(MotionEvent event) {
+            events.add(event.getActionMasked());
+            xs.add(event.getX());
+            ys.add(event.getY());
+            eventTimes.add(event.getEventTime());
+            dispatchOrder.add(name + ":" + event.getActionMasked());
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                // Deterministic stand-in for detector-owned work that outlives child UP.
+                main.postDelayed(restoreSpeed, 900);
+            }
+        }
+        void clear() { main.removeCallbacksAndMessages(null); }
+    }
+    public static final class NativeContainer extends FrameLayout {
+        final NativeDetector detector;
+        NativeContainer(Context context, NativeDetector detector) { super(context); this.detector = detector; }
+        public NativeDetector getDetector() { return detector; }
+    }
+    public static final class LegacyNativeContainer extends FrameLayout {
+        final NativeDetector detector;
+        LegacyNativeContainer(Context context, NativeDetector detector) { super(context); this.detector = detector; }
+        public NativeDetector getDetector() { return detector; }
     }
     private static final class FeedRoot extends FrameLayout {
         boolean focused = true;
@@ -624,6 +683,74 @@ public final class FeedGestureToolsHookTest {
         }
     }
 
+    @Test public void nativeLongPressInterceptionReservesUnassignedHoldsInEveryRegion() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, true), true)) {
+            f.select();
+            Handler nativeHandler = new Handler(Looper.getMainLooper());
+            f.touch.nativeDownAction = () -> nativeHandler.postDelayed(
+                    f.touch.longPressRunnable, f.touch.mTimeInterval);
+            for (int region = 0; region < FeedGestureToolsHook.REGION_IDS.length; region++) {
+                int x = region % 3 * 100 + 50;
+                int y = region / 3 * 200 + 100;
+                f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, x, y);
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+                f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, x, y);
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(300));
+                assertTrue("Unassigned " + FeedGestureToolsHook.REGION_IDS[region]
+                        + " must not initialize a child or ancestor native recognizer",
+                        f.nativeDispatchOrder.isEmpty());
+                assertEquals(0, f.press.nativeCalls);
+                assertEquals(1.25f, f.player.getSpeed(), 0f);
+            }
+        }
+    }
+
+    @Test public void nativeLongPressInterceptionStillHandsUnassignedTapsAndDragsBack() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, true), true)) {
+            f.player.delegate.speed = 1f;
+            f.select();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 150, 300);
+            assertTrue(f.nativeDispatchOrder.isEmpty());
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(100));
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 150, 300);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                    "child:1", "legacy:1", "video:1"), f.nativeDispatchOrder);
+
+            f.nativeDispatchOrder.clear();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 150, 300);
+            assertTrue(f.nativeDispatchOrder.isEmpty());
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(100));
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_MOVE, 150, 200);
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 150, 200);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                    "child:2", "legacy:2", "video:2", "child:1", "legacy:1", "video:1"),
+                    f.nativeDispatchOrder);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(1000));
+            assertEquals(0, f.press.nativeCalls);
+            assertEquals(1f, f.player.getSpeed(), 0f);
+        }
+    }
+
+    @Test public void disablingNativeLongPressInterceptionPreservesAncestorAndNativeHold() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, false), true)) {
+            f.player.delegate.speed = 1f;
+            f.select();
+            Handler nativeHandler = new Handler(Looper.getMainLooper());
+            f.touch.nativeDownAction = () -> nativeHandler.postDelayed(
+                    f.touch.longPressRunnable, f.touch.mTimeInterval);
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 150, 300);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0"), f.nativeDispatchOrder);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+            assertEquals(1, f.press.nativeCalls);
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 150, 300);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                    "child:1", "legacy:1", "video:1"), f.nativeDispatchOrder);
+            assertEquals(1, f.touch.nativeUpCalls);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(300));
+            assertEquals(1f, f.player.getSpeed(), 0f);
+        }
+    }
+
     @Test public void actualLongPressCallbackRoutesEveryCellAndPreservesUnconfiguredNeighbor() throws Throwable {
         try (Fixture f = new Fixture(Collections.emptyMap())) {
             f.hook.onActivityResumed(f.activity);
@@ -688,11 +815,11 @@ public final class FeedGestureToolsHookTest {
     }
 
     @Test public void bottomRightLongPressImmediatelyAppliesTheConfiguredNumericSpeed() throws Throwable {
-        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "2.75"))) {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
             f.select();
             f.longPress(2, 2);
             assertEquals(0, f.press.nativeCalls);
-            assertEquals(2.75f, f.player.getSpeed(), 0f);
+            assertEquals(3f, f.player.getSpeed(), 0f);
             assertEquals(1, f.player.delegate.speedChanges);
             assertNull("The configured speed action must not open another selector",
                     ShadowAlertDialog.getLatestAlertDialog());
@@ -700,12 +827,12 @@ public final class FeedGestureToolsHookTest {
     }
 
     @Test public void configuredLongPressConsumesTheHostReleaseAfterRunningItsAction() throws Throwable {
-        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "2.75"))) {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
             f.select();
             f.touchEvent(MotionEvent.ACTION_DOWN, 2, 2);
             f.longPress(2, 2);
 
-            assertEquals(2.75f, f.player.getSpeed(), 0f);
+            assertEquals(3f, f.player.getSpeed(), 0f);
             assertTrue("A configured long press must consume the host release", f.touch.discardCurrentEvent);
             MotionEvent up = MotionEvent.obtain(0, 200, MotionEvent.ACTION_UP, 250, 550, 0);
             try {
@@ -725,7 +852,7 @@ public final class FeedGestureToolsHookTest {
         }
     }
 
-    @Test public void configuredNumericValueUsesTheSamePlaybackBounds() throws Throwable {
+    @Test public void outOfRangeConfiguredValuesUseTheNearestSupportedPreset() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "8"))) {
             f.select();
             f.longPress(2, 2);
@@ -735,75 +862,645 @@ public final class FeedGestureToolsHookTest {
             f.longPress(2, 2);
             assertEquals(1f, f.player.getSpeed(), 0f);
             f.longPress(2, 2);
-            assertEquals(0.25f, f.player.getSpeed(), 0f);
+            assertEquals(0.75f, f.player.getSpeed(), 0f);
         }
     }
 
     @Test public void manuallyRequestedSpeedWorksWhileAutomaticSpeedIsDisabled() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
-                "playback_speed", "3.25", "auto_speed", false))) {
+                "playback_speed", "3", "auto_speed", false))) {
             f.select();
             assertEquals(1.25f, f.player.getSpeed(), 0f);
             f.longPress(2, 2);
-            assertEquals(3.25f, f.player.getSpeed(), 0f);
+            assertEquals(3f, f.player.getSpeed(), 0f);
         }
     }
 
     @Test public void longPressTogglesConfiguredSpeedAndNormalWithToastForBothAutoFlags() throws Throwable {
         for (boolean automatic : new boolean[]{false, true}) {
             try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
-                    "playback_speed", "2.75", "auto_speed", automatic))) {
+                    "playback_speed", "3", "auto_speed", automatic))) {
                 f.select();
                 f.longPress(2, 2);
-                assertEquals(2.75f, f.player.getSpeed(), 0f);
-                assertEquals("已开启倍速：2.75x", ShadowToast.getTextOfLatestToast());
+                assertEquals(3f, f.player.getSpeed(), 0f);
+                assertEquals("倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));
+                assertEquals("倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
                 f.longPress(2, 2);
                 assertEquals(1f, f.player.getSpeed(), 0f);
-                assertEquals("已关闭倍速，恢复 1x", ShadowToast.getTextOfLatestToast());
+                assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));
+                assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
                 f.longPress(2, 2);
-                assertEquals(2.75f, f.player.getSpeed(), 0f);
-                assertEquals("已开启倍速：2.75x", ShadowToast.getTextOfLatestToast());
+                assertEquals(3f, f.player.getSpeed(), 0f);
+                assertEquals("倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
             }
         }
     }
 
-    @Test public void manualToggleIsScopedToTheCurrentVideoEvenWhenHolderIsReused() throws Throwable {
+    @Test public void heldSpeedGesturePreventsNativeDownFromSchedulingALateSpeedRestore() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
-                "playback_speed", "2.75", "auto_speed", true))) {
+                "playback_speed", "2", "auto_speed", false))) {
+            f.player.delegate.speed = 1f;
             f.select();
+            Handler nativeHandler = new Handler(Looper.getMainLooper());
+            int[] nativeDownCalls = {0};
+            f.touch.nativeDownAction = () -> {
+                nativeDownCalls[0]++;
+                nativeHandler.postDelayed(f.touch.longPressRunnable, f.touch.mTimeInterval);
+                // Model teardown owned by DOWN, independent of the consumed long-press
+                // runnable and UP. Its exact delay is a fixture assumption, not a host contract.
+                nativeHandler.postDelayed(() -> f.player.delegate.setSpeed(1f),
+                        f.touch.mTimeInterval + 400L);
+            };
+
+            f.dispatchTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(500));
+            assertEquals(2f, f.player.getSpeed(), 0f);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));
+            assertEquals("倍速锁定目标：2x", ShadowToast.getTextOfLatestToast());
+            f.dispatchTouch(MotionEvent.ACTION_UP, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(300));
+            assertEquals("A confirmed toggle must survive teardown scheduled by native DOWN",
+                    2f, f.player.getSpeed(), 0f);
+            assertEquals("A claimed speed hold must not initialize the native gesture", 0,
+                    nativeDownCalls[0]);
+
+            f.dispatchTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+            f.dispatchTouch(MotionEvent.ACTION_UP, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(300));
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            assertEquals(0, nativeDownCalls[0]);
+            assertEquals(0, f.press.nativeCalls);
+        }
+    }
+
+    @Test public void heldSpeedShortTapReplaysTheOriginalDownAndUpWithoutChangingSpeed() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false))) {
+            f.select();
+            List<Integer> nativeEvents = new ArrayList<>();
+            List<Float> nativeXs = new ArrayList<>();
+            List<Float> nativeYs = new ArrayList<>();
+            int[] location = new int[2];
+            f.touch.getLocationOnScreen(location);
+            int[] nativeDownCalls = {0};
+            f.touch.nativeDownAction = () -> nativeDownCalls[0]++;
+            f.touch.setOnTouchListener((view, event) -> {
+                nativeEvents.add(event.getActionMasked());
+                nativeXs.add(event.getRawX() - location[0]);
+                nativeYs.add(event.getRawY() - location[1]);
+                return false;
+            });
+
+            f.dispatchTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            assertTrue("Reserve the candidate hold until it becomes a tap or long press",
+                    nativeEvents.isEmpty());
+            assertEquals(0, nativeDownCalls[0]);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(100));
+            f.dispatchTouch(MotionEvent.ACTION_UP, 252, 502);
+            assertEquals(Arrays.asList(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP), nativeEvents);
+            assertEquals(Arrays.asList(250f, 252f), nativeXs);
+            assertEquals(Arrays.asList(500f, 502f), nativeYs);
+            assertEquals(1, nativeDownCalls[0]);
+            assertEquals(1, f.touch.nativeUpCalls);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(600));
+            assertEquals(1.25f, f.player.getSpeed(), 0f);
+            assertEquals(0, f.press.nativeCalls);
+        }
+    }
+
+    @Test public void heldSpeedMoveReplaysTheOriginalDownBeforeHandingBackTheDrag() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false))) {
+            f.select();
+            List<Integer> nativeEvents = new ArrayList<>();
+            List<Float> nativeYs = new ArrayList<>();
+            int[] location = new int[2];
+            f.touch.getLocationOnScreen(location);
+            int[] nativeDownCalls = {0};
+            f.touch.nativeDownAction = () -> nativeDownCalls[0]++;
+            f.touch.setOnTouchListener((view, event) -> {
+                nativeEvents.add(event.getActionMasked());
+                nativeYs.add(event.getRawY() - location[1]);
+                return false;
+            });
+
+            f.dispatchTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            assertTrue(nativeEvents.isEmpty());
+            assertEquals(0, nativeDownCalls[0]);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(100));
+            f.dispatchTouch(MotionEvent.ACTION_MOVE, 250, 400);
+            assertEquals(Arrays.asList(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE), nativeEvents);
+            assertEquals(Arrays.asList(500f, 400f), nativeYs);
+            f.dispatchTouch(MotionEvent.ACTION_UP, 250, 390);
+            assertEquals(Arrays.asList(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE,
+                    MotionEvent.ACTION_UP), nativeEvents);
+            assertEquals(Arrays.asList(500f, 400f, 390f), nativeYs);
+            assertEquals(1, nativeDownCalls[0]);
+            assertEquals(1, f.touch.nativeUpCalls);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(600));
+            assertEquals(1.25f, f.player.getSpeed(), 0f);
+            assertEquals(0, f.press.nativeCalls);
+        }
+    }
+
+    @Test public void nativeLongPressInterceptionDoesNotRequireAnAvailablePlayer() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, true,
+                "long_press_bottom_right", "speed"), true)) {
+            f.panel.currentPlayer = null;
+            f.select();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 250, 500);
+            assertTrue("Global native blocking must not depend on a usable speed player",
+                    f.nativeDispatchOrder.isEmpty());
+            assertEquals(0, f.press.nativeCalls);
+            assertEquals("当前播放器不可用", ShadowToast.getTextOfLatestToast());
+        }
+    }
+
+    @Test public void heldSpeedGestureAlsoBlocksAncestorDetectorTeardown() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false), true)) {
+            f.player.delegate.speed = 1f;
+            f.select();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+            assertEquals(2f, f.player.getSpeed(), 0f);
+            assertEquals("倍速锁定目标：2x", ShadowToast.getTextOfLatestToast());
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(300));
+            assertEquals("An ancestor must not undo a child-owned speed toggle after confirmation",
+                    2f, f.player.getSpeed(), 0f);
+            assertTrue("Neither ancestor may initialize a detector or receive an orphan UP",
+                    f.nativeDispatchOrder.isEmpty());
+            assertTrue(f.nativeDetector.events.isEmpty());
+            assertTrue(f.legacyNativeDetector.events.isEmpty());
+            // A detector shared by multiple ancestors can receive the same terminal twice.
+            MotionEvent repeatedUp = MotionEvent.obtain(f.nativeDownTime, SystemClock.uptimeMillis(),
+                    MotionEvent.ACTION_UP, 250, 500, 0);
+            try {
+                f.dispatchDetector(f.nativeDetector, f.nativeContainer, repeatedUp);
+                f.dispatchDetector(f.legacyNativeDetector, f.legacyNativeContainer, repeatedUp);
+            } finally { repeatedUp.recycle(); }
+            assertTrue("Repeated ancestor terminal events must remain discarded",
+                    f.nativeDispatchOrder.isEmpty());
+            assertEquals(0, f.press.nativeCalls);
+        }
+    }
+
+    @Test public void heldSpeedShortTapReplaysChildAndAncestorDownBeforeUp() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false), true)) {
+            f.player.delegate.speed = 1f;
+            f.select();
+            long downAt = SystemClock.uptimeMillis();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            assertTrue(f.nativeDispatchOrder.isEmpty());
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(100));
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 252, 502);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                    "child:1", "legacy:1", "video:1"), f.nativeDispatchOrder);
+            assertEquals(Arrays.asList(263f, 265f), f.legacyNativeDetector.xs);
+            assertEquals(Arrays.asList(523f, 525f), f.legacyNativeDetector.ys);
+            assertEquals(Arrays.asList(274f, 276f), f.nativeDetector.xs);
+            assertEquals(Arrays.asList(540f, 542f), f.nativeDetector.ys);
+            assertEquals(Arrays.asList(downAt, downAt + 100), f.nativeDetector.eventTimes);
+            assertEquals(Arrays.asList(downAt, downAt + 100), f.legacyNativeDetector.eventTimes);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(1000));
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            assertEquals(0, f.press.nativeCalls);
+        }
+    }
+
+    @Test public void heldSpeedMoveReplaysChildAndAncestorDownBeforeMove() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false), true)) {
+            f.player.delegate.speed = 1f;
+            f.select();
+            long downAt = SystemClock.uptimeMillis();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            assertTrue(f.nativeDispatchOrder.isEmpty());
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(100));
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_MOVE, 250, 400);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                    "child:2", "legacy:2", "video:2"), f.nativeDispatchOrder);
+            assertEquals(Arrays.asList(523f, 423f), f.legacyNativeDetector.ys);
+            assertEquals(Arrays.asList(540f, 440f), f.nativeDetector.ys);
+            assertEquals(Arrays.asList(downAt, downAt + 100), f.nativeDetector.eventTimes);
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 250, 390);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                    "child:2", "legacy:2", "video:2", "child:1", "legacy:1", "video:1"),
+                    f.nativeDispatchOrder);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(1000));
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            assertEquals(0, f.press.nativeCalls);
+        }
+    }
+
+    @Test public void confirmedSpeedMoveDoesNotInitializeAncestorDetectors() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false), true)) {
+            f.player.delegate.speed = 1f;
+            f.select();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_MOVE, 250, 400);
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 250, 400);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(300));
+            assertEquals(2f, f.player.getSpeed(), 0f);
+            assertTrue("Movement after claiming a hold must not replay any native DOWN",
+                    f.nativeDispatchOrder.isEmpty());
+        }
+    }
+
+    @Test public void lostSpeedUpDoesNotBlockTheNextAncestorLongPress() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false), true)) {
+            f.player.delegate.speed = 1f;
+            f.select();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+            assertEquals(2f, f.player.getSpeed(), 0f);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(3500));
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+            assertEquals("A fresh DOWN after a lost UP must still toggle the existing speed off",
+                    1f, f.player.getSpeed(), 0f);
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(300));
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            assertTrue(f.nativeDispatchOrder.isEmpty());
+        }
+    }
+
+    @Test public void changedSpeedConfigurationDoesNotSendAnOrphanAncestorUp() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false), true)) {
+            f.player.delegate.speed = 1f;
+            f.select();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(100));
+            f.hook.setOptions(new LocalOptions(Map.of("long_press_bottom_right", "none")));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(550));
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 250, 500);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(300));
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            assertTrue("Cancelling a withheld DOWN must also consume its eventual native UP",
+                    f.nativeDispatchOrder.isEmpty());
+        }
+    }
+
+    @Test public void unconfiguredRegionStillReachesChildAndAncestorDetectors() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "2", "auto_speed", false), true)) {
+            f.select();
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 50, 100);
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 50, 100);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                    "child:1", "legacy:1", "video:1"), f.nativeDispatchOrder);
+            assertEquals(1.25f, f.player.getSpeed(), 0f);
+        }
+    }
+
+    @Test public void moduleOnlyModeStartsAtNormalAndKeepsItsPresetAcrossVideos() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                "long_press_bottom_right", "speed", "playback_speed", "3", "auto_speed", false))) {
+            f.select();
+            assertEquals("Module-only control must start at its own 1x instead of the host's 1.25x", 1f,
+                    f.player.getSpeed(), 0f);
             f.longPress(2, 2);
-            assertEquals(2.75f, f.player.getSpeed(), 0f);
+            assertEquals(3f, f.player.getSpeed(), 0f);
+            assertEquals("倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
+
             f.holder.aid = "video-2";
+            f.player.delegate.speed = 1.25f;
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals(3f, f.player.getSpeed(), 0f);
             f.longPress(2, 2);
-            assertEquals(2.75f, f.player.getSpeed(), 0f);
-            assertEquals("已开启倍速：2.75x", ShadowToast.getTextOfLatestToast());
+            assertEquals("Turning the preset off must select module 1x", 1f, f.player.getSpeed(), 0f);
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+
+            Holder next = new Holder();
+            next.aid = "video-3";
+            next.w = f.root;
+            next.A2 = f.holder.A2;
+            PlayerManager nextPlayer = new PlayerManager(new FakeFeedWrapper(1.25f));
+            f.panel.currentPlayer = nextPlayer;
+            f.panel.current = next;
+            f.harness.invoke(Holder.class.getMethod("selected"), next);
+            ShadowLooper.idleMainLooper();
+            assertEquals("Normal playback must remain module 1x after another player is selected", 1f,
+                    nextPlayer.getSpeed(), 0f);
+        }
+    }
+
+    @Test public void moduleOnlyModeRegistersNormalBeforeAnySelectionOrManualGesture() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                "long_press_bottom_right", "speed"))) {
+            assertEquals("The module's normal choice must exist before the first holder callback", 1f,
+                    GestureSpeedOverride.speedFor(f.player), 0f);
+            f.select();
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            f.longPress(2, 2);
+            assertEquals("The default enabled preset must be 2x", 2f, f.player.getSpeed(), 0f);
             f.longPress(2, 2);
             assertEquals(1f, f.player.getSpeed(), 0f);
-            assertEquals("已关闭倍速，恢复 1x", ShadowToast.getTextOfLatestToast());
+        }
+    }
+
+    @Test public void moduleOnlyModeDoesNotUseHostReadbackAsItsSelectedTarget() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                "long_press_bottom_right", "speed", "playback_speed", "3"))) {
+            FixedEngineReadbackPlayerManager player = new FixedEngineReadbackPlayerManager(1.7f);
+            f.panel.currentPlayer = player;
+            f.select();
+            assertEquals(1f, player.lastRequested, 0f);
+            assertEquals(1f, GestureSpeedOverride.speedFor(player), 0f);
+            f.longPress(2, 2);
+            assertEquals(3f, player.lastRequested, 0f);
+            assertEquals(3f, GestureSpeedOverride.speedFor(player), 0f);
+            f.longPress(2, 2);
+            assertEquals(1f, player.lastRequested, 0f);
+            assertEquals(1f, GestureSpeedOverride.speedFor(player), 0f);
+            assertEquals("The independent observation is neither the target nor the submitted value", 1.7f,
+                    player.engineReported, 0f);
+        }
+    }
+
+    @Test public void moduleOnlyModeHandlesHotEnableAndPresetChanges() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
+            f.select();
+            assertEquals(1.25f, f.player.getSpeed(), 0f);
+            f.hook.setOptions(new LocalOptions(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                    "long_press_bottom_right", "speed", "playback_speed", "3")));
+            ShadowLooper.idleMainLooper();
+            assertEquals("Hot enabling must start from module normal playback", 1f, f.player.getSpeed(), 0f);
+            f.longPress(2, 2);
+            assertEquals(3f, f.player.getSpeed(), 0f);
+            f.hook.setOptions(new LocalOptions(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                    "long_press_bottom_right", "speed", "playback_speed", "4")));
+            ShadowLooper.idleMainLooper();
+            assertEquals(4f, f.player.getSpeed(), 0f);
+            f.holder.aid = "four-times-video";
+            f.player.delegate.speed = 1.25f;
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals("A selected 4x preset must be inherited after the host resets a new video", 4f,
+                    f.player.getSpeed(), 0f);
+            f.longPress(2, 2);
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            f.hook.setOptions(new LocalOptions(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                    "long_press_bottom_right", "speed", "playback_speed", "0.75")));
+            ShadowLooper.idleMainLooper();
+            assertEquals("Changing a preset must not enable it while normal playback is selected", 1f,
+                    f.player.getSpeed(), 0f);
+            f.longPress(2, 2);
+            assertEquals(0.75f, f.player.getSpeed(), 0f);
+            f.holder.aid = "next-video";
+            f.player.delegate.speed = 1.25f;
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals(0.75f, f.player.getSpeed(), 0f);
+        }
+    }
+
+    @Test public void hotEnablingModuleOnlyModeUpdatesTheExistingLegacyScopeToken() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
+            f.select();
+            f.longPress(2, 2);
+            assertEquals(3f, f.player.getSpeed(), 0f);
+            Field ownerField = FeedGestureToolsHook.class.getDeclaredField("speedOverride");
+            ownerField.setAccessible(true);
+            GestureSpeedOverride owner = (GestureSpeedOverride) ownerField.get(f.hook);
+            assertNotNull(owner);
+            GestureSpeedOverride.ScopeToken[] queued = {null};
+            owner.apply(3f, () -> queued[0] = GestureSpeedOverride.captureScope());
+            assertNotNull(queued[0]);
+            assertEquals(Float.valueOf(3f), queued[0].desired());
+
+            f.hook.setOptions(new LocalOptions(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                    "long_press_bottom_right", "speed", "playback_speed", "3")));
+            ShadowLooper.idleMainLooper();
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            assertEquals(Float.valueOf(1f), GestureSpeedOverride.speedFor(f.player));
+            assertEquals("An already queued SDK request must observe the new module normal choice",
+                    Float.valueOf(1f), queued[0].desired());
+            assertSame(owner, ownerField.get(f.hook));
+
+            f.longPress(2, 2);
+            assertEquals("Hot enabling must reset the old ON state before the next toggle", 3f,
+                    f.player.getSpeed(), 0f);
+            assertEquals(Float.valueOf(3f), GestureSpeedOverride.speedFor(f.player));
+            assertEquals(Float.valueOf(3f), queued[0].desired());
+        }
+    }
+
+    @Test public void disablingModuleOnlyModeReleasesItsExclusiveChoiceAndNativeHold() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, false,
+                "long_press_bottom_right", "speed", "playback_speed", "3"), true)) {
+            f.select();
+            f.longPress(2, 2);
+            assertEquals(3f, f.player.getSpeed(), 0f);
+            f.hook.setOptions(new LocalOptions(Map.of(LocalOptions.MODULE_ONLY_SPEED, false,
+                    LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, false,
+                    "long_press_bottom_right", "speed", "playback_speed", "3")));
+            ShadowLooper.idleMainLooper();
+            assertNull("Disabling the mode must release the owner created by that mode",
+                    GestureSpeedOverride.speedFor(f.player));
+            f.player.setSpeed(3.25f);
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals("An external nonpreset speed must remain independent after mode exit", 3.25f,
+                    f.player.getSpeed(), 0f);
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 150, 300);
+            f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 150, 300);
+            assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                    "child:1", "legacy:1", "video:1"), f.nativeDispatchOrder);
+        }
+    }
+
+    @Test public void moduleOnlyModeForcesNativeHoldInterceptionEvenWhenTheStoredSwitchIsOff() throws Throwable {
+        Map<String, Object> values = Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, false);
+        assertTrue(new LocalOptions(values).interceptNativeLongPress());
+        try (Fixture f = new Fixture(values, true)) {
+            f.select();
+            Handler nativeHandler = new Handler(Looper.getMainLooper());
+            f.touch.nativeDownAction = () -> nativeHandler.postDelayed(
+                    f.touch.longPressRunnable, f.touch.mTimeInterval);
+            try {
+                f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 150, 300);
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(650));
+                f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 150, 300);
+                assertTrue(f.nativeDispatchOrder.isEmpty());
+                assertEquals(0, f.press.nativeCalls);
+                assertEquals(1f, f.player.getSpeed(), 0f);
+
+                f.dispatchNativeAncestorTouch(MotionEvent.ACTION_DOWN, 150, 300);
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(100));
+                f.dispatchNativeAncestorTouch(MotionEvent.ACTION_UP, 150, 300);
+                assertEquals(Arrays.asList("child:0", "legacy:0", "video:0",
+                        "child:1", "legacy:1", "video:1"), f.nativeDispatchOrder);
+            } finally { nativeHandler.removeCallbacksAndMessages(null); }
+        }
+    }
+
+    @Test public void moduleOnlyModeAcceptsEveryPresetAndAlwaysReturnsToItsOwnNormalChoice() throws Throwable {
+        try (Fixture f = new Fixture(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                "long_press_bottom_right", "speed"))) {
+            f.select();
+            for (String preset : new String[]{"0.75", "1", "1.25", "1.5", "2", "3", "4"}) {
+                f.hook.setOptions(new LocalOptions(Map.of(LocalOptions.MODULE_ONLY_SPEED, true,
+                        "long_press_bottom_right", "speed", "playback_speed", preset)));
+                ShadowLooper.idleMainLooper();
+                assertEquals(1f, f.player.getSpeed(), 0f);
+                f.longPress(2, 2);
+                assertEquals(Float.parseFloat(preset), f.player.getSpeed(), 0f);
+                assertEquals("倍速锁定目标：" + preset + "x", ShadowToast.getTextOfLatestToast());
+                f.longPress(2, 2);
+                assertEquals(1f, f.player.getSpeed(), 0f);
+                assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+            }
+        }
+    }
+
+    @Test public void manualToggleStaysEnabledAcrossHolderSelectionUntilTheNextLongPress() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "3", "auto_speed", false))) {
+            f.select();
+            f.longPress(2, 2);
+            assertEquals(3f, f.player.getSpeed(), 0f);
+            f.harness.invoke(Holder.class.getMethod("pause"), f.holder);
+            ShadowLooper.idleMainLooper();
+            Holder next = new Holder();
+            next.aid = "video-2";
+            next.w = f.root;
+            next.A2 = f.holder.A2;
+            f.panel.current = next;
+            f.harness.invoke(Holder.class.getMethod("selected"), next);
+            ShadowLooper.idleMainLooper();
+            assertEquals("Changing videos must not turn off the manually enabled speed",
+                    3f, f.player.getSpeed(), 0f);
+            f.longPress(2, 2);
+            assertEquals("The next long press must turn off the same persistent toggle",
+                    1f, f.player.getSpeed(), 0f);
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+
+            Holder third = new Holder();
+            third.aid = "video-3";
+            third.w = f.root;
+            third.A2 = f.holder.A2;
+            PlayerManager thirdPlayer = new PlayerManager(new FakeFeedWrapper(3f));
+            f.panel.currentPlayer = thirdPlayer;
+            f.panel.current = third;
+            f.harness.invoke(Holder.class.getMethod("selected"), third);
+            ShadowLooper.idleMainLooper();
+            assertEquals("The explicit 1x choice must also persist into a new player/video",
+                    1f, thirdPlayer.getSpeed(), 0f);
+            f.longPress(2, 2);
+            assertEquals(3f, thirdPlayer.getSpeed(), 0f);
+        }
+    }
+
+    @Test public void manualTogglePersistsWhenTheSameHolderReceivesAnotherVideo() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "3", "auto_speed", true))) {
+            f.select();
+            f.longPress(2, 2);
+            assertEquals(3f, f.player.getSpeed(), 0f);
+            f.holder.aid = "video-2";
+            f.player.delegate.speed = 1f;
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals("Reusing a holder for a new aid must reapply the enabled speed",
+                    3f, f.player.getSpeed(), 0f);
+            f.longPress(2, 2);
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+        }
+    }
+
+    @Test public void manualSpeedIsReappliedToAReplacementManagerWhenItsHolderResumes() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "3", "auto_speed", false))) {
+            f.select();
+            f.longPress(2, 2);
+            PlayerManager replacement = new PlayerManager(new FakeFeedWrapper(1.5f));
+            f.panel.currentPlayer = replacement;
+            f.holder.aid = "video-2";
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals("A resumed holder must apply the existing manual choice to its new engine",
+                    3f, replacement.delegate.speed, 0f);
+
+            // Model the host starting a new playback cycle before its holder-resume callback.
+            // This fixture does not claim to hook nested manager/engine Java calls.
+            replacement.delegate.speed = 1f;
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals(3f, replacement.delegate.speed, 0f);
+            f.longPress(2, 2);
+            assertEquals(1f, replacement.delegate.speed, 0f);
         }
     }
 
     @Test public void unavailableReadbackCannotBlockTheIndependentToggle() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
-                "playback_speed", "2.5", "auto_speed", false))) {
+                "playback_speed", "3", "auto_speed", false))) {
             UnreportedPlayerManager player = new UnreportedPlayerManager();
             f.panel.currentPlayer = player;
             f.select();
             f.longPress(2, 2);
-            assertEquals(2.5f, player.actualSpeed, 0f);
-            assertEquals("已开启倍速：2.5x", ShadowToast.getTextOfLatestToast());
+            assertEquals(3f, player.actualSpeed, 0f);
+            assertEquals("倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
             f.longPress(2, 2);
             assertEquals(1f, player.actualSpeed, 0f);
-            assertEquals("已关闭倍速，恢复 1x", ShadowToast.getTextOfLatestToast());
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+        }
+    }
+
+    @Test public void implausibleThirtyFpsReadbackMustNotBecomeTheRestorationSpeed() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "3", "auto_speed", false))) {
+            FrameRateReadbackPlayerManager player = new FrameRateReadbackPlayerManager();
+            f.panel.currentPlayer = player;
+            f.select();
+            f.longPress(2, 2);
+            assertEquals(3f, player.actualSpeed, 0f);
+            f.touchEvent(MotionEvent.ACTION_UP, 2, 2);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(1100));
+            assertEquals("Consuming the configured gesture release must preserve its toggle",
+                    3f, player.actualSpeed, 0f);
+            assertEquals("An invalid readback must not replace feedback for the chosen target",
+                    "倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
+
+            f.hook.onActivityPaused(f.activity);
+            ShadowLooper.idleMainLooper();
+            assertEquals("Pausing must keep the manual choice until the module is closed",
+                    3f, player.actualSpeed, 0f);
+            f.hook.close();
+            ShadowLooper.idleMainLooper();
+            assertEquals("A 30.0 readback matching the log cannot be restored as playback speed",
+                    1f, player.actualSpeed, 0f);
+            assertFalse("A value from an incompatible getter must never be sent to the speed setter",
+                    player.writes.contains(30f));
         }
     }
 
     @Test public void doubleTapUsesTheConfiguredSpeedWithoutASelector() throws Throwable {
-        try (Fixture f = new Fixture(Map.of("double_tap_bottom_right", "speed", "playback_speed", "2.5"))) {
+        try (Fixture f = new Fixture(Map.of("double_tap_bottom_right", "speed", "playback_speed", "3"))) {
             f.select();
             f.doubleTap(2, 2);
             assertEquals(0, f.panel.nativeDoubleTaps);
-            assertEquals(2.5f, f.player.getSpeed(), 0f);
+            assertEquals(3f, f.player.getSpeed(), 0f);
             assertNull(ShadowAlertDialog.getLatestAlertDialog());
         }
     }
@@ -816,6 +1513,9 @@ public final class FeedGestureToolsHookTest {
             assertEquals(2f, f.player.delegate.getSpeed(), 0f);
             f.hook.onActivityPaused(f.activity);
             ShadowLooper.idleMainLooper();
+            assertEquals(2f, f.player.delegate.getSpeed(), 0f);
+            f.hook.close();
+            ShadowLooper.idleMainLooper();
             assertEquals(1.25f, f.player.delegate.getSpeed(), 0f);
         }
     }
@@ -824,7 +1524,7 @@ public final class FeedGestureToolsHookTest {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed"))) {
             f.select();
             f.longPress(2, 2);
-            f.player.setSpeed(3f);
+            f.player.setSpeed(3.25f);
             f.hook.setOptions(new LocalOptions(Map.of("long_press_bottom_right", "speed",
                     "playback_speed", "1.5")));
             f.longPress(2, 2);
@@ -833,29 +1533,44 @@ public final class FeedGestureToolsHookTest {
             assertEquals(1.5f, f.player.getSpeed(), 0f);
             f.hook.onActivityPaused(f.activity);
             ShadowLooper.idleMainLooper();
-            assertEquals(3f, f.player.getSpeed(), 0f);
+            assertEquals(1.5f, f.player.getSpeed(), 0f);
+            f.hook.close();
+            ShadowLooper.idleMainLooper();
+            assertEquals(3.25f, f.player.getSpeed(), 0f);
         }
     }
 
-    @Test public void leavingTheForegroundRestoresTheSpeedBeforeTheGesture() throws Throwable {
+    @Test public void leavingTheForegroundKeepsManualSpeedUntilHooksClose() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed"))) {
             f.select();
             f.longPress(2, 2);
             f.hook.onActivityPaused(f.activity);
             ShadowLooper.idleMainLooper();
+            assertEquals(2f, f.player.getSpeed(), 0f);
+            f.hook.onActivityResumed(f.activity);
+            f.select();
+            assertEquals(2f, f.player.getSpeed(), 0f);
+            f.hook.close();
+            ShadowLooper.idleMainLooper();
             assertEquals(1.25f, f.player.getSpeed(), 0f);
-            assertEquals(2, f.player.delegate.speedChanges);
         }
     }
 
-    @Test public void pausingTheSelectedHolderRestoresTheOriginalSpeed() throws Throwable {
+    @Test public void pausingTheSelectedHolderKeepsManualSpeedUntilTheNextLongPress() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed"))) {
             f.select();
             f.longPress(2, 2);
             f.harness.invoke(Holder.class.getMethod("pause"), f.holder);
             ShadowLooper.idleMainLooper();
+            assertEquals(2f, f.player.getSpeed(), 0f);
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals(2f, f.player.getSpeed(), 0f);
+            f.longPress(2, 2);
+            assertEquals(1f, f.player.getSpeed(), 0f);
+            f.hook.close();
+            ShadowLooper.idleMainLooper();
             assertEquals(1.25f, f.player.getSpeed(), 0f);
-            assertEquals(2, f.player.delegate.speedChanges);
         }
     }
 
@@ -875,10 +1590,12 @@ public final class FeedGestureToolsHookTest {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed"))) {
             f.select();
             f.longPress(2, 2);
-            f.player.setSpeed(3f);
+            f.player.setSpeed(3.25f);
             f.hook.onActivityPaused(f.activity);
             ShadowLooper.idleMainLooper();
-            assertEquals(3f, f.player.getSpeed(), 0f);
+            f.hook.close();
+            ShadowLooper.idleMainLooper();
+            assertEquals(3.25f, f.player.getSpeed(), 0f);
             assertEquals(2, f.player.delegate.speedChanges);
         }
     }
@@ -904,68 +1621,156 @@ public final class FeedGestureToolsHookTest {
             assertEquals(2f, replacement.getSpeed(), 0f);
             f.hook.onActivityPaused(f.activity);
             ShadowLooper.idleMainLooper();
+            assertEquals(2f, replacement.getSpeed(), 0f);
+            f.hook.close();
+            ShadowLooper.idleMainLooper();
             assertEquals(1.5f, replacement.getSpeed(), 0f);
         }
     }
 
-    @Test public void liveSpeedOptionChangesKeepTheInitialRestoreValueAcrossRepeatedGestures() throws Throwable {
+    @Test public void liveSpeedOptionChangesApplyToThePersistentToggleAndItsNextVideo() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed"))) {
             f.select();
             f.longPress(2, 2);
             f.hook.setOptions(new LocalOptions(Map.of("long_press_bottom_right", "speed",
                     "playback_speed", "1.5")));
-            assertEquals(2f, f.player.getSpeed(), 0f);
+            ShadowLooper.idleMainLooper();
+            assertEquals(1.5f, f.player.getSpeed(), 0f);
+            f.holder.aid = "video-2";
+            f.player.delegate.speed = 1f;
+            f.harness.invoke(Holder.class.getMethod("resume"), f.holder);
+            ShadowLooper.idleMainLooper();
+            assertEquals(1.5f, f.player.getSpeed(), 0f);
             f.longPress(2, 2);
             assertEquals(1f, f.player.getSpeed(), 0f);
             f.longPress(2, 2);
             assertEquals(1.5f, f.player.getSpeed(), 0f);
             f.hook.onActivityPaused(f.activity);
             ShadowLooper.idleMainLooper();
+            assertEquals(1.5f, f.player.getSpeed(), 0f);
+            f.hook.close();
+            ShadowLooper.idleMainLooper();
             assertEquals(1.25f, f.player.getSpeed(), 0f);
-            assertEquals(4, f.player.delegate.speedChanges);
         }
     }
 
     @Test public void delayedSpeedReadbackDoesNotShowAFalseRejectionOrLoseRestoreOwnership() throws Throwable {
-        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "2.5"))) {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
             DelayedPlayerManager delayed = new DelayedPlayerManager(false);
             f.panel.currentPlayer = delayed;
             f.select();
             f.longPress(2, 2);
-            assertEquals(2.5f, delayed.actualSpeed, 0f);
+            assertEquals(3f, delayed.actualSpeed, 0f);
             assertEquals(1.25f, delayed.getSpeed(), 0f);
+            assertEquals("倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
             assertNoSpeedRejection();
-            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
-            assertEquals(2.5f, delayed.getSpeed(), 0f);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(399));
+            assertEquals("Target feedback must remain independent of delayed playback confirmation",
+                    "倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
+            assertEquals(1.25f, delayed.getSpeed(), 0f);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(101));
+            assertEquals(3f, delayed.getSpeed(), 0f);
+            assertEquals("倍速锁定目标：3x", ShadowToast.getTextOfLatestToast());
             assertNoSpeedRejection();
             f.hook.onActivityPaused(f.activity);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
+            assertEquals(3f, delayed.actualSpeed, 0f);
+            f.hook.close();
             ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
             assertEquals(1.25f, delayed.actualSpeed, 0f);
         }
     }
 
+    @Test public void unavailableReadbackKeepsTheChosenTargetFeedbackUntilTheNextToggle() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                "playback_speed", "3", "auto_speed", false))) {
+            UnreportedPlayerManager player = new UnreportedPlayerManager();
+            f.panel.currentPlayer = player;
+            f.select();
+            f.longPress(2, 2);
+            String chosenTargetFeedback = ShadowToast.getTextOfLatestToast();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(1000));
+            String feedbackAfterReadback = ShadowToast.getTextOfLatestToast();
+            assertEquals("Readback failure must not independently toggle the accepted speed",
+                    3f, player.actualSpeed, 0f);
+            f.longPress(2, 2);
+            assertEquals(1f, player.actualSpeed, 0f);
+            assertEquals("Readback uncertainty must not replace feedback for the chosen target",
+                    chosenTargetFeedback, feedbackAfterReadback);
+            assertEquals("倍速锁定目标：3x", chosenTargetFeedback);
+            assertFalse("Retrying the same long press would turn the existing choice off",
+                    feedbackAfterReadback.contains("重试"));
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(1000));
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
+            assertEquals(1f, player.actualSpeed, 0f);
+        }
+    }
+
+    @Test public void targetFeedbackPreservesMismatchUnavailableAndExactReadbackDiagnostics() throws Throwable {
+        IPlayerManager[] players = {new FixedEngineReadbackPlayerManager(1.7f),
+                new UnreportedPlayerManager(), new FixedEngineReadbackPlayerManager(2f)};
+        String[] reasons = {"readback_mismatch", "readback_unavailable", "speed_getter_readback"};
+        String[] outcomes = {"unconfirmed", "unconfirmed", "success"};
+        String[] evidence = {"requested=2.0;reported=1.7", "setter_returned=true;attempts=3",
+                "requested=2.0;reported=2.0"};
+        for (int i = 0; i < players.length; i++) {
+            try (SpeedReadbackLogs logs = new SpeedReadbackLogs();
+                 Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed",
+                         "playback_speed", "2", "auto_speed", false))) {
+                IPlayerManager player = players[i];
+                f.panel.currentPlayer = player;
+                f.select();
+                int previousToastCount = ShadowToast.shownToastCount();
+                f.longPress(2, 2);
+                assertEquals("倍速锁定目标：2x", ShadowToast.getTextOfLatestToast());
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(1000));
+                assertEquals("倍速锁定目标：2x", ShadowToast.getTextOfLatestToast());
+                assertEquals("Readback must not display a second status toast", previousToastCount + 1,
+                        ShadowToast.shownToastCount());
+                assertEquals("The label describes the selected target, independently of engine feedback", 2f,
+                        GestureSpeedOverride.speedFor(player), 0f);
+                if (player instanceof FixedEngineReadbackPlayerManager) {
+                    FixedEngineReadbackPlayerManager fixed = (FixedEngineReadbackPlayerManager) player;
+                    assertEquals(2f, fixed.lastRequested, 0f);
+                    assertEquals("The test must not replace the engine observation with the sent value",
+                            fixed.engineReported, fixed.getSpeed(), 0f);
+                }
+                assertTrue("The original structured readback verdict must remain available: " + reasons[i],
+                        logs.hasOutcome(reasons[i], outcomes[i], evidence[i]));
+                if (!"success".equals(outcomes[i])) {
+                    assertFalse("A selected 2x target must not turn an uncertain engine readback into success",
+                            logs.hasOutcome("speed_getter_readback", "success", null));
+                }
+            }
+        }
+    }
+
     @Test public void repeatedRequestsBeforeDelayedReadbackKeepTheInitialRestoreValue() throws Throwable {
-        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "2.5"))) {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
             DelayedPlayerManager delayed = new DelayedPlayerManager(false);
             f.panel.currentPlayer = delayed;
             f.select();
             f.longPress(2, 2);
             f.hook.setOptions(new LocalOptions(Map.of("long_press_bottom_right", "speed",
-                    "playback_speed", "3.5")));
+                    "playback_speed", "4")));
             f.longPress(2, 2);
-            assertEquals("已关闭倍速，恢复 1x", ShadowToast.getTextOfLatestToast());
+            assertEquals("已选择正常播放：1x", ShadowToast.getTextOfLatestToast());
             f.longPress(2, 2);
             ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
-            assertEquals(3.5f, delayed.actualSpeed, 0f);
+            assertEquals(4f, delayed.actualSpeed, 0f);
             assertNoSpeedRejection();
             f.hook.onActivityPaused(f.activity);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
+            assertEquals(4f, delayed.actualSpeed, 0f);
+            f.hook.close();
             ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
             assertEquals(1.25f, delayed.actualSpeed, 0f);
         }
     }
 
-    @Test public void pausingBeforeAnAsyncSetterFinishesCancelsItsPendingSpeed() throws Throwable {
-        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "2.5"))) {
+    @Test public void pausingBeforeAnAsyncSetterFinishesKeepsThePendingManualChoice() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
             DelayedPlayerManager delayed = new DelayedPlayerManager(true);
             f.panel.currentPlayer = delayed;
             f.select();
@@ -973,7 +1778,24 @@ public final class FeedGestureToolsHookTest {
             assertEquals(1.25f, delayed.actualSpeed, 0f);
             f.hook.onActivityPaused(f.activity);
             ShadowLooper.idleMainLooper();
-            assertEquals(2, delayed.speedChanges);
+            assertEquals(1, delayed.speedChanges);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
+            assertEquals(3f, delayed.actualSpeed, 0f);
+            f.hook.close();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
+            assertEquals(1.25f, delayed.actualSpeed, 0f);
+            assertNoSpeedRejection();
+        }
+    }
+
+    @Test public void closingBeforeAnAsyncSetterFinishesCancelsItsPendingSpeed() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
+            DelayedPlayerManager delayed = new DelayedPlayerManager(true);
+            f.panel.currentPlayer = delayed;
+            f.select();
+            f.longPress(2, 2);
+            assertEquals(1.25f, delayed.actualSpeed, 0f);
+            f.hook.close();
             ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
             assertEquals(1.25f, delayed.actualSpeed, 0f);
             assertNoSpeedRejection();
@@ -985,8 +1807,43 @@ public final class FeedGestureToolsHookTest {
                 "当前播放器没有接受该倍速".equals(ShadowToast.getTextOfLatestToast()));
     }
 
+    private static final class SpeedReadbackLogs implements AutoCloseable {
+        final List<String> records = new CopyOnWriteArrayList<>();
+        final boolean previousDebug;
+        final DouAiLog.Sink previousSink;
+
+        SpeedReadbackLogs() throws ReflectiveOperationException {
+            assertTrue(DouAiLog.awaitIdle(3000));
+            Field framework = DouAiLog.class.getDeclaredField("framework");
+            framework.setAccessible(true);
+            previousSink = (DouAiLog.Sink) framework.get(null);
+            previousDebug = DebugLog.isEnabled();
+            DebugLog.setEnabled(true);
+            DouAiLog.setFrameworkSink((priority, json) -> records.add(json));
+        }
+
+        boolean hasOutcome(String reason, String outcome, String evidence) throws org.json.JSONException {
+            assertTrue(DouAiLog.awaitIdle(3000));
+            for (String line : records) {
+                org.json.JSONObject record = new org.json.JSONObject(line);
+                if (reason.equals(record.optString("reason_code")) && outcome.equals(record.optString("outcome"))
+                        && (evidence == null || record.optString("evidence").contains(evidence))) return true;
+            }
+            return false;
+        }
+
+        @Override public void close() {
+            try { assertTrue(DouAiLog.awaitIdle(3000)); }
+            finally {
+                DouAiLog.setFrameworkSink(previousSink);
+                DebugLog.setEnabled(previousDebug);
+            }
+        }
+    }
+
     @Test public void defaultsPreserveNativeGesturesAndHideToolbar() {
         LocalOptions options = new LocalOptions(Collections.emptyMap());
+        assertFalse(options.moduleOnlySpeedControl());
         assertFalse(options.enabled("toolbar_enabled"));
         assertEquals("none", select(options, "long_press", 150, 300));
         assertEquals("none", select(options, "double_tap", 150, 300));
@@ -1070,7 +1927,7 @@ public final class FeedGestureToolsHookTest {
         Map<String, Object> values = new HashMap<>();
         values.put("long_press_top_right", "view_finder");
         values.put("long_press_bottom_right", "speed");
-        values.put("playback_speed", "2.5");
+        values.put("playback_speed", "3");
         try (Fixture f = new Fixture(values)) {
             f.root.addView(new TouchLayout(f.activity), new FrameLayout.LayoutParams(300, 600));
             f.select();
@@ -1501,17 +2358,57 @@ public final class FeedGestureToolsHookTest {
         final Holder holder = new Holder();
         final Harness harness = new Harness();
         final FeedGestureToolsHook hook;
+        final List<String> nativeDispatchOrder = new ArrayList<>();
+        final NativeDetector nativeDetector;
+        final NativeDetector legacyNativeDetector;
+        final NativeContainer nativeContainer;
+        final LegacyNativeContainer legacyNativeContainer;
+        long nativeDownTime;
         int componentToggles;
 
         Fixture(Map<String, ?> values) throws Exception {
+            this(values, false);
+        }
+
+        Fixture(Map<String, ?> values, boolean withNativeAncestors) throws Exception {
             touch.longPressRunnable = () -> {
                 try { harness.invoke(LongPress.class.getMethod("run"), press); }
                 catch (Throwable failure) { throw new AssertionError(failure); }
             };
-            root.addView(touch, new FrameLayout.LayoutParams(300, 600));
+            if (withNativeAncestors) {
+                nativeDetector = new NativeDetector("video", nativeDispatchOrder,
+                        () -> player.delegate.setSpeed(1f));
+                legacyNativeDetector = new NativeDetector("legacy", nativeDispatchOrder,
+                        () -> player.delegate.setSpeed(1f));
+                nativeContainer = new NativeContainer(activity, nativeDetector);
+                legacyNativeContainer = new LegacyNativeContainer(activity, legacyNativeDetector);
+                root.addView(nativeContainer, new FrameLayout.LayoutParams(300, 600));
+                FrameLayout.LayoutParams legacyParams = new FrameLayout.LayoutParams(300, 600);
+                legacyParams.leftMargin = 11;
+                legacyParams.topMargin = 17;
+                nativeContainer.addView(legacyNativeContainer, legacyParams);
+                FrameLayout.LayoutParams touchParams = new FrameLayout.LayoutParams(300, 600);
+                touchParams.leftMargin = 13;
+                touchParams.topMargin = 23;
+                legacyNativeContainer.addView(touch, touchParams);
+                touch.setOnTouchListener((view, event) -> {
+                    nativeDispatchOrder.add("child:" + event.getActionMasked());
+                    return false;
+                });
+            } else {
+                nativeDetector = null;
+                legacyNativeDetector = null;
+                nativeContainer = null;
+                legacyNativeContainer = null;
+                root.addView(touch, new FrameLayout.LayoutParams(300, 600));
+            }
             activity.setContentView(root);
             root.layout(0, 0, 300, 600);
-            touch.layout(0, 0, 300, 600);
+            if (withNativeAncestors) {
+                nativeContainer.layout(0, 0, 300, 600);
+                legacyNativeContainer.layout(11, 17, 311, 617);
+                touch.layout(13, 23, 313, 623);
+            } else touch.layout(0, 0, 300, 600);
             holder.w = root;
             holder.A2 = new ItemParams();
             holder.A2.mFeedContext = panel;
@@ -1566,6 +2463,41 @@ public final class FeedGestureToolsHookTest {
             } finally { event.recycle(); }
         }
 
+        void dispatchNativeAncestorTouch(int action, int x, int y) throws Throwable {
+            long eventTime = SystemClock.uptimeMillis();
+            if (action == MotionEvent.ACTION_DOWN) nativeDownTime = eventTime;
+            int[] touchLocation = new int[2];
+            touch.getLocationOnScreen(touchLocation);
+            MotionEvent screenEvent = MotionEvent.obtain(nativeDownTime, eventTime, action,
+                    touchLocation[0] + x, touchLocation[1] + y, 0);
+            try {
+                // Model both ancestors' proven super(child) -> detector order explicitly.
+                // Plain Java calls do not run hooks in this harness, so dispatch every seam.
+                MotionEvent childEvent = relativeEvent(screenEvent, touch);
+                try {
+                    harness.invoke(TouchLayout.class.getMethod("dispatchTouchEvent", MotionEvent.class),
+                            touch, childEvent);
+                } finally { childEvent.recycle(); }
+                dispatchDetector(legacyNativeDetector, legacyNativeContainer, screenEvent);
+                dispatchDetector(nativeDetector, nativeContainer, screenEvent);
+            } finally { screenEvent.recycle(); }
+        }
+
+        void dispatchDetector(NativeDetector detector, View owner, MotionEvent screenEvent) throws Throwable {
+            MotionEvent event = relativeEvent(screenEvent, owner);
+            try {
+                harness.invokeOrProceed(NativeDetector.class.getMethod("input", MotionEvent.class), detector, event);
+            } finally { event.recycle(); }
+        }
+
+        MotionEvent relativeEvent(MotionEvent screenEvent, View owner) {
+            int[] location = new int[2];
+            owner.getLocationOnScreen(location);
+            MotionEvent event = MotionEvent.obtain(screenEvent);
+            event.offsetLocation(-location[0], -location[1]);
+            return event;
+        }
+
         void doubleTap(int column, int row) throws Throwable {
             int[] location = new int[2];
             touch.getLocationOnScreen(location);
@@ -1577,6 +2509,8 @@ public final class FeedGestureToolsHookTest {
         }
 
         @Override public void close() {
+            if (nativeDetector != null) nativeDetector.clear();
+            if (legacyNativeDetector != null) legacyNativeDetector.clear();
             hook.close();
             ShadowLooper.idleMainLooper();
             activity.finish();
@@ -1593,6 +2527,9 @@ public final class FeedGestureToolsHookTest {
         addType(results, "adv_gesture_item_params", ItemParams.class);
         addType(results, "adv_gesture_touch_layout", TouchLayout.class);
         add(results, "adv_gesture_long_press", LongPress.class.getMethod("run"));
+        add(results, "adv_gesture_native_touch_detector", NativeDetector.class.getMethod("input", MotionEvent.class));
+        add(results, "adv_gesture_video_container_detector", NativeContainer.class.getMethod("getDetector"));
+        add(results, "adv_gesture_legacy_container_detector", LegacyNativeContainer.class.getMethod("getDetector"));
         add(results, "adv_ui_double_tap", Panel.class.getMethod("doubleTap", MotionEvent.class));
         add(results, "auto_slide_current_holder", Panel.class.getMethod("currentHolder"));
         add(results, "adv_gesture_panel_player", Panel.class.getMethod("player"));

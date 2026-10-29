@@ -57,6 +57,39 @@ public final class ConfigBackupTest {
         assertEquals(0, targetContext.getNoBackupFilesDir().list().length);
     }
 
+    @Test public void plainBackupMigratesOldCustomSpeedAndTheModuleOnlySwitch() throws Exception {
+        source.values.put(ConfigurationCatalog.PLAYBACK_SPEED, "3.5");
+        source.values.put(LocalOptions.MODULE_ONLY_SPEED, true);
+        JSONObject plain = new JSONObject(ConfigBackup.export(null, source, false, false));
+        assertEquals("3", plain.getJSONObject("values").getJSONObject(ConfigurationCatalog.PLAYBACK_SPEED).getString("value"));
+        assertEquals("3.5", source.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+        plain.getJSONObject("values").getJSONObject(ConfigurationCatalog.PLAYBACK_SPEED).put("value", "2.75");
+        ConfigBackup.Preview preview = ConfigBackup.inspect(target, plain.toString(), ConfigTransfer.Mode.REPLACE);
+        assertFalse(preview.includesAnalytics);
+        assertTrue(target.values.isEmpty());
+        ConfigBackup.apply(null, target, preview, false);
+        assertEquals("3", target.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+        assertEquals(true, target.values.get(LocalOptions.MODULE_ONLY_SPEED));
+    }
+
+    @Test public void analyticsBundleUsesTheSameLegacySpeedMigrationWithoutRestoringAnalytics() throws Exception {
+        source.values.put(ConfigurationCatalog.PLAYBACK_SPEED, "3.5");
+        source.values.put(LocalOptions.MODULE_ONLY_SPEED, true);
+        JSONObject bundled = new JSONObject(bundle());
+        JSONObject speed = bundled.getJSONObject("config").getJSONObject("values")
+                .getJSONObject(ConfigurationCatalog.PLAYBACK_SPEED);
+        assertEquals("3", speed.getString("value"));
+        speed.put("value", "1.75");
+        ConfigBackup.Preview preview = ConfigBackup.inspect(target, bundled.toString(), ConfigTransfer.Mode.MERGE);
+        assertTrue(preview.includesAnalytics);
+        assertTrue(target.values.isEmpty());
+        assertEquals(0, targetContext.getNoBackupFilesDir().list().length);
+        ConfigBackup.apply(targetContext, target, preview, false);
+        assertEquals("1.5", target.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+        assertEquals(true, target.values.get(LocalOptions.MODULE_ONLY_SPEED));
+        assertEquals(0, targetContext.getNoBackupFilesDir().list().length);
+    }
+
     @Test public void previewAndUnselectedImportLeaveExistingLocalAnalysisUntouched() throws Exception {
         String bundle = bundle(); LocalAnalytics local = analytics(targetContext);
         seed(local, "target"); local.snapshot(0); local.setEnabled(false); local.snapshot(0);

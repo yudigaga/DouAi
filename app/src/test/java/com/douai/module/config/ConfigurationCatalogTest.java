@@ -78,6 +78,16 @@ public final class ConfigurationCatalogTest {
         assertEquals(false, ConfigurationCatalog.settings().get(LocalOptions.DEBUG_LOGGING).defaultValue);
         assertConsumers(LocalOptions.DEBUG_LOGGING, EnumSet.of(DIAGNOSTICS));
     }
+    @Test public void moduleOnlySpeedTransfersWithFalseDefaultAndRefreshesItsThreeConsumers() {
+        assertEquals("boolean", ConfigKeys.TYPES.get(LocalOptions.MODULE_ONLY_SPEED));
+        assertEquals(false, ConfigurationCatalog.settings().get(LocalOptions.MODULE_ONLY_SPEED).defaultValue);
+        assertConsumers(LocalOptions.MODULE_ONLY_SPEED, EnumSet.of(PLAYBACK, GESTURE, HOST_BEHAVIOR));
+        ConfigurationChanges removed = ConfigurationChanges.between(
+                Map.of(LocalOptions.MODULE_ONLY_SPEED, true), Collections.emptyMap());
+        assertTrue(removed.affects(PLAYBACK));
+        assertTrue(removed.affects(GESTURE));
+        assertTrue(removed.affects(HOST_BEHAVIOR));
+    }
     @Test public void miniMaxTransportAndMixKeysParticipateInBackupAndSharedSpeechRefresh() {
         for (String key : new String[]{MiniMaxSpeechOptions.OUTPUT_FORMAT, MiniMaxSpeechOptions.TIMBRE_WEIGHTS}) {
             assertEquals("string", ConfigKeys.TYPES.get(key));
@@ -134,13 +144,21 @@ public final class ConfigurationCatalogTest {
         for (ConfigurationCatalog.Setting setting : ConfigurationCatalog.settings().values()) {
             if (setting.defaultValue != null) ConfigKeys.validate(setting.key, setting.defaultValue);
         }
-        assertEquals("0.25", ConfigurationCatalog.validatePlaybackSpeed(" 0.25 "));
+        assertEquals("0.75", ConfigurationCatalog.validatePlaybackSpeed(" 0.75 "));
+        assertEquals("2", ConfigurationCatalog.validatePlaybackSpeed("2.0"));
         assertEquals("4", ConfigurationCatalog.validatePlaybackSpeed("4"));
-        for (String invalid : new String[]{"0", "4.01", "Infinity", "NaN", "text", ""}) {
+        for (String invalid : new String[]{"0", "0.25", "1.75", "2.75", "3.5", "4.01", "Infinity", "NaN", "text", ""}) {
             assertThrows(invalid, IllegalArgumentException.class, () -> ConfigurationCatalog.validatePlaybackSpeed(invalid));
-            assertEquals("2", ConfigurationCatalog.normalizedPlaybackSpeed(invalid));
-            // Import remains type-compatible; runtime/settings retain their existing fallback behavior.
+            // Legacy transfer strings stay type-compatible and normalize instead of rejecting the backup.
             ConfigKeys.validate("playback_speed", invalid);
+        }
+        assertEquals("3", ConfigurationCatalog.normalizedPlaybackSpeed("3.5"));
+        assertEquals("3", ConfigurationCatalog.normalizedPlaybackSpeed("2.75"));
+        assertEquals("1.5", ConfigurationCatalog.normalizedPlaybackSpeed("1.75"));
+        assertEquals("0.75", ConfigurationCatalog.normalizedPlaybackSpeed("0"));
+        assertEquals("4", ConfigurationCatalog.normalizedPlaybackSpeed("4.01"));
+        for (String invalid : new String[]{"Infinity", "NaN", "text", ""}) {
+            assertEquals("2", ConfigurationCatalog.normalizedPlaybackSpeed(invalid));
         }
         assertEquals("2", ConfigurationCatalog.normalizedPlaybackSpeed(null));
         assertThrows(IllegalArgumentException.class, () -> ConfigKeys.validate("playback_speed", 2));

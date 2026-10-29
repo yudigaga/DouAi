@@ -90,11 +90,21 @@ adv_ui_long_press_speed	interface	method	Lcom/ss/android/ugc/aweme/control/speed
 adv_ui_black_spaces	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLJIL	()V	handleTopAndBottomSpace						Landroid/view/View;|Lcom/ss/android/ugc/aweme/feed/ui/bottom/BottomSpace;	i|j
 adv_ui_publish_attach	interface	method	Lcom/ss/android/ugc/aweme/tools/external/hometab/bottom/PublishButton;		onAttachedToWindow	()V								
 adv_player_set_speed	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		setSpeed	(F)V								
-adv_player_get_speed	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		LJIIJ	()F								
+adv_player_get_speed	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		LJI	(Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand;)Ljava/lang/Object;								
+adv_player_speed_command	playback	class	Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand$Getter$VideoPlaySpeed;										Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand$Getter$VideoPlaySpeed;	f
+adv_player_real_speed_command	playback	class	Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand$Getter$RealVideoPlaySpeed;										Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand$Getter$RealVideoPlaySpeed;	f
+adv_player_engine_set_params	playback	method	Lcom/ss/ttvideoengine/TTVideoEngine;		setPlaybackParams	(Lcom/ss/ttm/player/PlaybackParams;)V			Lcom/ss/ttvideoengine/TTVideoEngine;					a
+adv_player_cached_engine_set_params	playback	method	Lcom/ss/android/ugc/aweme/player/sdk/impl/MTTVideoEngine;		setPlaybackParams	(Lcom/ss/ttm/player/PlaybackParams;)V		Lcom/ss/android/ugc/aweme/player/sdk/impl/util/MBaseTTVideoEngine;						
+adv_player_media_set_params	playback	method	Lcom/ss/ttm/player/TTMediaPlayer;		setPlaybackParams	(Lcom/ss/ttm/player/PlaybackParams;)V		Lcom/ss/ttm/player/MediaPlayerClient;	Lcom/ss/ttm/player/TTMediaPlayer;				Lcom/ss/ttm/player/MediaPlayerClient;	LIZIZ
+adv_player_native_float_option	playback	method	Lcom/ss/ttm/player/TTPlayer;		setFloatOption	(IF)I		Lcom/ss/ttm/player/TTPlayer;	Lcom/ss/ttm/player/TTPlayer;				J	mHandle
+adv_player_sdk_base_params_caller	playback	method	Lcom/ss/android/ugc/aweme/player/sdk/impl/util/MBaseTTVideoEngine;		setPlaybackParams	(Lcom/ss/ttm/player/PlaybackParams;)V		Lcom/ss/ttvideoengine/TTVideoEngine;						
+adv_player_sdk_speed_params_caller	playback	method	Lcom/ss/ttm/player/TTPlayerClient;		LJJJJLL	(Lcom/ss/ttm/player/PlaybackParams;)V		Lcom/ss/ttm/player/TTPlayer;						
+adv_player_sdk_float_option_caller	playback	method	Lcom/ss/ttm/player/TTPlayerClient;		LJJIJIIJI	(IF)I		Lcom/ss/ttm/player/TTPlayer;						
+adv_player_sdk_media_params_caller	playback	method	LX/0FfW;		setPlaybackParams	(Lcom/ss/ttm/player/PlaybackParams;)V		Lcom/ss/ttm/player/MediaPlayer;	LX/0FfW;				Lcom/ss/ttm/player/MediaPlayer;	f
 adv_player_resume	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		resumePlay	()V								
 adv_player_play	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		LJJIJIL	(Lcom/ss/android/ugc/aweme/feed/model/Video;Lcom/ss/android/ugc/aweme/player/sdk/api/OnUIPlayListener;ILjava/lang/String;ZLjava/lang/String;ZZII)Ljava/lang/String;								
 adv_player_manager_set_speed	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		setSpeed	(F)V								
-adv_player_manager_get_speed	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		LJIIJ	()F								
+adv_player_manager_get_speed	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		LJI	(Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand;)Ljava/lang/Object;								
 adv_player_manager_resume	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		resumePlay	()V								
 adv_player_manager_play	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		LJJIJIL	(Lcom/ss/android/ugc/aweme/feed/model/Video;Lcom/ss/android/ugc/aweme/player/sdk/api/OnUIPlayListener;ILjava/lang/String;ZLjava/lang/String;ZZII)Ljava/lang/String;								
 adv_player_can_auto_next	playback	method	Lcom/ss/android/ugc/aweme/feed/plato/business/pad/palycontrol/autoplay/component/PadAutoNextComponent;		checkCanMoveToNext	()Z								
@@ -151,6 +161,9 @@ adv_im_cell_bind	message	method	Lcom/ss/android/ugc/aweme/im/business/chat/msgce
 adv_im_cell_message	message	method	Lcom/ss/android/ugc/aweme/im/business/chat/msgcell/common/CellComposeAdapter;		LJLZ	(I)Lcom/bytedance/im/core/model/Message;								
 adv_im_message_uuid	message	method	Lcom/bytedance/im/core/model/Message;		getUuid	()Ljava/lang/String;								
 adv_gesture_touch_layout	interface	class	Lcom/ss/android/ugc/aweme/feed/ui/LongPressLayout;										F|Z|Ljava/lang/Runnable;	lastRawX|lastRawY|enableLongClick|longPressRunnable
+adv_gesture_native_touch_detector	interface	method	LX/1eom;		LIZ	(Landroid/view/MotionEvent;)V		Lcom/ss/android/ugc/aweme/o/oplayer/client/gesture/detector/DIVideoGestureListener;	LX/1eom;				Landroid/view/GestureDetector;|Lcom/ss/android/ugc/aweme/o/oplayer/client/gesture/detector/DIVideoGestureListener;	LIZ|LIZLLL
+adv_gesture_video_container_detector	interface	method	Lcom/ss/android/ugc/aweme/o/oplayer/client/gesture/detector/DVideoGestureContainer;		getDetector	()LX/1eom;			Lcom/ss/android/ugc/aweme/o/oplayer/client/gesture/detector/DVideoGestureContainer;				LX/1eom;	a
+adv_gesture_legacy_container_detector	interface	method	LX/07rz;		getDetector	()LX/1eom;			LX/07rz;				LX/1eom;	detector
 auto_slide_completed	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/refactor/impl_pm/PMPlayListenerDispatcherV2;		onPlayCompleted	(Ljava/lang/String;)V	on_play_completed							
 auto_slide_panel_context	playback	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		feedViewPagerContext	()Lcom/ss/android/ugc/aweme/feed/plato/core/FeedViewPagerContext;							Lcom/ss/android/ugc/aweme/feed/plato/core/FeedViewPagerContext;|Lcom/ss/android/ugc/aweme/common/widget/VerticalViewPager;|LX/1fH5;	B3|f|L0
 auto_slide_current_holder	playback	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		getCurrentViewHolderP	()Lcom/ss/android/ugc/aweme/feed/adapter/IFeedViewHolder;								
@@ -161,7 +174,7 @@ adv_gesture_long_press	interface	method	LX/120B;		run	()V		LX/12zh;					Lcom/ss/
 adv_gesture_item_params	interface	class	Lcom/ss/android/ugc/aweme/feed/model/VideoItemParams;										Lcom/ss/android/ugc/aweme/feed/plato/core/IFeedContext;	mFeedContext
 adv_gesture_panel_player	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLJJJJLIIL	()Lcom/ss/android/ugc/aweme/video/IPlayerManager;								
 adv_gesture_player_set_speed	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerManager;		setSpeed	(F)V								
-adv_gesture_player_get_speed	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerInfoProvider;		LJIIJ	()F								
+adv_gesture_player_get_speed	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerInfoProvider;		LJI	(Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand;)Ljava/lang/Object;								
 adv_gesture_player_is_playing	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerInfoProvider;		isPlaying	()Z								
 adv_gesture_player_resume	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerManager;		resumePlay	()V								
 adv_gesture_player_pause	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerManager;		LJJIJL	()V								

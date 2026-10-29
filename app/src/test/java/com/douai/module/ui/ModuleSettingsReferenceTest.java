@@ -88,7 +88,7 @@ public final class ModuleSettingsReferenceTest {
                         "去推荐商家开关", "去商品/购物卡片开关", "去热点榜单卡开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
                         "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},
                 {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
-                {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
+                {"AUTOPLAY", "自动滑动到下一个视频", "仅模块控制倍速", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
                 {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "素材识别", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
                         "接收评论回复", "每日最大回复数", "同一用户回复间隔（分钟）", "发送与记录"},
@@ -126,7 +126,8 @@ public final class ModuleSettingsReferenceTest {
                 {"导入配置", "backup", "扩展功能 > 配置备份", "config.backup.import"},
                 {"PDF", "analytics", "扩展功能 > 本地数据分析", "analytics.root"},
                 {"调试", "debug-logs", "关于 > 调试与日志", "debug.logs.enabled"},
-                {"#长按", "hash-long-press-voice", "评论相关 > #长按发送转语音（全局）", "settings.toggle.#长按发送转语音（全局）"}};
+                {"#长按", "hash-long-press-voice", "评论相关 > #长按发送转语音（全局）", "settings.toggle.#长按发送转语音（全局）"},
+                {"仅模块控制倍速", "module-only-speed", "自动播放 > 仅模块控制倍速", "settings.toggle.仅模块控制倍速"}};
         for (String[] item : cases) {
             search.setText(item[0]);
             View result = home.findViewWithTag("settings.search.result." + item[1]);
@@ -244,8 +245,9 @@ public final class ModuleSettingsReferenceTest {
                 boolean globalHashVoice = "#长按发送转语音（全局）".contentEquals(control.getContentDescription());
                 boolean privateMessageVoice = "MESSAGE".equals(category)
                         && "自动文本转语音".contentEquals(control.getContentDescription());
+                boolean moduleOnlySpeed = "仅模块控制倍速".contentEquals(control.getContentDescription());
                 assertEquals(category + ": " + control.getContentDescription(),
-                        voiceComment || globalHashVoice || privateMessageVoice ? 2 : 1, visibleLabels);
+                        voiceComment || globalHashVoice || privateMessageVoice || moduleOnlySpeed ? 2 : 1, visibleLabels);
                 if (globalHashVoice) {
                     assertTrue(containsText(labels, "适用于私信、群聊和评论"));
                     assertTrue(containsText(labels, "只发送语音，不发送文字"));
@@ -260,7 +262,7 @@ public final class ModuleSettingsReferenceTest {
                 }
             }
             if ("AUTOPLAY".equals(category)) {
-                assertEquals("1.75", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
+                assertEquals("1.5x", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
                 assertFalse(containsText(page, "0.25 至 4"));
             }
             if ("AUTO_REPLY".equals(category)) {
@@ -469,25 +471,83 @@ public final class ModuleSettingsReferenceTest {
     }
 
     @Test
-    public void playbackSpeedRejectsInvalidValuesAndDisplaysTheEffectiveLegacyValue() {
-        store.putString("playback_speed", "99");
+    public void playbackSpeedUsesSevenChoicesAndNormalizesTheLegacySelectionWithoutWritingOnRender() {
+        store.putString("playback_speed", "2.75");
         View page = openCategory("AUTOPLAY");
-        assertEquals("2", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
+        assertEquals("3x", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
+        assertEquals("2.75", store.getString("playback_speed", ""));
 
         option(page, "倍速数值").performClick();
         AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
-        EditText input = editor.getWindow().getDecorView().findViewWithTag("settings.input.倍速数值");
-        assertNotNull(input);
-        input.setText("4.01");
-        editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        assertTrue(editor.isShowing());
-        assertEquals("99", store.getString("playback_speed", ""));
-
-        input.setText("0.25");
-        editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertTrue(collect(editor.getWindow().getDecorView(), EditText.class).isEmpty());
+        ListView list = editor.getListView();
+        assertEquals(7, list.getCount());
+        assertEquals(Arrays.asList("0.75x", "1x", "1.25x", "1.5x", "2x", "3x", "4x"),
+                java.util.stream.IntStream.range(0, list.getCount()).mapToObj(index -> list.getItemAtPosition(index).toString())
+                        .collect(java.util.stream.Collectors.toList()));
+        assertTrue(list.isItemChecked(5));
+        assertFalse(list.isItemChecked(0));
+        assertEquals("2.75", store.getString("playback_speed", ""));
+        list.performItemClick(null, 6, list.getAdapter().getItemId(6));
         assertFalse(editor.isShowing());
-        assertEquals("0.25", store.getString("playback_speed", ""));
-        assertEquals("0.25", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
+        assertEquals("4", store.getString("playback_speed", ""));
+        assertEquals("4x", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
+    }
+
+    @Test public void playbackSpeedDefaultsToTwoAndInvalidLegacyTextDoesNotSelectTheFirstChoice() {
+        View page = openCategory("AUTOPLAY");
+        assertEquals("2x", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
+        assertFalse(toggle(page, "仅模块控制倍速").isChecked());
+        assertTrue(store.values.isEmpty());
+        screen.dismissChildPages();
+        store.putString("playback_speed", "not-a-speed");
+        page = openCategory("AUTOPLAY");
+        option(page, "倍速数值").performClick();
+        AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(choices.getListView().isItemChecked(4));
+        assertFalse(choices.getListView().isItemChecked(0));
+        choices.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        assertEquals("not-a-speed", store.getString("playback_speed", ""));
+    }
+
+    @Test public void moduleOnlySpeedKeepsRawAutomaticAndLongPressChoicesWhileShowingEffectiveControls() {
+        store.putBoolean("auto_speed", true);
+        store.putBoolean("block_long_press_speed", false);
+        store.putBoolean(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, true);
+        View playback = openCategory("AUTOPLAY");
+        Switch mode = toggle(playback, "仅模块控制倍速");
+        assertFalse(mode.isChecked());
+        assertTrue(toggle(playback, "自动倍速播放").isEnabled());
+        mode.setChecked(true);
+        assertTrue(store.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false));
+        Switch automatic = toggle(playback, "自动倍速播放");
+        assertTrue(automatic.isChecked());
+        assertFalse(automatic.isEnabled());
+        assertTrue(containsText(playback, "手动切换优先"));
+        assertTrue(store.getBoolean("auto_speed", false));
+        screen.dismissChildPages();
+
+        View gestures = openCategory("INTERFACE");
+        for (String title : new String[]{"拦截长按倍数启用场景", "拦截系统长按手势"}) {
+            assertTrue(toggle(gestures, title).isChecked());
+            assertFalse(toggle(gestures, title).isEnabled());
+        }
+        assertTrue(containsText(gestures, "由仅模块控制倍速启用"));
+        assertFalse(store.getBoolean("block_long_press_speed", true));
+        assertTrue(store.getBoolean(LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, false));
+        screen.dismissChildPages();
+
+        playback = openCategory("AUTOPLAY");
+        toggle(playback, "仅模块控制倍速").setChecked(false);
+        assertFalse(store.getBoolean(LocalOptions.MODULE_ONLY_SPEED, true));
+        assertTrue(toggle(playback, "自动倍速播放").isChecked());
+        assertTrue(toggle(playback, "自动倍速播放").isEnabled());
+        screen.dismissChildPages();
+        gestures = openCategory("INTERFACE");
+        assertFalse(toggle(gestures, "拦截长按倍数启用场景").isChecked());
+        assertTrue(toggle(gestures, "拦截长按倍数启用场景").isEnabled());
+        assertTrue(toggle(gestures, "拦截系统长按手势").isChecked());
+        assertTrue(toggle(gestures, "拦截系统长按手势").isEnabled());
     }
 
     @Test

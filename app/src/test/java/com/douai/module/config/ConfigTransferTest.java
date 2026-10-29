@@ -18,6 +18,63 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void exportsCanonicalSpeedAndTheModuleOnlySwitchWithoutMutatingTheSource() throws Exception {
+        for (boolean secrets : new boolean[]{false, true}) {
+            MemoryStore source = new MemoryStore(), target = new MemoryStore();
+            source.values.put(ConfigurationCatalog.PLAYBACK_SPEED, "3.5");
+            source.values.put(LocalOptions.MODULE_ONLY_SPEED, true);
+            String encoded = ConfigTransfer.export(source, secrets);
+            JSONObject values = new JSONObject(encoded).getJSONObject("values");
+            assertEquals("3", values.getJSONObject(ConfigurationCatalog.PLAYBACK_SPEED).getString("value"));
+            assertEquals("boolean", values.getJSONObject(LocalOptions.MODULE_ONLY_SPEED).getString("type"));
+            assertTrue(values.getJSONObject(LocalOptions.MODULE_ONLY_SPEED).getBoolean("value"));
+            assertEquals("3.5", source.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+            ConfigTransfer.Preview preview = ConfigTransfer.inspect(target, encoded);
+            assertTrue(target.values.isEmpty());
+            assertEquals(0, target.commits);
+            ConfigTransfer.apply(target, preview);
+            assertEquals("3", target.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+            assertEquals(true, target.values.get(LocalOptions.MODULE_ONLY_SPEED));
+        }
+    }
+
+    @Test public void oldCustomSpeedBackupsNormalizeBeforeEitherImportModePublishesThem() throws Exception {
+        String[][] cases = {{"3.5", "3"}, {"2.75", "3"}, {"1.75", "1.5"}, {"0.25", "0.75"},
+                {"4.5", "4"}, {"NaN", "2"}, {"Infinity", "2"}, {"text", "2"}};
+        for (ConfigTransfer.Mode mode : ConfigTransfer.Mode.values()) for (String[] sample : cases) {
+            JSONObject old = new JSONObject(ConfigTransfer.export(new MemoryStore(), true));
+            old.getJSONObject("values").put(ConfigurationCatalog.PLAYBACK_SPEED,
+                    new JSONObject().put("type", "string").put("value", sample[0]));
+            MemoryStore target = new MemoryStore();
+            target.values.put(ConfigurationCatalog.PLAYBACK_SPEED, "2");
+            ConfigTransfer.Preview preview = ConfigTransfer.inspect(target, old.toString(), mode);
+            assertEquals("2", target.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+            assertEquals(0, target.commits);
+            ConfigTransfer.apply(target, preview);
+            assertEquals(sample[0] + ":" + mode, sample[1], target.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+        }
+    }
+
+    @Test public void mergeNormalizesExistingLegacySpeedWhilePreservingRawSnapshotConflictChecks() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put("keyword", "incoming");
+        target.values.put(ConfigurationCatalog.PLAYBACK_SPEED, "1.75");
+        target.values.put(LocalOptions.MODULE_ONLY_SPEED, true);
+        String encoded = ConfigTransfer.export(source, false);
+        ConfigTransfer.Preview preview = ConfigTransfer.inspect(target, encoded);
+        assertTrue(preview.changedKeys.contains(ConfigurationCatalog.PLAYBACK_SPEED));
+        assertEquals("1.75", target.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+        ConfigTransfer.apply(target, preview);
+        assertEquals("1.5", target.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+        assertEquals(true, target.values.get(LocalOptions.MODULE_ONLY_SPEED));
+
+        target.values.put(ConfigurationCatalog.PLAYBACK_SPEED, "3.5");
+        ConfigTransfer.Preview stale = ConfigTransfer.inspect(target, encoded);
+        target.values.put(ConfigurationCatalog.PLAYBACK_SPEED, "3.4");
+        assertThrows(IllegalStateException.class, () -> ConfigTransfer.apply(target, stale));
+        assertEquals("3.4", target.values.get(ConfigurationCatalog.PLAYBACK_SPEED));
+    }
+
     @Test public void fishSettingsRoundTripWithoutMistakingAudioTokenBudgetForASecret() throws Exception {
         MemoryStore source = fishStore(), target = new MemoryStore();
         ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, true)));

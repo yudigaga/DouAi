@@ -91,6 +91,14 @@ public final class PlaybackBehaviorHooksTest {
         public boolean previous(String source, boolean smooth) { backwards++; return true; }
     }
 
+    @Test public void runtimePlaybackSpeedUsesOnlyTheSharedSevenPresets() {
+        String[][] cases = {{"3.5", "3"}, {"2.75", "3"}, {"1.75", "1.5"}, {"0.25", "0.75"},
+                {"2.5", "2"}, {"4", "4"}, {"4.1", "4"}, {"NaN", "2"}, {"Infinity", "2"}, {"text", "2"}};
+        for (String[] sample : cases) assertEquals(sample[0], Float.parseFloat(sample[1]),
+                PlaybackBehaviorHooks.playbackSpeed(new LocalOptions(Map.of("playback_speed", sample[0]))), 0f);
+        assertEquals(2f, PlaybackBehaviorHooks.playbackSpeed(new LocalOptions(Collections.emptyMap())), 0f);
+    }
+
     @Test public void speedRestoresTheLatestHostRequestedValue() throws Throwable {
         Harness harness = new Harness();
         Map<String, Method> methods = speedMethods();
@@ -145,6 +153,160 @@ public final class PlaybackBehaviorHooksTest {
         assertTrue(hooks.supports("auto_speed"));
         manual.close();
         hooks.close();
+    }
+
+    @Test public void globalManualSpeedReachesNewPlayersBeforeAnyHolderSelection() throws Throwable {
+        Harness harness = new Harness();
+        Map<String, Method> methods = speedMethods();
+        PlaybackBehaviorHooks hooks = install(harness, methods, Collections.emptyMap());
+        GestureSpeedOverride manual = new GestureSpeedOverride();
+        try {
+            Player first = new Player();
+            first.speed = 1.25f;
+            manual.rememberOriginal(first, first.speed);
+            manual.apply(3f, () -> harness.call(methods.get("adv_player_set_speed"), first, 3f));
+            manual.registerGlobal();
+
+            Player resumed = new Player();
+            resumed.resetOnResume = true;
+            harness.invoke(methods.get("adv_player_resume"), resumed);
+            assertEquals(3f, resumed.speed, 0f);
+            Player played = new Player();
+            played.speed = 1.5f;
+            harness.invoke(methods.get("adv_player_play"), played);
+            assertEquals(3f, played.speed, 0f);
+            Player writtenAfterTheOriginalScope = new Player();
+            harness.invoke(methods.get("adv_player_set_speed"), writtenAfterTheOriginalScope, 1.75f);
+            assertEquals(3f, writtenAfterTheOriginalScope.speed, 0f);
+
+            PlayerDelegate delegate = new PlayerDelegate();
+            delegate.speed = 0.75f;
+            PlayerManager manager = new PlayerManager(harness, delegate);
+            harness.invoke(methods.get("adv_player_manager_play"), manager);
+            assertEquals(3f, delegate.speed, 0f);
+            delegate.resetOnResume = true;
+            harness.invoke(methods.get("adv_player_manager_resume"), manager);
+            assertEquals(3f, delegate.speed, 0f);
+            harness.invoke(methods.get("adv_player_manager_set_speed"), manager, 2f);
+            assertEquals(3f, delegate.speed, 0f);
+
+            assertEquals(1.25f, manual.restorationSpeed(first, 2f), 0f);
+            assertEquals(1f, manual.restorationSpeed(resumed, 2f), 0f);
+            assertEquals(1.5f, manual.restorationSpeed(played, 2f), 0f);
+            assertEquals(1.75f, manual.restorationSpeed(writtenAfterTheOriginalScope, 2f), 0f);
+            assertEquals(0.75f, manual.restorationSpeed(manager, 2f), 0f);
+        } finally {
+            manual.close();
+            hooks.close();
+        }
+    }
+
+    @Test public void globalNormalSpeedPersistsAcrossNewPlayersAndOverridesAutomaticSpeed() throws Throwable {
+        Harness harness = new Harness();
+        Map<String, Method> methods = speedMethods();
+        PlaybackBehaviorHooks hooks = install(harness, methods,
+                Map.of("auto_speed", true, "playback_speed", "4"));
+        GestureSpeedOverride manual = new GestureSpeedOverride();
+        try {
+            Player first = new Player();
+            manual.apply(3f, () -> harness.call(methods.get("adv_player_set_speed"), first, 3f));
+            manual.registerGlobal();
+            manual.apply(1f, () -> harness.call(methods.get("adv_player_set_speed"), first, 1f));
+
+            Player next = new Player();
+            harness.invoke(methods.get("adv_player_resume"), next);
+            harness.invoke(methods.get("adv_player_set_speed"), next, 2f);
+            assertEquals(1f, next.speed, 0f);
+            PlayerDelegate delegate = new PlayerDelegate();
+            delegate.resetOnPlay = true;
+            delegate.resetOnResume = true;
+            PlayerManager manager = new PlayerManager(harness, delegate);
+            harness.invoke(methods.get("adv_player_manager_play"), manager);
+            harness.invoke(methods.get("adv_player_manager_resume"), manager);
+            harness.invoke(methods.get("adv_player_manager_set_speed"), manager, 2f);
+            assertEquals(1f, delegate.speed, 0f);
+            hooks.setOptions(new LocalOptions(Map.of("auto_speed", true, "playback_speed", "3")));
+            assertEquals(1f, first.speed, 0f);
+            assertEquals(1f, next.speed, 0f);
+            assertEquals(1f, delegate.speed, 0f);
+
+            manual.unregisterGlobal();
+            Player independent = new Player();
+            harness.invoke(methods.get("adv_player_resume"), independent);
+            assertEquals(3f, independent.speed, 0f);
+            harness.invoke(methods.get("adv_player_resume"), next);
+            assertEquals(1f, next.speed, 0f);
+            manual.releaseBindings();
+            harness.invoke(methods.get("adv_player_resume"), next);
+            assertEquals(3f, next.speed, 0f);
+        } finally {
+            manual.close();
+            hooks.close();
+        }
+    }
+
+    @Test public void configurationRefreshReappliesTheGlobalChoiceToAllSeenPlayersWithAutoDisabled() throws Throwable {
+        Harness harness = new Harness();
+        Map<String, Method> methods = speedMethods();
+        PlaybackBehaviorHooks hooks = install(harness, methods, Collections.emptyMap());
+        GestureSpeedOverride manual = new GestureSpeedOverride();
+        try {
+            Player first = new Player();
+            manual.apply(2f, () -> harness.call(methods.get("adv_player_set_speed"), first, 2f));
+            manual.registerGlobal();
+            Player second = new Player();
+            harness.invoke(methods.get("adv_player_resume"), second);
+            PlayerManager manager = new PlayerManager(harness, new PlayerDelegate());
+            harness.invoke(methods.get("adv_player_manager_resume"), manager);
+
+            // Feed updates the shared session before publishing playback's options snapshot.
+            manual.apply(3f, () -> { });
+            hooks.setOptions(new LocalOptions(Map.of("playback_speed", "3")));
+            assertEquals(3f, first.speed, 0f);
+            assertEquals(3f, second.speed, 0f);
+            assertEquals(3f, manager.LIZ.speed, 0f);
+            manual.releaseBindings();
+            harness.invoke(methods.get("adv_player_resume"), second);
+            assertEquals(3f, second.speed, 0f);
+        } finally {
+            manual.close();
+            hooks.close();
+        }
+    }
+
+    @Test public void globalRestorationUsesEachPlayersNativeBaselineAndRejectsMetrics() throws Throwable {
+        Harness harness = new Harness();
+        Map<String, Method> methods = speedMethods();
+        PlaybackBehaviorHooks hooks = install(harness, methods,
+                Map.of("auto_speed", true, "playback_speed", "2"));
+        GestureSpeedOverride manual = new GestureSpeedOverride();
+        try {
+            Player first = new Player();
+            first.speed = 1.25f;
+            Player second = new Player();
+            second.speed = 1.75f;
+            harness.invoke(methods.get("adv_player_resume"), first);
+            harness.invoke(methods.get("adv_player_resume"), second);
+            manual.rememberOriginal(first, first.speed);
+            manual.apply(3f, () -> harness.call(methods.get("adv_player_set_speed"), first, 3f));
+            manual.registerGlobal();
+            harness.invoke(methods.get("adv_player_resume"), second);
+            hooks.setOptions(new LocalOptions(Collections.emptyMap()));
+            assertEquals(3f, first.speed, 0f);
+            assertEquals(3f, second.speed, 0f);
+            assertEquals(1.25f, manual.restorationSpeed(first, 2f), 0f);
+            assertEquals(1.75f, manual.restorationSpeed(second, 2f), 0f);
+            manual.rememberOriginal(first, 2f);
+            manual.rememberOriginal(second, 30f);
+            assertEquals(1.25f, manual.restorationSpeed(first, 2f), 0f);
+            assertEquals(1.75f, manual.restorationSpeed(second, 2f), 0f);
+            Player unseen = new Player();
+            manual.rememberOriginal(unseen, Float.NaN);
+            assertEquals(2.5f, manual.restorationSpeed(unseen, 2.5f), 0f);
+        } finally {
+            manual.close();
+            hooks.close();
+        }
     }
 
     @Test public void manualNormalSpeedSuppressesAutomaticUpdatesOnlyForItsEngine() throws Throwable {
