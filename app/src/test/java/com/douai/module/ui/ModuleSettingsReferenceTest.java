@@ -854,7 +854,7 @@ public final class ModuleSettingsReferenceTest {
     }
 
     @Test
-    public void aiProfilePresetCanBeCreatedActivatedAndDeletedWithoutReadingLegacySettings() {
+    public void aiProfilePresetCanBeSavedAndDeletedWithoutChoosingADefaultOrReadingLegacySettings() {
         store.putString("ai_models", "[{\"id\":\"legacy\",\"model\":\"old-model\"}]");
         store.putString("ai_model_id", "legacy");
         View extension = openCategory("EXTENSION");
@@ -884,14 +884,14 @@ public final class ModuleSettingsReferenceTest {
 
         AiModelSettings configured = AiModelSettings.read(store);
         assertEquals(1, configured.configs.size());
-        assertEquals(configured.configs.get(0).id, configured.activeId);
-        assertEquals("qwen", configured.selected().provider);
-        assertEquals("chat_completions", configured.selected().protocol);
-        assertEquals("qwen-turbo", configured.selected().modelName);
+        assertEquals("", configured.activeId);
+        assertEquals("qwen", configured.configs.get(0).provider);
+        assertEquals("chat_completions", configured.configs.get(0).protocol);
+        assertEquals("qwen-turbo", configured.configs.get(0).modelName);
         assertFalse(containsText(ShadowDialog.getLatestDialog().getWindow().getDecorView(), "old-model"));
 
         View row = ShadowDialog.getLatestDialog().getWindow().getDecorView()
-                .findViewWithTag("ai.edit." + configured.activeId);
+                .findViewWithTag("ai.edit." + configured.configs.get(0).id);
         assertNotNull(row);
         row.performClick();
         AlertDialog savedEditor = (AlertDialog) ShadowDialog.getLatestDialog();

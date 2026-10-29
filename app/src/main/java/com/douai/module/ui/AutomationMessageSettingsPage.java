@@ -662,7 +662,7 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             AiModelConfig selected = AiModelSettings.readForAutomation(repository, kind).selected();
             return (id.isEmpty() ? "跟随全局 · " : "") + automationModelLabel(selected);
         } catch (RuntimeException ignored) {
-            return id.isEmpty() ? "跟随全局（未启用模型）" : "所选配置不可用，请重新选择";
+            return id.isEmpty() ? "跟随全局（未选择模型）" : "所选配置不可用，请重新选择";
         }
     }
 

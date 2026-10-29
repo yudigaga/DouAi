@@ -729,7 +729,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
                 }
                 boolean hasData = currentSnapshot != null
                         && (currentSnapshot.totalViews > 0 || currentSnapshot.totalFeatureUses > 0);
-                if (!configured) caption(analysisBody, "请选择可用的 AI 模型配置；跟随全局时需先启用全局模型。");
+                if (!configured) caption(analysisBody, "请选择可用的 AI 模型配置；跟随全局时需先选择全局默认模型。");
                 else if (!hasData) caption(analysisBody, "当前范围暂无可分析数据，产生记录后即可分析。");
                 Button request = button(analysisError == null ? "请求 AI 分析" : "重新请求 AI 分析",
                         "analytics.analysis.request", this::requestAnalysis);
@@ -780,7 +780,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
             AiModelConfig config = AnalyticsAiSettings.models(analysisSettings).selected();
             return (selected == null || selected.isEmpty() ? "跟随全局 · " : "") + analysisModelLabel(config);
         } catch (RuntimeException ignored) {
-            return selected == null || selected.isEmpty() ? "跟随全局（未启用模型）" : "所选配置不可用，请重新选择";
+            return selected == null || selected.isEmpty() ? "跟随全局（未选择模型）" : "所选配置不可用，请重新选择";
         }
     }
 

@@ -90,6 +90,102 @@ public final class AiModelAutomationSelectionTest {
         assertThrows(IllegalArgumentException.class, () -> AiModelSettings.automationModelKey("manual"));
     }
 
+    @Test public void independentBindingsIgnoreGlobalSwitchesAndUnrelatedProfileEdits() throws Exception {
+        MemoryStore store = configuredStore("global");
+        store.putString(AiModelSettings.REPLY_MODEL_ID, "reply-provider");
+        store.putString(AiModelSettings.COMMENT_MODEL_ID, "comment-provider");
+        LocalOptions before = new LocalOptions(store.values);
+        AiModelSettings profiles = AiModelSettings.read(before);
+        LocalOptions switched = withProfiles(store.values, profiles.activate("reply-provider"));
+        for (String kind : new String[]{"reply", "comment", "comment_reply"}) {
+            assertTrue(kind, AiModelSettings.sameAutomationSelection(before, switched, kind));
+        }
+        AiModelConfig unrelated = AiModelConfig.fromJson(profile("global", false).toJson()
+                .put("apiKey", "changed-unrelated-key").put("systemPrompt", "changed unrelated prompt"));
+        LocalOptions edited = withProfiles(store.values, profiles.upsert(unrelated, false));
+        LocalOptions added = withProfiles(store.values, profiles.upsert(profile("new-provider", true), false));
+        LocalOptions removed = withProfiles(store.values, profiles.activate("reply-provider").delete("global"));
+        for (LocalOptions next : new LocalOptions[]{edited, added, removed}) {
+            for (String kind : new String[]{"reply", "comment", "comment_reply"}) {
+                assertTrue(kind, AiModelSettings.sameAutomationSelection(before, next, kind));
+            }
+        }
+    }
+
+    @Test public void globalFollowersAndBindingPolicyChangesInvalidateTheSelection() throws Exception {
+        MemoryStore store = configuredStore("global");
+        LocalOptions before = new LocalOptions(store.values);
+        LocalOptions switched = withProfiles(store.values, AiModelSettings.read(before).activate("reply-provider"));
+        for (String kind : new String[]{"reply", "comment", "comment_reply"}) {
+            assertFalse(kind, AiModelSettings.sameAutomationSelection(before, switched, kind));
+        }
+        store.putString(AiModelSettings.REPLY_MODEL_ID, "global");
+        LocalOptions pinnedToTheCurrentGlobal = new LocalOptions(store.values);
+        assertFalse(AiModelSettings.sameAutomationSelection(before, pinnedToTheCurrentGlobal, "reply"));
+        assertFalse(AiModelSettings.sameAutomationSelection(before, pinnedToTheCurrentGlobal, "comment_reply"));
+        assertTrue(AiModelSettings.sameAutomationSelection(before, pinnedToTheCurrentGlobal, "comment"));
+        store.putString(AiModelSettings.REPLY_MODEL_ID, "reply-provider");
+        assertFalse(AiModelSettings.sameAutomationSelection(pinnedToTheCurrentGlobal,
+                new LocalOptions(store.values), "reply"));
+    }
+
+    @Test public void changesToAnySelectedRequestSettingInvalidateTheBoundProfile() throws Exception {
+        MemoryStore store = configuredStore("global");
+        store.putString(AiModelSettings.COMMENT_MODEL_ID, "comment-provider");
+        LocalOptions before = new LocalOptions(store.values);
+        AiModelSettings profiles = AiModelSettings.read(before);
+        AiModelConfig selected = AiModelSettings.readForAutomation(before, "comment").selected();
+        Object[][] changes = {
+                {"apiEndpoint", "https://changed.example.test/v1"}, {"apiKey", "changed-key"},
+                {"protocol", AiModelConfig.RESPONSES}, {"responseMode", AiModelConfig.RESPONSE_STREAM},
+                {"modelName", "changed-model"}, {"systemPrompt", "changed primary prompt"},
+                {"provider", "changed-provider"}, {"contextRounds", 4}, {"timeoutSeconds", 45},
+                {"reasoningEffort", "low"}, {"temperatureEnabled", true}, {"temperature", 0.3},
+                {"topPEnabled", true}, {"topP", 0.8}, {"maxTokensEnabled", true}, {"maxTokens", 128},
+                {"customHeaders", "{\"X-Fixture\":\"changed\"}"}, {"customParameters", "{\"seed\":1}"}
+        };
+        for (Object[] change : changes) {
+            AiModelConfig edited = AiModelConfig.fromJson(selected.toJson().put((String) change[0], change[1]));
+            LocalOptions next = withProfiles(store.values, profiles.upsert(edited, false));
+            assertFalse((String) change[0], AiModelSettings.sameAutomationSelection(before, next, "comment"));
+            assertTrue((String) change[0], AiModelSettings.sameAutomationSelection(before, next, "reply"));
+        }
+    }
+
+    @Test public void deletedAndInvalidSelectionsConservativelyCompareTheRawDocumentAndBinding() throws Exception {
+        MemoryStore store = configuredStore("global");
+        store.putString(AiModelSettings.COMMENT_MODEL_ID, "comment-provider");
+        LocalOptions before = new LocalOptions(store.values);
+        LocalOptions deleted = withProfiles(store.values, AiModelSettings.read(before).delete("comment-provider"));
+        assertFalse(AiModelSettings.sameAutomationSelection(before, deleted, "comment"));
+        assertThrows(IllegalStateException.class, () -> AiModelSettings.readForAutomation(deleted, "comment"));
+        assertTrue(AiModelSettings.sameAutomationSelection(deleted, deleted, "comment"));
+        LocalOptions changedWhileMissing = withProfiles(store.values,
+                AiModelSettings.read(deleted).activate("reply-provider"));
+        assertFalse(AiModelSettings.sameAutomationSelection(deleted, changedWhileMissing, "comment"));
+
+        LocalOptions invalid = new LocalOptions(Map.of(AiModelSettings.KEY, "{invalid", AiModelSettings.COMMENT_MODEL_ID, "selected"));
+        LocalOptions identical = new LocalOptions(Map.of(AiModelSettings.KEY, "{invalid", AiModelSettings.COMMENT_MODEL_ID, "selected"));
+        LocalOptions changedDocument = new LocalOptions(Map.of(AiModelSettings.KEY, "{different", AiModelSettings.COMMENT_MODEL_ID, "selected"));
+        LocalOptions changedBinding = new LocalOptions(Map.of(AiModelSettings.KEY, "{invalid", AiModelSettings.COMMENT_MODEL_ID, "other"));
+        assertTrue(AiModelSettings.sameAutomationSelection(invalid, identical, "comment"));
+        assertFalse(AiModelSettings.sameAutomationSelection(invalid, changedDocument, "comment"));
+        assertFalse(AiModelSettings.sameAutomationSelection(invalid, changedBinding, "comment"));
+        assertThrows(IllegalArgumentException.class, () -> AiModelSettings.sameAutomationSelection(before, before, "manual"));
+    }
+
+    @Test public void unselectedProfilesAskForSelectionInsteadOfASeparateEnabledFlag() {
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> new AiModelSettings(List.of(), "").selected());
+        assertEquals("请先选择模型配置", failure.getMessage());
+    }
+
+    private static LocalOptions withProfiles(Map<String, Object> source, AiModelSettings settings) {
+        Map<String, Object> next = new LinkedHashMap<>(source);
+        next.put(AiModelSettings.KEY, settings.serialize());
+        return new LocalOptions(next);
+    }
+
     private static MemoryStore configuredStore(String activeId) throws Exception {
         MemoryStore store = new MemoryStore();
         AiModelConfig global = profile("global", false);

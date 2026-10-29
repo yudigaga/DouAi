@@ -191,6 +191,25 @@ public final class NativeMessagingHooksTest {
                 new LocalOptions(Collections.singletonMap(LocalOptions.REPLY_RECOGNIZE_VIDEO, true))));
     }
 
+    @Test public void globalAndOtherFunctionModelChangesDoNotInvalidatePinnedReplies() throws Exception {
+        try (okhttp3.mockwebserver.MockWebServer global = new okhttp3.mockwebserver.MockWebServer();
+             okhttp3.mockwebserver.MockWebServer replies = new okhttp3.mockwebserver.MockWebServer();
+             okhttp3.mockwebserver.MockWebServer comments = new okhttp3.mockwebserver.MockWebServer()) {
+            com.douai.module.config.AiModelSettings profiles = AutomationModelFixtures.profiles(global, replies, comments);
+            Map<String, Object> values = new HashMap<>();
+            values.put(com.douai.module.config.AiModelSettings.KEY, profiles.serialize());
+            values.put(com.douai.module.config.AiModelSettings.REPLY_MODEL_ID, "reply");
+            LocalOptions before = new LocalOptions(values);
+            Method changed = NativeMessagingHooks.class.getDeclaredMethod("automationOptionsChanged", LocalOptions.class, LocalOptions.class);
+            changed.setAccessible(true);
+            values.put(com.douai.module.config.AiModelSettings.KEY, profiles.activate("comment").serialize());
+            values.put(com.douai.module.config.AiModelSettings.COMMENT_MODEL_ID, "global");
+            assertEquals(false, changed.invoke(null, before, new LocalOptions(values)));
+            values.put(com.douai.module.config.AiModelSettings.REPLY_MODEL_ID, "global");
+            assertEquals(true, changed.invoke(null, before, new LocalOptions(values)));
+        }
+    }
+
     @Test public void disabledStreakDoesNotEnumerateConversationsForItsFormerContactSideEffect() throws Exception {
         NativeMessagingHooks hook = enumerationHook(new LocalOptions(Collections.emptyMap()));
         EnumerationSdk sdk = (EnumerationSdk) HostTargets.read(hook, "sdk");

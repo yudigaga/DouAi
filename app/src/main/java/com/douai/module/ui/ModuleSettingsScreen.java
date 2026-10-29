@@ -1021,7 +1021,6 @@ public final class ModuleSettingsScreen {
         addOption("测试当前配置", "", null, true, this::showAiChat);
         addSectionLabel("已配置模型");
         AiModelSettings settings = aiSettings();
-        java.util.Map<Button, String> activationButtons = new java.util.LinkedHashMap<>();
         if (settings.configs.isEmpty()) addUnavailable("尚未配置");
         for (AiModelConfig config : settings.configs) {
             LinearLayout row = new LinearLayout(context);
@@ -1046,26 +1045,6 @@ public final class ModuleSettingsScreen {
             }
             row.addView(modelDetails, miuixHome == null
                     ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1)
-                    : matchWrap());
-            Button activate = formButton();
-            boolean active = config.id.equals(settings.activeId);
-            activate.setText(active ? "已启用" : "启用");
-            activate.setEnabled(!active);
-            activate.setTag("ai.activate." + config.id);
-            activationButtons.put(activate, config.id);
-            activate.setOnClickListener(ignored -> {
-                try {
-                    AiModelSettings next = aiSettings().activate(config.id);
-                    saveAiSettings(next);
-                    for (java.util.Map.Entry<Button, String> entry : activationButtons.entrySet()) {
-                        boolean selected = next.activeId.equals(entry.getValue());
-                        entry.getKey().setText(selected ? "已启用" : "启用");
-                        entry.getKey().setEnabled(!selected);
-                    }
-                } catch (RuntimeException failure) { toast(safeError(failure)); }
-            });
-            row.addView(MiuixFormControls.viewFor(activate), miuixHome == null
-                    ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44))
                     : matchWrap());
             content.addView(row, matchWrap());
             addDivider();

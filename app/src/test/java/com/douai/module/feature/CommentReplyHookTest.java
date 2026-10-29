@@ -1459,6 +1459,27 @@ public final class CommentReplyHookTest {
         assertEquals(List.of("mode-change"), sender.sent);
     }
 
+    @Test public void changingGlobalModelDoesNotCancelAnIndependentlyBoundCommentReply() throws Exception {
+        try (okhttp3.mockwebserver.MockWebServer global = new okhttp3.mockwebserver.MockWebServer();
+             okhttp3.mockwebserver.MockWebServer replies = new okhttp3.mockwebserver.MockWebServer();
+             okhttp3.mockwebserver.MockWebServer comments = new okhttp3.mockwebserver.MockWebServer()) {
+            com.douai.module.config.AiModelSettings profiles = AutomationModelFixtures.profiles(global, replies, comments);
+            values.put(com.douai.module.config.AiModelSettings.KEY, profiles.serialize());
+            configure(com.douai.module.config.AiModelSettings.REPLY_MODEL_ID, "reply");
+            open();
+            source.events.put(100L, List.of(event("independent-reply", "root", "200", 1001)));
+            int cancellations = generator.cancels;
+            generator.duringGenerate = () -> configure(com.douai.module.config.AiModelSettings.KEY,
+                    profiles.activate("comment").serialize());
+            hook.requestScan();
+            processReplies();
+            assertEquals("An unrelated global choice must not disconnect the active reply generator", cancellations, generator.cancels);
+            assertEquals(List.of("independent-reply"), generator.ids);
+            assertEquals(List.of("independent-reply"), sender.sent);
+            assertEquals("sent", history().get(0).status);
+        }
+    }
+
     @Test public void legacyIndependentReplyOptionsCannotOverrideParentConfiguration() {
         values.put("comment_reply_daily_limit", "1");
         values.put("comment_reply_user_cooldown_minutes", "100");

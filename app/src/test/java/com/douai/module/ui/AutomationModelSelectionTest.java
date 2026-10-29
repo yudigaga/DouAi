@@ -112,7 +112,7 @@ public final class AutomationModelSelectionTest {
     @Test public void modelManagementRemainsAvailableWithoutAConfiguredProfile() {
         new AiModelSettings(List.of(), "").save(store);
         View comment = openContent("comment");
-        assertEquals("跟随全局（未启用模型）", modelPreview(comment));
+        assertEquals("跟随全局（未选择模型）", modelPreview(comment));
         AlertDialog choices = openChoices(comment);
         assertEquals(1, choices.getListView().getCount());
         choices.getButton(Dialog.BUTTON_NEUTRAL).performClick();

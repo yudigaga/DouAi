@@ -215,7 +215,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                     || before.enabled("native_auto_reply") != next.enabled("native_auto_reply")
                     || !before.samePrefix(next, "reply_") || !before.samePrefix(next, "tts_")
                     || !before.text("auto_message_text", "").equals(next.text("auto_message_text", ""))
-                    || !before.text(AiModelSettings.KEY, "").equals(next.text(AiModelSettings.KEY, ""));
+                    || !AiModelSettings.sameAutomationSelection(before, next, AutomationHistoryStore.REPLY);
             options = next;
             if (changed) invalidate();
         }
@@ -612,7 +612,8 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             case "图片下载失败": return "image_download_failed";
             case "图片超过 16 MB": return "image_size_limit";
             case "Comment reply output is too long": return "output_limit";
-            case "请先添加并启用模型配置": return "model_unselected";
+            case "请先添加并启用模型配置":
+            case "请先选择模型配置": return "model_unselected";
             default: return "unexpected";
         }
     }

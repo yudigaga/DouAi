@@ -8,6 +8,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.douai.module.config.AiModelConfig
 import com.douai.module.config.AiModelSettings
+import com.douai.module.config.AnalyticsAiSettings
 import com.douai.module.config.BreezeSpeechSettings
 import com.douai.module.config.FishSpeechSettings
 import com.douai.module.config.HostSettingsStore
@@ -19,6 +20,7 @@ import com.douai.module.feature.VoiceNameTranslationCache
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -64,22 +66,68 @@ class GestureQuickDialogInteractionTest {
         }
     }
 
-    @Test fun modelQuickSwitchChangesOnlyTheActiveProfile() {
+    @Test fun globalModelQuickSwitchChangesOnlyTheDefault() {
         val first = model("profile-one", "One", "model-one")
         val second = model("profile-two", "Two", "model-two")
         compose.runOnUiThread {
             clearPreferences()
             AiModelSettings(listOf(first, second), first.id).save(store)
+            store.putString(AiModelSettings.REPLY_MODEL_ID, first.id)
+            store.putString(AiModelSettings.COMMENT_MODEL_ID, first.id)
+            store.putString(AnalyticsAiSettings.MODEL_ID, first.id)
             dialog = GestureQuickModelDialog.create(compose.activity, store, {})
             dialog!!.show()
         }
 
+        compose.onNodeWithTag("miuix.dialog.choice.0").assertIsDisplayed().performClick()
         compose.onNodeWithTag("miuix.dialog.choice.1").assertIsDisplayed().performClick()
         compose.runOnIdle {
             val current = AiModelSettings.read(store)
             assertEquals(second.id, current.activeId)
             assertEquals(2, current.configs.size)
             assertEquals(first.apiEndpoint, current.configs[0].apiEndpoint)
+            assertEquals(first.id, store.getString(AiModelSettings.REPLY_MODEL_ID, ""))
+            assertEquals(first.id, store.getString(AiModelSettings.COMMENT_MODEL_ID, ""))
+            assertEquals(first.id, store.getString(AnalyticsAiSettings.MODEL_ID, ""))
+        }
+    }
+
+    @Test fun featureQuickSwitchReturnsAndSelectsWithoutAGlobalDefault() {
+        val first = model("profile-one", "One", "model-one")
+        val second = model("profile-two", "Two", "model-two")
+        val targets = listOf(1 to AiModelSettings.REPLY_MODEL_ID,
+            2 to AiModelSettings.COMMENT_MODEL_ID, 3 to AnalyticsAiSettings.MODEL_ID)
+        for ((targetIndex, targetKey) in targets) {
+            var beforeSelection = emptyMap<String, Any?>()
+            compose.runOnUiThread {
+                clearPreferences()
+                AiModelSettings(listOf(first, second), "").save(store)
+                store.putString(AiModelSettings.REPLY_MODEL_ID, first.id)
+                store.putString(AiModelSettings.COMMENT_MODEL_ID, first.id)
+                store.putString(AnalyticsAiSettings.MODEL_ID, first.id)
+                beforeSelection = store.snapshot().mapValues { it.value }
+                dialog = GestureQuickModelDialog.create(compose.activity, store, {})
+                dialog!!.show()
+            }
+            if (targetIndex == 3) {
+                compose.onNodeWithTag("miuix.dialog.choice.1").assertIsDisplayed().performClick()
+                compose.onNodeWithTag("miuix.dialog.button.-2").assertIsDisplayed().performClick()
+                compose.onNodeWithText("全局默认").assertIsDisplayed()
+                compose.runOnIdle {
+                    assertTrue(dialog!!.isShowing)
+                    assertEquals("Returning to the function list must not save a model", beforeSelection, store.snapshot())
+                }
+            }
+            compose.onNodeWithTag("miuix.dialog.choice.$targetIndex").assertIsDisplayed().performClick()
+            compose.onNodeWithText("跟随全局默认").assertIsDisplayed()
+            compose.onNodeWithTag("miuix.dialog.choice.2").assertIsDisplayed().performClick()
+            compose.runOnIdle {
+                val expected = beforeSelection.toMutableMap()
+                expected[targetKey] = second.id
+                assertEquals("Selecting a feature must change only its binding key", expected, store.snapshot())
+                assertEquals("", AiModelSettings.read(store).activeId)
+                assertFalse(dialog!!.isShowing)
+            }
         }
     }
 

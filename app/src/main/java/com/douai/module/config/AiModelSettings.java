@@ -49,6 +49,24 @@ public final class AiModelSettings {
         return read(options).forAutomation(kind, options.text(key, ""));
     }
 
+    /** Compares this channel's binding policy and complete selected profile without logging its values. */
+    public static boolean sameAutomationSelection(LocalOptions before, LocalOptions next, String kind) {
+        String key = automationModelKey(kind);
+        if (before == null || next == null) return before == next;
+        String previousBinding = before.text(key, "");
+        String nextBinding = next.text(key, "");
+        if (!previousBinding.equals(nextBinding)) return false;
+        try {
+            String previousProfile = readForAutomation(before, kind).selected().toJson().toString();
+            String nextProfile = readForAutomation(next, kind).selected().toJson().toString();
+            return previousProfile.equals(nextProfile);
+        } catch (RuntimeException invalid) {
+            // Keep invalid/deleted selections visible to the normal request validation.
+            // Without a valid selected profile, any document change must invalidate the old snapshot.
+            return before.text(KEY, "").equals(next.text(KEY, ""));
+        }
+    }
+
     private AiModelSettings forAutomation(String kind, String modelId) {
         if (modelId == null || modelId.isEmpty()) return this;
         for (AiModelConfig config : configs) if (config.id.equals(modelId)) {
@@ -88,7 +106,7 @@ public final class AiModelSettings {
             config.validate(true);
             return config;
         }
-        throw new IllegalStateException("请先添加并启用模型配置");
+        throw new IllegalStateException("请先选择模型配置");
     }
 
     public AiModelSettings upsert(AiModelConfig config, boolean activate) {

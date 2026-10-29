@@ -53,8 +53,9 @@ class AiModelResponseModeMiuixTest {
         compose.runOnIdle {
             assertEquals("流式", responseMode().selectedItem)
             editor!!.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
-            assertTrue(AiModelSettings.read(store).selected().streaming())
-            openEditor(store, AiModelSettings.read(store).selected())
+            assertTrue(AiModelSettings.read(store).configs.single().streaming())
+            assertEquals("", AiModelSettings.read(store).activeId)
+            openEditor(store, AiModelSettings.read(store).configs.single())
         }
         compose.onNodeWithTag("ai.response_mode").assertExists()
         compose.runOnIdle {
@@ -64,7 +65,7 @@ class AiModelResponseModeMiuixTest {
         compose.onNodeWithTag("miuix.dialog.choice.0").performClick()
         compose.runOnIdle {
             editor!!.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
-            assertFalse(AiModelSettings.read(store).selected().streaming())
+            assertFalse(AiModelSettings.read(store).configs.single().streaming())
         }
     }
 
@@ -88,8 +89,8 @@ class AiModelResponseModeMiuixTest {
         compose.runOnIdle {
             assertEquals("max", reasoningEffort().selectedItem)
             editor!!.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
-            assertEquals("max", AiModelSettings.read(store).selected().reasoningEffort)
-            openEditor(store, AiModelSettings.read(store).selected())
+            assertEquals("max", AiModelSettings.read(store).configs.single().reasoningEffort)
+            openEditor(store, AiModelSettings.read(store).configs.single())
         }
         compose.onNodeWithTag("ai.reasoning_effort").assertExists()
         compose.runOnIdle {
@@ -99,7 +100,7 @@ class AiModelResponseModeMiuixTest {
         compose.onNodeWithTag("miuix.dialog.choice.0").performClick()
         compose.runOnIdle {
             editor!!.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
-            assertFalse(AiModelSettings.read(store).selected().hasReasoningEffort())
+            assertFalse(AiModelSettings.read(store).configs.single().hasReasoningEffort())
         }
     }
 
@@ -122,14 +123,14 @@ class AiModelResponseModeMiuixTest {
             assertEquals("minimal", effort.getItemAtPosition(1))
             editor!!.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
             assertTrue(editor!!.dialog().isShowing)
-            assertEquals(AiModelConfig.CHAT, AiModelSettings.read(store).selected().protocol)
-            assertEquals("max", AiModelSettings.read(store).selected().reasoningEffort)
+            assertEquals(AiModelConfig.CHAT, AiModelSettings.read(store).configs.single().protocol)
+            assertEquals("max", AiModelSettings.read(store).configs.single().reasoningEffort)
             effort.performClick()
         }
         compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
         compose.runOnIdle {
             editor!!.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
-            val saved = AiModelSettings.read(store).selected()
+            val saved = AiModelSettings.read(store).configs.single()
             assertEquals(AiModelConfig.GEMINI, saved.protocol)
             assertEquals("minimal", saved.reasoningEffort)
         }

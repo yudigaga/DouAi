@@ -428,6 +428,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     private static boolean automationOptionsChanged(LocalOptions previous, LocalOptions next) {
+        if (!AiModelSettings.sameAutomationSelection(previous, next, AutomationHistoryStore.REPLY)) return true;
         if (!previous.samePrefix(next, "tts_")) return true;
         for (String key : new String[]{"native_auto_reply", "reply_global", "reply_targets",
                 "reply_mode", "reply_voice", "reply_prompt", "reply_delay_seconds", "reply_daily_limit",
@@ -438,7 +439,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 "reply_filter_mode", "reply_filter_keywords", "reply_filter_fields",
                 "reply_private_chats", "reply_group_chats",
                 "reply_group_scope_mode", "reply_group_targets", "reply_group_mode", "reply_group_members",
-                "reply_random", AiModelSettings.REPLY_MODEL_ID, AiModelSettings.KEY, "streak_enabled", "streak_targets", "streak_content",
+                "reply_random", AiModelSettings.REPLY_MODEL_ID, "streak_enabled", "streak_targets", "streak_content",
                 "streak_content_api", "streak_start", "streak_end"}) {
             boolean defaultEnabled = "reply_private_chats".equals(key) || LocalOptions.REPLY_RECOGNIZE_IMAGES.equals(key);
             if (previous.enabled(key, defaultEnabled) != next.enabled(key, defaultEnabled)

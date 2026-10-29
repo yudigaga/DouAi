@@ -140,6 +140,22 @@ public final class HelpDialogTest {
         assertFalse(text.contains("0.25 至 4"));
     }
 
+    @Test public void modelHelpSeparatesSavingProfilesFromChoosingAFeatureOrGlobalDefault() {
+        HelpContent.Section models = HelpContent.search("模型管理").stream()
+                .filter(section -> "models".equals(section.id)).findFirst().get();
+        StringBuilder body = new StringBuilder();
+        for (HelpContent.Part part : models.parts) body.append(part.title).append('\n').append(part.text);
+        String text = body.toString();
+        assertTrue(text.contains("添加并保存模型"));
+        assertTrue(text.contains("不改变任何功能的模型选择"));
+        assertTrue(text.contains("先选功能"));
+        assertTrue(text.contains("全局默认"));
+        assertTrue(text.contains("本地数据分析"));
+        assertFalse(text.contains("添加并启用"));
+        assertFalse(text.contains("全局启用模型"));
+        assertFalse(text.contains("先启用全局"));
+    }
+
     @Test public void closingSettingsDismissesTheAboutAndHelpBranch() {
         AlertDialog help = openHelp();
         assertTrue(help.isShowing());

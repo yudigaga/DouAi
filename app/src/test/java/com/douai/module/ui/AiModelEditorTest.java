@@ -50,6 +50,48 @@ public final class AiModelEditorTest {
 
     @After public void closeEditor() { if (editor != null) editor.close(); }
 
+    @Test public void savingANewProfileDoesNotActivateItOrChangeAnyFeatureSelection() throws Exception {
+        AiModelConfig draft = profile();
+        AiModelConfig global = AiModelConfig.fromJson(draft.toJson().put("id", "global").put("name", "全局配置"));
+        new AiModelSettings(Collections.singletonList(global), global.id).save(store);
+        store.putString(AiModelSettings.REPLY_MODEL_ID, global.id);
+        store.putString(AiModelSettings.COMMENT_MODEL_ID, global.id);
+        store.putString(com.douai.module.config.AnalyticsAiSettings.MODEL_ID, global.id);
+        editor = new AiModelEditor(activity, store, draft, false, () -> { });
+        show(editor);
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        AiModelSettings saved = AiModelSettings.read(store);
+        assertEquals("Saving a profile must leave the global default unchanged", global.id, saved.activeId);
+        assertEquals(2, saved.configs.size());
+        assertEquals(global.id, store.getString(AiModelSettings.REPLY_MODEL_ID, ""));
+        assertEquals(global.id, store.getString(AiModelSettings.COMMENT_MODEL_ID, ""));
+        assertEquals(global.id, store.getString(com.douai.module.config.AnalyticsAiSettings.MODEL_ID, ""));
+        assertEquals("保存", editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+    }
+
+    @Test public void savingTheFirstProfileLeavesTheGlobalDefaultUnselected() throws Exception {
+        editor = new AiModelEditor(activity, store, profile(), false, () -> { });
+        show(editor);
+        assertEquals("保存", editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        AiModelSettings saved = AiModelSettings.read(store);
+        assertEquals(1, saved.configs.size());
+        assertEquals("", saved.activeId);
+    }
+
+    @Test public void editingAnExistingNondefaultProfileOnlySavesItsDraft() throws Exception {
+        AiModelConfig editing = profile();
+        AiModelConfig global = AiModelConfig.fromJson(editing.toJson().put("id", "global"));
+        new AiModelSettings(java.util.Arrays.asList(global, editing), global.id).save(store);
+        editor = new AiModelEditor(activity, store, editing, false, () -> { });
+        show(editor);
+        input(editor.dialog(), "配置名称").setText("修改后的配置");
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        AiModelSettings saved = AiModelSettings.read(store);
+        assertEquals(global.id, saved.activeId);
+        assertEquals("修改后的配置", saved.configs.get(1).name);
+    }
+
     @Test public void changingResponseModeSavesAndReopensInNativeEditor() throws Exception {
         AiModelConfig original = profile();
         editor = new AiModelEditor(activity, store, original, false, () -> { });
@@ -59,7 +101,7 @@ public final class AiModelEditorTest {
         assertEquals("非流式", mode.getSelectedItem());
         mode.setSelection(1);
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        AiModelConfig saved = AiModelSettings.read(store).selected();
+        AiModelConfig saved = AiModelSettings.read(store).configs.get(0);
         assertTrue(saved.streaming());
 
         editor = new AiModelEditor(activity, store, saved, false, () -> { });
@@ -68,7 +110,7 @@ public final class AiModelEditorTest {
         assertEquals("流式", mode.getSelectedItem());
         mode.setSelection(0);
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        assertFalse(AiModelSettings.read(store).selected().streaming());
+        assertFalse(AiModelSettings.read(store).configs.get(0).streaming());
     }
 
     @Test public void testChatUsesUnsavedResponseModeWithoutChangingSavedProfile() throws Exception {
@@ -98,8 +140,8 @@ public final class AiModelEditorTest {
             JSONObject body = new JSONObject(request.getBody().readUtf8());
             assertTrue(body.getBoolean("stream"));
             assertEquals("high", body.getString("reasoning_effort"));
-            assertFalse(AiModelSettings.read(store).selected().streaming());
-            assertFalse(AiModelSettings.read(store).selected().hasReasoningEffort());
+            assertFalse(AiModelSettings.read(store).configs.get(0).streaming());
+            assertFalse(AiModelSettings.read(store).configs.get(0).hasReasoningEffort());
             editor.close();
         }
     }
@@ -112,7 +154,7 @@ public final class AiModelEditorTest {
         assertEquals("模型默认", effort.getSelectedItem());
         selectEffort(editor.dialog().getWindow().getDecorView(), "max");
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        AiModelConfig saved = AiModelSettings.read(store).selected();
+        AiModelConfig saved = AiModelSettings.read(store).configs.get(0);
         assertEquals("max", saved.reasoningEffort);
 
         editor = new AiModelEditor(activity, store, saved, false, () -> { });
@@ -121,7 +163,7 @@ public final class AiModelEditorTest {
         assertEquals("max", effort.getSelectedItem());
         effort.setSelection(0);
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        assertFalse(AiModelSettings.read(store).selected().hasReasoningEffort());
+        assertFalse(AiModelSettings.read(store).configs.get(0).hasReasoningEffort());
     }
 
     @Test public void explicitReasoningConflictKeepsEditorOpenAndSavedProfileUnchanged() throws Exception {
@@ -134,12 +176,12 @@ public final class AiModelEditorTest {
         input(editor.dialog(), "自定义参数 JSON").setText("{\"reasoning_effort\":\"medium\"}");
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         assertTrue(editor.dialog().isShowing());
-        assertFalse(AiModelSettings.read(store).selected().hasReasoningEffort());
+        assertFalse(AiModelSettings.read(store).configs.get(0).hasReasoningEffort());
         assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("冲突"));
         ((Spinner) root.findViewWithTag("ai.reasoning_effort")).setSelection(0);
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         assertFalse(editor.dialog().isShowing());
-        assertEquals("medium", AiModelSettings.read(store).selected().parameters().getString("reasoning_effort"));
+        assertEquals("medium", AiModelSettings.read(store).configs.get(0).parameters().getString("reasoning_effort"));
     }
 
     @Test public void invalidDraftAndFailedPersistenceStayOpenUntilSuccessfulSave() throws Exception {
@@ -153,19 +195,19 @@ public final class AiModelEditorTest {
         input(dialog, "超时秒数（5–120）").setText("4");
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         assertTrue(dialog.isShowing());
-        assertEquals("saved-model", AiModelSettings.read(store).selected().modelName);
+        assertEquals("saved-model", AiModelSettings.read(store).configs.get(0).modelName);
         assertEquals(0, refreshes[0]);
 
         input(dialog, "超时秒数（5–120）").setText("30");
         store.failWrite = true;
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         assertTrue(dialog.isShowing());
-        assertEquals("saved-model", AiModelSettings.read(store).selected().modelName);
+        assertEquals("saved-model", AiModelSettings.read(store).configs.get(0).modelName);
         assertEquals(0, refreshes[0]);
         store.failWrite = false;
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         assertFalse(dialog.isShowing());
-        assertEquals("changed-model", AiModelSettings.read(store).selected().modelName);
+        assertEquals("changed-model", AiModelSettings.read(store).configs.get(0).modelName);
         assertEquals(1, refreshes[0]);
     }
 
@@ -193,7 +235,7 @@ public final class AiModelEditorTest {
         new AiModelSettings(Collections.singletonList(edited), edited.id).save(store);
         editor.dialog().getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
         assertTrue(editor.dialog().isShowing());
-        assertEquals("新模板名称", AiModelSettings.read(store).selected().name);
+        assertEquals("新模板名称", AiModelSettings.read(store).configs.get(0).name);
     }
 
 
@@ -245,7 +287,7 @@ public final class AiModelEditorTest {
         ((CheckBox) root.findViewWithTag("ai.message_contact_enabled")).setChecked(true);
         input(editor.dialog(), "联系人名字（留空使用配置名称）").setText("专属 AI");
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        AiModelConfig saved = AiModelSettings.read(store).selected();
+        AiModelConfig saved = AiModelSettings.read(store).configs.get(0);
         assertTrue(saved.messageContactEnabled);
         assertEquals("专属 AI", saved.messageContactDisplayName());
         assertEquals(avatar, saved.messageContactAvatar);
@@ -255,7 +297,7 @@ public final class AiModelEditorTest {
         root = editor.dialog().getWindow().getDecorView();
         ((CheckBox) root.findViewWithTag("ai.message_contact_enabled")).setChecked(false);
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        saved = AiModelSettings.read(store).selected();
+        saved = AiModelSettings.read(store).configs.get(0);
         assertFalse(saved.messageContactEnabled);
         assertEquals("专属 AI", saved.messageContactDisplayName());
         assertEquals(avatar, saved.messageContactAvatar);
@@ -282,7 +324,7 @@ public final class AiModelEditorTest {
         assertEquals("恢复默认", actions.getListView().getAdapter().getItem(1));
         actions.getListView().performItemClick(null, 1, 1);
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        assertEquals("", AiModelSettings.read(store).selected().messageContactAvatar);
+        assertEquals("", AiModelSettings.read(store).configs.get(0).messageContactAvatar);
     }
 
     @Test public void optionalParameterSwitchesControlTheirInputs() throws Exception {
@@ -313,7 +355,7 @@ public final class AiModelEditorTest {
         }
         editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         assertFalse(editor.dialog().isShowing());
-        AiModelConfig saved = AiModelSettings.read(store).selected();
+        AiModelConfig saved = AiModelSettings.read(store).configs.get(0);
         assertEquals(original.temperature, saved.temperature, 0);
         assertEquals(original.maxTokens, saved.maxTokens);
         assertEquals(original.topP, saved.topP, 0);

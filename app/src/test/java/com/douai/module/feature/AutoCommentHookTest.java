@@ -1006,6 +1006,43 @@ public final class AutoCommentHookTest {
         }
     }
 
+    @Test public void changingGlobalModelKeepsAnIndependentlyBoundCommentRequestAlive() throws Throwable {
+        try (MockWebServer global = new MockWebServer(); MockWebServer replies = new MockWebServer();
+             MockWebServer comments = new MockWebServer()) {
+            java.util.concurrent.CountDownLatch releaseResponse = new java.util.concurrent.CountDownLatch(1);
+            MockResponse response = AutomationModelFixtures.streamed("{\"comment\":\"独立模型继续生成\"}");
+            comments.setDispatcher(new okhttp3.mockwebserver.Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                    if (!releaseResponse.await(5, TimeUnit.SECONDS)) return new MockResponse().setResponseCode(504);
+                    return response;
+                }
+            });
+            AiModelSettings profiles = AutomationModelFixtures.profiles(global, replies, comments);
+            Map<String, Object> values = baseOptions(false);
+            values.put("comment_mode", "ai");
+            values.put(AiModelSettings.KEY, profiles.serialize());
+            values.put(AiModelSettings.REPLY_MODEL_ID, "reply");
+            values.put(AiModelSettings.COMMENT_MODEL_ID, "comment");
+            setOptions(new LocalOptions(values));
+            selectWork();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(3));
+            assertNotNull("The independent comment request must already be in flight", comments.takeRequest(2, TimeUnit.SECONDS));
+            java.util.concurrent.atomic.AtomicLong epoch = (java.util.concurrent.atomic.AtomicLong) HostTargets.read(hook, "generation");
+            long before = epoch.get();
+            try {
+                values.put(AiModelSettings.KEY, profiles.activate("reply").serialize());
+                setOptions(new LocalOptions(values));
+                assertEquals("Changing only the global model must not cancel a pinned comment request", before, epoch.get());
+            } finally { releaseResponse.countDown(); }
+            awaitGeneration(); flushDispatch();
+            assertEquals(1, comments.getRequestCount());
+            assertEquals(0, global.getRequestCount());
+            assertEquals(0, replies.getRequestCount());
+            assertEquals("独立模型继续生成", Request.models.get(0).a);
+            assertEquals("sent", entry("work").status);
+        }
+    }
+
     @Test public void automaticCommentsNeverUseOrRememberPreviousComments() throws Throwable {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(modelResponse("{\"comment\":\"当前作品评论\"}"));

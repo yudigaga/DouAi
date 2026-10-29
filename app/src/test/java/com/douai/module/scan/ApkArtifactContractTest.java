@@ -95,6 +95,14 @@ public final class ApkArtifactContractTest {
 
     @Test public void releaseHostReflectionNamesAndScannerOpcodeTextSurviveR8() throws Exception {
         DexFacts release = dexFacts("DOUAI_VERIFY_RELEASE_APK");
+        assertMethod(release, "Lcom/douai/module/config/AiModelSettings;",
+                "sameAutomationSelection(Lcom/douai/module/config/LocalOptions;Lcom/douai/module/config/LocalOptions;Ljava/lang/String;)Z",
+                0, true);
+        for (String marker : new String[]{"跟随全局默认", "自动回复（私聊、群聊、评论回复）", "请先选择模型配置"}) {
+            assertTrue("Missing per-feature model selection marker: " + marker, release.strings.contains(marker));
+        }
+        assertFalse("Model management must not include activation controls", release.strings.contains("ai.activate."));
+        assertFalse("Saving a model must not activate it", release.strings.contains("保存并启用"));
         for (String marker : new String[]{"module_only_speed", "仅模块控制倍速", "倍速锁定目标：", "已选择正常播放：1x"}) {
             assertTrue("Missing module speed control marker: " + marker, release.strings.contains(marker));
         }

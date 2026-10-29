@@ -49,7 +49,6 @@ final class AiModelEditor implements AutoCloseable {
     private final Context context;
     private final SettingsStore repository;
     private final boolean useMiuix;
-    private final boolean activateOnSave;
     private final Runnable onDelete;
     private final Runnable onChanged;
     private final ExecutorService requests;
@@ -72,33 +71,33 @@ final class AiModelEditor implements AutoCloseable {
 
     AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
                   boolean useMiuix, Runnable onChanged, ExecutorService requests) {
-        this(context, repository, original, useMiuix, onChanged, requests, true);
+        this(context, repository, original, useMiuix, onChanged, requests, false);
     }
 
+    /** Compatibility entry point for contact editors; saving never selects a model. */
     AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
-                  boolean useMiuix, Runnable onChanged, boolean activateOnSave) {
+                  boolean useMiuix, Runnable onChanged, boolean ignoredActivation) {
         this(context, repository, original, useMiuix, onChanged,
-                Executors.newSingleThreadExecutor(), activateOnSave, null);
+                Executors.newSingleThreadExecutor(), ignoredActivation, null);
     }
 
     AiModelEditor(Context context, SettingsStore repository, AiModelConfig original, boolean useMiuix,
-                  Runnable onChanged, boolean activateOnSave, Runnable onDelete) {
+                  Runnable onChanged, boolean ignoredActivation, Runnable onDelete) {
         this(context, repository, original, useMiuix, onChanged,
-                Executors.newSingleThreadExecutor(), activateOnSave, onDelete);
+                Executors.newSingleThreadExecutor(), ignoredActivation, onDelete);
     }
 
     private AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
-                  boolean useMiuix, Runnable onChanged, ExecutorService requests, boolean activateOnSave) {
-        this(context, repository, original, useMiuix, onChanged, requests, activateOnSave, null);
+                  boolean useMiuix, Runnable onChanged, ExecutorService requests, boolean ignoredActivation) {
+        this(context, repository, original, useMiuix, onChanged, requests, ignoredActivation, null);
     }
 
     private AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
-                  boolean useMiuix, Runnable onChanged, ExecutorService requests, boolean activateOnSave,
+                  boolean useMiuix, Runnable onChanged, ExecutorService requests, boolean ignoredActivation,
                   Runnable onDelete) {
         this.context = ModuleTheme.themedContext(context);
         this.repository = repository;
         this.useMiuix = useMiuix;
-        this.activateOnSave = activateOnSave;
         this.onDelete = onDelete == null ? () -> {
             saveAiSettings(aiSettings().delete(original.id));
             onChanged.run();
@@ -374,7 +373,7 @@ final class AiModelEditor implements AutoCloseable {
 
         dialog = new MiuixDialogBuilder(context, useMiuix).setTitle("模型配置")
                 .setView(scrolling(form)).setNegativeButton("取消", null)
-                .setPositiveButton(activateOnSave ? "保存并启用" : "保存", null).setNeutralButton("删除", null).create();
+                .setPositiveButton("保存", null).setNeutralButton("删除", null).create();
         dialog.setOnDismissListener(ignored -> close());
         bindButtons = () -> {
             boolean exists = false;
@@ -389,7 +388,7 @@ final class AiModelEditor implements AutoCloseable {
                 try {
                     AiModelConfig draft = readDraft.call();
                     draft.validate(true);
-                    saveAiSettings(aiSettings().upsert(draft, activateOnSave));
+                    saveAiSettings(aiSettings().upsert(draft, false));
                     close();
                     onChanged.run();
                 } catch (Exception failure) { toast(safeError(failure)); }

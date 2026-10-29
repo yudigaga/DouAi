@@ -163,13 +163,14 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     public void setOptions(LocalOptions next) {
         LocalOptions before = options;
         options = next;
+        boolean changed = !AiModelSettings.sameAutomationSelection(before, next, AutomationHistoryStore.COMMENT);
         for (String key : new String[]{"native_auto_comment", "comment_mode", "comment_prompt",
                 "comment_delay_seconds", "comment_daily_limit", "comment_user_cooldown_minutes",
                 "auto_comment_text", AutomationCommentMedia.RECOGNIZE_IMAGES,
                 AutomationCommentMedia.RECOGNIZE_VIDEO, "comment_scope_mode", "comment_scope_relations",
                 "comment_scope_fields", "comment_scope_keywords", "comment_scope_users", "comment_filter_mode",
                 "comment_filter_keywords", "comment_filter_fields", AiModelSettings.COMMENT_MODEL_ID,
-                AiModelSettings.KEY, LocalOptions.COMMENT_VOICE, "tts_"}) {
+                LocalOptions.COMMENT_VOICE, "tts_"}) {
             boolean defaultEnabled = AutomationCommentMedia.RECOGNIZE_IMAGES.equals(key);
             if (("tts_".equals(key) && !before.samePrefix(next, "tts_"))
                     || before.enabled(key, defaultEnabled) != next.enabled(key, defaultEnabled)
@@ -177,18 +178,20 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                     || "comment_delay_seconds".equals(key) && before.integer(key, 3) != next.integer(key, 3)
                     || ("comment_daily_limit".equals(key) || "comment_user_cooldown_minutes".equals(key))
                     && before.integer(key, 0) != next.integer(key, 0)) {
-                generation.incrementAndGet();
-                GenerationAttempt active = activeGeneration;
-                if (active != null) markCancelled(active.task);
-                ai.cancelCurrentRequest();
-                worker.getQueue().clear();
-                queue.reset();
-                dispatcher.cancelKind(AutomationHistoryStore.COMMENT);
-                main.post(() -> { Object selected = holder.get(); if (!closed && selected != null) selected(selected); });
-                safeLog("Automatic comment configuration changed; queue reset");
+                changed = true;
                 break;
             }
         }
+        if (!changed) return;
+        generation.incrementAndGet();
+        GenerationAttempt active = activeGeneration;
+        if (active != null) markCancelled(active.task);
+        ai.cancelCurrentRequest();
+        worker.getQueue().clear();
+        queue.reset();
+        dispatcher.cancelKind(AutomationHistoryStore.COMMENT);
+        main.post(() -> { Object selected = holder.get(); if (!closed && selected != null) selected(selected); });
+        safeLog("Automatic comment configuration changed; queue reset");
     }
 
     private boolean enabled() { return !closed && options.enabled("native_auto_comment"); }

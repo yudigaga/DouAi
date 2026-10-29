@@ -91,6 +91,22 @@ public final class LocalAnalyticsAiSettingsTest {
         assertTrue(text("analytics.analysis.model").contains("跟随全局"));
     }
 
+    @Test public void anUnselectedGlobalDefaultStillAllowsAnIndependentAnalysisModel() {
+        new AiModelSettings(AiModelSettings.read(store).configs, "").save(store);
+        find("analytics.refresh").performClick(); reader.runAll(); ShadowLooper.idleMainLooper();
+        assertTrue(text("analytics.analysis.model").contains("跟随全局（未选择模型）"));
+        assertFalse(find("analytics.analysis.request").isEnabled());
+        find("analytics.analysis.model").performClick();
+        AlertDialog chooser = (AlertDialog) ShadowDialog.getLatestDialog();
+        chooser.getListView().performItemClick(null, 2, 2);
+        assertEquals("second", store.getString(AnalyticsAiSettings.MODEL_ID, ""));
+        assertEquals("", AiModelSettings.read(store).activeId);
+        assertTrue(find("analytics.analysis.request").isEnabled());
+        assertEquals("first", store.getString(AiModelSettings.REPLY_MODEL_ID, ""));
+        assertEquals("second", store.getString(AiModelSettings.COMMENT_MODEL_ID, ""));
+        assertTrue(analysis.requests.isEmpty());
+    }
+
     @Test public void secondaryPromptSavesOnlyOnSaveAndCanBeRestoredToItsDefault() {
         String customPrompt = "只关注浏览时段的变化，保持简洁。".repeat(400);
         find("analytics.analysis.prompt").performClick();
