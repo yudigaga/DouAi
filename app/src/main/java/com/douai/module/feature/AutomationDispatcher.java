@@ -65,6 +65,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     private Pending submittedReply;
     private long replyFailureAttentionUntil;
     private String replyPresentation = "";
+    private final Runnable replyRefresh = this::renderReplyRing;
     private String commentHead = "";
     private int commentQueueCount = -1;
     private int commentRetries = 2;
@@ -675,6 +676,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     private void renderReplyRing() {
+        main.removeCallbacks(replyRefresh);
         Activity activity = resumed.get();
         String suppressed = closed ? "closed" : !enabled(AutomationHistoryStore.REPLY) ? "disabled"
                 : !tipEnabled(AutomationHistoryStore.REPLY) ? "tip_off" : activity == null ? "no_activity"
@@ -710,6 +712,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             replyPresentation(activity, "attach_failed", phase, count);
             safeLog("Reply overlay attach unavailable: " + unavailable.getClass().getSimpleName());
         }
+        // Host relayouts can remove the ring while generation has no stage updates.
+        main.postDelayed(replyRefresh, 1000);
     }
 
     private void replyPresentation(Activity activity, String state, String phase, int count) {
@@ -882,6 +886,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         safeLog("[DouAi.ReplyOverlay] lifecycle=paused activity=" + (activity == null ? "none" : activity.getClass().getSimpleName()));
         resumed.clear();
         commentRing.detach();
+        main.removeCallbacks(replyRefresh);
         replyRing.detach();
         replyPresentation(null, "no_activity", "", 0);
         if (failureDetails != null) failureDetails.dismiss();
@@ -903,6 +908,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         onMain(() -> {
             for (Pending item : new ArrayList<>(pending.values())) { cancel(item); removeNotice(item); }
             commentRing.detach();
+            main.removeCallbacks(replyRefresh);
             replyRing.detach();
             if (failureDetails != null) failureDetails.dismiss();
             if (submittedReply != null) { removeNotice(submittedReply); submittedReply = null; }

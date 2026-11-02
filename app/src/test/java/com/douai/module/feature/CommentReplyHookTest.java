@@ -1017,6 +1017,37 @@ public final class CommentReplyHookTest {
         assertTrue(history().stream().noneMatch(entry -> "sent".equals(entry.status) || "submitted".equals(entry.status)));
     }
 
+    @Test public void commentReplyRestoresItsPreviewAfterHostRemovesTheGeneratingRingAndSendsOnce() {
+        configure("reply_tip", true);
+        configure("reply_notice_seconds", "3");
+        open();
+        source.events.put(100L, List.of(event("removed-ring", "root", "200", 1001)));
+        CommentRingView[] generatingRing = new CommentRingView[1];
+        generator.duringGenerate = () -> {
+            generatingRing[0] = commentReplyRing();
+            assertNotNull(generatingRing[0]);
+            assertEquals("generating", generatingRing[0].getPhase());
+            ((android.view.ViewGroup) generatingRing[0].getParent()).removeView(generatingRing[0]);
+            assertNull(commentReplyRing());
+        };
+        hook.requestScan();
+        processReplies();
+
+        assertSame("The generated reply must regain its preview in the same Activity", generatingRing[0], commentReplyRing());
+        assertTrue(commentReplyRing().isAttachedToWindow());
+        assertTrue(commentReplyRing().isShown());
+        assertEquals("preview", commentReplyRing().getPhase());
+        assertTrue(sender.sent.isEmpty());
+        advanceMillis(2999);
+        assertTrue(sender.sent.isEmpty());
+        advanceMillis(1);
+        assertEquals(List.of("removed-ring"), sender.sent);
+        assertEquals("sent", history().get(0).status);
+        hook.requestScan();
+        processReplies();
+        assertEquals(List.of("removed-ring"), sender.sent);
+    }
+
     @Test public void commentReplyPreparationKeepsOneRingAcrossWaitingMediaModelSpeechAndTheOriginalPreview() throws Exception {
         configure("reply_tip", true);
         configure("reply_notice_seconds", "3");

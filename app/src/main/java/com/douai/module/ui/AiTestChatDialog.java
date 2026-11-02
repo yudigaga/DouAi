@@ -59,6 +59,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.Consumer;
 
 /** Model test conversation using a fixed profile snapshot and optional bounded private history. */
 final class AiTestChatDialog extends Dialog {
@@ -67,6 +68,10 @@ final class AiTestChatDialog extends Dialog {
         void cancel();
         default String reply(String message, List<ChatImage> images, String document) throws Exception {
             return reply(message, images);
+        }
+        default String replyStreaming(String message, List<ChatImage> images, String document,
+                                      Consumer<String> onPartial) throws Exception {
+            return reply(message, images, document);
         }
         default void clear() { }
         default List<TestChatMemory.Turn> savedTurns() { return Collections.emptyList(); }
@@ -183,6 +188,11 @@ final class AiTestChatDialog extends Dialog {
                 }
                 @Override public String reply(String message, List<ChatImage> images, String document) throws Exception {
                     return client().reply(messageContact ? "message-contact" : "model-test", message, images, snapshot, "", true, document);
+                }
+                @Override public String replyStreaming(String message, List<ChatImage> images, String document,
+                                                       Consumer<String> onPartial) throws Exception {
+                    return client().replyStreaming(messageContact ? "message-contact" : "model-test",
+                            message, images, snapshot, "", true, document, onPartial);
                 }
                 @Override public void clear() { client().clearHistory(); }
                 @Override public List<TestChatMemory.Turn> savedTurns() { return client().savedTurns(); }
@@ -650,7 +660,8 @@ final class AiTestChatDialog extends Dialog {
                 }
                 turn.checkStopped();
                 turn.trace.stage("provider_request", "images=" + turn.preparedImages.size() + ";documents=" + turn.preparedDocuments.size());
-                reply = active.reply(prompt, turn.preparedImages, documentText(turn.preparedDocuments, turn.preparedImages));
+                reply = active.replyStreaming(prompt, turn.preparedImages,
+                        documentText(turn.preparedDocuments, turn.preparedImages), text -> queuePartialReply(turn, text));
             }
             catch (InterruptedException cancelled) {
                 Thread.currentThread().interrupt();
@@ -662,6 +673,30 @@ final class AiTestChatDialog extends Dialog {
             Exception failure = error;
             main.post(turn.trace.wrap(() -> finishRequest(turn, result, failure)));
         }));
+    }
+
+    private void queuePartialReply(RequestTurn turn, String text) {
+        if (text == null || text.isEmpty()) return;
+        synchronized (turn) {
+            if (turn.stopRequested) return;
+            turn.latestPartial = text;
+            if (turn.partialQueued) return;
+            turn.partialQueued = true;
+        }
+        main.post(() -> {
+            String latest;
+            synchronized (turn) {
+                latest = turn.latestPartial;
+                turn.partialQueued = false;
+            }
+            if (disposed || !busy || pending != turn || turn.ticket != generation || turn.stopRequested) return;
+            if (latest.equals(turn.answer.text)) return;
+            boolean follow = messages.getLastVisiblePosition() >= messages.getCount() - 2;
+            turn.answer.text = latest;
+            state.setText("正在回复…");
+            messageRows.notifyDataSetChanged();
+            if (follow) scrollToBottom();
+        });
     }
 
     private void prepareMedia(RequestTurn turn) throws Exception {
@@ -764,6 +799,9 @@ final class AiTestChatDialog extends Dialog {
         } else {
             answer.text = turn.stopRequested ? "已停止" : turn.reading
                     ? "附件读取失败：" + failureDetail(failure) : errorMessage(failure);
+            if (!turn.reading && !turn.latestPartial.isEmpty()) {
+                answer.text = turn.latestPartial + "\n\n（" + answer.text + "，回复未完成）";
+            }
             answer.color = turn.stopRequested ? MUTED : ERROR;
             state.setText(turn.stopRequested ? "已停止" : turn.reading ? "附件读取失败" : "发送失败");
             restoreDraft(turn.prompt, turn.images, turn.documents);
@@ -1242,6 +1280,8 @@ final class AiTestChatDialog extends Dialog {
         final List<Document> preparedDocuments;
         final ChatMessage answer;
         volatile boolean stopRequested;
+        volatile String latestPartial = "";
+        boolean partialQueued;
         boolean started;
         boolean reading;
 

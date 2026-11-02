@@ -455,6 +455,44 @@ public final class AutomationDispatcherTest {
         advance(1); worker.runAll(); assertEquals(1, sends.get()); assertNull(replyRing());
     }
 
+    @Test public void generatingReplyRecoversWithoutAStageChangeAndStopsRefreshingWhenHidden() {
+        Map<String, Object> values = base(true, true);
+        values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        dispatcher.setOptions(new LocalOptions(values));
+        AutomationHistoryStore.Entry entry = commentReplyPreparation("generating-recovery");
+        dispatcher.trackReply(entry, "generating", () -> true, () -> { });
+        CommentRingView preparing = replyRing();
+        assertNotNull(preparing);
+        ((android.view.ViewGroup) preparing.getParent()).removeView(preparing);
+        advance(1);
+        assertSame(preparing, replyRing());
+        assertTrue(preparing.isAttachedToWindow());
+        assertTrue(preparing.isShown());
+        assertEquals("generating", preparing.getPhase());
+        assertEquals(0, sends.get());
+
+        dispatcher.onActivityPaused(activity);
+        advance(2);
+        assertNull(preparing.getParent());
+        dispatcher.onActivityResumed(activity);
+        assertSame(preparing, replyRing());
+        values.put("reply_tip", false);
+        dispatcher.setOptions(new LocalOptions(values));
+        advance(2);
+        assertNull(preparing.getParent());
+        values.put("reply_tip", true);
+        dispatcher.setOptions(new LocalOptions(values));
+        dispatcher.discardReplyPreparation(entry.kind, entry.id);
+        advance(2);
+        assertNull(preparing.getParent());
+        dispatcher.trackReply(commentReplyPreparation("close-recovery"), "generating", () -> true, () -> { });
+        assertSame(preparing, replyRing());
+        dispatcher.close();
+        advance(2);
+        assertNull(preparing.getParent());
+        assertEquals(0, sends.get());
+    }
+
     @Test public void commentPreparationDoesNotTakeAReadySlotAndFullPreviewStillDefersItsClaim() {
         Map<String, Object> values = base(true, false);
         values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);

@@ -42,6 +42,8 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
+import java.util.function.Consumer;
 import java.io.ByteArrayOutputStream;
 
 import static org.junit.Assert.*;
@@ -110,6 +112,85 @@ public final class AiTestChatDialogTest {
         assertEquals("发送", send.getContentDescription());
         assertTrue(send.isEnabled());
         assertEquals("", text("ai.chat.state").getText().toString());
+    }
+
+    @Test public void streamedTextIsVisibleBeforeCompletionInOneReplyBubble() throws Exception {
+        FakeSession active = sessions.get(0);
+        Thread io = startStreaming(active, "边生成边显示");
+        try {
+            input.setText("保留下一条草稿");
+            emitPartial(active, "第一段");
+            assertEquals("正在回复…", text("ai.chat.answer").getText().toString());
+            ShadowLooper.idleMainLooper();
+            assertTrue("Provider has not completed", io.isAlive());
+            assertEquals("第一段", text("ai.chat.answer").getText().toString());
+            assertEquals(2, messageCount());
+            assertEquals("停止请求", send.getContentDescription());
+            emitPartial(active, "第一段，第二段");
+            ShadowLooper.idleMainLooper();
+            assertEquals("第一段，第二段", text("ai.chat.answer").getText().toString());
+            assertEquals("保留下一条草稿", input.getText().toString());
+            active.answer = "第一段，第二段，完成。";
+        } finally {
+            releaseStreaming(active, io);
+        }
+        assertEquals("第一段，第二段，完成。", text("ai.chat.answer").getText().toString());
+        emitPartial(active, "不应覆盖完成文本");
+        ShadowLooper.idleMainLooper();
+        assertEquals("第一段，第二段，完成。", text("ai.chat.answer").getText().toString());
+        assertEquals(2, messageCount());
+    }
+
+    @Test public void stoppingStreamRetainsPartialTextAndRejectsLateProgress() throws Exception {
+        FakeSession active = sessions.get(0);
+        Thread io = startStreaming(active, "中途停止");
+        try {
+            emitPartial(active, "已经生成的内容");
+            ShadowLooper.idleMainLooper();
+            assertTrue(send.performClick());
+            emitPartial(active, "停止后的迟到内容");
+        } finally {
+            releaseStreaming(active, io);
+        }
+        String answer = text("ai.chat.answer").getText().toString();
+        assertTrue(answer.startsWith("已经生成的内容"));
+        assertTrue(answer.contains("已停止"));
+        assertTrue(answer.contains("回复未完成"));
+        assertFalse(answer.contains("迟到"));
+        assertEquals("中途停止", input.getText().toString());
+    }
+
+    @Test public void clearingStreamRejectsQueuedProgressAndOldCompletion() throws Exception {
+        FakeSession active = sessions.get(0);
+        Thread io = startStreaming(active, "清空前的流式请求");
+        try {
+            emitPartial(active, "清空前排队的内容");
+            root.findViewWithTag("ai.chat.clear").performClick();
+            historyWorker.runAllOnThread();
+        } finally {
+            releaseStreaming(active, io);
+        }
+        assertEquals(0, messageCount());
+        submit("新的请求");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        emitPartial(active, "旧请求的迟到内容");
+        ShadowLooper.idleMainLooper();
+        assertEquals("模型回复", text("ai.chat.answer").getText().toString());
+        assertEquals(2, messageCount());
+    }
+
+    @Test public void closingStreamRejectsQueuedProgressAndOldCompletion() throws Exception {
+        FakeSession active = sessions.get(0);
+        Thread io = startStreaming(active, "关闭前的流式请求");
+        try {
+            emitPartial(active, "尚未展示的内容");
+            dialog.dismiss();
+        } finally {
+            releaseStreaming(active, io);
+        }
+        assertFalse(dialog.isShowing());
+        assertEquals("正在回复…", text("ai.chat.answer").getText().toString());
     }
 
     @Test
@@ -789,6 +870,30 @@ public final class AiTestChatDialogTest {
         assertTrue(send.performClick());
     }
 
+    private Thread startStreaming(FakeSession active, String prompt) throws Exception {
+        active.streamStarted = new CountDownLatch(1);
+        active.streamContinue = new CountDownLatch(1);
+        submit(prompt);
+        Thread io = new Thread(worker::runNext, "test-chat-stream");
+        io.start();
+        assertTrue("Provider must enter streaming", active.streamStarted.await(5, TimeUnit.SECONDS));
+        return io;
+    }
+
+    private static void emitPartial(FakeSession active, String text) throws Exception {
+        Thread io = new Thread(() -> active.onPartial.accept(text), "test-chat-chunk");
+        io.start();
+        io.join(5000);
+        assertFalse("Chunk delivery must finish", io.isAlive());
+    }
+
+    private static void releaseStreaming(FakeSession active, Thread io) throws Exception {
+        active.streamContinue.countDown();
+        io.join(5000);
+        assertFalse("Provider must finish", io.isAlive());
+        ShadowLooper.idleMainLooper();
+    }
+
     private void selectVideo(android.net.Uri uri) throws Exception {
         selectMedia(uri, AiTestChatDialog.AttachmentKind.VIDEO);
     }
@@ -887,6 +992,9 @@ public final class AiTestChatDialogTest {
         int clearCalls;
         boolean readOnMain;
         boolean clearOnMain;
+        Consumer<String> onPartial;
+        CountDownLatch streamStarted;
+        CountDownLatch streamContinue;
 
         @Override public String reply(String message, List<ChatImage> attachments) throws Exception {
             images.add(new ArrayList<>(attachments));
@@ -900,7 +1008,23 @@ public final class AiTestChatDialogTest {
             return reply(message, attachments);
         }
 
-        @Override public void cancel() { cancelCount++; }
+        @Override public String replyStreaming(String message, List<ChatImage> attachments, String document,
+                                               Consumer<String> progress) throws Exception {
+            onPartial = progress;
+            if (streamStarted != null) streamStarted.countDown();
+            if (streamContinue != null && !streamContinue.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Streaming test was not released");
+            }
+            return reply(message, attachments, document);
+        }
+
+        @Override public void cancel() {
+            cancelCount++;
+            if (streamContinue != null) {
+                failure = new java.util.concurrent.CancellationException();
+                streamContinue.countDown();
+            }
+        }
 
         @Override public List<TestChatMemory.Turn> savedTurns() {
             savedCalls++;

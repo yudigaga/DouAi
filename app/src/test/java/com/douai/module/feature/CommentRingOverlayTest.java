@@ -10,6 +10,7 @@ import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.FrameLayout;
 
@@ -70,6 +71,57 @@ public final class CommentRingOverlayTest {
         assertEquals(32, ring.getHeight());
         assertFalse(ring.getContentDescription().toString().contains("评论内容"));
         assertTrue(ring.getContentDescription().toString().contains("发布中"));
+    }
+
+    @Test public void repeatedShowRestoresAReplyRingRemovedByHostFromTheSameDecor() {
+        CommentRingOverlay reply = new CommentRingOverlay(activity, clicks::incrementAndGet,
+                cancellations::incrementAndGet, true);
+        try {
+            ViewGroup decor = (ViewGroup) activity.getWindow().getDecorView();
+            reply.show(activity, 1, 0, "generating", -1);
+            CommentRingView ring = reply.view();
+            assertSame(decor, ring.getParent());
+            assertTrue(ring.isAttachedToWindow());
+            assertTrue(ring.isShown());
+
+            decor.removeView(ring);
+            assertNull(ring.getParent());
+            assertFalse(ring.isAttachedToWindow());
+
+            reply.show(activity, 1, 0, "generating", -1);
+
+            assertSame("The same live Activity must regain its reply ring after host removal", decor, ring.getParent());
+            assertTrue(ring.isAttachedToWindow());
+            assertTrue(ring.isShown());
+            assertEquals("generating", ring.getPhase());
+            assertTrue(ring.performClick());
+            assertEquals(1, clicks.get());
+        } finally { reply.detach(); }
+    }
+
+    @Test public void repeatedShowReclaimsAReplyRingReparentedOutsideTheWindow() {
+        CommentRingOverlay reply = new CommentRingOverlay(activity, clicks::incrementAndGet,
+                cancellations::incrementAndGet, true);
+        try {
+            ViewGroup decor = (ViewGroup) activity.getWindow().getDecorView();
+            reply.show(activity, 1, 0, "generating", -1);
+            CommentRingView ring = reply.view();
+            assertSame(decor, ring.getParent());
+            decor.removeView(ring);
+            FrameLayout detachedHostContainer = new FrameLayout(activity);
+            detachedHostContainer.addView(ring);
+            assertSame(detachedHostContainer, ring.getParent());
+            assertFalse(ring.isAttachedToWindow());
+
+            reply.show(activity, 1, 0, "generating", -1);
+
+            assertSame("A host container outside the window must not retain the reply ring", decor, ring.getParent());
+            assertEquals(0, detachedHostContainer.getChildCount());
+            assertTrue(ring.isAttachedToWindow());
+            assertTrue(ring.isShown());
+            assertTrue(ring.performLongClick());
+            assertEquals(1, cancellations.get());
+        } finally { reply.detach(); }
     }
 
     @Test public void independentReplyPositionAndBlueStyleDoNotChangeTheSavedCommentPosition() {

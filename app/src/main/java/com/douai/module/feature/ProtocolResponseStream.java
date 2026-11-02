@@ -21,14 +21,20 @@ import java.util.function.Consumer;
 final class ProtocolResponseStream {
     static String read(String protocol, InputStream source, int maximumChars,
                        ResponsesAnalysisStream.IoGuard guard, Consumer<String> diagnostics) throws IOException {
+        return read(protocol, source, maximumChars, guard, diagnostics, null);
+    }
+
+    static String read(String protocol, InputStream source, int maximumChars,
+                       ResponsesAnalysisStream.IoGuard guard, Consumer<String> diagnostics,
+                       ResponsesAnalysisStream.PartialText onPartial) throws IOException {
         if (AiModelConfig.RESPONSES.equals(protocol)) {
-            return ResponsesAnalysisStream.read(source, maximumChars, guard, diagnostics);
+            return ResponsesAnalysisStream.read(source, maximumChars, guard, diagnostics, onPartial);
         }
         if (!AiModelConfig.CHAT.equals(protocol) && !AiModelConfig.ANTHROPIC.equals(protocol)
                 && !AiModelConfig.GEMINI.equals(protocol)) {
             throw new ResponsesAnalysisStream.Failure(ResponsesAnalysisStream.Failure.Kind.FORMAT, 0);
         }
-        return new Decoder(protocol, source, maximumChars, guard, diagnostics).read();
+        return new Decoder(protocol, source, maximumChars, guard, diagnostics, onPartial).read();
     }
 
     private static final class Decoder {
@@ -36,6 +42,7 @@ final class ProtocolResponseStream {
         private final int maximumChars;
         private final ResponsesAnalysisStream.IoGuard guard;
         private final Consumer<String> diagnostics;
+        private final ResponsesAnalysisStream.PartialText onPartial;
         private final CountingInput input;
         private final StringBuilder data = new StringBuilder();
         private final StringBuilder text = new StringBuilder();
@@ -43,13 +50,16 @@ final class ProtocolResponseStream {
         private String eventName = "";
         private int frames;
         private boolean firstText, finished, messageStarted, toolCall;
+        private String lastPartial = "";
 
         Decoder(String protocol, InputStream source, int maximumChars,
-                ResponsesAnalysisStream.IoGuard guard, Consumer<String> diagnostics) {
+                ResponsesAnalysisStream.IoGuard guard, Consumer<String> diagnostics,
+                ResponsesAnalysisStream.PartialText onPartial) {
             this.protocol = protocol;
             this.maximumChars = maximumChars;
             this.guard = guard;
             this.diagnostics = diagnostics;
+            this.onPartial = onPartial;
             input = new CountingInput(source, guard);
         }
 
@@ -116,10 +126,12 @@ final class ProtocolResponseStream {
             try {
                 JSONObject event = new JSONObject(frame);
                 if ("error".equals(declared) || nonNull(event, "error")) throw failure(ResponsesAnalysisStream.Failure.Kind.INCOMPLETE);
+                boolean terminal = false;
                 if (AiModelConfig.CHAT.equals(protocol)) chat(event);
-                else if (AiModelConfig.ANTHROPIC.equals(protocol)) return claude(event, declared);
+                else if (AiModelConfig.ANTHROPIC.equals(protocol)) terminal = claude(event, declared);
                 else gemini(event);
-                return false;
+                publishPartial();
+                return terminal;
             } catch (ResponsesAnalysisStream.Failure failure) { throw failure; }
             catch (java.util.concurrent.CancellationException cancelled) { throw cancelled; }
             catch (IOException failure) { throw failure; }
@@ -290,6 +302,16 @@ final class ProtocolResponseStream {
             diagnostic("stream_complete");
             guard.check();
             return text.toString();
+        }
+
+        private void publishPartial() throws IOException {
+            if (onPartial == null || text.length() == 0) return;
+            String snapshot = text.toString();
+            if (snapshot.equals(lastPartial)) return;
+            guard.check();
+            onPartial.accept(snapshot);
+            lastPartial = snapshot;
+            guard.check();
         }
 
         private ResponsesAnalysisStream.Failure failure(ResponsesAnalysisStream.Failure.Kind kind) {

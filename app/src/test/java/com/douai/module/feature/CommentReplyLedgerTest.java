@@ -54,6 +54,30 @@ public final class CommentReplyLedgerTest {
         assertEquals(0, restarted.watermark(101));
     }
 
+    @Test public void diagnosticStatusUsesOnlyKnownLabelsAndDoesNotExposeStoredValues() {
+        assertTrue(ledger.initialize(100, 1000, List.of("ignored")));
+        assertEquals("ignored", ledger.diagnosticStatus(100, "ignored"));
+        assertEquals("missing", ledger.diagnosticStatus(100, "missing"));
+        assertTrue(ledger.claim(100, "pending", "root-pending", 0));
+        assertEquals("pending", ledger.diagnosticStatus(100, "pending"));
+        assertTrue(ledger.submitted(100, "pending"));
+        assertEquals("submitted", ledger.diagnosticStatus(100, "pending"));
+        ledger.finish(100, "pending", "unknown");
+        assertEquals("unknown", ledger.diagnosticStatus(100, "pending"));
+        assertTrue(ledger.claim(100, "deferred", "root-deferred", 0));
+        ledger.defer(100, "deferred");
+        assertEquals("deferred", ledger.diagnosticStatus(100, "deferred"));
+        assertTrue(ledger.claim(100, "failed", "root-failed", 0));
+        ledger.finish(100, "failed", "failed");
+        assertEquals("failed", ledger.diagnosticStatus(100, "failed"));
+        assertTrue(ledger.claim(100, "cancelled", "root-cancelled", 0));
+        ledger.finish(100, "cancelled", "cancelled");
+        assertEquals("cancelled", ledger.diagnosticStatus(100, "cancelled"));
+        assertTrue(preferences.edit().putString("incoming.100.corrupt", "private-comment-data").commit());
+        assertEquals("corrupt", ledger.diagnosticStatus(100, "corrupt"));
+        assertNotEquals("private-comment-data", ledger.diagnosticStatus(100, "corrupt"));
+    }
+
     @Test public void legacyInboxModelRewindsOnlyWatermarkOnceAndPreservesEveryClaim() {
         assertTrue(ledger.initialize(100, 1000, List.of("ignored")));
         for (String status : List.of("sent", "submitted", "unknown", "deferred", "failed", "cancelled")) {

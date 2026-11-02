@@ -11,6 +11,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -453,6 +454,81 @@ public final class NativeCommentThreadLookupTest {
         assertEquals(Long.valueOf(0), own.starts.get(0));
         assertEquals(Long.valueOf(70), own.starts.get(1));
         assertTrue(own.counts.get(0) > 0);
+    }
+
+    @Test public void historicalOwnCommentPagesResumeAcrossLookupRestartWithoutCrossingAccounts() throws Exception {
+        Map<Long, Long> persisted = new HashMap<>();
+        NativeCommentThreadLookup.OwnCursorStore cursorStore = new NativeCommentThreadLookup.OwnCursorStore() {
+            @Override public long read(long account) { return persisted.getOrDefault(account, 0L); }
+            @Override public boolean write(long account, long cursor) { persisted.put(account, cursor); return true; }
+        };
+        lookup = new NativeCommentThreadLookup(report(), getClass().getClassLoader(), diagnostics::add, cursorStore);
+        own.pages.add(ownPage(true, 10, payload(original("head", "other-work"))));
+        for (int page = 1; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+
+        assertTrue(lookup.resolve(100, hints("reply"), () -> true).isEmpty());
+        assertEquals(Long.valueOf(14), Long.valueOf(persisted.get(100L)));
+        assertEquals(Arrays.asList(0L, 10L, 11L, 12L, 13L), own.starts);
+
+        lookup.close();
+        lookup = new NativeCommentThreadLookup(report(), getClass().getClassLoader(), diagnostics::add, cursorStore);
+        own.pages.add(ownPage(true, 10, payload(original("head", "other-work"))));
+        own.pages.add(ownPage(true, 15));
+        own.pages.add(ownPage(true, 16));
+        own.pages.add(ownPage(true, 17));
+        own.pages.add(ownPage(true, 18, payload(original("historical-root", "work"))));
+        ThreadApi.enqueue("historical-root", threadPage(false, 0, "", incoming("reply", "historical-root", "work")));
+
+        assertEquals("The old original becomes eligible when its notification work is reached", 1,
+                lookup.resolve(100, hints("reply"), () -> true).size());
+        assertEquals(Arrays.asList(0L, 10L, 11L, 12L, 13L, 0L, 14L, 15L, 16L, 17L), own.starts);
+        assertEquals(Long.valueOf(18), Long.valueOf(persisted.get(100L)));
+
+        own.pages.add(ownPage(true, 10, payload(original("other-account-head", "other-work"))));
+        for (int page = 1; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+        Comment otherAccountTarget = incoming("other-account-reply", "0", "other-work");
+        otherAccountTarget.replyToUserId = "101";
+        assertTrue(lookup.resolve(101, Collections.singletonList(hint("other-account-notice", "other-work",
+                "other-account-reply", "200", otherAccountTarget)), () -> true).isEmpty());
+        assertEquals(Long.valueOf(14), Long.valueOf(persisted.get(101L)));
+        assertEquals(Long.valueOf(18), Long.valueOf(persisted.get(100L)));
+    }
+
+    @Test public void stalledOwnPaginationDoesNotAdvanceTheDurableHistoryCursor() throws Exception {
+        Map<Long, Long> persisted = new HashMap<>();
+        persisted.put(100L, 15L);
+        NativeCommentThreadLookup.OwnCursorStore cursorStore = new NativeCommentThreadLookup.OwnCursorStore() {
+            @Override public long read(long account) { return persisted.getOrDefault(account, 0L); }
+            @Override public boolean write(long account, long cursor) { persisted.put(account, cursor); return true; }
+        };
+        lookup = new NativeCommentThreadLookup(report(), getClass().getClassLoader(), diagnostics::add, cursorStore);
+        own.fallback = ownPage(true, 15, payload(original("root", "work")));
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        assertEquals("A repeated min cursor cannot mark an incomplete historical range as complete", Long.valueOf(15),
+                Long.valueOf(persisted.get(100L)));
+    }
+
+    @Test public void exhaustedHistoricalCursorWrapsToTheCurrentHeadForTheNextCycle() throws Exception {
+        Map<Long, Long> persisted = new HashMap<>();
+        persisted.put(100L, 20L);
+        NativeCommentThreadLookup.OwnCursorStore cursorStore = new NativeCommentThreadLookup.OwnCursorStore() {
+            @Override public long read(long account) { return persisted.getOrDefault(account, 0L); }
+            @Override public boolean write(long account, long cursor) { persisted.put(account, cursor); return true; }
+        };
+        lookup = new NativeCommentThreadLookup(report(), getClass().getClassLoader(), diagnostics::add, cursorStore);
+        own.pages.add(ownPage(true, 10, payload(original("head", "other-work"))));
+        own.pages.add(ownPage(false, 0));
+
+        assertTrue(lookup.resolve(100, hints("reply"), () -> true).isEmpty());
+        assertEquals(Long.valueOf(0), Long.valueOf(persisted.get(100L)));
+        assertEquals(Arrays.asList(0L, 20L), own.starts);
+
+        for (int page = 0; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+        assertTrue(lookup.resolve(100, hints("reply"), () -> true).isEmpty());
+        assertEquals(Arrays.asList(0L, 20L, 0L, 10L, 11L, 12L, 13L), own.starts);
+        assertEquals(Long.valueOf(14), Long.valueOf(persisted.get(100L)));
     }
 
     @Test public void threadPaginationPreservesBothNativeCursorForms() throws Exception {

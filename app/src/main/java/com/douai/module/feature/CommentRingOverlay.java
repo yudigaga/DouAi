@@ -91,7 +91,8 @@ public final class CommentRingOverlay {
         if (activity == null || activity.isFinishing() || activity.isDestroyed() || activity.getWindow() == null) return;
         View decor = activity.getWindow().getDecorView();
         if (!(decor instanceof ViewGroup)) return;
-        if (parent != decor) {
+        // The host can remove or reparent our View without changing its Activity/decor.
+        if (parent != decor || ring.getParent() != decor) {
             detach();
             parent = (ViewGroup) decor;
             parent.addView(ring, new FrameLayout.LayoutParams(dp(CommentRingView.TOUCH_WIDTH_DP), dp(CommentRingView.TOUCH_SIZE_DP)));
@@ -139,9 +140,9 @@ public final class CommentRingOverlay {
             diagnostic("detach", null);
             parent.requestDisallowInterceptTouchEvent(false);
             parent.removeOnLayoutChangeListener(layoutListener);
-            parent.removeView(ring);
-            parent = null;
         }
+        if (ring.getParent() instanceof ViewGroup) ((ViewGroup) ring.getParent()).removeView(ring);
+        parent = null;
         insetLeft = insetTop = insetRight = insetBottom = 0;
     }
 

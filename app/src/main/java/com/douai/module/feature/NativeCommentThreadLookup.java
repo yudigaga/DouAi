@@ -1,5 +1,8 @@
 package com.douai.module.feature;
 
+import android.content.Context;
+import android.content.SharedPreferences;
+
 import com.douai.module.diagnostics.DouAiLog;
 
 import com.douai.module.scan.HostScanReport;
@@ -55,6 +58,7 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
 
     private final Consumer<String> log;
     private final LongSupplier cacheClock;
+    private final OwnCursorStore ownCursorStore;
     private final Method ownFetch, threadFetch, contextFactory, workResolver, commentUser;
     private final Method taskWait, taskResult, taskFaulted, taskError, taskCancelled;
     private final Constructor<?> builderConstructor, requestConstructor;
@@ -73,14 +77,30 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
     private volatile boolean closed;
     private volatile Future<?> activeFuture;
 
+    interface OwnCursorStore {
+        long read(long account);
+        boolean write(long account, long cursor);
+    }
+
     NativeCommentThreadLookup(HostScanReport report, ClassLoader loader, Consumer<String> log) throws Exception {
-        this(report, loader, log, System::nanoTime);
+        this(report, loader, log, System::nanoTime, new MemoryOwnCursorStore());
     }
 
     NativeCommentThreadLookup(HostScanReport report, ClassLoader loader, Consumer<String> log,
                               LongSupplier cacheClock) throws Exception {
+        this(report, loader, log, cacheClock, new MemoryOwnCursorStore());
+    }
+
+    NativeCommentThreadLookup(HostScanReport report, ClassLoader loader, Consumer<String> log,
+                              OwnCursorStore ownCursorStore) throws Exception {
+        this(report, loader, log, System::nanoTime, ownCursorStore);
+    }
+
+    private NativeCommentThreadLookup(HostScanReport report, ClassLoader loader, Consumer<String> log,
+                              LongSupplier cacheClock, OwnCursorStore ownCursorStore) throws Exception {
         this.log = log;
         this.cacheClock = cacheClock;
+        this.ownCursorStore = ownCursorStore;
         ownFetch = HostTargets.method(report, "comment_reply_own_fetch", loader);
         Class<?> ownProvider = HostTargets.type(report, "comment_reply_own_provider", loader);
         provider = HostTargets.field(ownProvider, "b");
@@ -148,6 +168,29 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
         builderUid = field(builderClass, "LJJIII", String.class);
     }
 
+    static OwnCursorStore preferencesStore(Context context) {
+        if (context == null) throw new IllegalArgumentException("Application context is required");
+        Context application = context.getApplicationContext();
+        if (application == null) application = context;
+        SharedPreferences preferences = application.getSharedPreferences("douai_comment_reply_thread_lookup", Context.MODE_PRIVATE);
+        return new OwnCursorStore() {
+            private String key(long account) { return "own_cursor." + account; }
+            @Override public long read(long account) {
+                try { return Math.max(0, preferences.getLong(key(account), 0)); }
+                catch (RuntimeException corrupt) { return 0; }
+            }
+            @Override public boolean write(long account, long cursor) {
+                return preferences.edit().putLong(key(account), Math.max(0, cursor)).commit();
+            }
+        };
+    }
+
+    private static final class MemoryOwnCursorStore implements OwnCursorStore {
+        private final Map<Long, Long> cursors = new LinkedHashMap<>();
+        @Override public synchronized long read(long account) { return cursors.getOrDefault(account, 0L); }
+        @Override public synchronized boolean write(long account, long cursor) { cursors.put(account, Math.max(0, cursor)); return true; }
+    }
+
     @Override public synchronized List<Match> resolve(long account, List<Hint> hints, BooleanSupplier valid) throws Exception {
         long started = System.nanoTime();
         try { return resolveNow(account, hints, valid, started + ROUND_TIMEOUT, true, started, new HashSet<>()); }
@@ -174,7 +217,7 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
         if (pending.isEmpty()) return Collections.emptyList();
         safeLog("Comment reply own comments read started: hints=" + pending.size());
         long ownStarted = System.nanoTime();
-        OwnLoad ownLoad = loadOwnRoots(me, valid, deadline, pending,
+        OwnLoad ownLoad = loadOwnRoots(account, me, valid, deadline, pending,
                 allowCachedWindow && covers(pending, me), revoked);
         int ownPages = ownLoad.pages;
         long ownMillis = elapsedMillis(ownStarted);
@@ -259,9 +302,10 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
         return matches;
     }
 
-    private OwnLoad loadOwnRoots(String me, BooleanSupplier valid, long deadline,
+    private OwnLoad loadOwnRoots(long account, String me, BooleanSupplier valid, long deadline,
                                  List<Hint> hints, boolean canReuseWindow, Set<String> revoked) throws Exception {
         long cursor = 0;
+        long historyCursor = Math.max(0, ownCursorStore.read(account));
         Set<String> confirmed = new LinkedHashSet<>();
         // Keep negative evidence across this resolve's cache-miss refresh; a later independent
         // resolve starts with a new set and can observe an original becoming visible again.
@@ -269,8 +313,16 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
         Set<Long> seenCursors = new HashSet<>();
         int stalled = 0;
         int pages = 0;
+        boolean historyResumed = false;
+        Set<String> refreshedRoots = new HashSet<>();
         ownMorePending = false;
         for (int page = 0; page < OWN_PAGES; page++) {
+            if (page == 1 && historyCursor > 0 && historyCursor != cursor) {
+                cursor = historyCursor;
+                seenCursors.clear();
+                stalled = 0;
+                historyResumed = true;
+            }
             check(valid, deadline);
             seenCursors.add(cursor);
             Object api = provider.get(null);
@@ -291,7 +343,8 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
                 }
                 Root root = new Root(work, comment, string(workAid.get(work)), string(cid.get(comment)), createdAt.getLong(comment));
                 if (!revoked.contains(root.cid) && payloadInvisible.getInt(item) == 0 && validRoot(root, me)) {
-                    remember(root);
+                    remember(root, refreshedRoots);
+                    refreshedRoots.add(root.aid + ":" + root.cid);
                     confirmed.add(root.aid + ":" + root.cid);
                 } else { revoked.add(root.cid); forget(root.cid); }
             }
@@ -316,21 +369,31 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
                     if (roots.containsKey(key)) coveredRoots.put(key, new RootCoverage(now, valid));
                 }
             }
+            // Wrap at the end so comments added while the historical pass ran are covered next cycle.
+            long nextHistoryCursor = ended || !ownMorePending ? 0 : cursor;
+            if (!ownCursorStore.write(account, nextHistoryCursor)) {
+                throw new IllegalStateException("thread_lookup_cursor_persist_failed");
+            }
         }
+        safeLog("Comment reply own cursor: history=" + (historyResumed ? "resumed" : "head")
+                + "; persisted=" + (progressed && (ended || pages == OWN_PAGES) ? "advanced" : "unchanged"));
         return new OwnLoad(pages, false);
     }
 
-    private void remember(Root root) {
+    private void remember(Root root, Set<String> refreshedRoots) {
         synchronized (stateLock) {
             if (closed) return;
             String key = root.aid + ":" + root.cid;
+            roots.remove(key);
             roots.put(key, root);
             while (roots.size() > MAX_ROOTS) {
-                Map.Entry<String, Root> oldest = null;
-                for (Map.Entry<String, Root> item : roots.entrySet()) {
-                    if (oldest == null || item.getValue().createdAt < oldest.getValue().createdAt) oldest = item;
+                String oldest = null;
+                for (String candidate : roots.keySet()) {
+                    if (!refreshedRoots.contains(candidate)) { oldest = candidate; break; }
                 }
-                if (oldest != null) { coveredRoots.remove(oldest.getKey()); roots.remove(oldest.getKey()); }
+                if (oldest == null) oldest = roots.keySet().iterator().next();
+                coveredRoots.remove(oldest);
+                roots.remove(oldest);
             }
         }
     }

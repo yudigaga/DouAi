@@ -133,6 +133,14 @@ public final class ChatCompletionClient {
                 requestSent, MAX_REPLY_CHARS);
     }
 
+    /** Cumulative visible text for manual chat; partials are provisional until the returned reply validates. */
+    public synchronized String replyStreaming(String conversation, String prompt, List<ChatImage> images,
+                                             AiModelSettings settings, String secondaryPrompt, boolean remember,
+                                             String document, Consumer<String> onPartial) throws Exception {
+        return replyWithLimit(conversation, prompt, images, settings, secondaryPrompt, remember, document,
+                ignored -> { }, MAX_REPLY_CHARS, onPartial);
+    }
+
     /** Only structured analysis may carry bounded fences/whitespace around its 4000-char canonical JSON. */
     public synchronized String replyStructuredAnalysis(String conversation, String prompt,
                                      AiModelSettings settings, String secondaryPrompt, String document) throws Exception {
@@ -143,6 +151,14 @@ public final class ChatCompletionClient {
     private String replyWithLimit(String conversation, String prompt, List<ChatImage> images,
                                   AiModelSettings settings, String secondaryPrompt, boolean remember,
                                    String document, IntConsumer requestSent, int maximumReplyChars) throws Exception {
+        return replyWithLimit(conversation, prompt, images, settings, secondaryPrompt, remember, document,
+                requestSent, maximumReplyChars, null);
+    }
+
+    private String replyWithLimit(String conversation, String prompt, List<ChatImage> images,
+                                  AiModelSettings settings, String secondaryPrompt, boolean remember,
+                                   String document, IntConsumer requestSent, int maximumReplyChars,
+                                   Consumer<String> onPartial) throws Exception {
         AiModelConfig config = settings.selected();
         String secondary = secondaryPrompt == null ? "" : secondaryPrompt;
         List<ChatImage> attachments = images == null ? Collections.emptyList() : new ArrayList<>(images);
@@ -158,17 +174,20 @@ public final class ChatCompletionClient {
         config.validate(true);
         if (config.streaming()) {
             return sendBoundedStream(config, conversationValue, promptValue, fixedAttachments, secondary,
-                     remember, documentValue, sent, maximumReplyChars);
+                     remember, documentValue, sent, maximumReplyChars, onPartial);
         }
+        ActiveRequest request = new ActiveRequest();
+        request.onPartial = onPartial;
         return send(config, conversationValue, promptValue, fixedAttachments, secondary, remember, documentValue,
-                sent, maximumReplyChars, new ActiveRequest(), null);
+                sent, maximumReplyChars, request, null);
     }
 
     /** The caller's deadline never waits for a platform socket read or its potentially blocking close. */
     private String sendBoundedStream(AiModelConfig config, String conversation, String prompt, List<ChatImage> images,
                                        String secondary, boolean remember, String document, IntConsumer sent,
-                                       int maximumReplyChars) throws Exception {
+                                       int maximumReplyChars, Consumer<String> onPartial) throws Exception {
         ActiveRequest request = new ActiveRequest();
+        request.onPartial = onPartial;
         request.asynchronous = true;
         RequestDeadline deadline = new RequestDeadline(System.nanoTime(), config.timeoutSeconds);
         FutureTask<String> io = new FutureTask<>(() -> send(config, conversation, prompt, images, secondary, remember,
@@ -447,6 +466,7 @@ public final class ChatCompletionClient {
             }
             if (result.isEmpty()) throw new ReplyFailure(ReplyFailure.Kind.EMPTY, status, 0);
             if (result.length() > maximumReplyChars) throw new ReplyFailure(ReplyFailure.Kind.OVERLONG, status, result.length());
+            publishPartial(request, deadline, result);
             synchronized (requestLock) {
                 ensureActive(request);
                 Runnable commit = () -> {
@@ -500,7 +520,8 @@ public final class ChatCompletionClient {
         if (sse) {
             try {
                 return ProtocolResponseStream.read(config.protocol, guarded, maximumReplyChars,
-                        () -> deadline.beforeIo(request, connection), value -> streamDiagnostic(request, deadline, value));
+                        () -> deadline.beforeIo(request, connection), value -> streamDiagnostic(request, deadline, value),
+                        request.onPartial == null ? null : value -> publishPartial(request, deadline, value));
             } catch (ResponsesAnalysisStream.Failure failure) {
                 ReplyFailure.Kind kind;
                 switch (failure.kind) {
@@ -519,6 +540,17 @@ public final class ChatCompletionClient {
         }
         catch (ReplyFailure failure) { throw failure; }
         catch (Exception invalid) { throw new ReplyFailure(ReplyFailure.Kind.FORMAT, status, -1); }
+    }
+
+    private static void publishPartial(ActiveRequest request, RequestDeadline deadline, String text)
+            throws java.net.SocketTimeoutException {
+        if (request.onPartial == null || text.equals(request.lastPartial)) return;
+        ensureActive(request);
+        if (deadline != null) deadline.remainingMillis();
+        request.onPartial.accept(text);
+        request.lastPartial = text;
+        ensureActive(request);
+        if (deadline != null) deadline.remainingMillis();
     }
 
     private void streamDiagnostic(ActiveRequest request, RequestDeadline deadline, String value) {
@@ -590,6 +622,8 @@ public final class ChatCompletionClient {
         HttpURLConnection cleanupConnection;
         InputStream cleanupInput;
         Runnable commitHistory;
+        Consumer<String> onPartial;
+        String lastPartial;
     }
 
     private static final class RequestDeadline {

@@ -65,6 +65,8 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
+import java.util.function.Consumer;
 
 import static org.junit.Assert.*;
 
@@ -142,6 +144,40 @@ public final class NativeAiConversationTest {
         assertEquals("模型回复", renderedText(1));
         assertEquals("下一条草稿", nativeViews.input.getText().toString());
         assertTrue(TextOnlyCellUI.createCalls >= 2);
+    }
+
+    @Test public void nativeBubbleShowsStreamBeforeCompletionWithoutReplacingHostWidgets() throws Exception {
+        session.streamStarted = new CountDownLatch(1);
+        session.streamContinue = new CountDownLatch(1);
+        submit("原生流式回复");
+        View originalRow = row(1);
+        View originalText = originalRow.findViewById(0x7f0a1dbf);
+        View originalComposer = nativeViews.input;
+        Thread io = new Thread(worker::runNext, "native-stream-provider");
+        io.start();
+        try {
+            assertTrue(session.streamStarted.await(5, TimeUnit.SECONDS));
+            Thread firstChunk = new Thread(() -> session.onPartial.accept("第一段"), "native-stream-chunk");
+            firstChunk.start();
+            firstChunk.join(5000);
+            assertFalse(firstChunk.isAlive());
+            ShadowLooper.idleMainLooper();
+            assertTrue("Native bubble updates while provider is still running", io.isAlive());
+            View rebound = messages.getAdapter().getView(1 + messages.getHeaderViewsCount(), originalRow, messages);
+            assertSame(originalRow, rebound);
+            assertSame(originalText, rebound.findViewById(0x7f0a1dbf));
+            assertEquals("第一段", ((IMMsgTextView) originalText).getText().toString());
+            assertSame(originalComposer, nativeViews.input);
+            assertEquals(2, messageCount());
+            session.answer = "第一段，最终完成";
+        } finally {
+            session.streamContinue.countDown();
+            io.join(5000);
+        }
+        assertFalse(io.isAlive());
+        ShadowLooper.idleMainLooper();
+        assertEquals("第一段，最终完成", renderedText(1));
+        assertEquals(2, messageCount());
     }
 
     @Test public void nativeSendStopsBeforeProviderAndClearRejectsAnAlreadyPostedReply() throws Exception {
@@ -752,6 +788,9 @@ public final class NativeAiConversationTest {
         String answer = "模型回复";
         int cancelCalls;
         boolean historyOnMain;
+        Consumer<String> onPartial;
+        CountDownLatch streamStarted;
+        CountDownLatch streamContinue;
 
         @Override public String reply(String prompt, List<ChatImage> attachments) throws Exception {
             prompts.add(prompt);
@@ -763,6 +802,15 @@ public final class NativeAiConversationTest {
         @Override public String reply(String prompt, List<ChatImage> attachments, String document) throws Exception {
             documents.add(document);
             return reply(prompt, attachments);
+        }
+        @Override public String replyStreaming(String prompt, List<ChatImage> attachments, String document,
+                                               Consumer<String> progress) throws Exception {
+            onPartial = progress;
+            if (streamStarted != null) streamStarted.countDown();
+            if (streamContinue != null && !streamContinue.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Native streaming test was not released");
+            }
+            return reply(prompt, attachments, document);
         }
         @Override public List<TestChatMemory.Turn> savedTurns() {
             historyOnMain = Looper.myLooper() == Looper.getMainLooper();

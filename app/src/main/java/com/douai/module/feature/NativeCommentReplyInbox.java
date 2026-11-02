@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import android.content.Context;
+
 import com.douai.module.diagnostics.DouAiLog;
 
 import com.douai.module.scan.HostScanReport;
@@ -191,9 +193,10 @@ final class NativeCommentReplyInbox implements AutoCloseable {
     }
 
     static NativeCommentReplyInbox install(XposedInterface framework, HostScanReport report,
-                                          ClassLoader loader, Consumer<String> log,
+                                          ClassLoader loader, Context context, Consumer<String> log,
                                           Runnable incomingSignal) throws Exception {
-        NativeCommentThreadLookup lookup = new NativeCommentThreadLookup(report, loader, log);
+        NativeCommentThreadLookup lookup = new NativeCommentThreadLookup(report, loader, log,
+                NativeCommentThreadLookup.preferencesStore(context));
         NativeCommentReplyInbox inbox;
         try { inbox = new NativeCommentReplyInbox(report, loader, log, lookup); }
         catch (Exception failure) { lookup.close(); throw failure; }

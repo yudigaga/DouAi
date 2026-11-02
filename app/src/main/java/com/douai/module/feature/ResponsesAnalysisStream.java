@@ -22,6 +22,7 @@ final class ResponsesAnalysisStream {
     static final int MAX_FRAMES = 65_536;
 
     interface IoGuard { void check() throws IOException; }
+    interface PartialText { void accept(String snapshot) throws IOException; }
 
     static final class Failure extends IOException {
         enum Kind { INCOMPLETE, EMPTY, OVERLONG, FORMAT }
@@ -34,24 +35,32 @@ final class ResponsesAnalysisStream {
     }
 
     static String read(InputStream source, int maximumChars, IoGuard guard, Consumer<String> diagnostics) throws IOException {
-        return new Decoder(source, maximumChars, guard, diagnostics).read();
+        return read(source, maximumChars, guard, diagnostics, null);
+    }
+
+    static String read(InputStream source, int maximumChars, IoGuard guard, Consumer<String> diagnostics,
+                       PartialText onPartial) throws IOException {
+        return new Decoder(source, maximumChars, guard, diagnostics, onPartial).read();
     }
 
     private static final class Decoder {
         private final int maximumChars;
         private final IoGuard guard;
         private final Consumer<String> diagnostics;
+        private final PartialText onPartial;
         private final CountingInput input;
         private final StringBuilder data = new StringBuilder();
         private final StringBuilder deltas = new StringBuilder();
         private String eventName = "";
         private int frames;
         private boolean firstText;
+        private String lastPartial = "";
 
-        Decoder(InputStream source, int maximumChars, IoGuard guard, Consumer<String> diagnostics) {
+        Decoder(InputStream source, int maximumChars, IoGuard guard, Consumer<String> diagnostics, PartialText onPartial) {
             this.maximumChars = maximumChars;
             this.guard = guard;
             this.diagnostics = diagnostics;
+            this.onPartial = onPartial;
             this.input = new CountingInput(source, guard);
         }
 
@@ -127,6 +136,7 @@ final class ResponsesAnalysisStream {
                         if (!(delta instanceof String)) throw failure(Failure.Kind.FORMAT);
                         append(deltas, (String) delta);
                         if (!firstText && !((String) delta).isEmpty()) { firstText = true; diagnostic("stream_first_text"); }
+                        publishPartial(deltas.toString());
                         return null;
                     }
                     case "response.completed": {
@@ -140,6 +150,7 @@ final class ResponsesAnalysisStream {
                         if (result.trim().isEmpty()) throw failure(Failure.Kind.EMPTY);
                         guard.check();
                         diagnostic("stream_complete", result.length());
+                        publishPartial(result);
                         return result;
                     }
                     default: throw failure(Failure.Kind.INCOMPLETE);
@@ -176,6 +187,13 @@ final class ResponsesAnalysisStream {
         private void append(StringBuilder text, String value) throws IOException {
             if (value.length() > maximumChars - text.length()) throw new Failure(Failure.Kind.OVERLONG, text.length() + value.length());
             text.append(value);
+        }
+        private void publishPartial(String snapshot) throws IOException {
+            if (onPartial == null || snapshot.isEmpty() || snapshot.equals(lastPartial)) return;
+            guard.check();
+            onPartial.accept(snapshot);
+            lastPartial = snapshot;
+            guard.check();
         }
         private Failure failure(Failure.Kind kind) { return new Failure(kind, deltas.length()); }
         private void diagnostic(String stage) { diagnostic(stage, deltas.length()); }

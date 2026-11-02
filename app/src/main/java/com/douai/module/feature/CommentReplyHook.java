@@ -155,7 +155,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         NativeCommentReplyInbox inbox = null;
         CommentReplyHook[] installed = new CommentReplyHook[1];
         try {
-            inbox = NativeCommentReplyInbox.install(framework, report, loader, log, () -> {
+            inbox = NativeCommentReplyInbox.install(framework, report, loader, context, log, () -> {
                 CommentReplyHook hook = installed[0];
                 if (hook != null) hook.signal();
             });
@@ -309,7 +309,12 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                         if (tasks.containsKey(identity)) { deferred = true; continue; }
                         int threadLimit = MAX_THREAD_REPLIES;
                         if (ledger.threadExhausted(account, event.rootId, threadLimit)) { DouAiLog.event("auto_comment_reply", "eligibility", "thread_limit", "limit=" + threadLimit); continue; }
-                        if (ledger.contains(account, event.incomingId) && !ledger.retryable(account, event.incomingId)) { DouAiLog.event("auto_comment_reply", "eligibility", "ledger_duplicate_or_not_retryable", "incoming_ref=" + DouAiLog.reference(event.incomingId)); continue; }
+                        if (ledger.contains(account, event.incomingId) && !ledger.retryable(account, event.incomingId)) {
+                            DouAiLog.event("auto_comment_reply", "eligibility", "ledger_duplicate_or_not_retryable",
+                                    "incoming_ref=" + DouAiLog.reference(event.incomingId)
+                                            + ";ledger_status=" + ledger.diagnosticStatus(account, event.incomingId));
+                            continue;
+                        }
                         if (tasks.size() >= MAX_PENDING || !rateLimiter.canSend(KIND, account, event.senderUid, options)) {
                             deferred = true;
                             continue;

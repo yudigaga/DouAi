@@ -229,6 +229,24 @@ final class CommentReplyLedger {
         synchronized (LOCK) { return account > 0 && validId(incomingId) && preferences.contains(key(account, incomingId)); }
     }
 
+    /** Returns only a fixed status label for diagnostics; never exposes stored comment data. */
+    String diagnosticStatus(long account, String incomingId) {
+        if (account <= 0 || !validId(incomingId)) return "invalid";
+        synchronized (LOCK) {
+            Object value = preferences.getAll().get(key(account, incomingId));
+            if (value == null) return "missing";
+            Record stored = record(value);
+            if (stored == null || stored.rootId.isEmpty() && !"ignored".equals(stored.status)) return "corrupt";
+            switch (stored.status) {
+                case "sent": case "unknown": case "pending": case "submitted":
+                case "ignored": case "failed": case "cancelled": case "deferred":
+                    return stored.status;
+                default:
+                    return "corrupt";
+            }
+        }
+    }
+
     /** Whether another attempt remains, independently of the retry delay. */
     boolean retryable(long account, String incomingId) {
         if (account <= 0 || !validId(incomingId)) return false;
