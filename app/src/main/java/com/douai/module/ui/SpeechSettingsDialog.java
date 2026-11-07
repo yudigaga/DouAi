@@ -65,7 +65,7 @@ import java.util.function.Consumer;
 
 /** Provider-specific settings using the host's existing dialog ownership. */
 final class SpeechSettingsDialog implements AutoCloseable {
-    private static final String VOICE_SAMPLE = "tts_voice_sample";
+    private static final String VOICE_SAMPLE = SpeechSettings.VOICE_SAMPLE;
     private static final String SYNTHESIS_SAMPLE = "tts_synthesis_sample";
     private static final String BREEZE_ADVANCED = "Breeze Blue 高级设置";
     private static final String BREEZE_AUDIO = "Breeze Blue 音频输出";
@@ -147,8 +147,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
                     cancelFetch();
                     discardFishCatalog();
                     discardBreezeCatalog();
-                    if (speech.fish && which != 4) clearCatalogSample(true);
-                    if (speech.breeze && which != 3) clearCatalogSample(false);
                     stopEnhancement();
                     stopNameTranslation("音色来源已变化，已停止翻译");
                     instructionEditor = null;
@@ -156,6 +154,23 @@ final class SpeechSettingsDialog implements AutoCloseable {
                     choice.dismiss();
                     render();
                 }).setNegativeButton("取消", null).create(), null));
+        String random = speech.randomMode;
+        option("随机音色", SpeechSettings.RANDOM_ALL.equals(random) ? "大随机（跨来源）"
+                : SpeechSettings.RANDOM_CURRENT.equals(random) ? "小随机（当前来源）" : "关闭",
+                () -> show(builder("随机音色").setSingleChoiceItems(
+                        new String[]{"关闭", "小随机（当前来源）", "大随机（跨来源）"},
+                        SpeechSettings.RANDOM_ALL.equals(random) ? 2 : SpeechSettings.RANDOM_CURRENT.equals(random) ? 1 : 0,
+                        (choice, which) -> {
+                            if (closed) return;
+                            store.putString(SpeechSettings.RANDOM_MODE, which == 2 ? SpeechSettings.RANDOM_ALL
+                                    : which == 1 ? SpeechSettings.RANDOM_CURRENT : SpeechSettings.RANDOM_OFF);
+                            stopPreview();
+                            choice.dismiss();
+                            render();
+                        }).setNegativeButton("取消", null).create(), null));
+        if (!SpeechSettings.RANDOM_OFF.equals(random)) {
+            hint(content, "speech.random.hint", "小随机仅当前来源，大随机跨有效来源；先刷新音色列表。系统引擎仅使用当前语言的离线音色。");
+        }
         if (speech.fish) {
             FishSpeechSettings fish = speech.fishSettings;
             option("语音引擎", fish.engine, this::selectFishModel);
@@ -1719,8 +1734,10 @@ final class SpeechSettingsDialog implements AutoCloseable {
         editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
             try {
                 String value = sample.getText().toString();
-                VoiceCatalog.parse(value, settings());
+                SpeechSettings current = settings();
+                VoiceCatalog.parse(value, current);
                 store.putString(VOICE_SAMPLE, value);
+                store.putString(VoiceCatalogLabels.queryStorageKey(current), VoiceCatalogLabels.queryKey(current));
                 cancelFetch();
                 editor.dismiss();
                 render();
@@ -1742,6 +1759,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
             } catch (IllegalArgumentException invalid) { toast(error(invalid)); return; }
         }
         SpeechHttpClient.Request request = new SpeechHttpClient.Request();
+        String queryKey = VoiceCatalogLabels.queryKey(settings);
         fetch = request;
         toast("正在获取音色列表");
         try {
@@ -1763,9 +1781,11 @@ final class SpeechSettingsDialog implements AutoCloseable {
                         if (closed || fetch != request) return;
                         fetch = null;
                         future = null;
-                        if (settings.breeze && !canUseBreeze()) return;
-                        if (settings.fish && !canUseFish()) return;
+                        SpeechSettings current = settings();
+                        if (settings.minimax != current.minimax || settings.thirdParty != current.thirdParty
+                                || !queryKey.equals(VoiceCatalogLabels.queryKey(current))) return;
                         store.putString(voiceSampleKey(settings), sample);
+                        store.putString(VoiceCatalogLabels.queryStorageKey(settings), queryKey);
                         render();
                         chooseVoices(entries);
                     });
@@ -2662,10 +2682,17 @@ final class SpeechSettingsDialog implements AutoCloseable {
         }
         if (SpeechSettings.MINIMAX_API_KEY.equals(key) || SpeechSettings.MINIMAX_BASE_URL.equals(key)) {
             store.putString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "");
+            store.putString(VoiceCatalogLabels.MINIMAX_QUERY_KEY, "");
             if ("api".equals(store.getString(SpeechSettings.MINIMAX_MODEL_SOURCE, ""))) {
                 store.putString(SpeechSettings.MINIMAX_MODEL_SAMPLE, "");
                 store.putString(SpeechSettings.MINIMAX_MODEL_SOURCE, "");
             }
+        }
+        if (SpeechSettings.GET_TEMPLATE.equals(key) || SpeechSettings.HEADERS.equals(key)
+                || SpeechSettings.VOICE_GET_TEMPLATE.equals(key) || SpeechSettings.VOICE_HEADERS.equals(key)
+                || SpeechSettings.VOICE_LIST_PATH.equals(key) || SpeechSettings.VOICE_ID_PATH.equals(key)
+                || SpeechSettings.VOICE_NAME_PATH.equals(key)) {
+            store.putString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, "");
         }
     }
 
@@ -2695,13 +2722,19 @@ final class SpeechSettingsDialog implements AutoCloseable {
 
     private Map<String, Object> speechValues() {
         Map<String, Object> values = new LinkedHashMap<>();
-        for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.GET_TEMPLATE, SpeechSettings.HEADERS,
+        for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.RANDOM_MODE,
+                SpeechSettings.GET_TEMPLATE, SpeechSettings.HEADERS,
                 SpeechSettings.AUDIO_FIELD, SpeechSettings.VOICE_GET_TEMPLATE, SpeechSettings.VOICE_HEADERS,
                 SpeechSettings.VOICE_LIST_PATH, SpeechSettings.VOICE_ID_PATH, SpeechSettings.VOICE_NAME_PATH,
-                SpeechSettings.SELECTED_VOICE, SpeechSettings.SELECTED_VOICE_NAME, "tts_engine", "tts_language", SpeechSettings.RATE, SpeechSettings.PITCH,
+                SpeechSettings.SELECTED_VOICE, SpeechSettings.SELECTED_VOICE_NAME,
+                SpeechSettings.LOCAL_VOICE_NAME, "tts_engine", "tts_language", SpeechSettings.RATE, SpeechSettings.PITCH,
                 SpeechSettings.MINIMAX_API_KEY, SpeechSettings.MINIMAX_BASE_URL, SpeechSettings.MINIMAX_MODEL,
                 SpeechSettings.MINIMAX_VOICE_ID, SpeechSettings.MINIMAX_VOICE_NAME, SpeechSettings.MINIMAX_SPEED,
-                SpeechSettings.MINIMAX_VOLUME, SpeechSettings.MINIMAX_PITCH}) {
+                SpeechSettings.MINIMAX_VOLUME, SpeechSettings.MINIMAX_PITCH,
+                SpeechSettings.VOICE_SAMPLE, SpeechSettings.MINIMAX_VOICE_SAMPLE,
+                BreezeSpeechSettings.VOICE_SAMPLE, FishSpeechSettings.VOICE_SAMPLE,
+                VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, VoiceCatalogLabels.MINIMAX_QUERY_KEY,
+                VoiceCatalogLabels.BREEZE_QUERY_KEY, VoiceCatalogLabels.FISH_QUERY_KEY}) {
             String value = store.getString(key, null);
             if (value != null) values.put(key, value);
         }

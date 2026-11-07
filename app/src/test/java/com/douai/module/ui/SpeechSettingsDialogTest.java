@@ -113,6 +113,51 @@ public final class SpeechSettingsDialogTest {
         assertEquals("https://example.com/speak?text={text}", store.getString(SpeechSettings.GET_TEMPLATE, ""));
     }
 
+    @Test public void randomVoiceChoicePersistsAndReopensWithoutChangingManualSource() {
+        open(false);
+        assertEquals("关闭", value("随机音色"));
+        AlertDialog modes = option("随机音色");
+        assertEquals("关闭", modes.getListView().getAdapter().getItem(0));
+        assertEquals("小随机（当前来源）", modes.getListView().getAdapter().getItem(1));
+        assertEquals("大随机（跨来源）", modes.getListView().getAdapter().getItem(2));
+        modes.getListView().performItemClick(null, 1, 1);
+        assertEquals(SpeechSettings.RANDOM_CURRENT, store.getString(SpeechSettings.RANDOM_MODE, ""));
+        assertEquals("小随机（当前来源）", value("随机音色"));
+        assertNotNull(root.findViewWithTag("speech.random.hint"));
+        modes = option("随机音色");
+        modes.getListView().performItemClick(null, 2, 2);
+        assertEquals(SpeechSettings.RANDOM_ALL, store.getString(SpeechSettings.RANDOM_MODE, ""));
+        page.close(); page.dialog().dismiss();
+        open(false);
+        assertEquals("大随机（跨来源）", value("随机音色"));
+        assertEquals(SpeechSettings.LOCAL, store.getString(SpeechSettings.PROVIDER, SpeechSettings.LOCAL));
+        modes = option("随机音色");
+        modes.getListView().performItemClick(null, 0, 0);
+        assertEquals(SpeechSettings.RANDOM_OFF, store.getString(SpeechSettings.RANDOM_MODE, ""));
+        assertNull(root.findViewWithTag("speech.random.hint"));
+    }
+
+    @Test public void switchingSourcesKeepsValidFishAndBreezeVoiceCatalogs() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.FISH);
+        store.putString(FishSpeechSettings.API_KEY, "fish-key");
+        store.putString(BreezeSpeechSettings.API_KEY, "breeze-key");
+        String fish = "[{\"id\":\"fish-cached\",\"name\":\"Fish\"}]";
+        String breeze = "[{\"id\":\"breeze-cached\",\"name\":\"Breeze\"}]";
+        store.putString(FishSpeechSettings.VOICE_SAMPLE, fish);
+        store.putString(VoiceCatalogLabels.FISH_QUERY_KEY, VoiceCatalogLabels.queryKey(speechSettings()));
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.BREEZE);
+        store.putString(BreezeSpeechSettings.VOICE_SAMPLE, breeze);
+        store.putString(VoiceCatalogLabels.BREEZE_QUERY_KEY, VoiceCatalogLabels.queryKey(speechSettings()));
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.FISH);
+        open(false);
+        chooseProvider(3);
+        chooseProvider(1);
+        assertEquals(fish, store.getString(FishSpeechSettings.VOICE_SAMPLE, ""));
+        assertEquals(breeze, store.getString(BreezeSpeechSettings.VOICE_SAMPLE, ""));
+        chooseProvider(4);
+        assertEquals("Fish · fish-cached", fishSingleVoice().getListView().getAdapter().getItem(1));
+    }
+
     @Test public void breezeControlsKeepTheMiniMaxLayoutAndIndependentSettings() {
         store.putString(SpeechSettings.MINIMAX_API_KEY, "minimax-private-key");
         store.putString(SpeechSettings.MINIMAX_VOICE_ID, "mini-voice");
@@ -1888,6 +1933,8 @@ public final class SpeechSettingsDialogTest {
             assertEquals("/v1/get_voice", request.getPath());
             assertEquals("Bearer fixture-key", request.getHeader("Authorization"));
             await(() -> !store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "").isEmpty());
+            assertEquals(VoiceCatalogLabels.queryKey(speechSettings()),
+                    store.getString(VoiceCatalogLabels.MINIMAX_QUERY_KEY, ""));
             AlertDialog choice = (AlertDialog) ShadowDialog.getLatestDialog();
             assertEquals(2, choice.getListView().getAdapter().getCount());
             choice.getListView().performItemClick(null, 1, 1);
@@ -1898,6 +1945,7 @@ public final class SpeechSettingsDialogTest {
             input(apiKey, "API Key").setText("new-key");
             save(apiKey);
             assertEquals("", store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, ""));
+            assertEquals("", store.getString(VoiceCatalogLabels.MINIMAX_QUERY_KEY, ""));
             assertEquals("7. Third Voice", store.getString("tts_voice_sample", ""));
         }
     }
@@ -2211,10 +2259,67 @@ public final class SpeechSettingsDialogTest {
             assertNull(request.getRequestUrl().query());
             assertEquals("catalog-key", request.getHeader("X-Catalog"));
             await(() -> body.toString().equals(store.getString("tts_voice_sample", "")));
+            assertEquals(VoiceCatalogLabels.queryKey(speechSettings()),
+                    store.getString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, ""));
             AlertDialog choice = (AlertDialog) ShadowDialog.getLatestDialog();
             assertEquals(223, choice.getListView().getAdapter().getCount());
             choice.getListView().performItemClick(null, 222, 222);
             assertEquals("223", store.getString(SpeechSettings.SELECTED_VOICE, ""));
+        }
+    }
+
+    @Test public void pastedThirdPartyCatalogBindsToCurrentQuery() {
+        store.putString(SpeechSettings.GET_TEMPLATE, "https://example.com/tts?text={text}&voice={voice}");
+        open(true);
+        AlertDialog advanced = option("音色高级设置");
+        AlertDialog editor = option(advanced.getWindow().getDecorView(), "音色列表样本");
+        input(editor, "音色列表样本").setText("7. Cached voice");
+        save(editor);
+        assertEquals("7. Cached voice", store.getString(SpeechSettings.VOICE_SAMPLE, ""));
+        assertEquals(VoiceCatalogLabels.queryKey(speechSettings()),
+                store.getString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, ""));
+    }
+
+    @Test public void lateThirdPartyCatalogDoesNotBindToChangedQuery() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("7. Old voice").setBodyDelay(250, TimeUnit.MILLISECONDS));
+            server.start();
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/old").toString());
+            store.putString(SpeechSettings.VOICE_SAMPLE, "9. Saved voice");
+            open(true);
+            fieldParent("刷新音色").findViewWithTag("settings.option.刷新音色").performClick();
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/changed").toString());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+            while (System.nanoTime() < deadline) {
+                ShadowLooper.idleMainLooper(); LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+            }
+            assertEquals("9. Saved voice", store.getString(SpeechSettings.VOICE_SAMPLE, ""));
+            assertEquals("", store.getString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, ""));
+        }
+    }
+
+    @Test public void globalPreviewUsesBoundCatalogFromAnotherSourceWithoutChangingManualVoice() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+            server.start();
+            store.putString("tts_engine", "missing.test.engine");
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.THIRD_PARTY);
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/tts") + "?text={text}&voice={voice}");
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
+            store.putString(SpeechSettings.SELECTED_VOICE, "manual-voice");
+            store.putString(SpeechSettings.VOICE_SAMPLE, "7. Cached voice");
+            store.putString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, VoiceCatalogLabels.queryKey(speechSettings()));
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            open(false);
+            AlertDialog preview = option("试听");
+            preview.getWindow().getDecorView().findViewWithTag("speech.preview.start").performClick();
+            RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(request);
+            assertEquals("7", request.getRequestUrl().queryParameter("voice"));
+            assertEquals("manual-voice", store.getString(SpeechSettings.SELECTED_VOICE, ""));
+            assertEquals(SpeechSettings.MINIMAX, store.getString(SpeechSettings.PROVIDER, ""));
         }
     }
 
@@ -2646,8 +2751,21 @@ public final class SpeechSettingsDialogTest {
                 return Unit.INSTANCE;
             });
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.语音来源"), false));
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.随机音色"), false));
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.合成 GET"), false));
             savePreview(page.dialog(), "speech-settings");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.随机音色"), false));
+            Dialog randomPicker = children.get(children.size() - 1);
+            for (int index = 0; index < 3; index++) {
+                AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.choice." + index), false));
+            }
+            savePreview(randomPicker, "speech-random-picker");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.choice.2"), false));
+            assertEquals(SpeechSettings.RANDOM_ALL, store.getString(SpeechSettings.RANDOM_MODE, ""));
+            scrollToOption("随机音色");
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.随机音色"), false));
+            savePreview(page.dialog(), "speech-settings-random");
+            scrollToOption("合成参数");
             ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.合成参数"), false));
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasContentDescription("添加参数", false, false), false));
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("speech.parameter.name.0"), false));
