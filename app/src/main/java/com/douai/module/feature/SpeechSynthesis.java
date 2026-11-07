@@ -22,6 +22,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 
 /** One provider selection shared by manual speech, automatic replies and comments. */
@@ -65,14 +66,15 @@ public final class SpeechSynthesis implements AutoCloseable {
             request.start(context, text, options, false);
             return request;
         }
-        Runnable selectionTimeout = request.operation.wrap(() -> request.complete(null, "随机音色选择超时"));
+        AtomicReference<String> timeoutFailure = new AtomicReference<>("随机音色选择超时");
+        Runnable selectionTimeout = request.operation.wrap(() -> request.complete(null, timeoutFailure.get()));
         request.main.postDelayed(selectionTimeout, 60_000);
         try {
             request.worker = WORKERS.submit(request.operation.wrap(() -> {
                 if (request.finished.get()) return;
                 try {
                     LocalOptions chosen = RandomSpeechVoice.select(options, new Random(), hasSystemEngine(context, options));
-                    request.main.removeCallbacks(selectionTimeout);
+                    timeoutFailure.set(timeoutMessage(new SpeechSettings(chosen)));
                     if (!request.finished.get()) request.start(context, text, chosen, true);
                 } catch (IllegalArgumentException invalid) {
                     request.complete(null, invalid.getMessage());
@@ -105,8 +107,7 @@ public final class SpeechSynthesis implements AutoCloseable {
         }
         Context application = context.getApplicationContext();
         Context use = application == null ? context : application;
-        main.postDelayed(operation.wrap(() -> complete(null,
-                settings.fish ? "Fish Audio 语音生成超时" : settings.breeze ? "Breeze Blue 语音生成超时" : settings.minimax ? "MiniMax 语音生成超时" : "第三方语音生成超时")), 60_000);
+        if (!onWorker) main.postDelayed(operation.wrap(() -> complete(null, timeoutMessage(settings))), 60_000);
         if (onWorker) {
             if (!finished.get()) generate(use, text, settings);
             return;
@@ -118,6 +119,12 @@ public final class SpeechSynthesis implements AutoCloseable {
         } catch (RejectedExecutionException ignored) {
             complete(null, "语音生成任务过多，请稍后重试");
         }
+    }
+
+    private static String timeoutMessage(SpeechSettings settings) {
+        return settings.local ? "本地语音生成超时" : settings.fish ? "Fish Audio 语音生成超时"
+                : settings.breeze ? "Breeze Blue 语音生成超时" : settings.minimax
+                ? "MiniMax 语音生成超时" : "第三方语音生成超时";
     }
 
     private static boolean hasSystemEngine(Context context, LocalOptions options) {

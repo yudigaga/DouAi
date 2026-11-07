@@ -107,6 +107,43 @@ public final class SpeechSynthesisTest {
         }
     }
 
+    @Test public void randomNetworkTimeoutIncludesTimeSpentWaitingForSelectionWorker() throws Exception {
+        java.lang.reflect.Field field = SpeechSynthesis.class.getDeclaredField("WORKERS");
+        field.setAccessible(true);
+        ThreadPoolExecutor workers = (ThreadPoolExecutor) field.get(null);
+        CountDownLatch started = new CountDownLatch(2), release = new CountDownLatch(1);
+        Future<?> first = workers.submit(() -> { started.countDown(); try { release.await(); } catch (InterruptedException ignored) { } });
+        Future<?> second = workers.submit(() -> { started.countDown(); try { release.await(); } catch (InterruptedException ignored) { } });
+        SpeechSynthesis request = null;
+        try (MockWebServer server = new MockWebServer()) {
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.start();
+            LocalOptions saved = settings(server.url("/tts") + "?text={text}&voice={voice}")
+                    .withDefault(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_CURRENT)
+                    .withDefault(SpeechSettings.VOICE_SAMPLE, "[{\"id\":\"one\",\"name\":\"One\"}]");
+            SpeechSettings catalogSettings = new SpeechSettings(saved);
+            LocalOptions options = saved.withOverrides(Map.of(VoiceCatalogLabels.queryStorageKey(catalogSettings),
+                    VoiceCatalogLabels.queryKey(catalogSettings)));
+            AtomicInteger calls = new AtomicInteger();
+            AtomicReference<String> failure = new AtomicReference<>();
+            request = SpeechSynthesis.synthesize(context(), "正文", options,
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            ShadowLooper.getShadowMainLooper().idleFor(59, TimeUnit.SECONDS);
+            assertEquals(0, calls.get());
+            release.countDown();
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            ShadowLooper.getShadowMainLooper().idleFor(1, TimeUnit.SECONDS);
+            await(calls);
+            assertEquals("第三方语音生成超时", failure.get());
+            assertEquals(1, calls.get());
+            assertEquals(1, server.getRequestCount());
+        } finally {
+            if (request != null) request.close();
+            release.countDown(); first.cancel(true); second.cancel(true);
+        }
+    }
+
     @Test public void fishSpeechUsesItsOwnPostAndTransfersOneValidatedOriginalFile() throws Exception {
         try (MockWebServer server = new MockWebServer(); MockWebServer other = new MockWebServer()) {
             server.enqueue(wav());

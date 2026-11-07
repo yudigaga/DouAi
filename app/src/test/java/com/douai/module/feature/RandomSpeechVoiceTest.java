@@ -54,7 +54,8 @@ public final class RandomSpeechVoiceTest {
         values.put(SpeechSettings.PROVIDER, SpeechSettings.FISH);
         values.put(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
         values.put(SpeechSettings.GET_TEMPLATE, "https://example.test/tts?text={text}&voice={voice}");
-        values.put(SpeechSettings.VOICE_SAMPLE, "[{\"id\":\"third-one\",\"name\":\"Third One\"}]");
+        values.put(SpeechSettings.VOICE_SAMPLE, "[{\"id\":\"third-one\",\"name\":\"Third One\"},"
+                + "{\"id\":\"third-two\",\"name\":\"Third Two\"}]");
         values.put(SpeechSettings.MINIMAX_API_KEY, "minimax-key");
         values.put(SpeechSettings.MINIMAX_VOICE_SAMPLE, "[{\"id\":\"mini-one\",\"name\":\"Mini One\"}]");
         values.put(BreezeSpeechSettings.API_KEY, "breeze-key");
@@ -74,6 +75,15 @@ public final class RandomSpeechVoiceTest {
             assertEquals(sources[i], chosen.text(SpeechSettings.PROVIDER, ""));
             assertEquals(voices[i], chosen.text(keys[i], ""));
         }
+        LocalOptions secondThirdPartyVoice = RandomSpeechVoice.select(saved, new Random() {
+            private int draws;
+            @Override public int nextInt(int bound) {
+                if (draws++ == 0) { assertEquals(4, bound); return 0; }
+                assertEquals(2, bound); return 1;
+            }
+        });
+        assertEquals(SpeechSettings.THIRD_PARTY, secondThirdPartyVoice.text(SpeechSettings.PROVIDER, ""));
+        assertEquals("third-two", secondThirdPartyVoice.text(SpeechSettings.SELECTED_VOICE, ""));
         assertEquals(SpeechSettings.FISH, saved.text(SpeechSettings.PROVIDER, ""));
     }
 
