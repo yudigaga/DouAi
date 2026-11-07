@@ -123,6 +123,28 @@ public final class ConfigurationCatalogTest {
         assertConsumers("reply_prompt", EnumSet.of(REPLY, COMMENT_REPLY, AUTOMATION_DISPATCH));
     }
 
+    @Test public void catalogMarkerOnlyRefreshesEverySpeechConsumerWhenSampleIsUnchanged() {
+        String[][] catalogs = {
+                {"tts_voice_sample", "voice_catalog_third_party_query_v1"},
+                {"tts_minimax_voice_sample", "voice_catalog_minimax_query_v1"},
+                {"tts_breeze_voice_sample", "voice_catalog_breeze_query_v1"},
+                {"tts_fish_voice_sample", "voice_catalog_fish_query_v1"}
+        };
+        Set<ConfigurationCatalog.Feature> expected = EnumSet.of(REPLY, COMMENT_AUTOMATION, COMMENT_REPLY,
+                AUTOMATION_DISPATCH, DIRECT_MESSAGE_SPEECH, NATIVE_COMMENT_SPEECH);
+        for (String[] catalog : catalogs) {
+            ConfigurationChanges changes = ConfigurationChanges.between(
+                    Map.of(catalog[0], "same response", catalog[1], ""),
+                    Map.of(catalog[0], "same response", catalog[1], "new query"));
+            Set<ConfigurationCatalog.Feature> actual = EnumSet.noneOf(ConfigurationCatalog.Feature.class);
+            for (ConfigurationCatalog.Feature feature : ConfigurationCatalog.Feature.values()) {
+                if (changes.affects(feature)) actual.add(feature);
+            }
+            assertEquals(catalog[1], expected, actual);
+            assertFalse(catalog[1], ConfigKeys.TYPES.containsKey(catalog[1]));
+        }
+    }
+
     @Test public void removalsAndLegacyPrefixesUseTheSameDependenciesAsUpdates() {
         ConfigurationChanges removed = ConfigurationChanges.between(Map.of("playback_speed", "3"), Collections.emptyMap());
         assertTrue(removed.affects(PLAYBACK));

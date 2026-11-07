@@ -7,6 +7,8 @@ import com.douai.module.config.FishSpeechSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.MiniMaxSpeechOptions;
 import com.douai.module.config.SpeechSettings;
+import com.douai.module.diagnostics.DebugLog;
+import com.douai.module.diagnostics.DouAiLog;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -27,6 +29,160 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class RandomSpeechVoiceTest {
+    @Test public void simpleLogExplainsActualRandomPoolWithoutPrivateValues() throws Exception {
+        List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        DouAiLog.Operation operation = DouAiLog.begin("random_fixture", "select");
+        try {
+            LocalOptions saved = allSourcesOptions().withOverrides(Map.of("tts_random_sources",
+                    "[\"minimax\",\"fish\"]", SpeechSettings.MINIMAX_API_KEY, ""));
+            operation.wrap(() -> RandomSpeechVoice.select(saved, pick(0), false)).run();
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String log = String.join("\n", lines);
+            assertTrue(log, log.contains("random_voice_scope") && log.contains("mode=all"));
+            assertTrue(log, log.contains("source=minimax") && log.contains("missing_key"));
+            assertTrue(log, log.contains("source=fish") && log.contains("voices=1"));
+            assertTrue(log, log.contains("random_voice_selected") && log.contains("voice_ref=" + DouAiLog.reference("fish-one")));
+            assertTrue(log, log.contains("random_voice_identifier") && log.contains("voice_id=fish-one"));
+            assertTrue(log, log.contains(operation.traceId()));
+            assertFalse(log.contains("Fish One"));
+            assertFalse(log.contains("fish-key")); assertFalse(log.contains("example.test"));
+            for (String line : lines) if (line.contains("random_voice_")) System.out.println(line);
+        } finally {
+            operation.finish(DouAiLog.Outcome.SUCCESS, "test", "");
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null);
+        }
+    }
+
+    @Test public void failedCandidatesReportReasonsAndOffModeRemainsQuiet() throws Exception {
+        List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        try {
+            LocalOptions base = allSourcesOptions().withOverrides(Map.of("tts_random_sources", "[\"fish\"]"));
+            List<LocalOptions> cases = List.of(
+                    base.withOverrides(Map.of(FishSpeechSettings.API_KEY, "")),
+                    base.withOverrides(Map.of(FishSpeechSettings.VOICE_SAMPLE, "[]")),
+                    base.withOverrides(Map.of(FishSpeechSettings.VOICE_SAMPLE, "[{\"id\":\"bad\\u0001voice\",\"name\":\"Voice\"}]")),
+                    base.withOverrides(Map.of(FishSpeechSettings.API_KEY, "different-key")),
+                    base.withOverrides(Map.of(FishSpeechSettings.VOICE_MODE, "multi")),
+                    base.withOverrides(Map.of(FishSpeechSettings.BASE_URL, "invalid")));
+            for (LocalOptions options : cases) {
+                DouAiLog.Operation op = DouAiLog.begin("random_fixture", "failure");
+                op.wrap(() -> assertThrows(IllegalArgumentException.class,
+                        () -> RandomSpeechVoice.select(options, pick(0), false))).run();
+                op.finish(DouAiLog.Outcome.FAILED, "test", "");
+            }
+            DouAiLog.Operation off = DouAiLog.begin("random_fixture", "off");
+            off.wrap(() -> RandomSpeechVoice.select(base.withOverrides(Map.of(SpeechSettings.RANDOM_MODE,
+                    SpeechSettings.RANDOM_OFF)), pick(0), false)).run();
+            off.finish(DouAiLog.Outcome.SUCCESS, "test", "");
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String log = String.join("\n", lines);
+            for (String reason : List.of("missing_key", "invalid_or_empty_catalog", "no_valid_voices", "stale_or_missing_catalog", "incompatible_mode", "invalid_config_or_error"))
+                assertTrue(reason + " " + log, log.contains(reason));
+            assertEquals(6, lines.stream().filter(line -> line.contains("random_voice_no_candidates")).count());
+            for (String line : lines) if (line.contains(off.traceId())) assertFalse(line.contains("random_voice_"));
+        } finally { DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); }
+    }
+
+    @Test public void concurrentRequestsKeepOneSelectionPerTrace() throws Exception {
+        List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(4);
+        try {
+            LocalOptions saved = allSourcesOptions().withOverrides(Map.of("tts_random_sources", "[\"fish\"]"));
+            List<java.util.concurrent.Future<String>> calls = new java.util.ArrayList<>();
+            for (int i = 0; i < 8; i++) calls.add(executor.submit(() -> {
+                DouAiLog.Operation op = DouAiLog.begin("random_fixture", "concurrent");
+                op.wrap(() -> RandomSpeechVoice.select(saved, pick(0), false)).run();
+                op.finish(DouAiLog.Outcome.SUCCESS, "test", "");
+                return op.traceId();
+            }));
+            List<String> traces = new java.util.ArrayList<>();
+            for (java.util.concurrent.Future<String> call : calls) traces.add(call.get());
+            assertTrue(DouAiLog.awaitIdle(5000));
+            for (String trace : traces) {
+                assertEquals(1, lines.stream().filter(line -> line.contains(trace) && line.contains("random_voice_selected")).count());
+                assertEquals(1, lines.stream().filter(line -> line.contains(trace) && line.contains("random_voice_candidate_fish")).count());
+            }
+            assertEquals(DouAiLog.reference("fish-one"), DouAiLog.reference("fish-one"));
+            assertNotEquals(DouAiLog.reference("fish-one"), DouAiLog.reference("another-voice"));
+        } finally { executor.shutdownNow(); DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); }
+    }
+
+    @Test public void detailedLogStillHidesCredentialsAndRawVoice() throws Exception {
+        List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(true);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        DouAiLog.Operation op = DouAiLog.begin("random_fixture", "detail");
+        try {
+            LocalOptions saved = allSourcesOptions().withOverrides(Map.of("tts_random_sources", "[\"fish\"]"));
+            op.wrap(() -> RandomSpeechVoice.select(saved, pick(0), false)).run();
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String log = String.join("\n", lines);
+            assertTrue(log.contains(DouAiLog.reference("fish-one")));
+            assertTrue(log.contains("voice_id=fish-one"));
+            for (String secret : List.of("Fish One", "fish-key", "example.test")) assertFalse(log.contains(secret));
+        } finally {
+            op.finish(DouAiLog.Outcome.SUCCESS, "test", "");
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); DebugLog.setEnabled(false);
+        }
+    }
+
+    @Test public void unsafeSelectedVoiceIdentifiersAreOmittedWithoutLeakingTheirContent() throws Exception {
+        List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        try {
+            for (String id : List.of("https://private.example/token-secret", "sk-private-token", "private-key-credential")) {
+                DouAiLog.Operation op = DouAiLog.begin("random_fixture", "unsafe_id");
+                op.wrap(() -> RandomSpeechVoice.logVoiceId(SpeechSettings.FISH, id)).run();
+                op.finish(DouAiLog.Outcome.SUCCESS, "test", "");
+            }
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String log = String.join("\n", lines);
+            assertTrue(log.contains("random_voice_identifier"));
+            assertTrue(log.contains("identifier_omitted"));
+            for (String secret : List.of("private.example", "token-secret", "private-key-credential", "Private Name"))
+                assertFalse(log.contains(secret));
+        } finally { DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); }
+    }
+
+    @Test public void simpleLogReconstructsLongValidIdentifierWithinOneTrace() throws Exception {
+        List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        DouAiLog.Operation op = DouAiLog.begin("random_fixture", "long_id");
+        try {
+            String id = "Ab9_".repeat(64);
+            LocalOptions saved = allSourcesOptions().withOverrides(Map.of("tts_random_sources", "[\"fish\"]",
+                    FishSpeechSettings.VOICE_SAMPLE, "[{\"id\":\"" + id + "\",\"name\":\"Private Name\"}]"));
+            op.wrap(() -> RandomSpeechVoice.select(saved, pick(0), false)).run();
+            assertTrue(DouAiLog.awaitIdle(5000));
+            StringBuilder reconstructed = new StringBuilder();
+            int part = 0;
+            for (String line : lines) {
+                org.json.JSONObject event = new org.json.JSONObject(line);
+                if (!event.optString("event").startsWith("random_voice_identifier_part_")) continue;
+                assertEquals(op.traceId(), event.getString("trace_id"));
+                assertEquals("random_voice_identifier_part_" + (++part), event.getString("event"));
+                String evidence = event.getString("evidence");
+                assertTrue(evidence.length() <= 160);
+                assertFalse(event.optBoolean("truncated"));
+                assertTrue(evidence.startsWith("voice_id_part="));
+                reconstructed.append(evidence.substring("voice_id_part=".length(), evidence.indexOf(';')));
+            }
+            assertEquals(4, part);
+            assertEquals(id, reconstructed.toString());
+            assertFalse(String.join("", lines).contains("Private Name"));
+        } finally {
+            op.finish(DouAiLog.Outcome.SUCCESS, "test", "");
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null);
+        }
+    }
     @Test public void globalRangeChoosesOnlySelectedSourceWhenEverySourceIsAvailable() {
         LocalOptions saved = allSourcesOptions();
         for (String source : List.of("local", "third_party", "minimax", "breeze", "fish")) {

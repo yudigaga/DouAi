@@ -3,6 +3,7 @@ package com.douai.module.ui;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.Activity;
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.graphics.Color;
@@ -40,6 +41,7 @@ import com.douai.module.feature.FishSpeechClient;
 import com.douai.module.feature.FishReferenceAudio;
 import com.douai.module.feature.MiniMaxSpeechClient;
 import com.douai.module.feature.MiniMaxSpeechModelCatalog;
+import com.douai.module.feature.RandomSpeechVoice;
 import com.douai.module.feature.SpeechHttpClient;
 import com.douai.module.feature.SpeechSynthesis;
 import com.douai.module.feature.ThirdPartyResponse;
@@ -102,6 +104,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private final Map<String, Dialog> sectionDialogs = new LinkedHashMap<>();
     private SpeechHttpClient.Request fetch;
     private Future<?> future;
+    private RandomCatalogSession randomCatalog;
     private FishCatalogSession fishCatalog;
     private BreezeCatalogSession breezeCatalog;
     private SpeechHttpClient.Request enhancement;
@@ -171,10 +174,11 @@ final class SpeechSettingsDialog implements AutoCloseable {
                         }).setNegativeButton("取消", null).create(), null));
         if (SpeechSettings.RANDOM_ALL.equals(random)) {
             option("来源范围", randomSourceSummary(speech), this::selectRandomSources);
+            option("音色列表管理", "查看并刷新已选来源", this::showRandomCatalog);
         }
         if (!SpeechSettings.RANDOM_OFF.equals(random)) {
             hint(content, "speech.random.hint", SpeechSettings.RANDOM_ALL.equals(random)
-                    ? "大随机仅在勾选且可用的来源中选择；先刷新音色列表。系统引擎仅使用当前语言的离线音色。"
+                    ? "大随机仅在勾选且可用的来源中选择；可在音色列表管理中刷新。系统引擎仅使用当前语言的离线音色。"
                     : "小随机仅当前来源；先刷新音色列表。系统引擎仅使用当前语言的离线音色。");
         }
         if (speech.fish) {
@@ -251,6 +255,225 @@ final class SpeechSettingsDialog implements AutoCloseable {
             choice.dismiss();
             render();
         });
+    }
+
+    private SpeechSettings sourceSettings(String source) {
+        return new SpeechSettings(options().withOverrides(Map.of(SpeechSettings.PROVIDER, source)));
+    }
+
+    private void showRandomCatalog() {
+        if (closed || randomCatalog != null) return;
+        RandomCatalogSession session = new RandomCatalogSession(settings().randomSources);
+        randomCatalog = session;
+        LinearLayout body = form();
+        hint(body, "speech.random.catalog.hint", "仅刷新已选网络来源。Fish Audio 和 Breeze Blue 使用已设置的筛选条件，只读取首屏 20 项；更多音色可在各来源的音色选择器中加载。系统引擎使用离线音色，无需联网刷新。");
+        for (String source : session.sources) {
+            if (!SpeechSettings.PROVIDERS.contains(source)) continue;
+            TextView view = new TextView(context);
+            view.setTag("speech.random.catalog." + source);
+            session.status.put(source, view);
+            body.addView(view, matchWrap());
+            if (SpeechSettings.LOCAL.equals(source)) setRandomCatalogStatus(session, source, "离线音色，无需刷新");
+            else {
+                SpeechSettings snapshot = sourceSettings(source);
+                String sample = store.getString(voiceSampleKey(snapshot), "");
+                String marker = VoiceCatalogLabels.queryKey(snapshot);
+                if (sample.isEmpty()) setRandomCatalogStatus(session, source, "暂无缓存");
+                else if (!marker.equals(store.getString(VoiceCatalogLabels.queryStorageKey(snapshot), ""))) {
+                    setRandomCatalogStatus(session, source, "缓存与当前条件不符，请刷新");
+                } else {
+                    setRandomCatalogStatus(session, source, "已有当前条件缓存；正在评估随机可用性…");
+                    assessRandomCatalogStatus(session, source, snapshot, "已有当前条件缓存");
+                }
+            }
+        }
+        session.dialog = builder("音色列表管理").setView(scroll(body)).setNegativeButton("关闭", null)
+                .setPositiveButton("刷新所选", null).create();
+        show(session.dialog, () -> cancelRandomCatalog(session));
+        session.dialog.getButton(Dialog.BUTTON_POSITIVE).setOnClickListener(ignored -> startRandomCatalog(session));
+    }
+
+    @SuppressLint("SetTextI18n")
+    private void setRandomCatalogStatus(RandomCatalogSession session, String source, String text) {
+        TextView view = session.status.get(source);
+        int index = SpeechSettings.PROVIDERS.indexOf(source);
+        if (view != null && index >= 0) view.setText(RANDOM_SOURCE_LABELS[index] + "：" + text);
+    }
+
+    private void startRandomCatalog(RandomCatalogSession session) {
+        if (closed || randomCatalog != session || session.running) return;
+        if (fetch != null) { toast("音色列表正在获取，请稍后重试"); return; }
+        if (!settings().randomSources.equals(session.sources)) { toast("来源范围已变化，请重新打开"); return; }
+        session.running = true;
+        session.dialog.getButton(Dialog.BUTTON_POSITIVE).setEnabled(false);
+        session.snapshots.clear();
+        for (String source : session.sources) session.snapshots.put(source, sourceSettings(source));
+        refreshRandomCatalogSource(session, 0);
+    }
+
+    private void refreshRandomCatalogSource(RandomCatalogSession session, int index) {
+        if (closed || randomCatalog != session) return;
+        if (!settings().randomSources.equals(session.sources)) {
+            session.running = false;
+            session.dialog.getButton(Dialog.BUTTON_POSITIVE).setEnabled(true);
+            toast("来源范围已变化，请重新打开");
+            return;
+        }
+        if (index >= session.sources.size()) {
+            session.running = false;
+            session.dialog.getButton(Dialog.BUTTON_POSITIVE).setEnabled(true);
+            return;
+        }
+        String source = session.sources.get(index);
+        if (SpeechSettings.LOCAL.equals(source)) { refreshRandomCatalogSource(session, index + 1); return; }
+        SpeechSettings snapshot = session.snapshots.get(source);
+        String marker = VoiceCatalogLabels.queryKey(snapshot);
+        if (!marker.equals(VoiceCatalogLabels.queryKey(sourceSettings(source)))) {
+            setRandomCatalogStatus(session, source, "设置已变化，原缓存保留");
+            refreshRandomCatalogSource(session, index + 1); return;
+        }
+        String problem = randomCatalogPrerequisite(snapshot);
+        if (problem != null) {
+            setRandomCatalogStatus(session, source, problem + "，原缓存保留");
+            refreshRandomCatalogSource(session, index + 1); return;
+        }
+        SpeechHttpClient.Request request = new SpeechHttpClient.Request();
+        session.request = request;
+        setRandomCatalogStatus(session, source, "正在刷新…");
+        try {
+            session.future = WORKER.submit(() -> {
+                try {
+                    String sample;
+                    String suffix = "";
+                    if (snapshot.thirdParty) {
+                        sample = request.fetchText(snapshot.voiceGetTemplate, snapshot.voiceHeaders);
+                        VoiceCatalog.parse(sample, snapshot);
+                    } else {
+                        List<VoiceCatalog.Entry> entries;
+                        boolean stalled = false;
+                        if (snapshot.fish) {
+                            FishSpeechClient.VoicePage page = FishSpeechClient.fetchVoicePage(request, snapshot.fishSettings, 1);
+                            entries = page.entries;
+                            boolean more = page.moreKnown ? page.hasMore : page.totalExact && page.sourceCount < page.total;
+                            stalled = page.sourceCount == 0 && more;
+                            suffix = !page.moreKnown && !page.totalExact ? "，更多结果未知，可在音色选择器查看"
+                                    : more ? "，还有更多可在音色选择器加载" : "，没有更多结果";
+                        } else if (snapshot.breeze) {
+                            BreezeSpeechClient.VoicePage page = BreezeSpeechClient.fetchVoicePage(request, snapshot.breezeSettings, 1, "");
+                            entries = page.entries;
+                            stalled = page.sourceIds.isEmpty() && page.hasMore;
+                            suffix = page.hasMore ? "，还有更多可在音色选择器加载" : "，没有更多结果";
+                        } else entries = MiniMaxSpeechClient.fetchVoices(request, snapshot);
+                        if (stalled) throw new IllegalArgumentException("音色分页未前进，请刷新或缩小搜索范围");
+                        org.json.JSONArray encoded = new org.json.JSONArray();
+                        for (VoiceCatalog.Entry entry : entries) encoded.put(VoiceCatalogLabels.cached(entry));
+                        sample = encoded.toString();
+                    }
+                    String result = sample, more = suffix;
+                    main.post(() -> {
+                        if (closed || randomCatalog != session || session.request != request) return;
+                        session.request = null; session.future = null;
+                        if (!settings().randomSources.equals(session.sources)
+                                || !marker.equals(VoiceCatalogLabels.queryKey(sourceSettings(source)))) {
+                            setRandomCatalogStatus(session, source, "设置已变化，原缓存保留");
+                        } else {
+                            store.putString(voiceSampleKey(snapshot), result);
+                            store.putString(VoiceCatalogLabels.queryStorageKey(snapshot), marker);
+                            if (snapshot.fish) discardFishCatalog();
+                            if (snapshot.breeze) discardBreezeCatalog();
+                            String refreshed = "已刷新" + (snapshot.fish || snapshot.breeze ? "首屏（最多 20 项）" : "") + more;
+                            setRandomCatalogStatus(session, source, refreshed + "；正在评估随机可用性…");
+                            assessRandomCatalogStatus(session, source, snapshot, refreshed);
+                        }
+                        refreshRandomCatalogSource(session, index + 1);
+                    });
+                } catch (Exception failure) {
+                    String message = failure instanceof IllegalArgumentException
+                            && "音色分页未前进，请刷新或缩小搜索范围".equals(failure.getMessage())
+                            ? "音色分页未前进，请刷新或缩小搜索范围，原缓存保留"
+                            : "刷新失败，请检查配置或稍后重试，原缓存保留";
+                    main.post(() -> {
+                        if (closed || randomCatalog != session || session.request != request) return;
+                        session.request = null; session.future = null;
+                        setRandomCatalogStatus(session, source, message);
+                        refreshRandomCatalogSource(session, index + 1);
+                    });
+                } finally { request.close(); }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException failure) {
+            session.request = null; request.close();
+            setRandomCatalogStatus(session, source, "请求繁忙，请稍后重试，原缓存保留");
+            refreshRandomCatalogSource(session, index + 1);
+        }
+    }
+
+    private String randomCatalogPrerequisite(SpeechSettings speech) {
+        try {
+            if (speech.thirdParty) {
+                if (!speech.getTemplate.contains("{voice}")) return "配置无效";
+                ThirdPartyRequestTemplate.parse(speech.getTemplate, "{text}", "{voice}");
+                ThirdPartyRequestTemplate.parse(speech.voiceGetTemplate, new String[0]);
+                if (!SpeechHttpClient.validHeaders(speech.headers)
+                        || !SpeechHttpClient.validHeaders(speech.voiceHeaders)) return "配置无效";
+            } else if (speech.minimax) {
+                if (speech.minimaxApiKey.isEmpty()) return "请先设置 API Key";
+                SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_API_KEY, speech.minimaxApiKey);
+                SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_BASE_URL, speech.minimaxBaseUrl);
+            } else if (speech.breeze) {
+                if (speech.breezeSettings.apiKey.isEmpty()) return "请先设置 API Key";
+                speech.breezeSettings.validateCatalog();
+            } else if (speech.fish) {
+                if (speech.fishSettings.apiKey.isEmpty()) return "请先设置 API Key";
+                speech.fishSettings.validateCatalog();
+            } else return "来源无效";
+            return null;
+        } catch (RuntimeException invalid) { return "配置或筛选条件无效"; }
+    }
+
+    private void assessRandomCatalogStatus(RandomCatalogSession session, String source,
+                                           SpeechSettings snapshot, String prefix) {
+        if (closed || randomCatalog != session) return;
+        final LocalOptions optionsSnapshot = options();
+        final String marker = VoiceCatalogLabels.queryKey(snapshot);
+        try {
+            final Future<?>[] assessmentHolder = new Future<?>[1];
+            assessmentHolder[0] = WORKER.submit(() -> {
+                RandomSpeechVoice.Assessment assessment = RandomSpeechVoice.assess(optionsSnapshot, source);
+                main.post(() -> {
+                    if (assessmentHolder[0] != null) session.assessments.remove(assessmentHolder[0]);
+                    if (closed || randomCatalog != session || !settings().randomSources.equals(session.sources)) return;
+                    if (!marker.equals(VoiceCatalogLabels.queryKey(sourceSettings(source)))) return;
+                    String status = assessment.eligible ? "，当前可用：" + assessment.validVoiceCount + " 个有效音色"
+                            : "，不参与大随机：" + assessment.reasonLabel + "（" + assessment.validVoiceCount + " 个有效音色）";
+                    setRandomCatalogStatus(session, source, prefix + status);
+                });
+            });
+            session.assessments.add(assessmentHolder[0]);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            setRandomCatalogStatus(session, source, prefix + "；可用性暂未评估");
+        }
+    }
+
+    private void cancelRandomCatalog(RandomCatalogSession session) {
+        if (randomCatalog != session) return;
+        randomCatalog = null;
+        if (session.request != null) session.request.cancel();
+        if (session.future != null) session.future.cancel(true);
+        for (Future<?> assessment : session.assessments) assessment.cancel(true);
+        session.assessments.clear();
+        session.request = null; session.future = null;
+    }
+
+    private static final class RandomCatalogSession {
+        final List<String> sources;
+        final Map<String, SpeechSettings> snapshots = new LinkedHashMap<>();
+        final Map<String, TextView> status = new LinkedHashMap<>();
+        final List<Future<?>> assessments = new ArrayList<>();
+        AlertDialog dialog;
+        SpeechHttpClient.Request request;
+        Future<?> future;
+        boolean running;
+        RandomCatalogSession(List<String> sources) { this.sources = new ArrayList<>(sources); }
     }
 
     private String readingSummary(SpeechSettings speech) {
@@ -2891,6 +3114,11 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private static void delete(LocalSpeechSynthesis.Result result) { if (result != null) result.file.delete(); }
     @Override public void close() {
         closed = true;
+        if (randomCatalog != null) {
+            RandomCatalogSession session = randomCatalog;
+            cancelRandomCatalog(session);
+            session.dialog.dismiss();
+        }
         stopNameTranslation("设置已关闭，已停止名称翻译");
         cancelFetch();
         discardFishCatalog();

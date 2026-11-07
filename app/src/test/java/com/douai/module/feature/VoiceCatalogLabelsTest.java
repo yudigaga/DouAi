@@ -225,7 +225,7 @@ public final class VoiceCatalogLabelsTest {
         assertChange(mini, SpeechSettings.MINIMAX_API_KEY, "new-key", miniMarker);
     }
 
-    @Test public void networkSourcesHaveDerivedMarkersExcludedFromBackupAndAutomation() {
+    @Test public void networkSourcesHaveDerivedMarkersExcludedFromBackupButRefreshSpeechConsumers() {
         assertEquals(VoiceCatalogLabels.FISH_QUERY_KEY, VoiceCatalogLabels.queryStorageKey(speech(settings(SpeechSettings.FISH))));
         assertEquals(VoiceCatalogLabels.BREEZE_QUERY_KEY, VoiceCatalogLabels.queryStorageKey(speech(settings(SpeechSettings.BREEZE))));
         assertEquals(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, VoiceCatalogLabels.queryStorageKey(speech(settings(SpeechSettings.THIRD_PARTY))));
@@ -239,9 +239,12 @@ public final class VoiceCatalogLabelsTest {
             assertFalse(ConfigurationCatalog.settings().containsKey(storage));
             assertFalse(ConfigurationCatalog.transferableTypes().containsKey(storage));
             ConfigurationChanges changes = ConfigurationChanges.between(Collections.emptyMap(), Collections.singletonMap(storage, "derived"));
-            assertFalse(changes.affects(ConfigurationCatalog.Feature.REPLY));
-            assertFalse(changes.affects(ConfigurationCatalog.Feature.COMMENT_AUTOMATION));
-            assertFalse(changes.affects(ConfigurationCatalog.Feature.AUTOMATION_DISPATCH));
+            assertTrue(changes.affects(ConfigurationCatalog.Feature.REPLY));
+            assertTrue(changes.affects(ConfigurationCatalog.Feature.COMMENT_AUTOMATION));
+            assertTrue(changes.affects(ConfigurationCatalog.Feature.COMMENT_REPLY));
+            assertTrue(changes.affects(ConfigurationCatalog.Feature.AUTOMATION_DISPATCH));
+            assertTrue(changes.affects(ConfigurationCatalog.Feature.DIRECT_MESSAGE_SPEECH));
+            assertTrue(changes.affects(ConfigurationCatalog.Feature.NATIVE_COMMENT_SPEECH));
         }
     }
 

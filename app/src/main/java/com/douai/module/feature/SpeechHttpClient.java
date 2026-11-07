@@ -570,7 +570,7 @@ public final class SpeechHttpClient {
         }
     }
 
-    static boolean validHeaders(String json) {
+    public static boolean validHeaders(String json) {
         try { headers(json); return true; }
         catch (IllegalArgumentException invalid) { return false; }
     }

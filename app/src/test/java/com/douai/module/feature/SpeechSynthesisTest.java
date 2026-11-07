@@ -14,6 +14,7 @@ import com.douai.module.config.BreezeSpeechSettings;
 import com.douai.module.config.FishSpeechSettings;
 import com.douai.module.config.SpeechSettings;
 import com.douai.module.diagnostics.DebugLog;
+import com.douai.module.diagnostics.DouAiLog;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -70,6 +71,119 @@ public final class SpeechSynthesisTest {
         AudioMetadata.duration = "1000";
         AudioMetadata.hasVideo = "no";
         ShadowTextToSpeech.reset();
+    }
+
+    @Test public void simpleRandomLocalLogCorrelatesResolvedVoiceWithSelection() throws Exception {
+        java.util.List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        SpeechSynthesis request = null;
+        try {
+            Context context = context();
+            registerTtsEngine(context);
+            ShadowTextToSpeech.addVoice(new Voice("private-voice", Locale.CHINA, 300, 300, false, Set.of()));
+            LocalOptions saved = new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.LOCAL,
+                    SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL, "tts_random_sources", "[\"local\"]",
+                    "tts_engine", "org.example.tts"));
+            request = SpeechSynthesis.synthesize(context, "private text", saved, (audio, error) -> {});
+            TextToSpeech probe = awaitTtsInstance(null);
+            ((ShadowTextToSpeech) org.robolectric.shadow.api.Shadow.extract(probe)).getOnInitListener().onInit(TextToSpeech.SUCCESS);
+            TextToSpeech synthesis = awaitTtsInstance(probe);
+            ((ShadowTextToSpeech) org.robolectric.shadow.api.Shadow.extract(synthesis)).getOnInitListener().onInit(TextToSpeech.SUCCESS);
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (((ShadowTextToSpeech) org.robolectric.shadow.api.Shadow.extract(synthesis)).getLastSynthesizeToFileText() == null
+                    && System.nanoTime() < until) { ShadowLooper.getShadowMainLooper().idle(); Thread.sleep(10); }
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String log = String.join("\n", lines);
+            assertTrue(log, log.contains("random_voice_selected") && log.contains("voice_ref=deferred"));
+            assertTrue(log, log.contains("random_voice_local_resolved") && log.contains("voice_ref=" + DouAiLog.reference("private-voice")));
+            assertTrue(log, log.contains("random_voice_identifier") && log.contains("voice_id=private-voice"));
+            org.json.JSONObject selected = null, resolved = null;
+            for (String line : lines) {
+                org.json.JSONObject event = new org.json.JSONObject(line);
+                if ("random_voice_selected".equals(event.optString("event"))) selected = event;
+                if ("random_voice_local_resolved".equals(event.optString("event"))) resolved = event;
+            }
+            assertNotNull(selected); assertNotNull(resolved);
+            assertEquals(selected.getString("trace_id"), resolved.getString("trace_id"));
+            assertFalse(log.contains("private text"));
+        } finally {
+            if (request != null) request.close();
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null);
+        }
+    }
+
+    @Test public void localRandomLogCountsTheActualExactFallbackAndEmptyPools() throws Exception {
+        assertLocalRandomPool(1, new Voice("exact-private", Locale.CHINA, 300, 300, false, Set.of()),
+                new Voice("fallback-private", Locale.TAIWAN, 300, 300, false, Set.of()));
+        assertLocalRandomPool(2, new Voice("fallback-a", Locale.TAIWAN, 300, 300, false, Set.of()),
+                new Voice("fallback-b", Locale.forLanguageTag("zh-HK"), 300, 300, false, Set.of()));
+        assertLocalRandomPool(0, new Voice("other-language", Locale.US, 300, 300, false, Set.of()));
+    }
+
+    @Test public void localVoiceIdentifierWithNewlineIsOmitted() throws Exception {
+        java.util.List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        SpeechSynthesis request = null;
+        try {
+            Context context = context();
+            registerTtsEngine(context);
+            ShadowTextToSpeech.addVoice(new Voice("voice\nAuthorization=private-sentinel", Locale.CHINA, 300, 300, false, Set.of()));
+            LocalOptions options = new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.LOCAL,
+                    SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_CURRENT, "tts_engine", "org.example.tts"));
+            request = SpeechSynthesis.synthesize(context, "private text", options, (audio, error) -> {});
+            TextToSpeech engine = awaitTtsInstance(null);
+            ShadowTextToSpeech shadow = (ShadowTextToSpeech) org.robolectric.shadow.api.Shadow.extract(engine);
+            shadow.getOnInitListener().onInit(TextToSpeech.SUCCESS);
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (shadow.getLastSynthesizeToFileText() == null && System.nanoTime() < until) {
+                ShadowLooper.getShadowMainLooper().idle(); Thread.sleep(10);
+            }
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String log = String.join("\n", lines);
+            assertTrue(log, log.contains("random_voice_identifier") && log.contains("identifier_omitted"));
+            assertFalse(log.contains("private-sentinel")); assertFalse(log.contains("private text"));
+            for (String line : lines) assertFalse(line.contains("\n"));
+        } finally {
+            if (request != null) request.close();
+            ShadowLooper.getShadowMainLooper().idle();
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null);
+        }
+    }
+
+    private void assertLocalRandomPool(int expected, Voice... installed) throws Exception {
+        ShadowTextToSpeech.reset();
+        java.util.List<String> lines = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, json) -> lines.add(json));
+        SpeechSynthesis request = null;
+        try {
+            Context context = context();
+            registerTtsEngine(context);
+            for (Voice voice : installed) ShadowTextToSpeech.addVoice(voice);
+            LocalOptions options = new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.LOCAL,
+                    SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_CURRENT, "tts_language", "zh-CN",
+                    "tts_engine", "org.example.tts"));
+            AtomicInteger calls = new AtomicInteger();
+            request = SpeechSynthesis.synthesize(context, "private text", options, (audio, error) -> calls.incrementAndGet());
+            TextToSpeech synthesis = awaitTtsInstance(null);
+            ShadowTextToSpeech shadow = (ShadowTextToSpeech) org.robolectric.shadow.api.Shadow.extract(synthesis);
+            shadow.getOnInitListener().onInit(TextToSpeech.SUCCESS);
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (calls.get() == 0 && shadow.getLastSynthesizeToFileText() == null && System.nanoTime() < until) {
+                ShadowLooper.getShadowMainLooper().idle(); Thread.sleep(10);
+            }
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String log = String.join("\n", lines);
+            assertTrue(log, lines.stream().anyMatch(line -> line.contains("random_voice_local_resolved")
+                    && line.contains("voices=" + expected)));
+            assertFalse(log.contains("private text"));
+        } finally {
+            if (request != null) request.close();
+            ShadowLooper.getShadowMainLooper().idle();
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null);
+        }
     }
 
     @Test public void globalRangeExcludingLocalSynthesizesWithoutOpeningSystemInventory() throws Exception {

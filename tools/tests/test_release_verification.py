@@ -329,7 +329,9 @@ class ReleaseGateTest(unittest.TestCase):
                           "fishReferenceAudioAndSpeakerEditorsRemainReachableInTheNarrowMiuixPage",
                           "publicFishWindowKeepsItsChoicesVisibleInMiuix",
                           "filteredCatalogHeaderAndLocalSearchRemainUsableInNarrowMiuix",
-                          "allBreezeCatalogFiltersAndMultipleSelectionsAreReachableInMiuix"},
+                          "allBreezeCatalogFiltersAndMultipleSelectionsAreReachableInMiuix",
+                          "narrowRandomCatalogManagerRenders",
+                          "landscapeRandomCatalogManagerRenders"},
                          set(inventory["suites"][nested]))
         self.assertFalse(set(inventory["suites"][nested]) &
                          set(inventory["suites"]["com.douai.module.ui.SpeechSettingsDialogTest"]))

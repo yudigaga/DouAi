@@ -2392,6 +2392,285 @@ public final class SpeechSettingsDialogTest {
         }
     }
 
+    @Test public void globalCatalogRefreshOnlyTouchesSelectedSourcesAndPreservesManualChoice() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("7. New voice"));
+            server.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.LOCAL);
+            store.putString(SpeechSettings.SELECTED_VOICE, "manual");
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"local\",\"third_party\",\"minimax\"]");
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/speak").toString() + "?text={text}&voice={voice}");
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
+            store.putString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "saved");
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            assertEquals(0, server.getRequestCount());
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            assertEquals("/voices", server.takeRequest(2, TimeUnit.SECONDS).getPath());
+            await(() -> "7. New voice".equals(store.getString(SpeechSettings.VOICE_SAMPLE, "")));
+            assertEquals(SpeechSettings.LOCAL, store.getString(SpeechSettings.PROVIDER, ""));
+            assertEquals("manual", store.getString(SpeechSettings.SELECTED_VOICE, ""));
+            assertEquals("saved", store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, ""));
+            TextView missingKey = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.minimax");
+            assertTrue(missingKey.getText().toString().contains("API Key"));
+            assertEquals(1, server.getRequestCount());
+        }
+    }
+
+    @Test public void closingGlobalCatalogManagerDiscardsLateResponse() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("7. Late voice").setBodyDelay(300, TimeUnit.MILLISECONDS));
+            server.start();
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"third_party\"]");
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/speak").toString() + "?text={text}&voice={voice}");
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
+            store.putString(SpeechSettings.VOICE_SAMPLE, "9. Saved voice");
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            manager.dismiss();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(600);
+            while (System.nanoTime() < deadline) { ShadowLooper.idleMainLooper(); LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10)); }
+            assertEquals("9. Saved voice", store.getString(SpeechSettings.VOICE_SAMPLE, ""));
+            assertEquals("", store.getString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, ""));
+        }
+    }
+
+    @Test public void globalCatalogRefreshFetchesTwoSelectedSourcesSerially() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("7. Third voice"));
+            server.enqueue(new MockResponse().setBody("{\"voices\":[{\"voice_id\":\"breeze-one\",\"name\":\"Breeze voice\"}],\"has_more\":true,\"next_page_token\":\"next\",\"page\":1}"));
+            server.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.MINIMAX_VOICE_ID, "manual-voice");
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"third_party\",\"breeze\"]");
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/speak").toString() + "?text={text}&voice={voice}");
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
+            store.putString(BreezeSpeechSettings.API_KEY, "fixture-key");
+            store.putString(BreezeSpeechSettings.BASE_URL, server.url("/").toString());
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            assertEquals("/voices", server.takeRequest(2, TimeUnit.SECONDS).getPath());
+            await(() -> store.getString(SpeechSettings.VOICE_SAMPLE, "").contains("Third voice"));
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            await(() -> store.getString(BreezeSpeechSettings.VOICE_SAMPLE, "").contains("breeze-one"));
+            assertEquals(SpeechSettings.MINIMAX, store.getString(SpeechSettings.PROVIDER, ""));
+            assertEquals("manual-voice", store.getString(SpeechSettings.MINIMAX_VOICE_ID, ""));
+            TextView status = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.breeze");
+            assertTrue(status.getText().toString().contains("首屏"));
+            assertTrue(status.getText().toString().contains("更多"));
+            assertEquals(2, server.getRequestCount());
+        }
+    }
+
+    @Test public void globalCatalogFailureAndChangedQueryRetainExistingCache() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("7. Late voice").setBodyDelay(300, TimeUnit.MILLISECONDS));
+            server.enqueue(new MockResponse().setResponseCode(503).setBody("secret service message"));
+            server.start();
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"third_party\",\"breeze\"]");
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/speak").toString() + "?text={text}&voice={voice}");
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
+            store.putString(SpeechSettings.VOICE_SAMPLE, "9. Saved voice");
+            store.putString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, "old-third-marker");
+            store.putString(BreezeSpeechSettings.API_KEY, "fixture-key");
+            store.putString(BreezeSpeechSettings.BASE_URL, server.url("/").toString());
+            store.putString(BreezeSpeechSettings.VOICE_SAMPLE, "old-breeze-cache");
+            store.putString(VoiceCatalogLabels.BREEZE_QUERY_KEY, "old-breeze-marker");
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/changed").toString());
+            TextView thirdStatus = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.third_party");
+            await(() -> thirdStatus.getText().toString().contains("设置已变化"));
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            TextView status = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.breeze");
+            await(() -> status.getText().toString().contains("刷新失败"));
+            assertFalse(status.getText().toString().contains("secret"));
+            assertEquals("9. Saved voice", store.getString(SpeechSettings.VOICE_SAMPLE, ""));
+            assertEquals("old-third-marker", store.getString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, ""));
+            assertEquals("old-breeze-cache", store.getString(BreezeSpeechSettings.VOICE_SAMPLE, ""));
+            assertEquals("old-breeze-marker", store.getString(VoiceCatalogLabels.BREEZE_QUERY_KEY, ""));
+        }
+    }
+
+    @Test public void globalCatalogSystemOnlyDoesNotRequestNetwork() {
+        store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        store.putString(SpeechSettings.RANDOM_SOURCES, "[\"local\"]");
+        open(false);
+        AlertDialog manager = option("音色列表管理");
+        assertEquals("刷新所选", manager.getButton(Dialog.BUTTON_POSITIVE).getText().toString());
+        TextView status = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.local");
+        assertTrue(status.getText().toString().contains("离线"));
+        manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+        assertTrue(manager.getButton(Dialog.BUTTON_POSITIVE).isEnabled());
+        assertNull(manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.third_party"));
+    }
+
+    @Test public void globalCatalogFishRespectsFiltersAndStopsAtFirstPage() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(fishPage(100, true, true, false, fishItem("fish-one", "Fish first")));
+            server.enqueue(fishPage(100, null, true, false, fishItem("fish-two", "Fish second")));
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"fish\"]");
+            store.putString(FishSpeechSettings.API_KEY, "fixture-key");
+            store.putString(FishSpeechSettings.BASE_URL, server.url("/").toString());
+            store.putString(FishSpeechSettings.VOICE_SCOPE, "public");
+            store.putString(FishSpeechSettings.VOICE_SEARCH, "reader");
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(request);
+            assertEquals("1", request.getRequestUrl().queryParameter("page_number"));
+            await(() -> store.getString(FishSpeechSettings.VOICE_SAMPLE, "").contains("fish-one"));
+            TextView status = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.fish");
+            assertTrue(status.getText().toString().contains("首屏"));
+            assertTrue(status.getText().toString().contains("更多"));
+            assertEquals(1, server.getRequestCount());
+            assertEquals("reader", store.getString(FishSpeechSettings.VOICE_SEARCH, ""));
+            assertEquals("public", store.getString(FishSpeechSettings.VOICE_SCOPE, ""));
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            await(() -> status.getText().toString().contains("更多结果未知"));
+            assertEquals(2, server.getRequestCount());
+        }
+    }
+
+    @Test public void globalCatalogStatusesExplainWhyCachedSourcesAreExcluded() {
+        store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        store.putString(SpeechSettings.RANDOM_SOURCES, "[\"third_party\",\"minimax\",\"breeze\",\"fish\"]");
+        store.putString(SpeechSettings.GET_TEMPLATE, "https://example.com/tts?text={text}&voice={voice}");
+        store.putString(SpeechSettings.VOICE_GET_TEMPLATE, "https://example.com/voices");
+        store.putString(SpeechSettings.HEADERS, "{broken");
+        store.putString(SpeechSettings.VOICE_SAMPLE, "7. Cached voice");
+        store.putString(SpeechSettings.MINIMAX_API_KEY, "fixture-key");
+        store.putString(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "voice-one/100");
+        store.putString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "[{\"id\":\"voice-one\",\"name\":\"One\"}]");
+        store.putString(BreezeSpeechSettings.API_KEY, "fixture-key");
+        store.putString(BreezeSpeechSettings.VOICE_TYPE, "default");
+        store.putString(BreezeSpeechSettings.VOICE_SAMPLE, "[]");
+        store.putString(FishSpeechSettings.API_KEY, "fixture-key");
+        store.putString(FishSpeechSettings.VOICE_MODE, "references");
+        store.putString(FishSpeechSettings.VOICE_SAMPLE, "[{\"id\":\"fish-one\",\"name\":\"One\"}]");
+        for (String source : new String[]{SpeechSettings.THIRD_PARTY, SpeechSettings.MINIMAX, SpeechSettings.BREEZE, SpeechSettings.FISH}) {
+            SpeechSettings snapshot = new SpeechSettings(new LocalOptions(store.values).withOverrides(Map.of(SpeechSettings.PROVIDER, source)));
+            store.putString(VoiceCatalogLabels.queryStorageKey(snapshot), VoiceCatalogLabels.queryKey(snapshot));
+        }
+        open(false);
+        View manager = option("音色列表管理").getWindow().getDecorView();
+        TextView third = manager.findViewWithTag("speech.random.catalog.third_party");
+        TextView minimax = manager.findViewWithTag("speech.random.catalog.minimax");
+        TextView breeze = manager.findViewWithTag("speech.random.catalog.breeze");
+        TextView fish = manager.findViewWithTag("speech.random.catalog.fish");
+        await(() -> third.getText().toString().contains("配置无效"));
+        await(() -> minimax.getText().toString().contains("不参与大随机"));
+        await(() -> breeze.getText().toString().contains("无有效音色"));
+        await(() -> fish.getText().toString().contains("不参与大随机"));
+    }
+
+    @Test public void globalCatalogRefreshSkipsThirdPartyWithoutVoiceBinding() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"third_party\"]");
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/speak").toString() + "?text={text}");
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            TextView status = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.third_party");
+            await(() -> status.getText().toString().contains("配置"));
+            assertEquals(0, server.getRequestCount());
+        }
+    }
+
+    @Test public void globalCatalogStalledBreezeRetainsCacheAndContinuesToFish() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(breezePage(true, 1, "next"));
+            server.enqueue(fishPage(1, false, false, true, fishItem("fish-valid", "Fish voice")));
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"breeze\",\"fish\"]");
+            store.putString(BreezeSpeechSettings.API_KEY, "fixture-key");
+            store.putString(BreezeSpeechSettings.BASE_URL, server.url("/").toString());
+            store.putString(BreezeSpeechSettings.VOICE_SAMPLE, "old-breeze-cache");
+            store.putString(VoiceCatalogLabels.BREEZE_QUERY_KEY, "old-marker");
+            store.putString(FishSpeechSettings.API_KEY, "fixture-key");
+            store.putString(FishSpeechSettings.BASE_URL, server.url("/").toString());
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            TextView breeze = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.breeze");
+            await(() -> breeze.getText().toString().contains("分页未前进"));
+            await(() -> store.getString(FishSpeechSettings.VOICE_SAMPLE, "").contains("fish-valid"));
+            assertEquals("old-breeze-cache", store.getString(BreezeSpeechSettings.VOICE_SAMPLE, ""));
+            assertEquals("old-marker", store.getString(VoiceCatalogLabels.BREEZE_QUERY_KEY, ""));
+            assertEquals(2, server.getRequestCount());
+        }
+    }
+
+    @Test public void globalCatalogStalledFishExactTotalRetainsCacheAndMarker() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(fishPage(5, null, false, true));
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"fish\"]");
+            store.putString(FishSpeechSettings.API_KEY, "fixture-key");
+            store.putString(FishSpeechSettings.BASE_URL, server.url("/").toString());
+            store.putString(FishSpeechSettings.VOICE_SAMPLE, "old-fish-cache");
+            store.putString(VoiceCatalogLabels.FISH_QUERY_KEY, "old-marker");
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            TextView fish = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.fish");
+            await(() -> fish.getText().toString().contains("分页未前进"));
+            assertEquals("old-fish-cache", store.getString(FishSpeechSettings.VOICE_SAMPLE, ""));
+            assertEquals("old-marker", store.getString(VoiceCatalogLabels.FISH_QUERY_KEY, ""));
+        }
+    }
+
+    @Test public void globalCatalogFishExactTotalShowsMoreAndUsableCount() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(fishPage(5, null, false, true, fishItem("fish-one", "Fish voice")));
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"fish\"]");
+            store.putString(FishSpeechSettings.API_KEY, "fixture-key");
+            store.putString(FishSpeechSettings.BASE_URL, server.url("/").toString());
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            TextView status = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.fish");
+            await(() -> status.getText().toString().contains("已刷新"));
+            assertTrue(status.getText().toString().contains("还有更多"));
+            assertTrue(status.getText().toString().contains("1 个有效音色"));
+        }
+    }
+
+    @Test public void changingGlobalCatalogScopeRejectsPendingResult() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("7. Late voice").setBodyDelay(300, TimeUnit.MILLISECONDS));
+            server.start();
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"third_party\"]");
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/speak").toString() + "?text={text}&voice={voice}");
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
+            store.putString(SpeechSettings.VOICE_SAMPLE, "9. Saved voice");
+            open(false);
+            AlertDialog manager = option("音色列表管理");
+            manager.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"local\"]");
+            TextView status = manager.getWindow().getDecorView().findViewWithTag("speech.random.catalog.third_party");
+            await(() -> status.getText().toString().contains("设置已变化"));
+            assertEquals("9. Saved voice", store.getString(SpeechSettings.VOICE_SAMPLE, ""));
+            assertEquals("", store.getString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, ""));
+        }
+    }
+
     @Test public void pastedThirdPartyCatalogBindsToCurrentQuery() {
         store.putString(SpeechSettings.GET_TEMPLATE, "https://example.com/tts?text={text}&voice={voice}");
         open(true);
@@ -2666,6 +2945,31 @@ public final class SpeechSettingsDialogTest {
 
         @Test @Config(sdk = 28, qualifiers = "w640dp-h360dp-land-mdpi")
         public void landscapeMiuixPageAndParameterEditorKeepTheirControlsVisible() throws Exception { verify(); }
+
+        @Test public void narrowRandomCatalogManagerRenders() throws Exception { verifyRandomCatalogManager("random-catalog-narrow"); }
+
+        @Test @Config(sdk = 28, qualifiers = "w640dp-h360dp-land-mdpi")
+        public void landscapeRandomCatalogManagerRenders() throws Exception { verifyRandomCatalogManager("random-catalog-landscape"); }
+
+        private void verifyRandomCatalogManager(String screenshot) throws Exception {
+            MemoryStore store = new MemoryStore();
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            compose.runOnUiThread(() -> {
+                page = new SpeechSettingsDialog(compose.getActivity(), store, true, (dialog, cleanup) -> {
+                    children.add(dialog);
+                    if (cleanup != null) dialog.setOnDismissListener(ignored -> cleanup.run());
+                    dialog.setOwnerActivity(compose.getActivity()); dialog.show();
+                });
+                page.dialog().setOwnerActivity(compose.getActivity()); page.dialog().show();
+                return Unit.INSTANCE;
+            });
+            scrollToOption("音色列表管理");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.音色列表管理"), false));
+            compose.waitForIdle();
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.button.-1"), false));
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasText("刷新所选", false, false), false));
+            savePreview(children.get(children.size() - 1), screenshot);
+        }
 
         @Test public void breezeSettingsUseTheSameNarrowHostDialogsWithTheirOwnControls() throws Exception {
             MemoryStore store = new MemoryStore();

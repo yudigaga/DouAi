@@ -98,8 +98,10 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
         Locale language = Locale.forLanguageTag(options.text("tts_language", "zh-CN"));
         String preferredVoiceName = options.text(SpeechSettings.LOCAL_VOICE_NAME, "").trim();
         Set<Voice> installed = current.getVoices();
-        Voice selected = SpeechSettings.RANDOM_CURRENT.equals(new SpeechSettings(options).randomMode)
-                ? randomOfflineVoice(installed, language, new Random()) : null;
+        boolean randomVoice = SpeechSettings.RANDOM_CURRENT.equals(new SpeechSettings(options).randomMode);
+        OfflineVoiceSelection randomSelection = randomVoice
+                ? selectOfflineVoice(installed, language, new Random()) : null;
+        Voice selected = randomSelection == null ? null : randomSelection.voice;
         Voice languageMatch = null;
         if (selected == null && installed != null) {
             for (Voice voice : installed) {
@@ -115,10 +117,16 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
         }
         if (selected == null) selected = languageMatch;
         if (selected == null) {
+            if (randomVoice) DouAiLog.event("speech_synthesis", "random_voice_local_resolved", "no_valid_voices",
+                    "source=local; voices=" + randomSelection.count + "; voice_ref=none; set_voice=not_attempted");
             complete(null, "请先在系统语音引擎中安装离线中文语音");
             return;
         }
-        current.setVoice(selected);
+        int setVoiceResult = current.setVoice(selected);
+        if (randomVoice) DouAiLog.event("speech_synthesis", "random_voice_local_resolved", "set_voice_attempted",
+                "source=local; voices=" + randomSelection.count + "; voice_ref=" + DouAiLog.reference(selected.getName())
+                        + "; set_voice=" + (setVoiceResult == TextToSpeech.SUCCESS ? "accepted" : "rejected"));
+        if (randomVoice) RandomSpeechVoice.logVoiceId(SpeechSettings.LOCAL, selected.getName());
         operation.stage("engine_ready", "offline_voice_selected=true; language=" + language.getLanguage());
         SpeechSettings settings = new SpeechSettings(options);
         current.setSpeechRate(settings.rate);
@@ -153,17 +161,26 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
     }
 
     static Voice randomOfflineVoice(Set<Voice> installed, Locale language, Random random) {
-        if (installed == null) return null;
+        return selectOfflineVoice(installed, language, random).voice;
+    }
+
+    private static final class OfflineVoiceSelection {
+        final Voice voice;
+        final int count;
+        OfflineVoiceSelection(Voice voice, int count) { this.voice = voice; this.count = count; }
+    }
+
+    private static OfflineVoiceSelection selectOfflineVoice(Set<Voice> installed, Locale language, Random random) {
         List<Voice> exact = new ArrayList<>();
         List<Voice> matchingLanguage = new ArrayList<>();
-        for (Voice voice : installed) {
+        if (installed != null) for (Voice voice : installed) {
             if (voice == null || voice.isNetworkConnectionRequired() || voice.getLocale() == null
                     || !language.getLanguage().equals(voice.getLocale().getLanguage())) continue;
             matchingLanguage.add(voice);
             if (language.equals(voice.getLocale())) exact.add(voice);
         }
         List<Voice> eligible = exact.isEmpty() ? matchingLanguage : exact;
-        return eligible.isEmpty() ? null : eligible.get(random.nextInt(eligible.size()));
+        return new OfflineVoiceSelection(eligible.isEmpty() ? null : eligible.get(random.nextInt(eligible.size())), eligible.size());
     }
 
     /** Short-lived inventory check for global provider selection; no audio is generated. */
