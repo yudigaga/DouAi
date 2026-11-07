@@ -72,6 +72,39 @@ public final class SpeechSynthesisTest {
         ShadowTextToSpeech.reset();
     }
 
+    @Test public void globalRangeExcludingLocalSynthesizesWithoutOpeningSystemInventory() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(wav()); server.start();
+            Context context = context();
+            registerTtsEngine(context);
+            ShadowTextToSpeech.addVoice(new Voice("chinese-offline", Locale.CHINA, 300, 300, false, Set.of()));
+            LocalOptions scoped = globalThirdPartyOptions(server).withOverrides(
+                    Map.of("tts_random_sources", "[\"third_party\"]"));
+            AtomicReference<LocalSpeechSynthesis.Result> result = new AtomicReference<>();
+            AtomicReference<String> failure = new AtomicReference<>();
+            AtomicInteger calls = new AtomicInteger();
+            SpeechSynthesis request = SpeechSynthesis.synthesize(context, "正文", scoped,
+                    (audio, error) -> { result.set(audio); failure.set(error); calls.incrementAndGet(); });
+            try {
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (calls.get() == 0 && ShadowTextToSpeech.getLastTextToSpeechInstance() == null
+                        && System.nanoTime() < until) {
+                    ShadowLooper.getShadowMainLooper().idle();
+                    Thread.sleep(10);
+                }
+                assertNull("An excluded local source must not initialize a TTS inventory",
+                        ShadowTextToSpeech.getLastTextToSpeechInstance());
+                await(calls);
+                assertNull(failure.get());
+                assertNotNull(result.get());
+                assertEquals("net-one", server.takeRequest(2, TimeUnit.SECONDS).getRequestUrl().queryParameter("voice"));
+            } finally {
+                request.close();
+                if (result.get() != null) Files.deleteIfExists(result.get().file.toPath());
+            }
+        }
+    }
+
     @Test public void globalRandomWaitsForOfflineInventoryAndUsesValidNetworkWhenLocalHasNoMatch() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(wav()); server.start();

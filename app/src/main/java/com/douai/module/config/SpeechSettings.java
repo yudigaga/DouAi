@@ -1,5 +1,10 @@
 package com.douai.module.config;
 
+import org.json.JSONArray;
+
+import java.util.ArrayList;
+import java.util.List;
+
 /** Host-local speech settings shared by the editor and synthesis requests. */
 public final class SpeechSettings {
     public static final String PROVIDER = "tts_provider";
@@ -8,7 +13,10 @@ public final class SpeechSettings {
     public static final String MINIMAX = "minimax";
     public static final String BREEZE = "breeze";
     public static final String FISH = "fish";
+    public static final List<String> PROVIDERS = List.of(LOCAL, THIRD_PARTY, MINIMAX, BREEZE, FISH);
     public static final String RANDOM_MODE = "tts_random_mode";
+    public static final String RANDOM_SOURCES = "tts_random_sources";
+    public static final String DEFAULT_RANDOM_SOURCES = "[\"local\",\"third_party\",\"minimax\",\"breeze\",\"fish\"]";
     public static final String RANDOM_OFF = "off";
     public static final String RANDOM_CURRENT = "current";
     public static final String RANDOM_ALL = "all";
@@ -54,6 +62,7 @@ public final class SpeechSettings {
     public final boolean fish;
     public final boolean local;
     public final String randomMode;
+    public final List<String> randomSources;
     public final String minimaxApiKey;
     public final String minimaxBaseUrl;
     public final String minimaxModel;
@@ -89,6 +98,14 @@ public final class SpeechSettings {
         String savedRandomMode = options.text(RANDOM_MODE, RANDOM_OFF);
         randomMode = RANDOM_CURRENT.equals(savedRandomMode) || RANDOM_ALL.equals(savedRandomMode)
                 ? savedRandomMode : RANDOM_OFF;
+        List<String> savedSources;
+        try {
+            savedSources = parseRandomSources(options.withDefault(RANDOM_SOURCES, DEFAULT_RANDOM_SOURCES)
+                    .text(RANDOM_SOURCES, ""));
+        } catch (IllegalArgumentException invalid) {
+            savedSources = List.of();
+        }
+        randomSources = savedSources;
         breezeSettings = new BreezeSpeechSettings(options);
         fishSettings = new FishSpeechSettings(options);
         minimaxApiKey = options.text(MINIMAX_API_KEY, "").trim();
@@ -142,6 +159,29 @@ public final class SpeechSettings {
             throw new IllegalArgumentException("语音来源无效");
         }
         return value;
+    }
+
+    public static String validateRandomSources(String value) {
+        return new JSONArray(parseRandomSources(value)).toString();
+    }
+
+    private static List<String> parseRandomSources(String value) {
+        try {
+            Object parsed = ConfigJson.parse(value);
+            if (!(parsed instanceof JSONArray) || ((JSONArray) parsed).length() == 0) throw ConfigJson.invalid();
+            JSONArray sources = (JSONArray) parsed;
+            List<String> selected = new ArrayList<>();
+            for (int i = 0; i < sources.length(); i++) {
+                Object source = sources.get(i);
+                if (!(source instanceof String) || !PROVIDERS.contains(source)) throw ConfigJson.invalid();
+                selected.add((String) source);
+            }
+            List<String> canonical = new ArrayList<>();
+            for (String source : PROVIDERS) if (selected.contains(source)) canonical.add(source);
+            return List.copyOf(canonical);
+        } catch (Exception invalid) {
+            throw new IllegalArgumentException("随机来源范围无效，请至少选择一个有效的语音来源");
+        }
     }
 
     /** Independent MiniMax controls use the provider's ranges, separate from Android TTS. */

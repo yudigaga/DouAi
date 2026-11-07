@@ -13,9 +13,6 @@ import java.util.Random;
 
 /** Chooses one provider and one cached voice for an individual synthesis request. */
 public final class RandomSpeechVoice {
-    private static final String[] SOURCES = {SpeechSettings.LOCAL, SpeechSettings.THIRD_PARTY,
-            SpeechSettings.MINIMAX, SpeechSettings.BREEZE, SpeechSettings.FISH};
-
     private RandomSpeechVoice() { }
 
     public static LocalOptions select(LocalOptions options, Random random) {
@@ -34,7 +31,7 @@ public final class RandomSpeechVoice {
         }
         List<String> available = new ArrayList<>();
         List<List<VoiceCatalog.Entry>> catalogs = new ArrayList<>();
-        for (String source : SOURCES) {
+        for (String source : current.randomSources) {
             if (SpeechSettings.LOCAL.equals(source)) {
                 if (systemAvailable) { available.add(source); catalogs.add(null); }
                 continue;
@@ -44,7 +41,7 @@ public final class RandomSpeechVoice {
             List<VoiceCatalog.Entry> voices = voices(options, candidate);
             if (!voices.isEmpty()) { available.add(source); catalogs.add(voices); }
         }
-        if (available.isEmpty()) throw new IllegalArgumentException("没有可用的随机音色来源，请配置语音来源并刷新音色列表");
+        if (available.isEmpty()) throw new IllegalArgumentException("所选来源范围内没有可用的随机音色，请检查来源范围及配置并刷新音色列表");
         int sourceIndex = random.nextInt(available.size());
         String source = available.get(sourceIndex);
         if (SpeechSettings.LOCAL.equals(source)) {

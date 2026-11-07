@@ -18,6 +18,38 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void randomSourceRangeRoundTripsInCanonicalProviderOrder() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put("tts_random_sources", "[\"fish\",\"local\",\"fish\"]");
+        String encoded = ConfigTransfer.export(source, false);
+        assertEquals("[\"local\",\"fish\"]", new JSONObject(encoded).getJSONObject("values")
+                .getJSONObject("tts_random_sources").getString("value"));
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, encoded));
+        assertEquals("[\"local\",\"fish\"]", target.values.get("tts_random_sources"));
+        assertEquals("[\"fish\",\"local\",\"fish\"]", source.values.get("tts_random_sources"));
+        JSONObject unordered = new JSONObject(encoded);
+        unordered.getJSONObject("values").getJSONObject("tts_random_sources")
+                .put("value", "[\"fish\",\"local\",\"fish\"]");
+        MemoryStore imported = new MemoryStore();
+        ConfigTransfer.apply(imported, ConfigTransfer.inspect(imported, unordered.toString()));
+        assertEquals("[\"local\",\"fish\"]", imported.values.get("tts_random_sources"));
+    }
+
+    @Test public void invalidImportedRandomSourceRangesAreRejectedWithoutPublication() throws Exception {
+        for (Object range : new Object[]{"[]", "", "broken", "{}", "[\"unknown\"]", "[\"fish\",4]",
+                "[\"fish\"] trailing", "['fish']", "[fish]", true, new JSONArray("[\"fish\"]")}) {
+            MemoryStore target = new MemoryStore();
+            target.values.put("keyword", "unchanged");
+            JSONObject invalid = new JSONObject(ConfigTransfer.export(new MemoryStore(), false));
+            invalid.getJSONObject("values").put("tts_random_sources",
+                    new JSONObject().put("type", "string").put("value", range));
+            assertThrows(String.valueOf(range), IllegalArgumentException.class,
+                    () -> ConfigTransfer.inspect(target, invalid.toString()));
+            assertEquals(Map.of("keyword", "unchanged"), target.values);
+            assertEquals(0, target.commits);
+        }
+    }
+
     @Test public void randomModeRoundTripsWhileInvalidImportedModeIsRejected() throws Exception {
         MemoryStore source = new MemoryStore(), target = new MemoryStore();
         source.values.put(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);

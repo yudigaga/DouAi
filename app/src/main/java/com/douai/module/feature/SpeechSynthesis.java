@@ -74,7 +74,9 @@ public final class SpeechSynthesis implements AutoCloseable {
             request.worker = WORKERS.submit(request.operation.wrap(() -> {
                 if (request.finished.get()) return;
                 try {
-                    boolean systemAvailable = hasSystemEngine(context, options);
+                    boolean includeSystem = !SpeechSettings.RANDOM_ALL.equals(original.randomMode)
+                            || original.randomSources.contains(SpeechSettings.LOCAL);
+                    boolean systemAvailable = includeSystem && hasSystemEngine(context, options);
                     if (systemAvailable && SpeechSettings.RANDOM_ALL.equals(original.randomMode)) {
                         LocalSpeechSynthesis.OfflineVoiceProbe inventory =
                                 new LocalSpeechSynthesis.OfflineVoiceProbe(context, options);

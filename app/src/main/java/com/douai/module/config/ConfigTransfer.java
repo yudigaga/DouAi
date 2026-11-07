@@ -267,6 +267,7 @@ public final class ConfigTransfer {
                 : key.startsWith("tts_fish_") ? Reason.FISH_OPTIONS : Reason.STRUCTURED_FIELDS;
         try {
             if (SpeechSettings.PROVIDER.equals(key) && value instanceof String) SpeechSettings.validateProvider((String) value);
+            if (SpeechSettings.RANDOM_SOURCES.equals(key) && value instanceof String) SpeechSettings.validateRandomSources((String) value);
             if (SpeechSettings.RANDOM_MODE.equals(key) && value instanceof String
                     && !SpeechSettings.RANDOM_OFF.equals(value) && !SpeechSettings.RANDOM_CURRENT.equals(value)
                     && !SpeechSettings.RANDOM_ALL.equals(value)) throw new IllegalArgumentException("随机音色模式无效");

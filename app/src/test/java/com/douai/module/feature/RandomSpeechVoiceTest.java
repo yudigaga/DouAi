@@ -27,6 +27,52 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class RandomSpeechVoiceTest {
+    @Test public void globalRangeChoosesOnlySelectedSourceWhenEverySourceIsAvailable() {
+        LocalOptions saved = allSourcesOptions();
+        for (String source : List.of("local", "third_party", "minimax", "breeze", "fish")) {
+            LocalOptions scoped = saved.withOverrides(Map.of("tts_random_sources", "[\"" + source + "\"]"));
+            LocalOptions chosen = RandomSpeechVoice.select(scoped, pick(0), true);
+            assertEquals(source, chosen.text(SpeechSettings.PROVIDER, ""));
+        }
+    }
+
+    @Test public void missingRangeKeepsEveryUsableSourceInTheGlobalPool() {
+        LocalOptions saved = allSourcesOptions();
+        String[] sources = {"local", "third_party", "minimax", "breeze", "fish"};
+        for (int i = 0; i < sources.length; i++) {
+            assertEquals(sources[i], RandomSpeechVoice.select(saved, pick(i), true)
+                    .text(SpeechSettings.PROVIDER, ""));
+        }
+    }
+
+    @Test public void unavailableSelectedSourceCannotFallBackToUncheckedAvailableSources() {
+        LocalOptions saved = allSourcesOptions().withOverrides(Map.of("tts_random_sources", "[\"minimax\"]",
+                SpeechSettings.MINIMAX_API_KEY, ""));
+        String failure = assertThrows(IllegalArgumentException.class,
+                () -> RandomSpeechVoice.select(saved, pick(0), true)).getMessage();
+        assertTrue(failure.contains("来源范围"));
+        assertTrue(failure.contains("配置"));
+    }
+
+    @Test public void malformedOrEmptySavedRangesFailClosedEvenWhenAllSourcesAreAvailable() {
+        LocalOptions saved = allSourcesOptions();
+        for (Object range : new Object[]{"[]", "", "broken", "{}", "[\"unknown\"]", "[\"fish\",4]", true, null}) {
+            LocalOptions scoped = saved.withOverrides(java.util.Collections.singletonMap("tts_random_sources", range));
+            assertThrows(String.valueOf(range), IllegalArgumentException.class,
+                    () -> RandomSpeechVoice.select(scoped, pick(0), true));
+        }
+    }
+
+    @Test public void currentAndOffModesIgnoreGlobalRange() {
+        LocalOptions saved = allSourcesOptions().withOverrides(Map.of("tts_random_sources", "[]",
+                SpeechSettings.PROVIDER, SpeechSettings.THIRD_PARTY));
+        LocalOptions current = RandomSpeechVoice.select(saved.withOverrides(Map.of(
+                SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_CURRENT)), pick(0), true);
+        assertEquals("third-one", current.text(SpeechSettings.SELECTED_VOICE, ""));
+        LocalOptions off = saved.withOverrides(Map.of(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_OFF));
+        assertSame(off, RandomSpeechVoice.select(off, pick(0), true));
+    }
+
     @Test public void offAndUnknownLegacyModeKeepManualProviderAndVoice() {
         LocalOptions manual = new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.THIRD_PARTY,
                 SpeechSettings.SELECTED_VOICE, "manual", SpeechSettings.RANDOM_MODE, "legacy"));
@@ -143,6 +189,23 @@ public final class RandomSpeechVoiceTest {
     private static LocalOptions withMarker(LocalOptions options, String source) {
         SpeechSettings settings = new SpeechSettings(options.withOverrides(Map.of(SpeechSettings.PROVIDER, source)));
         return options.withOverrides(Map.of(VoiceCatalogLabels.queryStorageKey(settings), VoiceCatalogLabels.queryKey(settings)));
+    }
+
+    private static LocalOptions allSourcesOptions() {
+        Map<String, Object> values = new HashMap<>();
+        values.put(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        values.put(SpeechSettings.GET_TEMPLATE, "https://example.test/tts?text={text}&voice={voice}");
+        values.put(SpeechSettings.VOICE_SAMPLE, "[{\"id\":\"third-one\",\"name\":\"Third One\"}]");
+        values.put(SpeechSettings.MINIMAX_API_KEY, "minimax-key");
+        values.put(SpeechSettings.MINIMAX_VOICE_SAMPLE, "[{\"id\":\"mini-one\",\"name\":\"Mini One\"}]");
+        values.put(BreezeSpeechSettings.API_KEY, "breeze-key");
+        values.put(BreezeSpeechSettings.VOICE_TYPE, "default");
+        values.put(BreezeSpeechSettings.VOICE_SAMPLE, "[{\"id\":\"breeze-one\",\"name\":\"Breeze One\"}]");
+        values.put(FishSpeechSettings.API_KEY, "fish-key");
+        values.put(FishSpeechSettings.VOICE_SAMPLE, "[{\"id\":\"fish-one\",\"name\":\"Fish One\"}]");
+        LocalOptions saved = new LocalOptions(values);
+        for (String source : List.of("third_party", "minimax", "breeze", "fish")) saved = withMarker(saved, source);
+        return saved;
     }
 
     private static Random pick(int index) {
