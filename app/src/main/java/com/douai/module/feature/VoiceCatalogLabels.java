@@ -17,6 +17,8 @@ import java.util.Locale;
 public final class VoiceCatalogLabels {
     public static final String FISH_QUERY_KEY = "voice_catalog_fish_query_v1";
     public static final String BREEZE_QUERY_KEY = "voice_catalog_breeze_query_v1";
+    public static final String THIRD_PARTY_QUERY_KEY = "voice_catalog_third_party_query_v1";
+    public static final String MINIMAX_QUERY_KEY = "voice_catalog_minimax_query_v1";
     private static final int MAX_METADATA_ITEMS = 64;
     private static final String[] LANGUAGES = {
             "af", "南非荷兰语", "ar", "阿拉伯语", "bg", "保加利亚语", "bn", "孟加拉语",
@@ -87,12 +89,13 @@ public final class VoiceCatalogLabels {
 
     public static String queryStorageKey(SpeechSettings settings) {
         if (settings == null) return "";
-        return settings.fish ? FISH_QUERY_KEY : settings.breeze ? BREEZE_QUERY_KEY : "";
+        return settings.fish ? FISH_QUERY_KEY : settings.breeze ? BREEZE_QUERY_KEY
+                : settings.minimax ? MINIMAX_QUERY_KEY : settings.thirdParty ? THIRD_PARTY_QUERY_KEY : "";
     }
 
     /** Length-prefixed fields include credentials only inside SHA-256, never in the stored marker. */
     public static String queryKey(SpeechSettings settings) {
-        if (settings == null || !settings.fish && !settings.breeze) return "";
+        if (settings == null || settings.local) return "";
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             part(digest, "voice-catalog-query-v1");
@@ -108,7 +111,7 @@ public final class VoiceCatalogLabels {
                 part(digest, settings.fishSettings.voiceLicensed);
                 part(digest, settings.fishSettings.voiceSort);
                 parts(digest, settings.fishSettings.voiceTags);
-            } else {
+            } else if (settings.breeze) {
                 part(digest, SpeechSettings.BREEZE);
                 part(digest, settings.breezeSettings.baseUrl);
                 part(digest, settings.breezeSettings.apiKey);
@@ -126,6 +129,19 @@ public final class VoiceCatalogLabels {
                 part(digest, settings.breezeSettings.voiceSortDirection);
                 part(digest, Boolean.toString(settings.breezeSettings.voiceFavoritesOnly));
                 parts(digest, settings.breezeSettings.voiceTags);
+            } else if (settings.minimax) {
+                part(digest, SpeechSettings.MINIMAX);
+                part(digest, settings.minimaxBaseUrl);
+                part(digest, settings.minimaxApiKey);
+            } else {
+                part(digest, SpeechSettings.THIRD_PARTY);
+                part(digest, settings.getTemplate);
+                part(digest, settings.headers);
+                part(digest, settings.voiceGetTemplate);
+                part(digest, settings.voiceHeaders);
+                part(digest, settings.voiceListPath);
+                part(digest, settings.voiceIdPath);
+                part(digest, settings.voiceNamePath);
             }
             StringBuilder hex = new StringBuilder(64);
             for (byte value : digest.digest()) hex.append(String.format(Locale.ROOT, "%02x", value & 255));

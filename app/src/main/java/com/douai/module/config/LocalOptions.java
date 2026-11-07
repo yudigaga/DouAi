@@ -63,6 +63,12 @@ public final class LocalOptions {
         return new LocalOptions(copy);
     }
 
+    public LocalOptions withOverrides(Map<String, ?> overrides) {
+        Map<String, Object> copy = new HashMap<>(values);
+        copy.putAll(overrides);
+        return new LocalOptions(copy);
+    }
+
     public boolean enabled(String key) { return enabled(key, false); }
 
     public boolean enabled(String key, boolean fallback) {

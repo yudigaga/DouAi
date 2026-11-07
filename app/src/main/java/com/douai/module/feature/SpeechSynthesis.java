@@ -1,9 +1,11 @@
 package com.douai.module.feature;
 
 import android.content.Context;
+import android.content.Intent;
 import android.media.MediaMetadataRetriever;
 import android.os.Handler;
 import android.os.Looper;
+import android.speech.tts.TextToSpeech;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SpeechSettings;
@@ -12,6 +14,7 @@ import com.douai.module.diagnostics.DouAiLog;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.util.UUID;
+import java.util.Random;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.Future;
@@ -56,29 +59,79 @@ public final class SpeechSynthesis implements AutoCloseable {
             request.complete(null, "语音设置不可用");
             return request;
         }
-        SpeechSettings settings = new SpeechSettings(options);
-        request.operation.stage("provider_selected", "provider=" + provider(settings)
-                + "; text_chars=" + (text == null ? 0 : text.length()));
-        if (settings.local) {
-            request.operation.wrap(() -> request.local = LocalSpeechSynthesis.synthesize(context, text, options, request::complete)).run();
+        SpeechSettings original = new SpeechSettings(options);
+        if (SpeechSettings.RANDOM_OFF.equals(original.randomMode) || context == null
+                || text == null || text.trim().isEmpty()) {
+            request.start(context, text, options, false);
             return request;
         }
-        if (context == null || text == null || text.trim().isEmpty()) {
-            request.complete(null, "语音内容为空");
-            return request;
-        }
-        Context application = context.getApplicationContext();
-        Context use = application == null ? context : application;
-        request.main.postDelayed(request.operation.wrap(() -> request.complete(null,
-                settings.fish ? "Fish Audio 语音生成超时" : settings.breeze ? "Breeze Blue 语音生成超时" : settings.minimax ? "MiniMax 语音生成超时" : "第三方语音生成超时")), 60_000);
+        Runnable selectionTimeout = request.operation.wrap(() -> request.complete(null, "随机音色选择超时"));
+        request.main.postDelayed(selectionTimeout, 60_000);
         try {
-            request.operation.stage("queued", "business_result=pending; timeout_ms=60000");
-            request.worker = WORKERS.submit(request.operation.wrap(() -> request.generate(use, text, settings)));
+            request.worker = WORKERS.submit(request.operation.wrap(() -> {
+                if (request.finished.get()) return;
+                try {
+                    LocalOptions chosen = RandomSpeechVoice.select(options, new Random(), hasSystemEngine(context, options));
+                    request.main.removeCallbacks(selectionTimeout);
+                    if (!request.finished.get()) request.start(context, text, chosen, true);
+                } catch (IllegalArgumentException invalid) {
+                    request.complete(null, invalid.getMessage());
+                } catch (RuntimeException invalid) {
+                    request.complete(null, "随机音色配置无效，请检查设置并刷新音色列表");
+                }
+            }));
             if (request.finished.get()) request.worker.cancel(true);
         } catch (RejectedExecutionException ignored) {
             request.complete(null, "语音生成任务过多，请稍后重试");
         }
         return request;
+    }
+
+    private void start(Context context, String text, LocalOptions requestOptions, boolean onWorker) {
+        if (finished.get()) return;
+        SpeechSettings settings = new SpeechSettings(requestOptions);
+        operation.stage("provider_selected", "provider=" + provider(settings)
+                + "; text_chars=" + (text == null ? 0 : text.length()));
+        if (settings.local) {
+            operation.wrap(() -> {
+                local = LocalSpeechSynthesis.synthesize(context, text, requestOptions, this::complete);
+                if (finished.get()) try { local.close(); } catch (Exception ignored) { }
+            }).run();
+            return;
+        }
+        if (context == null || text == null || text.trim().isEmpty()) {
+            complete(null, "语音内容为空");
+            return;
+        }
+        Context application = context.getApplicationContext();
+        Context use = application == null ? context : application;
+        main.postDelayed(operation.wrap(() -> complete(null,
+                settings.fish ? "Fish Audio 语音生成超时" : settings.breeze ? "Breeze Blue 语音生成超时" : settings.minimax ? "MiniMax 语音生成超时" : "第三方语音生成超时")), 60_000);
+        if (onWorker) {
+            if (!finished.get()) generate(use, text, settings);
+            return;
+        }
+        try {
+            operation.stage("queued", "business_result=pending; timeout_ms=60000");
+            worker = WORKERS.submit(operation.wrap(() -> generate(use, text, settings)));
+            if (finished.get()) worker.cancel(true);
+        } catch (RejectedExecutionException ignored) {
+            complete(null, "语音生成任务过多，请稍后重试");
+        }
+    }
+
+    private static boolean hasSystemEngine(Context context, LocalOptions options) {
+        if (context == null) return false;
+        String configured = options.text("tts_engine", "").trim();
+        try {
+            for (android.content.pm.ResolveInfo service : context.getPackageManager().queryIntentServices(
+                    new Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0)) {
+                if (service.serviceInfo != null && service.serviceInfo.enabled && service.serviceInfo.exported
+                        && (configured.isEmpty()
+                        || configured.equals(service.serviceInfo.packageName))) return true;
+            }
+        } catch (RuntimeException ignored) { }
+        return false;
     }
 
     private void generate(Context context, String text, SpeechSettings settings) {

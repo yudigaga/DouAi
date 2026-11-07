@@ -31,6 +31,9 @@ import org.robolectric.shadows.ShadowLooper;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -56,6 +59,53 @@ public final class SpeechSynthesisTest {
     }
 
     @Before public void resetMetadata() { AudioMetadata.duration = "1000"; AudioMetadata.hasVideo = "no"; }
+
+    @Test public void currentRandomWithoutCatalogFailsBeforeAnyProviderRequest() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            AtomicInteger calls = new AtomicInteger();
+            AtomicReference<String> failure = new AtomicReference<>();
+            LocalOptions options = settings(server.url("/tts") + "?text={text}&voice={voice}")
+                    .withDefault("tts_random_mode", "current");
+            SpeechSynthesis.synthesize(context(), "正文", options,
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls);
+            assertTrue(failure.get(), failure.get().contains("音色"));
+            assertEquals(0, server.getRequestCount());
+        }
+    }
+
+    @Test public void queuedRandomRequestCancelledBeforeSelectionNeverStartsProvider() throws Exception {
+        java.lang.reflect.Field field = SpeechSynthesis.class.getDeclaredField("WORKERS");
+        field.setAccessible(true);
+        ThreadPoolExecutor workers = (ThreadPoolExecutor) field.get(null);
+        CountDownLatch started = new CountDownLatch(2), release = new CountDownLatch(1);
+        Future<?> first = workers.submit(() -> { started.countDown(); try { release.await(); } catch (InterruptedException ignored) { } });
+        Future<?> second = workers.submit(() -> { started.countDown(); try { release.await(); } catch (InterruptedException ignored) { } });
+        try (MockWebServer server = new MockWebServer()) {
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+            server.start();
+            LocalOptions saved = settings(server.url("/tts") + "?text={text}&voice={voice}")
+                    .withDefault(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_CURRENT)
+                    .withDefault(SpeechSettings.VOICE_SAMPLE, "[{\"id\":\"one\",\"name\":\"One\"}]");
+            SpeechSettings catalogSettings = new SpeechSettings(saved);
+            LocalOptions options = saved.withOverrides(Map.of(VoiceCatalogLabels.queryStorageKey(catalogSettings),
+                    VoiceCatalogLabels.queryKey(catalogSettings)));
+            AtomicInteger calls = new AtomicInteger();
+            AtomicReference<String> failure = new AtomicReference<>();
+            SpeechSynthesis request = SpeechSynthesis.synthesize(context(), "正文", options,
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            request.close();
+            await(calls);
+            assertEquals("语音生成已停止", failure.get());
+            release.countDown();
+            first.get(2, TimeUnit.SECONDS); second.get(2, TimeUnit.SECONDS);
+            assertEquals(0, server.getRequestCount());
+            assertEquals(1, calls.get());
+        } finally {
+            release.countDown(); first.cancel(true); second.cancel(true);
+        }
+    }
 
     @Test public void fishSpeechUsesItsOwnPostAndTransfersOneValidatedOriginalFile() throws Exception {
         try (MockWebServer server = new MockWebServer(); MockWebServer other = new MockWebServer()) {

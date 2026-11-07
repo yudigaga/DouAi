@@ -208,15 +208,33 @@ public final class VoiceCatalogLabelsTest {
         assertEquals("zh", breeze.breezeSettings.voiceLanguage);
     }
 
-    @Test public void unsupportedSourcesHaveNoMarkerAndDerivedMarkersAreExcludedFromBackupAndAutomation() {
+    @Test public void thirdPartyAndMiniMaxMarkersFollowAccountEndpointAndCatalogShape() {
+        Map<String, Object> third = settings(SpeechSettings.THIRD_PARTY);
+        String thirdMarker = key(third);
+        assertChange(third, SpeechSettings.GET_TEMPLATE, "https://changed.test/tts?voice={voice}", thirdMarker);
+        assertChange(third, SpeechSettings.HEADERS, "{\"Authorization\":\"new\"}", thirdMarker);
+        assertChange(third, SpeechSettings.VOICE_GET_TEMPLATE, "https://changed.test/list", thirdMarker);
+        assertChange(third, SpeechSettings.VOICE_HEADERS, "{\"Authorization\":\"new\"}", thirdMarker);
+        assertChange(third, SpeechSettings.VOICE_LIST_PATH, "data.voices", thirdMarker);
+        assertChange(third, SpeechSettings.VOICE_ID_PATH, "voice_id", thirdMarker);
+        assertChange(third, SpeechSettings.VOICE_NAME_PATH, "voice_name", thirdMarker);
+
+        Map<String, Object> mini = settings(SpeechSettings.MINIMAX);
+        String miniMarker = key(mini);
+        assertChange(mini, SpeechSettings.MINIMAX_BASE_URL, "https://changed.test", miniMarker);
+        assertChange(mini, SpeechSettings.MINIMAX_API_KEY, "new-key", miniMarker);
+    }
+
+    @Test public void networkSourcesHaveDerivedMarkersExcludedFromBackupAndAutomation() {
         assertEquals(VoiceCatalogLabels.FISH_QUERY_KEY, VoiceCatalogLabels.queryStorageKey(speech(settings(SpeechSettings.FISH))));
         assertEquals(VoiceCatalogLabels.BREEZE_QUERY_KEY, VoiceCatalogLabels.queryStorageKey(speech(settings(SpeechSettings.BREEZE))));
+        assertEquals(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, VoiceCatalogLabels.queryStorageKey(speech(settings(SpeechSettings.THIRD_PARTY))));
+        assertEquals(VoiceCatalogLabels.MINIMAX_QUERY_KEY, VoiceCatalogLabels.queryStorageKey(speech(settings(SpeechSettings.MINIMAX))));
         assertEquals("", VoiceCatalogLabels.queryKey(null)); assertEquals("", VoiceCatalogLabels.queryStorageKey(null));
-        for (String provider : new String[]{SpeechSettings.LOCAL, SpeechSettings.THIRD_PARTY, SpeechSettings.MINIMAX}) {
-            SpeechSettings settings = speech(settings(provider));
-            assertEquals("", VoiceCatalogLabels.queryKey(settings)); assertEquals("", VoiceCatalogLabels.queryStorageKey(settings));
-        }
-        for (String storage : new String[]{VoiceCatalogLabels.FISH_QUERY_KEY, VoiceCatalogLabels.BREEZE_QUERY_KEY}) {
+        SpeechSettings local = speech(settings(SpeechSettings.LOCAL));
+        assertEquals("", VoiceCatalogLabels.queryKey(local)); assertEquals("", VoiceCatalogLabels.queryStorageKey(local));
+        for (String storage : new String[]{VoiceCatalogLabels.FISH_QUERY_KEY, VoiceCatalogLabels.BREEZE_QUERY_KEY,
+                VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, VoiceCatalogLabels.MINIMAX_QUERY_KEY}) {
             assertFalse(storage.startsWith("tts_"));
             assertFalse(ConfigurationCatalog.settings().containsKey(storage));
             assertFalse(ConfigurationCatalog.transferableTypes().containsKey(storage));

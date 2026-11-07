@@ -18,6 +18,19 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void randomModeRoundTripsWhileInvalidImportedModeIsRejected() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        String encoded = ConfigTransfer.export(source, false);
+        assertEquals(SpeechSettings.RANDOM_ALL, new JSONObject(encoded).getJSONObject("values")
+                .getJSONObject(SpeechSettings.RANDOM_MODE).getString("value"));
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, encoded));
+        assertEquals(SpeechSettings.RANDOM_ALL, target.values.get(SpeechSettings.RANDOM_MODE));
+        JSONObject invalid = new JSONObject(encoded);
+        invalid.getJSONObject("values").getJSONObject(SpeechSettings.RANDOM_MODE).put("value", "unsupported");
+        assertThrows(IllegalArgumentException.class, () -> ConfigTransfer.inspect(new MemoryStore(), invalid.toString()));
+    }
+
     @Test public void exportsCanonicalSpeedAndTheModuleOnlySwitchWithoutMutatingTheSource() throws Exception {
         for (boolean secrets : new boolean[]{false, true}) {
             MemoryStore source = new MemoryStore(), target = new MemoryStore();

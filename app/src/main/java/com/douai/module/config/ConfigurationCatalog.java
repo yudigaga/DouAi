@@ -92,7 +92,7 @@ public final class ConfigurationCatalog {
                 + "comment_mode comment_prompt comment_scope_users ai_model_settings_v2 "
                 + "download_method third_party_get_template third_party_headers third_party_app_id third_party_app_secret "
                 + "third_party_signature_mode third_party_signature_header third_party_download_fields third_party_naming_fields "
-                + "tts_provider tts_engine tts_language tts_rate tts_pitch tts_get_template tts_headers tts_audio_field "
+                + "tts_provider tts_random_mode tts_engine tts_language tts_rate tts_pitch tts_get_template tts_headers tts_audio_field "
                 + "tts_voice_get_template tts_voice_headers tts_voice_list_path tts_voice_id_path tts_voice_name_path "
                 + "tts_selected_voice tts_selected_voice_name component_hide_custom_views "
                 + "tts_minimax_api_key tts_minimax_base_url tts_minimax_model tts_minimax_voice_id tts_minimax_voice_name "

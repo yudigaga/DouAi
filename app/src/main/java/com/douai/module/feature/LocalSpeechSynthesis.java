@@ -15,6 +15,10 @@ import com.douai.module.diagnostics.DouAiLog;
 
 import java.io.File;
 import java.util.Locale;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
@@ -91,11 +95,13 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
         }
         Locale language = Locale.forLanguageTag(options.text("tts_language", "zh-CN"));
         String preferredVoiceName = options.text(SpeechSettings.LOCAL_VOICE_NAME, "").trim();
-        Voice selected = null;
+        Set<Voice> installed = current.getVoices();
+        Voice selected = SpeechSettings.RANDOM_CURRENT.equals(new SpeechSettings(options).randomMode)
+                ? randomOfflineVoice(installed, language, new Random()) : null;
         Voice languageMatch = null;
-        if (current.getVoices() != null) {
-            for (Voice voice : current.getVoices()) {
-                if (voice.isNetworkConnectionRequired()
+        if (selected == null && installed != null) {
+            for (Voice voice : installed) {
+                if (voice.isNetworkConnectionRequired() || voice.getLocale() == null
                         || !voice.getLocale().getLanguage().equals(language.getLanguage())) continue;
                 if (languageMatch == null || voice.getLocale().equals(language)) languageMatch = voice;
                 if (!preferredVoiceName.isEmpty() && preferredVoiceName.equals(voice.getName())
@@ -142,6 +148,20 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
         if (current.synthesizeToFile(text, new Bundle(), output, id) != TextToSpeech.SUCCESS) {
             complete(null, "语音引擎拒绝了生成请求");
         } else operation.stage("engine_request_accepted", "business_result=pending");
+    }
+
+    static Voice randomOfflineVoice(Set<Voice> installed, Locale language, Random random) {
+        if (installed == null) return null;
+        List<Voice> exact = new ArrayList<>();
+        List<Voice> matchingLanguage = new ArrayList<>();
+        for (Voice voice : installed) {
+            if (voice == null || voice.isNetworkConnectionRequired() || voice.getLocale() == null
+                    || !language.getLanguage().equals(voice.getLocale().getLanguage())) continue;
+            matchingLanguage.add(voice);
+            if (language.equals(voice.getLocale())) exact.add(voice);
+        }
+        List<Voice> eligible = exact.isEmpty() ? matchingLanguage : exact;
+        return eligible.isEmpty() ? null : eligible.get(random.nextInt(eligible.size()));
     }
 
     private void complete(Result result, String failure) {

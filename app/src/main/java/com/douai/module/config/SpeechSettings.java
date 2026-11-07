@@ -8,6 +8,10 @@ public final class SpeechSettings {
     public static final String MINIMAX = "minimax";
     public static final String BREEZE = "breeze";
     public static final String FISH = "fish";
+    public static final String RANDOM_MODE = "tts_random_mode";
+    public static final String RANDOM_OFF = "off";
+    public static final String RANDOM_CURRENT = "current";
+    public static final String RANDOM_ALL = "all";
     public static final String MINIMAX_API_KEY = "tts_minimax_api_key";
     public static final String MINIMAX_BASE_URL = "tts_minimax_base_url";
     public static final String MINIMAX_MODEL = "tts_minimax_model";
@@ -35,6 +39,7 @@ public final class SpeechSettings {
     public static final String VOICE_NAME_PATH = "tts_voice_name_path";
     public static final String SELECTED_VOICE = "tts_selected_voice";
     public static final String SELECTED_VOICE_NAME = "tts_selected_voice_name";
+    public static final String VOICE_SAMPLE = "tts_voice_sample";
     public static final String DEFAULT_GET_TEMPLATE =
             "http://www.yx520.ltd/API/wzzyypromax/api.php?voice={voice}&apikey=&text={text}";
     public static final String DEFAULT_VOICE_GET_TEMPLATE = "https://www.yx520.ltd/API/wzzyypromax/ys.php";
@@ -48,6 +53,7 @@ public final class SpeechSettings {
     public final boolean breeze;
     public final boolean fish;
     public final boolean local;
+    public final String randomMode;
     public final String minimaxApiKey;
     public final String minimaxBaseUrl;
     public final String minimaxModel;
@@ -80,6 +86,9 @@ public final class SpeechSettings {
         breeze = BREEZE.equals(options.text(PROVIDER, LOCAL));
         fish = FISH.equals(options.text(PROVIDER, LOCAL));
         local = !thirdParty && !minimax && !breeze && !fish;
+        String savedRandomMode = options.text(RANDOM_MODE, RANDOM_OFF);
+        randomMode = RANDOM_CURRENT.equals(savedRandomMode) || RANDOM_ALL.equals(savedRandomMode)
+                ? savedRandomMode : RANDOM_OFF;
         breezeSettings = new BreezeSpeechSettings(options);
         fishSettings = new FishSpeechSettings(options);
         minimaxApiKey = options.text(MINIMAX_API_KEY, "").trim();

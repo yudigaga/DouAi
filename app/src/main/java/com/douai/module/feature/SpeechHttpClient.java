@@ -570,6 +570,11 @@ public final class SpeechHttpClient {
         }
     }
 
+    static boolean validHeaders(String json) {
+        try { headers(json); return true; }
+        catch (IllegalArgumentException invalid) { return false; }
+    }
+
     private static Map<String, String> headers(String json) {
         Map<String, String> values = new LinkedHashMap<>();
         if (json == null || json.trim().isEmpty()) return values;
