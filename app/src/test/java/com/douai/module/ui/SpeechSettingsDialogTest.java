@@ -137,6 +137,94 @@ public final class SpeechSettingsDialogTest {
         assertNull(root.findViewWithTag("speech.random.hint"));
     }
 
+    @Test public void globalRandomSourceScopeDefaultsToAllAndSavesMultipleChoicesAcrossReopen() {
+        store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        store.putString(SpeechSettings.SELECTED_VOICE, "manual-voice");
+        open(false);
+        assertEquals("全部来源", value("来源范围"));
+        AlertDialog sources = sourceScope();
+        String[] labels = {"系统引擎", "第三方", "MiniMax", "Breeze Blue", "Fish Audio"};
+        assertEquals(5, sources.getListView().getCount());
+        for (int index = 0; index < labels.length; index++) {
+            assertEquals(labels[index], sources.getListView().getAdapter().getItem(index));
+            assertTrue(sources.getListView().isItemChecked(index));
+        }
+        for (int index : new int[]{0, 2, 4}) sources.getListView().performItemClick(null, index, index);
+        save(sources);
+        assertFalse(sources.isShowing());
+        assertEquals("[\"third_party\",\"breeze\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+        assertEquals("第三方、Breeze Blue", value("来源范围"));
+        assertEquals("manual-voice", store.getString(SpeechSettings.SELECTED_VOICE, ""));
+        assertEquals(SpeechSettings.LOCAL, store.getString(SpeechSettings.PROVIDER, SpeechSettings.LOCAL));
+        page.close(); page.dialog().dismiss(); open(false);
+        assertEquals("第三方、Breeze Blue", value("来源范围"));
+        sources = sourceScope();
+        assertFalse(sources.getListView().isItemChecked(0));
+        assertTrue(sources.getListView().isItemChecked(1));
+        assertFalse(sources.getListView().isItemChecked(2));
+        assertTrue(sources.getListView().isItemChecked(3));
+        assertFalse(sources.getListView().isItemChecked(4));
+    }
+
+    @Test public void cancelingRandomSourceScopeKeepsTheSavedChoices() {
+        store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        store.putString(SpeechSettings.RANDOM_SOURCES, "[\"minimax\",\"fish\"]");
+        open(false);
+        AlertDialog sources = sourceScope();
+        sources.getListView().performItemClick(null, 2, 2);
+        sources.getListView().performItemClick(null, 1, 1);
+        sources.getButton(Dialog.BUTTON_NEGATIVE).performClick();
+        assertEquals("[\"minimax\",\"fish\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+        assertEquals("MiniMax、Fish Audio", value("来源范围"));
+        sources = sourceScope();
+        assertTrue(sources.getListView().isItemChecked(2));
+        assertTrue(sources.getListView().isItemChecked(4));
+        assertFalse(sources.getListView().isItemChecked(1));
+    }
+
+    @Test public void emptyRandomSourceScopeStaysOpenUntilAtLeastOneSourceIsChosen() {
+        store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        store.putString(SpeechSettings.RANDOM_SOURCES, "[\"third_party\"]");
+        open(false);
+        AlertDialog sources = sourceScope();
+        sources.getListView().performItemClick(null, 1, 1);
+        save(sources);
+        assertTrue(sources.isShowing());
+        assertEquals("[\"third_party\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+        assertEquals("至少选择一个来源", org.robolectric.shadows.ShadowToast.getTextOfLatestToast().toString());
+        for (int index = 0; index < 5; index++) assertFalse(sources.getListView().isItemChecked(index));
+        sources.getListView().performItemClick(null, 4, 4);
+        save(sources);
+        assertFalse(sources.isShowing());
+        assertEquals("[\"fish\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+        assertEquals("Fish Audio", value("来源范围"));
+    }
+
+    @Test public void otherRandomModesHideTheSourceScopeAndRetainItsChoices() {
+        store.putString(SpeechSettings.RANDOM_SOURCES, "[\"breeze\",\"fish\"]");
+        open(false);
+        assertNull(root.findViewWithTag("settings.option.来源范围"));
+        AlertDialog modes = option("随机音色"); modes.getListView().performItemClick(null, 1, 1);
+        assertNull(root.findViewWithTag("settings.option.来源范围"));
+        assertEquals("[\"breeze\",\"fish\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+        modes = option("随机音色"); modes.getListView().performItemClick(null, 2, 2);
+        assertEquals("Breeze Blue、Fish Audio", value("来源范围"));
+        modes = option("随机音色"); modes.getListView().performItemClick(null, 0, 0);
+        assertNull(root.findViewWithTag("settings.option.来源范围"));
+        assertEquals("[\"breeze\",\"fish\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+    }
+
+    @Test public void invalidStoredRandomSourceScopeShowsNoSelectionInsteadOfAllSources() {
+        store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        store.putString(SpeechSettings.RANDOM_SOURCES, "[\"unknown\"]");
+        open(false);
+        assertEquals("未选择来源", value("来源范围"));
+        AlertDialog sources = sourceScope();
+        for (int index = 0; index < 5; index++) assertFalse(sources.getListView().isItemChecked(index));
+        sources.getButton(Dialog.BUTTON_NEGATIVE).performClick();
+        assertEquals("[\"unknown\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+    }
+
     @Test public void switchingSourcesKeepsValidFishAndBreezeVoiceCatalogs() {
         store.putString(SpeechSettings.PROVIDER, SpeechSettings.FISH);
         store.putString(FishSpeechSettings.API_KEY, "fish-key");
@@ -2323,6 +2411,46 @@ public final class SpeechSettingsDialogTest {
         }
     }
 
+    @Test public void globalPreviewUsesOnlyTheChosenSourceScopeAndDoesNotFallBackOutsideIt() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+            server.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.THIRD_PARTY);
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/tts") + "?text={text}&voice={voice}");
+            store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
+            store.putString(SpeechSettings.SELECTED_VOICE, "manual-voice");
+            store.putString(SpeechSettings.VOICE_SAMPLE, "7. Cached voice");
+            store.putString(VoiceCatalogLabels.THIRD_PARTY_QUERY_KEY, VoiceCatalogLabels.queryKey(speechSettings()));
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+            store.putString(SpeechSettings.RANDOM_SOURCES, "[\"breeze\"]");
+            open(false);
+            AlertDialog preview = option("试听");
+            View form = preview.getWindow().getDecorView();
+            form.findViewWithTag("speech.preview.start").performClick();
+            TextView status = form.findViewWithTag("speech.preview.status");
+            await(() -> !"正在生成语音".contentEquals(status.getText()));
+            assertTrue(status.getText().toString().contains("没有可用"));
+            assertTrue(form.findViewWithTag("speech.preview.start").isEnabled());
+            assertEquals(0, server.getRequestCount());
+            preview.dismiss();
+
+            AlertDialog sources = sourceScope();
+            sources.getListView().performItemClick(null, 3, 3);
+            sources.getListView().performItemClick(null, 1, 1);
+            save(sources);
+            preview = option("试听");
+            preview.getWindow().getDecorView().findViewWithTag("speech.preview.start").performClick();
+            RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(request);
+            assertEquals("/tts", request.getRequestUrl().encodedPath());
+            assertEquals("7", request.getRequestUrl().queryParameter("voice"));
+            assertEquals("[\"third_party\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+            assertEquals("manual-voice", store.getString(SpeechSettings.SELECTED_VOICE, ""));
+            assertEquals(SpeechSettings.MINIMAX, store.getString(SpeechSettings.PROVIDER, ""));
+        }
+    }
+
     @Test public void changingCatalogSettingsCancelsOldFetchAndAllowsTheNewCatalog() throws Exception {
         try (MockWebServer old = new MockWebServer(); MockWebServer current = new MockWebServer()) {
             old.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
@@ -2377,6 +2505,16 @@ public final class SpeechSettingsDialogTest {
 
     private AlertDialog option(String title) {
         return option(fieldParent(title), title);
+    }
+
+    private AlertDialog sourceScope() {
+        AlertDialog sources = option("来源范围");
+        View decor = sources.getWindow().getDecorView();
+        // Native multi-choice checked state is restored as the real list rows bind.
+        decor.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY));
+        decor.layout(0, 0, 600, 1000);
+        return sources;
     }
 
     private View miniMaxSection(String title) {
@@ -2765,6 +2903,21 @@ public final class SpeechSettingsDialogTest {
             scrollToOption("随机音色");
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.随机音色"), false));
             savePreview(page.dialog(), "speech-settings-random");
+            scrollToOption("来源范围");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.来源范围"), false));
+            Dialog sourcePicker = children.get(children.size() - 1);
+            for (int index = 0; index < 5; index++) {
+                ActionsKt.performScrollToIndex(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.choices"), false), index);
+                AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.choice." + index), false));
+            }
+            savePreview(sourcePicker, "speech-random-source-picker");
+            ActionsKt.performScrollToIndex(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.choices"), false), 1);
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.choice.1"), false));
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.button.-1"), false));
+            assertEquals("[\"local\",\"minimax\",\"breeze\",\"fish\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+            scrollToOption("来源范围");
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasText("系统引擎、MiniMax、Breeze Blue、Fish Audio", false, false), false));
+            savePreview(page.dialog(), "speech-random-source-summary");
             scrollToOption("合成参数");
             ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.合成参数"), false));
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasContentDescription("添加参数", false, false), false));

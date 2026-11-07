@@ -67,6 +67,7 @@ import java.util.function.Consumer;
 final class SpeechSettingsDialog implements AutoCloseable {
     private static final String VOICE_SAMPLE = SpeechSettings.VOICE_SAMPLE;
     private static final String SYNTHESIS_SAMPLE = "tts_synthesis_sample";
+    private static final String[] RANDOM_SOURCE_LABELS = {"系统引擎", "第三方", "MiniMax", "Breeze Blue", "Fish Audio"};
     private static final String BREEZE_ADVANCED = "Breeze Blue 高级设置";
     private static final String BREEZE_AUDIO = "Breeze Blue 音频输出";
     private static final String BREEZE_VOICE = "Breeze Blue 语言与表达";
@@ -168,8 +169,13 @@ final class SpeechSettingsDialog implements AutoCloseable {
                             choice.dismiss();
                             render();
                         }).setNegativeButton("取消", null).create(), null));
+        if (SpeechSettings.RANDOM_ALL.equals(random)) {
+            option("来源范围", randomSourceSummary(speech), this::selectRandomSources);
+        }
         if (!SpeechSettings.RANDOM_OFF.equals(random)) {
-            hint(content, "speech.random.hint", "小随机仅当前来源，大随机跨有效来源；先刷新音色列表。系统引擎仅使用当前语言的离线音色。");
+            hint(content, "speech.random.hint", SpeechSettings.RANDOM_ALL.equals(random)
+                    ? "大随机仅在勾选且可用的来源中选择；先刷新音色列表。系统引擎仅使用当前语言的离线音色。"
+                    : "小随机仅当前来源；先刷新音色列表。系统引擎仅使用当前语言的离线音色。");
         }
         if (speech.fish) {
             FishSpeechSettings fish = speech.fishSettings;
@@ -214,6 +220,37 @@ final class SpeechSettingsDialog implements AutoCloseable {
         for (Map.Entry<String, LinearLayout> entry : new ArrayList<>(sectionContents.entrySet())) {
             renderSection(entry.getKey(), entry.getValue());
         }
+    }
+
+    private static String randomSourceSummary(SpeechSettings speech) {
+        if (speech.randomSources.isEmpty()) return "未选择来源";
+        if (speech.randomSources.size() == SpeechSettings.PROVIDERS.size()) return "全部来源";
+        List<String> labels = new ArrayList<>();
+        for (int index = 0; index < SpeechSettings.PROVIDERS.size(); index++) {
+            if (speech.randomSources.contains(SpeechSettings.PROVIDERS.get(index))) labels.add(RANDOM_SOURCE_LABELS[index]);
+        }
+        return String.join("、", labels);
+    }
+
+    private void selectRandomSources() {
+        if (closed) return;
+        List<String> saved = settings().randomSources;
+        boolean[] checked = new boolean[SpeechSettings.PROVIDERS.size()];
+        for (int index = 0; index < checked.length; index++) checked[index] = saved.contains(SpeechSettings.PROVIDERS.get(index));
+        AlertDialog choice = builder("来源范围（可多选）").setMultiChoiceItems(RANDOM_SOURCE_LABELS, checked,
+                (dialog, index, selected) -> checked[index] = selected).setPositiveButton("保存", null)
+                .setNegativeButton("取消", null).create();
+        show(choice, null);
+        choice.getButton(Dialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+            if (closed || !choice.isShowing()) return;
+            org.json.JSONArray selected = new org.json.JSONArray();
+            for (int index = 0; index < checked.length; index++) if (checked[index]) selected.put(SpeechSettings.PROVIDERS.get(index));
+            if (selected.length() == 0) { toast("至少选择一个来源"); return; }
+            store.putString(SpeechSettings.RANDOM_SOURCES, SpeechSettings.validateRandomSources(selected.toString()));
+            stopPreview();
+            choice.dismiss();
+            render();
+        });
     }
 
     private String readingSummary(SpeechSettings speech) {
@@ -2722,7 +2759,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
 
     private Map<String, Object> speechValues() {
         Map<String, Object> values = new LinkedHashMap<>();
-        for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.RANDOM_MODE,
+        for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_SOURCES,
                 SpeechSettings.GET_TEMPLATE, SpeechSettings.HEADERS,
                 SpeechSettings.AUDIO_FIELD, SpeechSettings.VOICE_GET_TEMPLATE, SpeechSettings.VOICE_HEADERS,
                 SpeechSettings.VOICE_LIST_PATH, SpeechSettings.VOICE_ID_PATH, SpeechSettings.VOICE_NAME_PATH,
