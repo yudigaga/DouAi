@@ -2759,7 +2759,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
 
     private Map<String, Object> speechValues() {
         Map<String, Object> values = new LinkedHashMap<>();
-        for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_SOURCES,
+        for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.RANDOM_MODE,
                 SpeechSettings.GET_TEMPLATE, SpeechSettings.HEADERS,
                 SpeechSettings.AUDIO_FIELD, SpeechSettings.VOICE_GET_TEMPLATE, SpeechSettings.VOICE_HEADERS,
                 SpeechSettings.VOICE_LIST_PATH, SpeechSettings.VOICE_ID_PATH, SpeechSettings.VOICE_NAME_PATH,
@@ -2774,6 +2774,12 @@ final class SpeechSettingsDialog implements AutoCloseable {
                 VoiceCatalogLabels.BREEZE_QUERY_KEY, VoiceCatalogLabels.FISH_QUERY_KEY}) {
             String value = store.getString(key, null);
             if (value != null) values.put(key, value);
+        }
+        try {
+            String sources = store.getString(SpeechSettings.RANDOM_SOURCES, null);
+            if (sources != null) values.put(SpeechSettings.RANDOM_SOURCES, sources);
+        } catch (ClassCastException invalid) {
+            values.put(SpeechSettings.RANDOM_SOURCES, "");
         }
         for (String key : MiniMaxSpeechOptions.KEYS) {
             String value = store.getString(key, null);

@@ -225,6 +225,42 @@ public final class SpeechSettingsDialogTest {
         assertEquals("[\"unknown\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
     }
 
+    @Test public void wrongTypedRandomSourceScopeOpensUnselectedAndCanBeRepairedAcrossReopen() {
+        store.putString(SpeechSettings.RANDOM_MODE, SpeechSettings.RANDOM_ALL);
+        store.values.put(SpeechSettings.RANDOM_SOURCES, Boolean.TRUE);
+        open(false);
+        assertEquals("未选择来源", value("来源范围"));
+        AlertDialog sources = sourceScope();
+        for (int index = 0; index < 5; index++) assertFalse(sources.getListView().isItemChecked(index));
+        sources.getListView().performItemClick(null, 1, 1);
+        sources.getListView().performItemClick(null, 4, 4);
+        save(sources);
+        assertEquals("[\"third_party\",\"fish\"]", store.getString(SpeechSettings.RANDOM_SOURCES, ""));
+        page.close(); page.dialog().dismiss(); open(false);
+        assertEquals("第三方、Fish Audio", value("来源范围"));
+        sources = sourceScope();
+        assertFalse(sources.getListView().isItemChecked(0));
+        assertTrue(sources.getListView().isItemChecked(1));
+        assertFalse(sources.getListView().isItemChecked(2));
+        assertFalse(sources.getListView().isItemChecked(3));
+        assertTrue(sources.getListView().isItemChecked(4));
+    }
+
+    @Test public void wrongTypedRandomSourceScopeStaysInvalidAcrossOffAndCurrentModes() {
+        store.values.put(SpeechSettings.RANDOM_SOURCES, Boolean.FALSE);
+        open(false);
+        assertNull(root.findViewWithTag("settings.option.来源范围"));
+        AlertDialog modes = option("随机音色"); modes.getListView().performItemClick(null, 1, 1);
+        assertNull(root.findViewWithTag("settings.option.来源范围"));
+        assertEquals(Boolean.FALSE, store.values.get(SpeechSettings.RANDOM_SOURCES));
+        modes = option("随机音色"); modes.getListView().performItemClick(null, 2, 2);
+        assertEquals("未选择来源", value("来源范围"));
+        AlertDialog sources = sourceScope();
+        for (int index = 0; index < 5; index++) assertFalse(sources.getListView().isItemChecked(index));
+        sources.getButton(Dialog.BUTTON_NEGATIVE).performClick();
+        assertEquals(Boolean.FALSE, store.values.get(SpeechSettings.RANDOM_SOURCES));
+    }
+
     @Test public void switchingSourcesKeepsValidFishAndBreezeVoiceCatalogs() {
         store.putString(SpeechSettings.PROVIDER, SpeechSettings.FISH);
         store.putString(FishSpeechSettings.API_KEY, "fish-key");
