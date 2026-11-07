@@ -40,6 +40,7 @@ public final class SpeechSynthesis implements AutoCloseable {
     private final BiConsumer<LocalSpeechSynthesis.Result, String> callback;
     private final SpeechHttpClient.Request http = new SpeechHttpClient.Request();
     private volatile AutoCloseable local;
+    private volatile LocalSpeechSynthesis.OfflineVoiceProbe probe;
     private volatile Future<?> worker;
     private volatile File output;
     private LocalSpeechSynthesis.Result pendingResult;
@@ -73,9 +74,26 @@ public final class SpeechSynthesis implements AutoCloseable {
             request.worker = WORKERS.submit(request.operation.wrap(() -> {
                 if (request.finished.get()) return;
                 try {
-                    LocalOptions chosen = RandomSpeechVoice.select(options, new Random(), hasSystemEngine(context, options));
+                    boolean systemAvailable = hasSystemEngine(context, options);
+                    if (systemAvailable && SpeechSettings.RANDOM_ALL.equals(original.randomMode)) {
+                        LocalSpeechSynthesis.OfflineVoiceProbe inventory =
+                                new LocalSpeechSynthesis.OfflineVoiceProbe(context, options);
+                        request.probe = inventory;
+                        try {
+                            if (request.finished.get()) return;
+                            systemAvailable = inventory.await();
+                        } finally {
+                            request.probe = null;
+                            inventory.close();
+                        }
+                    }
+                    if (request.finished.get()) return;
+                    LocalOptions chosen = RandomSpeechVoice.select(options, new Random(), systemAvailable);
                     timeoutFailure.set(timeoutMessage(new SpeechSettings(chosen)));
                     if (!request.finished.get()) request.start(context, text, chosen, true);
+                } catch (InterruptedException cancelled) {
+                    Thread.currentThread().interrupt();
+                    request.complete(null, "语音生成已停止");
                 } catch (IllegalArgumentException invalid) {
                     request.complete(null, invalid.getMessage());
                 } catch (RuntimeException invalid) {
@@ -268,6 +286,8 @@ public final class SpeechSynthesis implements AutoCloseable {
 
     private void stopRequests() {
         http.cancel();
+        LocalSpeechSynthesis.OfflineVoiceProbe inventory = probe;
+        if (inventory != null) inventory.close();
         Future<?> active = worker;
         if (active != null) active.cancel(true);
     }

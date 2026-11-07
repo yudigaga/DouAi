@@ -20,6 +20,8 @@ import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
@@ -162,6 +164,70 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
         }
         List<Voice> eligible = exact.isEmpty() ? matchingLanguage : exact;
         return eligible.isEmpty() ? null : eligible.get(random.nextInt(eligible.size()));
+    }
+
+    /** Short-lived inventory check for global provider selection; no audio is generated. */
+    static final class OfflineVoiceProbe implements AutoCloseable {
+        private final Handler main = new Handler(Looper.getMainLooper());
+        private final CountDownLatch ready = new CountDownLatch(1);
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private final Runnable launch;
+        private volatile TextToSpeech engine;
+        private volatile boolean eligible;
+
+        OfflineVoiceProbe(Context context, LocalOptions options) {
+            String configured = options.text("tts_engine", "").trim();
+            Locale language = Locale.forLanguageTag(options.text("tts_language", "zh-CN"));
+            launch = () -> {
+                if (closed.get()) return;
+                try {
+                    engine = new TextToSpeech(context,
+                            status -> main.post(() -> initialized(status, language)),
+                            configured.isEmpty() ? null : configured);
+                    if (closed.get()) shutdownEngine();
+                } catch (RuntimeException ignored) {
+                    ready.countDown();
+                }
+            };
+            main.post(launch);
+        }
+
+        boolean await() throws InterruptedException {
+            try {
+                return ready.await(5, TimeUnit.SECONDS) && !closed.get() && eligible;
+            } finally {
+                close();
+            }
+        }
+
+        private void initialized(int status, Locale language) {
+            if (closed.get()) return;
+            try {
+                TextToSpeech current = engine;
+                eligible = status == TextToSpeech.SUCCESS && current != null
+                        && randomOfflineVoice(current.getVoices(), language, new Random()) != null;
+            } catch (RuntimeException ignored) {
+                eligible = false;
+            } finally {
+                shutdownEngine();
+                ready.countDown();
+            }
+        }
+
+        private void shutdownEngine() {
+            TextToSpeech current = engine;
+            engine = null;
+            if (current != null) {
+                try { current.shutdown(); } catch (RuntimeException ignored) { }
+            }
+        }
+
+        @Override public void close() {
+            if (!closed.compareAndSet(false, true)) return;
+            ready.countDown();
+            main.removeCallbacks(launch);
+            main.post(this::shutdownEngine);
+        }
     }
 
     private void complete(Result result, String failure) {
