@@ -39,6 +39,11 @@ import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.FrameworkConfigSync;
 import com.douai.module.config.ExtendedSettings;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.AiModelSettings;
+import com.douai.module.config.CommentAiSettings;
+import com.douai.module.feature.CommentAiAnalysisHook;
+import com.douai.module.feature.DouyinSearch;
+import com.douai.module.feature.HostDouyinSearch;
 import com.douai.module.feature.HostBehaviorHooks;
 import com.douai.module.feature.PlaybackBehaviorHooks;
 import com.douai.module.feature.ProfileSpoofHook;
@@ -119,6 +124,11 @@ public final class DouAiModule extends XposedModule {
     private volatile AutomationDispatcher automationDispatcher;
     private volatile RecallHighlightHook recallHighlightHook;
     private volatile FeedGestureToolsHook feedGestureToolsHook;
+    private volatile CommentAiAnalysisHook commentAiAnalysisHook;
+    private volatile DouyinSearch manualAiSearch;
+    private volatile boolean manualAiSearchResolved;
+    private volatile String commentAiAnalysisFailure;
+    private volatile String manualAiSearchFailure;
     private volatile DirectMessageSpeechHook directMessageSpeechHook;
     private volatile HashLongPressVoiceHook hashLongPressVoiceHook;
     private volatile boolean additionalInitialized;
@@ -692,6 +702,9 @@ public final class DouAiModule extends XposedModule {
             }
             if (hostBehaviorHooks != null && (initial || changes.affects(Feature.HOST_BEHAVIOR))) hostBehaviorHooks.setOptions(options);
             if (feedGestureToolsHook != null && gestureChanged) feedGestureToolsHook.setOptions(options);
+            if (commentAiAnalysisHook != null && (initial || changes.affects(Feature.MANUAL_AI))) {
+                commentAiAnalysisHook.setOptions(options);
+            }
             if (playbackBehaviorHooks != null && playbackChanged) playbackBehaviorHooks.setOptions(options);
             if (profileSpoofHook != null && spoofChanged) profileSpoofHook.setOptions(options);
             if (nativeMessagingHooks != null && (replyChanged || messageRecallChanged)) nativeMessagingHooks.setOptions(options);
@@ -1056,6 +1069,33 @@ public final class DouAiModule extends XposedModule {
 
     private void installAdditionalHooks() {
         if (downloadActionHook != null) downloadActionHook.setOptions(localOptions);
+        if (HostAdaptation.currentProfile() == HostAdaptation.PROFILE_410) {
+            if (!manualAiSearchResolved) {
+                try {
+                    manualAiSearch = HostDouyinSearch.create(hostClassLoader, HostAdaptation.currentProfile());
+                    manualAiSearchFailure = null;
+                } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) {
+                    manualAiSearchFailure = HostAdaptationDiagnostics.installationFailure(unavailable);
+                    DouAiLog.failure("manual_ai_search", "installation", unavailable);
+                }
+                manualAiSearchResolved = true;
+            }
+            if (commentAiAnalysisHook == null) {
+                try {
+                    commentAiAnalysisHook = CommentAiAnalysisHook.install(hookFramework(), hostClassLoader,
+                            targetContext, localOptions, () -> {
+                                LocalOptions snapshot = localOptions;
+                                AiModelSettings models = AiModelSettings.read(snapshot);
+                                String selected = snapshot.text(CommentAiSettings.MODEL_ID, "");
+                                return selected.isEmpty() ? models : models.activate(selected);
+                            }, manualAiSearch, message -> moduleLog(3, TAG, message));
+                    commentAiAnalysisFailure = null;
+                } catch (Exception | LinkageError unavailable) {
+                    commentAiAnalysisFailure = HostAdaptationDiagnostics.installationFailure(unavailable);
+                    DouAiLog.failure("comment_ai", "installation", unavailable);
+                }
+            }
+        }
         // Startup gates can also be installed synchronously before Application.onCreate.
         synchronized (this) {
             if (hostBehaviorHooks == null) {
@@ -1223,6 +1263,10 @@ public final class DouAiModule extends XposedModule {
 
     private Bundle diagnosticsSnapshot() {
         Bundle snapshot = new Bundle(scanDiagnostics);
+        snapshot.putBoolean("feature.comment_ai.installed", commentAiAnalysisHook != null && commentAiAnalysisHook.isActive());
+        snapshot.putString("feature.comment_ai.failure", commentAiAnalysisFailure);
+        snapshot.putBoolean("feature.manual_ai_search.installed", manualAiSearch != null);
+        snapshot.putString("feature.manual_ai_search.failure", manualAiSearchFailure);
         snapshot.putString("module_version", BuildConfig.VERSION_NAME);
         snapshot.putBoolean("additional_initialized", additionalInitialized);
         snapshot.putBoolean("feature.local_analytics.installed", localAnalyticsHook != null);

@@ -15,6 +15,7 @@ import android.widget.TextView;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
+import com.douai.module.config.CommentAiSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.ThirdPartyDownloadSettings;
@@ -117,6 +118,7 @@ public final class ModuleSettingsReferenceTest {
         Map<String, Object> saved = new HashMap<>(store.values);
         EditText search = home.findViewWithTag("settings.search");
         String[][] cases = {{"API Key", "ai", "扩展功能 > AI 模型设置", "settings.option.添加模型配置"},
+                {"评论 AI 解析", "comment-ai", "扩展功能 > AI 模型设置", "settings.toggle.接管评论 AI 解析"},
                 {"minimax", "speech", "扩展功能 > 文本转语音设置", "settings.option.语音来源"},
                 {"保存目录", "download-directory", "下载相关 > 保存位置", "settings.option.保存位置"},
                 {"去水印", "download-watermark", "下载相关 > 无水印下载图集或者视频", "settings.toggle.无水印下载图集或者视频"},
@@ -841,7 +843,8 @@ public final class ModuleSettingsReferenceTest {
         Dialog ai = ShadowDialog.getLatestDialog();
         assertTrue(ai.isShowing());
         View page = ai.getWindow().getDecorView();
-        assertEquals(Arrays.asList("添加模型配置", "测试当前配置"),
+        assertEquals(Arrays.asList("添加模型配置", "测试当前配置", "接管评论 AI 解析",
+                        "评论解析模型", "允许 AI 使用抖音搜索"),
                 settingTitles(page));
         assertNotNull(page.findViewWithTag("settings.option.添加模型配置"));
         assertNotNull(page.findViewWithTag("settings.option.测试当前配置"));
@@ -851,6 +854,45 @@ public final class ModuleSettingsReferenceTest {
         category.dismiss();
         ShadowLooper.idleMainLooper();
         assertFalse(ai.isShowing());
+    }
+
+    @Test public void manualCommentAiAndSearchAreOptInAndModelBindingDoesNotChangeGlobalOrAutomation() throws Exception {
+        AiModelConfig global = testAiProfile("global", "全局模型", "global-model");
+        AiModelConfig comment = testAiProfile("comment", "评论模型", "comment-model");
+        new AiModelSettings(Arrays.asList(global, comment), global.id).save(store);
+        store.putString(AiModelSettings.REPLY_MODEL_ID, "reply-bound");
+        store.putString(AiModelSettings.COMMENT_MODEL_ID, "automatic-comment-bound");
+
+        option(openCategory("EXTENSION"), "AI 模型设置").performClick();
+        View page = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        Switch takeover = toggle(page, "接管评论 AI 解析");
+        Switch search = toggle(page, "允许 AI 使用抖音搜索");
+        assertFalse(takeover.isChecked());
+        assertFalse(search.isChecked());
+        assertTrue(containsText(option(page, "评论解析模型"), "全局模型"));
+
+        option(page, "评论解析模型").performClick();
+        AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals(Arrays.asList("跟随全局模型", "全局模型", "评论模型"),
+                listLabels(choices.getListView()));
+        choices.getListView().performItemClick(null, 2, 2);
+        assertEquals("comment", store.getString(CommentAiSettings.MODEL_ID, ""));
+        assertEquals("global", AiModelSettings.read(store).activeId);
+        assertEquals("reply-bound", store.getString(AiModelSettings.REPLY_MODEL_ID, ""));
+        assertEquals("automatic-comment-bound", store.getString(AiModelSettings.COMMENT_MODEL_ID, ""));
+
+        option(page, "评论解析模型").performClick();
+        choices = (AlertDialog) ShadowDialog.getLatestDialog();
+        choices.getListView().performItemClick(null, 0, 0);
+        assertEquals("", store.getString(CommentAiSettings.MODEL_ID, ""));
+        assertEquals("global", AiModelSettings.read(store).activeId);
+        assertTrue(containsText(option(page, "评论解析模型"), "全局模型"));
+
+        takeover.setChecked(true);
+        search.setChecked(true);
+        assertTrue(store.getBoolean(CommentAiSettings.TAKEOVER, false));
+        assertTrue(store.getBoolean(CommentAiSettings.SEARCH, false));
+        assertEquals("global", AiModelSettings.read(store).activeId);
     }
 
     @Test
@@ -1992,6 +2034,15 @@ public final class ModuleSettingsReferenceTest {
         View row = page.findViewWithTag("settings.option." + title);
         assertNotNull(title, row);
         return row;
+    }
+
+    private static List<String> listLabels(ListView list) {
+        List<String> labels = new ArrayList<>();
+        for (int index = 0; index < list.getAdapter().getCount(); index++) {
+            Object item = list.getAdapter().getItem(index);
+            labels.add(String.valueOf(item));
+        }
+        return labels;
     }
 
     private static void editOption(View page, String title, String value) {

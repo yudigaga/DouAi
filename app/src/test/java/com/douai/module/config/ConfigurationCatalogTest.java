@@ -115,7 +115,8 @@ public final class ConfigurationCatalogTest {
     }
 
     @Test public void sharedSettingsRefreshTheirConsumersWithoutTouchingPlayerOrFeedUi() {
-        assertConsumers("ai_model_settings_v2", EnumSet.of(REPLY, COMMENT_AUTOMATION, COMMENT_REPLY, AUTOMATION_DISPATCH));
+        assertConsumers("ai_model_settings_v2", EnumSet.of(REPLY, COMMENT_AUTOMATION, COMMENT_REPLY,
+                AUTOMATION_DISPATCH, MANUAL_AI));
         assertConsumers("tts_future_option", EnumSet.of(REPLY, COMMENT_AUTOMATION, COMMENT_REPLY,
                 AUTOMATION_DISPATCH, DIRECT_MESSAGE_SPEECH, NATIVE_COMMENT_SPEECH));
         assertConsumers(LocalOptions.COMMENT_REPLY_ENABLED, EnumSet.of(COMMENT_REPLY, AUTOMATION_DISPATCH));

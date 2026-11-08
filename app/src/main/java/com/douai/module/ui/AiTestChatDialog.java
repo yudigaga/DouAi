@@ -40,6 +40,7 @@ import android.widget.TextView;
 
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
+import com.douai.module.feature.DouyinSearch;
 import com.douai.module.feature.ChatCompletionClient;
 import com.douai.module.feature.ChatImage;
 import com.douai.module.feature.ChatImageLoader;
@@ -75,6 +76,8 @@ final class AiTestChatDialog extends Dialog {
         }
         default void clear() { }
         default List<TestChatMemory.Turn> savedTurns() { return Collections.emptyList(); }
+        default List<DouyinSearch.Result> searchResults() { return Collections.emptyList(); }
+        default DouyinSearch searchBridge() { return null; }
     }
 
     interface SessionFactory { Session create(); }
@@ -152,6 +155,7 @@ final class AiTestChatDialog extends Dialog {
     private boolean disposed;
     private MiuixChatEditorSurface miuixSurface;
     private final HostNativeChatViews nativeViews;
+    private final AiSearchVideoCards searchVideoCards;
     private int[] nativePadding;
     private boolean nativeFailure;
 
@@ -169,10 +173,17 @@ final class AiTestChatDialog extends Dialog {
 
     AiTestChatDialog(Context context, AiModelConfig config, boolean useMiuix, boolean messageContact,
                      HostNativeChatViews nativeViews) {
+        this(context, config, useMiuix, messageContact, nativeViews, null);
+    }
+
+    AiTestChatDialog(Context context, AiModelConfig config, boolean useMiuix, boolean messageContact,
+                     HostNativeChatViews nativeViews, DouyinSearch search) {
         this(context, config, () -> {
             AiModelSettings snapshot = new AiModelSettings(Collections.singletonList(config), config.id);
             return new Session() {
                 private volatile ChatCompletionClient client;
+                private final List<DouyinSearch.Result> found = new ArrayList<>();
+                private long searchEpoch;
                 private synchronized ChatCompletionClient client() {
                     if (client == null) client = new ChatCompletionClient(messageContact
                             ? TestChatMemory.messageConversation(context, config) : new TestChatMemory(context, config),
@@ -183,6 +194,7 @@ final class AiTestChatDialog extends Dialog {
                     return client().reply(messageContact ? "message-contact" : "model-test", message, images, snapshot);
                 }
                 @Override public void cancel() {
+                    synchronized (found) { searchEpoch++; found.clear(); }
                     ChatCompletionClient active = client;
                     if (active != null) active.cancelCurrentRequest();
                 }
@@ -191,10 +203,41 @@ final class AiTestChatDialog extends Dialog {
                 }
                 @Override public String replyStreaming(String message, List<ChatImage> images, String document,
                                                        Consumer<String> onPartial) throws Exception {
+                    long ticket;
+                    synchronized (found) { found.clear(); ticket = ++searchEpoch; }
+                    DouyinSearch observed = search == null ? null : (query, limit) -> {
+                        DouyinSearch.Request original = search.preparePage(query, limit, 0, "");
+                        return new DouyinSearch.Request() {
+                            @Override public DouyinSearch.Result run(long deadline) throws Exception {
+                                DouyinSearch.Result result = original.run(deadline);
+                                synchronized (found) {
+                                    if (ticket == searchEpoch && found.size() < 2) {
+                                        found.addAll(AiSearchVideoCards.snapshot(Collections.singletonList(result)));
+                                    }
+                                }
+                                return result;
+                            }
+                            @Override public void cancel() { original.cancel(); }
+                        };
+                    };
+                    if (search != null) return client().replyWithSearch(
+                            messageContact ? "message-contact" : "model-test", message, images,
+                            snapshot, "", true, document, observed, onPartial);
                     return client().replyStreaming(messageContact ? "message-contact" : "model-test",
                             message, images, snapshot, "", true, document, onPartial);
                 }
-                @Override public void clear() { client().clearHistory(); }
+                @Override public List<DouyinSearch.Result> searchResults() {
+                    synchronized (found) {
+                        List<DouyinSearch.Result> results = new ArrayList<>(found);
+                        found.clear();
+                        return results;
+                    }
+                }
+                @Override public DouyinSearch searchBridge() { return search; }
+                @Override public void clear() {
+                    synchronized (found) { searchEpoch++; found.clear(); }
+                    client().clearHistory();
+                }
                 @Override public List<TestChatMemory.Turn> savedTurns() { return client().savedTurns(); }
             };
         }, Executors.newSingleThreadExecutor(), HISTORY_IO, useMiuix, ChatImageLoader::thumbnail,
@@ -256,6 +299,7 @@ final class AiTestChatDialog extends Dialog {
         this.thumbnailLoader = thumbnailLoader;
         this.useMiuix = useMiuix;
         this.nativeViews = nativeViews;
+        this.searchVideoCards = new AiSearchVideoCards(context);
         assistantName = messageContact ? config.messageContactDisplayName() : "AI";
         session = sessions.create();
         requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -624,6 +668,7 @@ final class AiTestChatDialog extends Dialog {
             answer.sourceUser = user;
         }
         answer.text = selected.isEmpty() ? "正在回复…" : "正在读取附件…";
+        if (answer.videos != null) { answer.videos.close(); answer.videos = null; }
         answer.retry = false;
         messageRows.notifyDataSetChanged();
         if (prompt.equals(input.getText().toString().trim())) input.setText("");
@@ -662,6 +707,14 @@ final class AiTestChatDialog extends Dialog {
                 turn.trace.stage("provider_request", "images=" + turn.preparedImages.size() + ";documents=" + turn.preparedDocuments.size());
                 reply = active.replyStreaming(prompt, turn.preparedImages,
                         documentText(turn.preparedDocuments, turn.preparedImages), text -> queuePartialReply(turn, text));
+                turn.checkStopped();
+                try {
+                    turn.searchResults = AiSearchVideoCards.snapshot(active.searchResults());
+                    turn.searchBridge = active.searchBridge();
+                } catch (RuntimeException unavailable) {
+                    turn.searchResults = Collections.emptyList();
+                    turn.searchBridge = null;
+                }
             }
             catch (InterruptedException cancelled) {
                 Thread.currentThread().interrupt();
@@ -779,8 +832,10 @@ final class AiTestChatDialog extends Dialog {
                 || visibleImageBytes > MAX_VISIBLE_IMAGE_BYTES)) {
             List<ChatImage> removed = visibleImages.removeFirst();
             visibleImageBytes -= imageBytes(removed);
-            transcript.remove(0);
-            transcript.remove(0);
+            ChatMessage first = transcript.remove(0);
+            ChatMessage second = transcript.remove(0);
+            if (first.videos != null) first.videos.close();
+            if (second.videos != null) second.videos.close();
         }
         evictUnusedThumbnails();
     }
@@ -795,6 +850,7 @@ final class AiTestChatDialog extends Dialog {
         if (failure == null) {
             answer.text = reply;
             answer.color = TEXT;
+            answer.videos = turn.stopRequested ? null : searchVideoCards.group(turn.searchResults, turn.searchBridge);
             state.setText("");
         } else {
             answer.text = turn.stopRequested ? "已停止" : turn.reading
@@ -828,6 +884,7 @@ final class AiTestChatDialog extends Dialog {
             if (pending.started && request != null) request.cancel(true);
         }
         session.cancel();
+        searchVideoCards.cancelPages();
         state.setText("正在停止…");
         updateSend();
     }
@@ -838,6 +895,7 @@ final class AiTestChatDialog extends Dialog {
         closePickers();
         cancelRestore();
         cancelThumbnails();
+        searchVideoCards.clear();
         Session previous = session;
         session = sessions.create();
         transcript.clear();
@@ -870,6 +928,7 @@ final class AiTestChatDialog extends Dialog {
         ++generation;
         if (request != null) request.cancel(true);
         session.cancel();
+        searchVideoCards.cancelPending();
         request = null;
         pending = null;
         busy = false;
@@ -896,6 +955,7 @@ final class AiTestChatDialog extends Dialog {
         closePickers();
         cancelRestore();
         cancelThumbnails();
+        searchVideoCards.close();
         if (attachmentMenu != null) attachmentMenu.dismiss();
         if (memoryDialog != null) memoryDialog.dismiss();
         if (localMenu != null) localMenu.dismiss();
@@ -1284,6 +1344,8 @@ final class AiTestChatDialog extends Dialog {
         boolean partialQueued;
         boolean started;
         boolean reading;
+        List<DouyinSearch.Result> searchResults = Collections.emptyList();
+        DouyinSearch searchBridge;
 
         RequestTurn(int ticket, String prompt, List<ChatImage> images, List<Document> documents,
                     List<PendingAttachment> attachments, ChatMessage answer) {
@@ -1315,6 +1377,7 @@ final class AiTestChatDialog extends Dialog {
         List<Document> retryDocuments = Collections.emptyList();
         List<PendingAttachment> retryPending = Collections.emptyList();
         ChatMessage sourceUser;
+        AiSearchVideoCards.Group videos;
 
         ChatMessage(String role, String text, boolean user, List<ChatImage> images) {
             this.role = role;
@@ -1358,6 +1421,7 @@ final class AiTestChatDialog extends Dialog {
         private final TextView body;
         private final TextView document;
         private final LinearLayout images;
+        private final LinearLayout videos;
         private final ImageButton retry;
         private final HostNativeChatViews.TextBubble nativeBubble;
         private final ImageView messageAvatar;
@@ -1410,6 +1474,10 @@ final class AiTestChatDialog extends Dialog {
             images.setOrientation(VERTICAL);
             images.setTag("ai.chat.message.images");
             bubble.addView(images, wrap());
+            videos = new LinearLayout(context);
+            videos.setOrientation(VERTICAL);
+            videos.setTag("ai.chat.message.videos");
+            bubble.addView(videos, new LayoutParams(dp(240), ViewGroup.LayoutParams.WRAP_CONTENT));
             retry = icon("重新发送", "ai.chat.retry", android.R.drawable.ic_menu_rotate);
             bubble.addView(retry, square());
             addView(bubble, new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1443,6 +1511,12 @@ final class AiTestChatDialog extends Dialog {
             for (ChatImage image : message.images) {
                 images.addView(preview(image), new LayoutParams(dp(128), dp(96)));
             }
+            int rowWidthForVideos = messages.getWidth() > 0 ? messages.getWidth()
+                    : getContext().getResources().getDisplayMetrics().widthPixels;
+            int reservedForVideos = messages.getPaddingLeft() + messages.getPaddingRight() + dp(48)
+                    + (messageAvatar == null ? 0 : messageAvatar.getLayoutParams().width);
+            videos.getLayoutParams().width = Math.min(dp(240), Math.max(dp(120), rowWidthForVideos - reservedForVideos));
+            searchVideoCards.bind(videos, message.user ? null : message.videos);
             retry.setVisibility(message.retry ? VISIBLE : GONE);
             retry.setOnClickListener(message.retry ? ignored -> sendMessage(message.retryPrompt,
                     message.retryImages, message.retryDocuments, message) : null);

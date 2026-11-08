@@ -20,7 +20,7 @@ public final class ConfigurationCatalog {
         PLAYBACK, AUTO_PLAY, GESTURE, MESSAGE_RECALL, SPOOF, FOLLOW_LISTS, AUTOMATION_DISPATCH,
         HOST_BEHAVIOR, DIRECT_MESSAGE_SPEECH, MEDIA_MODEL, COMMENT_ENHANCEMENTS,
         COMMENT_VOICE, NATIVE_COMMENT_SPEECH, AUTO_LIKE, AUTO_FOLLOW, AUTO_MESSAGE,
-        COMMENT_TOOLS, IMMERSIVE, VERSION, TOP_TABS, REFRESH, DIAGNOSTICS
+        COMMENT_TOOLS, IMMERSIVE, VERSION, TOP_TABS, REFRESH, DIAGNOSTICS, MANUAL_AI
     }
 
     /** A missing default means the owning domain still resolves a context-dependent/legacy default. */
@@ -78,6 +78,7 @@ public final class ConfigurationCatalog {
         add(keys, "boolean", LocalOptions.DEBUG_LOGGING);
         add(keys, "boolean", LocalOptions.HASH_LONG_PRESS_VOICE);
         add(keys, "boolean", LocalOptions.MODULE_ONLY_SPEED);
+        add(keys, "boolean", CommentAiSettings.TAKEOVER + " " + CommentAiSettings.SEARCH);
         add(keys, "boolean", LocalOptions.REPLY_RECOGNIZE_IMAGES + " " + LocalOptions.REPLY_RECOGNIZE_VIDEO);
         add(keys, "boolean", LocalOptions.COMMENT_REPLY_ENABLED
                 + " comment_reply_tip_enabled comment_reply_failure_notify");
@@ -99,6 +100,7 @@ public final class ConfigurationCatalog {
                 + "tts_minimax_speed tts_minimax_volume tts_minimax_pitch");
         add(keys, "string", AiModelSettings.REPLY_MODEL_ID + " " + AiModelSettings.COMMENT_MODEL_ID);
         add(keys, "string", AnalyticsAiSettings.MODEL_ID + " " + AnalyticsAiSettings.SECONDARY_PROMPT);
+        add(keys, "string", CommentAiSettings.MODEL_ID);
         for (String key : MiniMaxSpeechOptions.KEYS) keys.put(key, "string");
         for (String key : BreezeSpeechSettings.KEYS) keys.put(key, "string");
         for (String key : FishSpeechSettings.KEYS) {
@@ -150,10 +152,15 @@ public final class ConfigurationCatalog {
         depend(Feature.REFRESH, "confirm_refresh", "");
 
         depend(Feature.DIAGNOSTICS, LocalOptions.DEBUG_LOGGING, "");
+        depend(Feature.MANUAL_AI, CommentAiSettings.TAKEOVER + " " + CommentAiSettings.SEARCH
+                + " " + CommentAiSettings.MODEL_ID + " " + AiModelSettings.KEY, "");
         Map<String, Object> defaults = new LinkedHashMap<>();
         defaults.put(LocalOptions.DEBUG_LOGGING, false);
         defaults.put(LocalOptions.HASH_LONG_PRESS_VOICE, false);
         defaults.put(LocalOptions.MODULE_ONLY_SPEED, false);
+        defaults.put(CommentAiSettings.TAKEOVER, false);
+        defaults.put(CommentAiSettings.SEARCH, false);
+        defaults.put(CommentAiSettings.MODEL_ID, "");
         defaults.put("hide_product_cards", false);
         defaults.put("hide_hotspot_rank_cards", false);
         defaults.put(PLAYBACK_SPEED, PLAYBACK_SPEED_DEFAULT);

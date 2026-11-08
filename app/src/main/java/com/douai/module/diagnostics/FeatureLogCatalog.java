@@ -39,6 +39,10 @@ public final class FeatureLogCatalog {
         add(entries, "auto_speed", "自动倍速", "PlaybackBehaviorHooks", Feature.PLAYBACK, "feature.auto_speed.installed", "auto_speed");
         add(entries, "auto_play", "连播及评论暂停", "AutoPlayHook", Feature.AUTO_PLAY, "auto_play_hook_installed", "auto_play_enabled");
         add(entries, "gesture", "九宫格手势及工具栏", "FeedGestureToolsHook", Feature.GESTURE, "feature.long_press_action.installed", "gesture_enabled");
+        add(entries, "comment_ai", "评论 AI 解析", "CommentAiAnalysisHook", Feature.MANUAL_AI,
+                "feature.comment_ai.installed", "comment_ai_takeover");
+        add(entries, "manual_ai_search", "手动 AI 抖音搜索", "HostDouyinSearch", Feature.MANUAL_AI,
+                "feature.manual_ai_search.installed", "manual_ai_douyin_search");
         add(entries, "prevent_message_recall", "消息防撤回", "NativeMessagingHooks", Feature.MESSAGE_RECALL, "feature.prevent_message_recall.installed", "prevent_message_recall");
         add(entries, "spoof_profile", "本地个人资料数量", "ProfileSpoofHook", Feature.SPOOF, "feature.spoof_profile.installed", "spoof_profile");
         add(entries, "follow_lists", "好友关注粉丝及群成员列表", "NativeFollowLists", Feature.FOLLOW_LISTS, "follow_lists_installed", "always");
@@ -83,7 +87,8 @@ public final class FeatureLogCatalog {
                 {"settings_entry", "宿主设置入口及主题", "HostSettingsEntry/HostUiController/ModuleTheme"},
                 {"restart", "宿主重启", "HostAppRestarter"},
                 {"launcher", "模块桌面图标", "LauncherVisibility"}}) {
-            add(entries, item[0], item[1], item[2], null, "", "always");
+            add(entries, item[0], item[1], item[2], "ai_chat".equals(item[0]) ? Feature.MANUAL_AI : null,
+                    "", "always");
         }
         ENTRIES = Collections.unmodifiableList(entries);
     }

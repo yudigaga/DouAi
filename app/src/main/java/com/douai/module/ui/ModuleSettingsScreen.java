@@ -33,6 +33,7 @@ import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.ConfigurationCatalog;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.CommentAiSettings;
 import com.douai.module.config.PlaybackSpeedPresets;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.feature.FeedGestureToolsHook;
@@ -120,7 +121,8 @@ public final class ModuleSettingsScreen {
             new SearchEntry("message-voice-file", "私聊语音文件", "消息管理 > 私聊语音文件", "私信 替换语音 音频 文件路径 选择文件", SearchDestination.MESSAGE, "settings.option.私聊语音文件"),
             new SearchEntry("comment-speech", "评论转语音", "评论相关 > 评论转语音", "语音 TTS # 单击发送 评论", SearchDestination.COMMENT, "settings.option.评论转语音"),
             new SearchEntry("hash-long-press-voice", "#长按发送转语音（全局）", "评论相关 > #长按发送转语音（全局）", "语音 TTS #长按 长按发送 全局 私信 群聊 评论", SearchDestination.COMMENT, "settings.toggle.#长按发送转语音（全局）"),
-            new SearchEntry("ai-chat", "AI 测试对话", "扩展功能 > AI 模型设置 > 测试对话", "AI 聊天 测试模型 对话 图片", SearchDestination.AI_CHAT)
+            new SearchEntry("ai-chat", "AI 测试对话", "扩展功能 > AI 模型设置 > 测试对话", "AI 聊天 测试模型 对话 图片", SearchDestination.AI_CHAT),
+            new SearchEntry("comment-ai", "评论 AI 解析与抖音搜索", "扩展功能 > AI 模型设置", "AI 解析 接管 评论 分析 搜索 抖音 联网 工具调用", SearchDestination.AI)
     };
 
     public ModuleSettingsScreen(Context context, SettingsStore repository) {
@@ -1019,6 +1021,33 @@ public final class ModuleSettingsScreen {
         content = panel;
         addOption("添加模型配置", "", null, true, this::showAiPresetPicker);
         addOption("测试当前配置", "", null, true, this::showAiChat);
+        addLocalSwitch("接管评论 AI 解析", "在抖音 41.0.0 的评论 AI 解析页使用所选模块模型。", CommentAiSettings.TAKEOVER);
+        AiModelSettings commentModels = aiSettings();
+        String commentModelId = repository.getString(CommentAiSettings.MODEL_ID, "");
+        String commentModelName = commentModelId.isEmpty() ? "跟随全局模型" : "请选择模型";
+        for (AiModelConfig model : commentModels.configs) if (model.id.equals(
+                commentModelId.isEmpty() ? commentModels.activeId : commentModelId)) commentModelName = model.name;
+        OptionRow[] commentModelRow = new OptionRow[1];
+        commentModelRow[0] = addOption("评论解析模型", "仅用于评论区 AI 解析，不更改自动评论或自动回复模型。",
+                commentModelName, true, () -> {
+                    AiModelSettings current = aiSettings();
+                    String[] names = new String[current.configs.size() + 1];
+                    names[0] = "跟随全局模型";
+                    for (int i = 0; i < current.configs.size(); i++) names[i + 1] = current.configs.get(i).name;
+                    showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null)
+                            .setTitle("评论解析模型").setItems(names, (dialog, index) -> {
+                                if (index == 0) {
+                                    repository.putString(CommentAiSettings.MODEL_ID, "");
+                                    commentModelRow[0].setValue("跟随全局模型");
+                                } else {
+                                    AiModelConfig chosen = current.configs.get(index - 1);
+                                    repository.putString(CommentAiSettings.MODEL_ID, chosen.id);
+                                    commentModelRow[0].setValue(chosen.name);
+                                }
+                            }).setNegativeButton("取消", null).create());
+                });
+        addLocalSwitch("允许 AI 使用抖音搜索", "仅抖音内的手动聊天和评论 AI 解析可用，搜索资料会提供给本次所选模型。",
+                CommentAiSettings.SEARCH);
         addSectionLabel("已配置模型");
         AiModelSettings settings = aiSettings();
         if (settings.configs.isEmpty()) addUnavailable("尚未配置");
@@ -1141,7 +1170,8 @@ public final class ModuleSettingsScreen {
     }
 
     private void showAiChat() {
-        try { showOptionDialog(new AiTestChatDialog(context, aiSettings().selected(), miuixHome != null)); }
+        try { showOptionDialog(new AiTestChatDialog(context, aiSettings().selected(), miuixHome != null,
+                false, null, AiConversationDialog.manualSearch(context, repository))); }
         catch (RuntimeException failure) { toast(safeError(failure)); }
     }
 

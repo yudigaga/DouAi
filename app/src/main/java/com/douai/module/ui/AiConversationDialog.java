@@ -11,6 +11,10 @@ import android.widget.Toast;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.SettingsStore;
+import com.douai.module.config.CommentAiSettings;
+import com.douai.module.feature.DouyinSearch;
+import com.douai.module.feature.HostDouyinSearch;
+import com.douai.module.scan.HostAdaptation;
 
 /** Opens a module-owned conversation for a saved model on the host message page. */
 public final class AiConversationDialog {
@@ -33,7 +37,8 @@ public final class AiConversationDialog {
         }
         AiTestChatDialog dialog = null;
         try {
-            dialog = new AiTestChatDialog(activity, snapshot, true, true, nativeViews);
+            dialog = new AiTestChatDialog(activity, snapshot, true, true, nativeViews,
+                    manualSearch(activity, store));
             dialog.setOwnerActivity(activity);
             AiTestChatDialog opened = dialog;
             dialog.setContactEditAction(() -> {
@@ -46,6 +51,26 @@ public final class AiConversationDialog {
             if (dialog != null) dialog.dismiss();
             DouAiLog.legacy(5, "DouAi.AiContact", "Native chat could not open", failure);
             Toast.makeText(activity, "原生聊天界面暂时无法打开，请重新进入消息页", Toast.LENGTH_LONG).show();
+            return null;
+        }
+    }
+
+    static DouyinSearch manualSearch(android.content.Context context, SettingsStore store) {
+        if (!store.getBoolean(CommentAiSettings.SEARCH, false)) return null;
+        if (!store.isInHost()) {
+            Toast.makeText(context, "抖音搜索需从抖音内的手动 AI 入口使用，当前继续普通对话", Toast.LENGTH_LONG).show();
+            return null;
+        }
+        try {
+            android.content.Context application = context.getApplicationContext();
+            DouyinSearch bridge = HostDouyinSearch.create((application == null ? context : application).getClassLoader(),
+                    HostAdaptation.currentProfile());
+            if (bridge == null) Toast.makeText(context, "当前抖音版本暂不支持 AI 搜索，继续普通对话", Toast.LENGTH_LONG).show();
+            return bridge;
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) {
+            DouAiLog.event("manual_ai_search", "availability", "host_bridge_unavailable",
+                    "error_type=" + unavailable.getClass().getSimpleName());
+            Toast.makeText(context, "抖音搜索暂不可用，继续普通对话", Toast.LENGTH_LONG).show();
             return null;
         }
     }

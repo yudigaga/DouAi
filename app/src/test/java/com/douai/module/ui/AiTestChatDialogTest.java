@@ -21,6 +21,7 @@ import android.widget.TextView;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.feature.ChatImage;
 import com.douai.module.feature.ChatImageLoader;
+import com.douai.module.feature.DouyinSearch;
 import com.douai.module.feature.TestChatMemory;
 
 import org.json.JSONObject;
@@ -112,6 +113,37 @@ public final class AiTestChatDialogTest {
         assertEquals("发送", send.getContentDescription());
         assertTrue(send.isEnabled());
         assertEquals("", text("ai.chat.state").getText().toString());
+    }
+
+    @Test public void successfulAnswerDisplaysOnlyTheSearchResultsFromItsOwnTurn() {
+        FakeSession active = sessions.get(0);
+        active.found = List.of(new DouyinSearch.Result("手势舞", List.of(new DouyinSearch.Item(
+                "123", "手势舞教程", "作者甲", "https://www.douyin.com/video/123", ""))));
+        submit("找手势舞教程");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(findView("ai.chat.video.card"));
+        assertEquals("模型回复", text("ai.chat.answer").getText().toString());
+        assertTrue(active.found.isEmpty());
+        root.findViewWithTag("ai.chat.clear").performClick();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, messageCount());
+        submit("不搜索的问题");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertNull(findView("ai.chat.video.card"));
+    }
+
+    @Test public void failedAnswerNeverAttachesPartialSearchResults() {
+        FakeSession active = sessions.get(0);
+        active.found = List.of(new DouyinSearch.Result("手势舞", List.of(new DouyinSearch.Item(
+                "123", "不应显示", "作者", "https://www.douyin.com/video/123", ""))));
+        active.failure = new IllegalStateException("Provider unavailable");
+        submit("找视频");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertNull(findView("ai.chat.video.card"));
     }
 
     @Test public void streamedTextIsVisibleBeforeCompletionInOneReplyBubble() throws Exception {
@@ -988,6 +1020,7 @@ public final class AiTestChatDialogTest {
         Exception failure;
         int cancelCount;
         List<TestChatMemory.Turn> saved = Collections.emptyList();
+        List<DouyinSearch.Result> found = Collections.emptyList();
         int savedCalls;
         int clearCalls;
         boolean readOnMain;
@@ -1030,6 +1063,12 @@ public final class AiTestChatDialogTest {
             savedCalls++;
             readOnMain = Looper.myLooper() == Looper.getMainLooper();
             return saved;
+        }
+
+        @Override public List<DouyinSearch.Result> searchResults() {
+            List<DouyinSearch.Result> result = found;
+            found = Collections.emptyList();
+            return result;
         }
 
         @Override public void clear() {

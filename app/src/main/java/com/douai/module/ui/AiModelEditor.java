@@ -453,7 +453,8 @@ final class AiModelEditor implements AutoCloseable {
             try {
                 AiModelConfig draft = readDraft.call();
                 draft.validate(true);
-                showChild(new AiTestChatDialog(context, draft, useMiuix));
+                showChild(new AiTestChatDialog(context, draft, useMiuix, false, null,
+                        AiConversationDialog.manualSearch(context, repository)));
             } catch (Exception failure) { toast(safeError(failure)); }
         });
         form.addView(MiuixFormControls.viewFor(messageContact), matchWrap());

@@ -141,11 +141,43 @@ public final class ChatCompletionClient {
                 ignored -> { }, MAX_REPLY_CHARS, onPartial);
     }
 
+    /** Explicit capability for manual chat and comment analysis; automation keeps the text-only APIs. */
+    public synchronized String replyWithSearch(String conversation, String prompt, List<ChatImage> images,
+                                              AiModelSettings settings, String secondaryPrompt, boolean remember,
+                                              String document, DouyinSearch search, Consumer<String> onPartial) throws Exception {
+        if (search == null) return replyStreaming(conversation, prompt, images, settings, secondaryPrompt, remember, document, onPartial);
+        AiModelConfig config = settings.selected();
+        config.validate(true);
+        ManualAiToolProtocol.validateParameters(config);
+        List<ChatImage> attachments = images == null ? Collections.emptyList() : new ArrayList<>(images);
+        if (attachments.size() > MAX_IMAGES_PER_MESSAGE) throw new IllegalArgumentException("每条消息最多 4 张图片");
+        for (ChatImage image : attachments) if (image == null) throw new IllegalArgumentException("图片内容为空");
+        return sendBoundedStream(config, conversation == null ? "" : conversation, prompt == null ? "" : prompt,
+                Collections.unmodifiableList(attachments), secondaryPrompt == null ? "" : secondaryPrompt, remember,
+                document == null ? "" : document, ignored -> { }, MAX_REPLY_CHARS, onPartial, search);
+    }
+
     /** Only structured analysis may carry bounded fences/whitespace around its 4000-char canonical JSON. */
     public synchronized String replyStructuredAnalysis(String conversation, String prompt,
                                      AiModelSettings settings, String secondaryPrompt, String document) throws Exception {
         return replyWithLimit(conversation, prompt, Collections.emptyList(), settings, secondaryPrompt, false,
                 document, ignored -> { }, MAX_STRUCTURED_REPLY_CHARS);
+    }
+
+    /** Bounds one optional analysis operation without changing the configured wire response mode. */
+    public synchronized String replyStructuredAnalysisBounded(String conversation, String prompt,
+                                     AiModelSettings settings, String secondaryPrompt, String document,
+                                     int maximumSeconds) throws Exception {
+        if (maximumSeconds < 5 || maximumSeconds > 120) {
+            throw new IllegalArgumentException("分析超时上限应为 5 至 120 秒");
+        }
+        AiModelConfig config = settings.selected();
+        config.validate(true);
+        AiModelConfig bounded = AiModelConfig.fromJson(config.toJson()
+                .put("timeoutSeconds", Math.min(config.timeoutSeconds, maximumSeconds)));
+        return sendBoundedStream(bounded, conversation == null ? "" : conversation, prompt == null ? "" : prompt,
+                Collections.emptyList(), secondaryPrompt == null ? "" : secondaryPrompt, false,
+                document == null ? "" : document, ignored -> { }, MAX_STRUCTURED_REPLY_CHARS, null);
     }
 
     private String replyWithLimit(String conversation, String prompt, List<ChatImage> images,
@@ -186,12 +218,20 @@ public final class ChatCompletionClient {
     private String sendBoundedStream(AiModelConfig config, String conversation, String prompt, List<ChatImage> images,
                                        String secondary, boolean remember, String document, IntConsumer sent,
                                        int maximumReplyChars, Consumer<String> onPartial) throws Exception {
+        return sendBoundedStream(config, conversation, prompt, images, secondary, remember, document,
+                sent, maximumReplyChars, onPartial, null);
+    }
+
+    private String sendBoundedStream(AiModelConfig config, String conversation, String prompt, List<ChatImage> images,
+                                       String secondary, boolean remember, String document, IntConsumer sent,
+                                       int maximumReplyChars, Consumer<String> onPartial, DouyinSearch search) throws Exception {
         ActiveRequest request = new ActiveRequest();
         request.onPartial = onPartial;
         request.asynchronous = true;
         RequestDeadline deadline = new RequestDeadline(System.nanoTime(), config.timeoutSeconds);
-        FutureTask<String> io = new FutureTask<>(() -> send(config, conversation, prompt, images, secondary, remember,
-                document, sent, maximumReplyChars, request, deadline));
+        FutureTask<String> io = new FutureTask<>(() -> search == null
+                ? send(config, conversation, prompt, images, secondary, remember, document, sent, maximumReplyChars, request, deadline)
+                : sendWithSearch(config, conversation, prompt, images, secondary, remember, document, search, request, deadline));
         request.io = io;
         synchronized (requestLock) { ensureActive(request); activeRequest = request; }
         try {
@@ -238,6 +278,7 @@ public final class ChatCompletionClient {
                 request.commitHistory = null;
                 if (activeRequest == request) activeRequest = null;
             }
+            cancelSearch(request);
             releaseAsync(request, false);
         }
     }
@@ -258,6 +299,7 @@ public final class ChatCompletionClient {
         HttpURLConnection connection;
         InputStream input;
         ActiveRequest request;
+        DouyinSearch.Request search;
         synchronized (requestLock) {
             if (activeRequest == null) return;
             request = activeRequest;
@@ -265,11 +307,185 @@ public final class ChatCompletionClient {
             request.trace.stage("model_cancel_requested", "asynchronous=" + request.asynchronous + ";remote_result=unknown");
             connection = request.connection;
             input = request.input;
+            search = request.search;
         }
+        if (search != null) try { search.cancel(); } catch (RuntimeException ignored) { }
         if (request.asynchronous) {
             if (request.io != null) request.io.cancel(false);
             releaseAsync(request, false);
         } else release(connection, input);
+    }
+
+    private String sendWithSearch(AiModelConfig config, String conversation, String prompt, List<ChatImage> images,
+                                  String secondary, boolean remember, String document, DouyinSearch search,
+                                  ActiveRequest request, RequestDeadline deadline) throws Exception {
+        if (prompt.trim().isEmpty() && images.isEmpty() && document.trim().isEmpty()) throw new IllegalArgumentException("消息不能为空");
+        if (prompt.length() > 4000) throw new IllegalArgumentException("消息最多 4000 个字符");
+        if (document.length() > 32768) throw new IllegalArgumentException("附件文本最多 32768 个字符");
+        String key = historyKey(conversation, config);
+        long savedEpoch = memory == null ? 0 : memory.epoch();
+        long epoch;
+        List<HistoryTurn> prior;
+        synchronized (requestLock) {
+            ensureActive(request); epoch = historyEpoch;
+            if (memory != null) {
+                prior = new ArrayList<>();
+                for (TestChatMemory.Turn turn : memory.read()) prior.add(new HistoryTurn(key, turn.prompt, turn.document, turn.images, turn.answer));
+            } else synchronized (historyImageBudget) {
+                ArrayDeque<HistoryTurn> previous = history.get(key);
+                if (previous != null) while (previous.size() > config.contextRounds) discardTurn(previous.peekFirst());
+                prior = previous == null ? Collections.emptyList() : new ArrayList<>(previous);
+            }
+        }
+        JSONObject body = requestBody(config, prior, withDocument(prompt, document), images, secondary);
+        Map<String, String> queriesById = new LinkedHashMap<>(), cachedResults = new LinkedHashMap<>();
+        int searches = 0;
+        try {
+            for (int round = 0; round < 3; round++) {
+                ensureActive(request); deadline.remainingMillis();
+                ManualAiToolProtocol.configure(body, config.protocol, round < 2 && searches < 2);
+                request.trace.stage("manual_model_round", "round=" + (round + 1) + ";search_attempts=" + searches);
+                ManualAiToolProtocol.Turn turn = sendManualRound(config, body, request, deadline);
+                ensureActive(request); deadline.remainingMillis();
+                if (turn.calls.isEmpty()) {
+                    String answer = turn.text;
+                    publishPartial(request, deadline, answer);
+                    synchronized (requestLock) {
+                        ensureActive(request); deadline.remainingMillis();
+                        request.commitHistory = () -> {
+                            if (remember && config.contextRounds > 0 && epoch == historyEpoch) {
+                                if (memory != null) memory.append(savedEpoch, new TestChatMemory.Turn(prompt, document, images, answer));
+                                else rememberTurn(new HistoryTurn(key, prompt, document, images, answer), config.contextRounds);
+                            }
+                        };
+                    }
+                    return answer;
+                }
+                if (round == 2) throw new ReplyFailure(ReplyFailure.Kind.INCOMPLETE, 200, -1);
+                List<String> results = new ArrayList<>();
+                for (ManualAiToolProtocol.Call call : turn.calls) {
+                    ensureActive(request); deadline.remainingMillis();
+                    String priorQuery = queriesById.get(call.id);
+                    if (call.correlated && priorQuery != null && !priorQuery.equals(call.query)) throw new ReplyFailure(ReplyFailure.Kind.FORMAT, 200, -1);
+                    if (call.correlated) queriesById.put(call.id, call.query);
+                    String result = cachedResults.get(call.query);
+                    if (result == null) {
+                        if (searches == 2) result = toolError("search_limit_reached");
+                        else {
+                            searches++;
+                            result = runSearch(search, call.query, request, deadline);
+                        }
+                        cachedResults.put(call.query, result);
+                    }
+                    results.add(result);
+                }
+                ManualAiToolProtocol.appendResults(body, config.protocol, turn, results);
+            }
+            throw new ReplyFailure(ReplyFailure.Kind.INCOMPLETE, 200, -1);
+        } catch (ResponsesAnalysisStream.Failure failure) {
+            throw manualFailure(failure);
+        } finally {
+            cancelSearch(request);
+        }
+    }
+
+    private ManualAiToolProtocol.Turn sendManualRound(AiModelConfig config, JSONObject body, ActiveRequest request,
+                                                     RequestDeadline deadline) throws Exception {
+        String endpoint = requestEndpoint(config, config.modelName);
+        HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
+        try {
+            synchronized (requestLock) { ensureActive(request); request.connection = connection; request.input = null; }
+            configure(connection, config);
+            connection.setConnectTimeout(deadline.remainingMillis()); deadline.beforeIo(request, connection);
+            connection.setRequestMethod("POST"); connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            if (config.streaming()) connection.setRequestProperty("Accept", "text/event-stream");
+            setAuthentication(connection, config, endpoint);
+            connection.setFixedLengthStreamingMode(JsonRequestBody.byteLength(body, () -> { ensureActive(request); deadline.remainingMillis(); }));
+            try (java.io.OutputStream output = connection.getOutputStream()) {
+                JsonRequestBody.write(body, output, () -> { ensureActive(request); deadline.remainingMillis(); });
+            }
+            deadline.beforeIo(request, connection);
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) throw httpFailure(status);
+            InputStream input = connection.getInputStream();
+            synchronized (requestLock) { ensureActive(request); request.input = input; }
+            InputStream guarded = new FilterInputStream(input) {
+                @Override public int read() throws IOException { deadline.beforeIo(request, connection); int value = super.read(); deadline.beforeIo(request, connection); return value; }
+                @Override public int read(byte[] b, int o, int n) throws IOException { deadline.beforeIo(request, connection); int value = super.read(b, o, n); deadline.beforeIo(request, connection); return value; }
+            };
+            String type = connection.getContentType();
+            if (config.streaming() && type != null && type.toLowerCase(java.util.Locale.ROOT).contains("text/event-stream")) {
+                return ManualAiToolProtocol.stream(config.protocol, guarded, () -> deadline.beforeIo(request, connection),
+                        text -> publishPartial(request, deadline, text));
+            }
+            return ManualAiToolProtocol.json(config.protocol, readBounded(guarded, MAX_RESPONSE_BYTES));
+        } catch (ResponsesAnalysisStream.Failure failure) { throw manualFailure(failure); }
+        finally {
+            releaseAsync(request, true);
+            synchronized (requestLock) { if (request.connection == connection) { request.connection = null; request.input = null; } }
+        }
+    }
+
+    private String runSearch(DouyinSearch search, String query, ActiveRequest request, RequestDeadline deadline) throws Exception {
+        DouyinSearch.Request operation = null;
+        try {
+            operation = search.prepare(query, 5);
+            if (operation == null) return toolError("search_unavailable");
+            try {
+                synchronized (requestLock) {
+                    request.search = operation;
+                    ensureActive(request);
+                    deadline.remainingMillis();
+                }
+            } catch (CancellationException | java.net.SocketTimeoutException fenced) {
+                if (fenced instanceof java.net.SocketTimeoutException) request.timedOut = true;
+                try { operation.cancel(); } catch (RuntimeException ignored) { }
+                synchronized (requestLock) { if (request.search == operation) request.search = null; }
+                throw fenced;
+            }
+            DouyinSearch.Result result = operation.run(deadline.endNanos());
+            ensureActive(request); deadline.remainingMillis();
+            if (result == null) return toolError("search_unavailable");
+            JSONArray items = new JSONArray();
+            for (DouyinSearch.Item item : result.items) {
+                if (item == null) continue;
+                if (items.length() == 5) break;
+                items.put(new JSONObject().put("awemeId", clipped(item.awemeId, 128)).put("title", clipped(item.title, 500))
+                        .put("authorName", clipped(item.authorName, 100)).put("shareUrl", clipped(item.shareUrl, 1024))
+                        .put("summary", clipped(item.summary, 1000)));
+            }
+            JSONObject output = new JSONObject().put("ok", true).put("query", query).put("items", items);
+            while (output.toString().length() > 8000 && items.length() > 0) items.remove(items.length() - 1);
+            return output.toString();
+        } catch (CancellationException cancelled) { throw cancelled; }
+        catch (java.net.SocketTimeoutException timeout) { request.timedOut = true; throw timeout; }
+        catch (InterruptedException cancelled) { Thread.currentThread().interrupt(); throw cancelled(); }
+        catch (Exception unavailable) { ensureActive(request); deadline.remainingMillis(); return toolError("search_unavailable"); }
+        finally {
+            boolean cancelOperation;
+            synchronized (requestLock) {
+                cancelOperation = request.search == operation
+                        && (request.cancelled || request.timedOut || Thread.currentThread().isInterrupted());
+                if (request.search == operation) request.search = null;
+            }
+            if (cancelOperation && operation != null) try { operation.cancel(); } catch (RuntimeException ignored) { }
+        }
+    }
+
+    private static String clipped(String text, int maximum) { return text == null ? "" : text.substring(0, Math.min(maximum, text.length())); }
+    private static String toolError(String code) { return "{\"ok\":false,\"error\":\"" + code + "\",\"items\":[]}"; }
+    private static ReplyFailure manualFailure(ResponsesAnalysisStream.Failure failure) {
+        ReplyFailure.Kind kind = failure.kind == ResponsesAnalysisStream.Failure.Kind.INCOMPLETE ? ReplyFailure.Kind.INCOMPLETE
+                : failure.kind == ResponsesAnalysisStream.Failure.Kind.EMPTY ? ReplyFailure.Kind.EMPTY
+                : failure.kind == ResponsesAnalysisStream.Failure.Kind.OVERLONG ? ReplyFailure.Kind.OVERLONG : ReplyFailure.Kind.FORMAT;
+        return new ReplyFailure(kind, 200, failure.chars);
+    }
+
+    private void cancelSearch(ActiveRequest request) {
+        DouyinSearch.Request pending;
+        synchronized (requestLock) { pending = request.search; request.search = null; }
+        if (pending != null) try { pending.cancel(); } catch (RuntimeException ignored) { }
     }
 
     /** Pending replies cannot restore context after it has been cleared. */
@@ -618,6 +834,7 @@ public final class ChatCompletionClient {
         boolean asynchronous;
         HttpURLConnection connection;
         InputStream input;
+        DouyinSearch.Request search;
         FutureTask<String> io;
         HttpURLConnection cleanupConnection;
         InputStream cleanupInput;
@@ -637,6 +854,7 @@ public final class ChatCompletionClient {
             return (int) Math.min(Integer.MAX_VALUE, (remaining + 999_999L) / 1_000_000L);
         }
         long elapsedMillis() { return TimeUnit.NANOSECONDS.toMillis(Math.max(0, System.nanoTime() - started)); }
+        long endNanos() { return started + budget; }
         void beforeIo(ActiveRequest request, HttpURLConnection connection) throws IOException {
             ensureActive(request);
             connection.setReadTimeout(remainingMillis());

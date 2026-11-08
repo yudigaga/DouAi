@@ -35,6 +35,36 @@ public final class ConfigTransferTest {
         assertEquals("[\"local\",\"fish\"]", imported.values.get("tts_random_sources"));
     }
 
+    @Test public void manualAiSettingsRoundTripAndKeepAutomationBindingsSeparate() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(CommentAiSettings.TAKEOVER, true);
+        source.values.put(CommentAiSettings.SEARCH, true);
+        source.values.put(CommentAiSettings.MODEL_ID, "comment-model-only");
+        source.values.put(AiModelSettings.KEY, new AiModelSettings(java.util.List.of(
+                AiModelConfig.fromJson(new JSONObject().put("id", "global-model").put("name", "全局")
+                        .put("apiEndpoint", "https://global.invalid/v1").put("modelName", "global")),
+                AiModelConfig.fromJson(new JSONObject().put("id", "comment-model-only").put("name", "评论")
+                        .put("apiEndpoint", "https://comment.invalid/v1").put("modelName", "comment"))),
+                "global-model").serialize());
+        source.values.put(AiModelSettings.REPLY_MODEL_ID, "reply-model");
+        source.values.put(AiModelSettings.COMMENT_MODEL_ID, "automatic-comment-model");
+
+        String export = ConfigTransfer.export(source, true);
+        JSONObject values = new JSONObject(export).getJSONObject("values");
+        assertTrue(values.getJSONObject(CommentAiSettings.TAKEOVER).getBoolean("value"));
+        assertTrue(values.getJSONObject(CommentAiSettings.SEARCH).getBoolean("value"));
+        assertEquals("comment-model-only", values.getJSONObject(CommentAiSettings.MODEL_ID).getString("value"));
+
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, export));
+        assertEquals(true, target.values.get(CommentAiSettings.TAKEOVER));
+        assertEquals(true, target.values.get(CommentAiSettings.SEARCH));
+        assertEquals("comment-model-only", target.values.get(CommentAiSettings.MODEL_ID));
+        AiModelSettings restored = AiModelSettings.read(target);
+        assertEquals("global-model", restored.activeId);
+        assertEquals("reply-model", target.values.get(AiModelSettings.REPLY_MODEL_ID));
+        assertEquals("automatic-comment-model", target.values.get(AiModelSettings.COMMENT_MODEL_ID));
+    }
+
     @Test public void invalidImportedRandomSourceRangesAreRejectedWithoutPublication() throws Exception {
         for (Object range : new Object[]{"[]", "", "broken", "{}", "[\"unknown\"]", "[\"fish\",4]",
                 "[\"fish\"] trailing", "['fish']", "[fish]", true, new JSONArray("[\"fish\"]")}) {
