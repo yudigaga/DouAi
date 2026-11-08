@@ -11,4 +11,4 @@
 - OkHttp MockWebServer 4.12.0 test dependency, licensed under Apache License 2.0: <https://github.com/square/okhttp>.
 - Gson 2.10.1 test dependency, licensed under Apache License 2.0: <https://github.com/google/gson>.
 - The model settings and conversation layout reference [AAswordman/Operit](https://github.com/AAswordman/Operit), revision `dbf71916fae9750cfdc9f9a774f5a0fee56633fb`, licensed under LGPL-3.0. Operit source files are not included in this project.
-- Xyner, dyyds and Freely APKs are local analysis inputs. Their native libraries, account systems and service implementations are not bundled in the DouAi module.
+
