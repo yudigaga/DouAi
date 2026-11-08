@@ -36,4 +36,4 @@
 
 最终 `:app:assembleRelease` 成功，用时 2 分 7 秒，附带 `lintVitalRelease` 通过。已核对非调试、包名/版本、长期证书与 v3 签名、16 KiB ZIP 对齐、包内新读取器/诊断标记、构建与归档哈希；619 个源码/构建/测试输入快照一致。
 
-独立静态复核发现的错位重试丢唤醒、失败行重绑丢入口两项已修复并再次静态复核。`AiTestChatDialogTest` 本地定向测试通过；完整测试、独立 Release Lint 和 APK 合同未在本地运行，构建自带 vital Lint 通过。用户反馈人工测试通过，设备版本与覆盖范围未记录；真实图片、模型和抖音服务验证范围未单独记录。
+独立静态复核发现的错位重试丢唤醒、失败行重绑丢入口两项已修复并再次静态复核。`AiTestChatDialogTest` 本地定向测试通过；本地完整测试、独立 Release Lint 和 APK 合同未运行，构建自带 vital Lint 通过。GitHub CI `42488794909` 的 Release 构建通过，但单测/APK 合同阶段以 3,026 项中 1 失败、19 跳过结束，Release Lint 未运行；失败项为 `CommentAiRecommendationClientTest.synchronousTrickledResponseStillStopsAtTheOverallBudget` 的请求计数断言。按维护者要求仍发布。用户反馈人工测试通过，设备版本与覆盖范围未记录；真实图片、模型和抖音服务验证范围未单独记录。
