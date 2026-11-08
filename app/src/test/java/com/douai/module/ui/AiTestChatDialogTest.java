@@ -115,7 +115,7 @@ public final class AiTestChatDialogTest {
         assertEquals("", text("ai.chat.state").getText().toString());
     }
 
-    @Test public void successfulAnswerDisplaysOnlyTheSearchResultsFromItsOwnTurn() {
+    @Test public void successfulAnswerDisplaysOnlyTheSearchResultsFromItsOwnTurn() throws Exception {
         FakeSession active = sessions.get(0);
         active.found = List.of(new DouyinSearch.Result("手势舞", List.of(new DouyinSearch.Item(
                 "123", "手势舞教程", "作者甲", "https://www.douyin.com/video/123", ""))));
