@@ -64,7 +64,23 @@ public final class DownloadActionHookTest {
             lastClickedView = view;
         }
 
+        public void LJJIJIIJIL(View view) { LJJIJIL(view); }
+
         public AwemeFixture LJIIJJI() { return aweme; }
+    }
+
+    public static final class DownloadModule410Fixture {
+        final AwemeFixture aweme = new AwemeFixture();
+        int nativeClicks;
+        public String moduleName() { return "LppDownloadModule"; }
+        public View LJJI(Context context, ViewGroup parent) {
+            TextView row = new TextView(context);
+            if (parent != null) parent.addView(row);
+            return row;
+        }
+        public void LJJIJIIJIL(View view) { nativeClicks++; }
+        public AwemeFixture LJIIJ() { return aweme; }
+        public String LJIIJJI() { return "decoy-is-not-an-aweme"; }
     }
 
     public static final class AwemeFixture {
@@ -213,6 +229,57 @@ public final class DownloadActionHookTest {
         } catch (IllegalArgumentException expected) { assertFalse(registered.get()); }
     }
 
+    @Test public void version410InstallsItsNativeClickAndRejectsTheOlderClickName() throws Exception {
+        HostAdaptation.setCurrentProfile(HostAdaptation.forVersion("41.0.0", 410001L));
+        assertNotNull(HostAdaptation.currentProfile());
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        try (DownloadActionHook ignored = DownloadActionHook.install(createFramework(installed, new AtomicBoolean()),
+                method("moduleName"), method("LJJI", Context.class, ViewGroup.class),
+                method("LJJIJIIJIL", View.class), true, value -> { })) {
+            assertNotNull(installed.get());
+        }
+        AtomicBoolean registered = new AtomicBoolean();
+        try {
+            DownloadActionHook.install(createFramework(new AtomicReference<>(), registered), method("moduleName"),
+                    method("LJJI", Context.class, ViewGroup.class), method("LJJIJIL", View.class), true, ignored -> { });
+            fail("The older native click must not be accepted for 41.0.0");
+        } catch (IllegalArgumentException expected) { assertFalse(registered.get()); }
+    }
+
+    @Test public void version410MenuReadsAwemeFromTheProfiledGetterWhenTheOldNameReturnsAString() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.forVersion("41.0.0", 410001L));
+        ActivityController<Activity> activity = Robolectric.buildActivity(Activity.class).setup();
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        DownloadModule410Fixture module = new DownloadModule410Fixture();
+        ImageFixture image = new ImageFixture();
+        image.url_list = List.of("https://media.example/410.jpg");
+        module.aweme.images = List.of(image);
+        try (DownloadActionHook hook = DownloadActionHook.install(createFramework(installed, new AtomicBoolean()),
+                method410("moduleName"), method410("LJJI", Context.class, ViewGroup.class),
+                method410("LJJIJIIJIL", View.class), true, ignored -> { })) {
+            XposedInterface.Chain chain = (XposedInterface.Chain) Proxy.newProxyInstance(
+                    XposedInterface.Chain.class.getClassLoader(), new Class<?>[]{XposedInterface.Chain.class},
+                    (proxy, method, args) -> {
+                        if ("getThisObject".equals(method.getName())) return module;
+                        if ("getArg".equals(method.getName())) return args[0].equals(0) ? new View(activity.get()) : null;
+                        if ("proceed".equals(method.getName())) return module.LJJI(activity.get(), new FrameLayout(activity.get()));
+                        throw new UnsupportedOperationException(method.getName());
+                    });
+            View row = (View) installed.get().intercept(chain);
+            assertNotNull(row);
+            assertTrue(row.performLongClick());
+            AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
+            assertNotNull(dialog);
+            boolean hasGallery = false;
+            for (int index = 0; index < dialog.getListView().getAdapter().getCount(); index++) {
+                if ("保存图集".contentEquals(dialog.getListView().getAdapter().getItem(index).toString())) {
+                    hasGallery = true;
+                }
+            }
+            assertTrue("The 410 getter must expose the gallery actions", hasGallery);
+        } finally { activity.pause().stop().destroy(); }
+    }
+
     @Test public void unverifiedProfileCannotInstallNativeDownloadFactory() throws Exception {
         HostAdaptation.setCurrentProfile(null); AtomicBoolean registered = new AtomicBoolean();
         try {
@@ -228,37 +295,46 @@ public final class DownloadActionHookTest {
         java.io.File apk = new java.io.File(configured);
         assertTrue(apk.isFile());
         boolean legacy = com.douai.module.scan.HostApkTestProfile.is406(apk);
+        boolean latest = com.douai.module.scan.HostApkTestProfile.is410(apk);
+        String awemeOwner = "Lcom/ss/android/ugc/aweme/feed/model/Aweme;";
         java.util.Set<String> required = new java.util.HashSet<>(Arrays.asList("moduleName()Ljava/lang/String;",
                 (legacy ? "LJJIFFI" : "LJJI") + "(Landroid/content/Context;Landroid/view/ViewGroup;)Landroid/view/View;",
-                "LJJIJIL(Landroid/view/View;)V"));
+                (latest ? "LJJIJIIJIL" : "LJJIJIL") + "(Landroid/view/View;)V"));
+        String awemeGetter = (latest ? "LJIIJ" : "LJIIJJI") + "()" + awemeOwner;
+        java.util.Set<String> parentRequired = new java.util.HashSet<>(Arrays.asList(awemeGetter));
+        if (latest) parentRequired.add("LJIIJJI()Ljava/lang/String;");
         String owner = "Lcom/ss/android/ugc/aweme/feed/long_press_panel/modules/business/homepage/LppDownloadModule;";
         boolean found = false;
+        boolean parentFound = false;
         try (java.util.zip.ZipFile archive = new java.util.zip.ZipFile(apk)) {
             java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = archive.entries();
-            while (entries.hasMoreElements() && !found) {
+            while (entries.hasMoreElements() && (!found || !parentFound)) {
                 java.util.zip.ZipEntry entry = entries.nextElement();
                 if (!entry.getName().matches("classes[0-9]*\\.dex")) continue;
                 try (java.io.BufferedInputStream input = new java.io.BufferedInputStream(archive.getInputStream(entry))) {
                     com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile dex = com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile.fromInputStream(com.android.tools.smali.dexlib2.Opcodes.getDefault(), input);
                     for (com.android.tools.smali.dexlib2.iface.ClassDef type : dex.getClasses()) {
-                        if (!owner.equals(type.getType())) continue;
-                        found = true;
+                        if (owner.equals(type.getType())) found = true;
+                        else if ("Lcom/ss/android/ugc/aweme/feed/long_press_panel/modules/LongPressPanelAbsModule;"
+                                .equals(type.getType())) parentFound = true;
+                        else continue;
+                        java.util.Set<String> expected = owner.equals(type.getType()) ? required : parentRequired;
                         for (com.android.tools.smali.dexlib2.iface.Method method : type.getMethods()) {
                             StringBuilder signature = new StringBuilder(method.getName()).append('(');
                             for (CharSequence parameter : method.getParameterTypes()) signature.append(parameter);
                             signature.append(')').append(method.getReturnType());
-                            if (!required.contains(signature.toString())) continue;
+                            if (!expected.contains(signature.toString())) continue;
                             assertTrue(com.android.tools.smali.dexlib2.AccessFlags.PUBLIC.isSet(method.getAccessFlags()));
                             assertFalse(com.android.tools.smali.dexlib2.AccessFlags.STATIC.isSet(method.getAccessFlags()));
-                            required.remove(signature.toString());
+                            expected.remove(signature.toString());
                         }
-                        break;
                     }
                 }
             }
         }
         assertTrue("Missing original download module", found);
         assertTrue("Missing original download methods: " + required, required.isEmpty());
+        assertTrue("Missing inherited original Aweme accessors: " + parentRequired, parentFound && parentRequired.isEmpty());
     }
 
     @Test public void thirdPartyModeExposesOnlyItsDownloadActionAndDoesNotFallbackToOfficial() throws Throwable {
@@ -296,6 +372,12 @@ public final class DownloadActionHookTest {
         } catch (NoSuchMethodException failure) {
             throw new AssertionError(failure);
         }
+    }
+
+    private static Method method410(String name, Class<?>... parameterTypes) {
+        try {
+            return DownloadModule410Fixture.class.getDeclaredMethod(name, parameterTypes);
+        } catch (NoSuchMethodException failure) { throw new AssertionError(failure); }
     }
 
     private static XposedInterface createFramework(AtomicReference<XposedInterface.Hooker> installed,

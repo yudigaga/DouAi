@@ -45,6 +45,7 @@ public final class PlayerSpeedHostContractTest {
     private static final String WRAPPER = PREFIX + "feed/controller/FeedPlayerWrapper;";
     private static final String MANAGER = PREFIX + "video/PlayerManager;";
     private static final String ABILITY = PREFIX + "o/oplayer/client/player/ability/DPlayAbility;";
+    private static final String OPERATE_PROVIDER = PREFIX + "o/oplayer/client/player/provider/DIOperateSimPlayerProvider;";
     private static final String COMMAND = PREFIX + "player/sdk/api/PlayerCommand;";
     private static final String SPEED_COMMAND = PREFIX + "player/sdk/api/PlayerCommand$Getter$VideoPlaySpeed;";
     private static final String REAL_SPEED_COMMAND = PREFIX + "player/sdk/api/PlayerCommand$Getter$RealVideoPlaySpeed;";
@@ -60,6 +61,8 @@ public final class PlayerSpeedHostContractTest {
     private static final String GESTURE_CONTAINER = PREFIX + "o/oplayer/client/gesture/detector/DVideoGestureContainer;";
     private static final String GESTURE_LISTENER = PREFIX + "o/oplayer/client/gesture/detector/DIVideoGestureListener;";
     private static final String MOTION_EVENT = "Landroid/view/MotionEvent;";
+    private static final String VIDEO_HOLDER = PREFIX + "feed/adapter/VideoViewHolder;";
+    private static final String ITEM_PARAMS = PREFIX + "feed/model/VideoItemParams;";
     private static final String QUERY_DESCRIPTOR = "(" + COMMAND + ")Ljava/lang/Object;";
     private static final Map<String, ClassDef> TYPES = new HashMap<>();
     private static File apk;
@@ -71,17 +74,23 @@ public final class PlayerSpeedHostContractTest {
         Assume.assumeNotNull(path);
         apk = new File(path);
         assertTrue("DOUAI_TEST_APK must be an original verified host", apk.isFile());
-        boolean legacy = HostApkTestProfile.is406(apk);
-        infoImplementation = legacy ? "LX/0DZZ;" : "LX/0G5v;";
-        commandDispatcher = legacy ? "LX/0DMZ;" : "LX/0Fsa;";
-        nativeDetector = legacy ? "LX/1Z4d;" : "LX/1eom;";
-        frameContainer = legacy ? "LX/06ns;" : "LX/07rz;";
-        mediaParamsCaller = legacy ? "LX/0Cz1;" : "LX/0FfW;";
-        previousMetricGetter = legacy ? "LJFF" : "LJIIJ";
+        HostAdaptation.Profile profile = HostApkTestProfile.profile(apk);
+        boolean legacy = profile == HostAdaptation.PROFILE_406;
+        boolean modern = profile == HostAdaptation.PROFILE_410;
+        infoImplementation = legacy ? "LX/0DZZ;" : modern ? "LX/0Gi9;" : "LX/0G5v;";
+        commandDispatcher = legacy ? "LX/0DMZ;" : modern
+                ? "Lcom/ss/android/ugc/aweme/o/oplayer/client/player/ability/DPlayAbility;" : "LX/0Fsa;";
+        nativeDetector = legacy ? "LX/1Z4d;" : modern ? "LX/1fN4;" : "LX/1eom;";
+        frameContainer = legacy ? "LX/06ns;" : modern ? "LX/0HI9;" : "LX/07rz;";
+        mediaParamsCaller = legacy ? "LX/0Cz1;" : modern ? "LX/0GGt;" : "LX/0FfW;";
+        previousMetricGetter = legacy || modern ? "LJFF" : "LJIIJ";
         Set<String> wanted = new HashSet<>(Arrays.asList(INFO, WRAPPER, MANAGER, SPEED_COMMAND,
-                REAL_SPEED_COMMAND, infoImplementation, commandDispatcher, nativeDetector, GESTURE_CONTAINER, frameContainer,
+                REAL_SPEED_COMMAND, ABILITY, infoImplementation, commandDispatcher, nativeDetector, GESTURE_CONTAINER, frameContainer,
                 VIDEO_ENGINE, CACHED_ENGINE, BASE_ENGINE, PLAYBACK_PARAMS, MEDIA_PLAYER, TT_MEDIA_PLAYER,
                 MEDIA_CLIENT, TT_PLAYER_CLIENT, TT_PLAYER, mediaParamsCaller));
+        wanted.add(VIDEO_HOLDER);
+        wanted.add(ITEM_PARAMS);
+        if (modern) wanted.add(OPERATE_PROVIDER);
         try (ZipFile archive = new ZipFile(apk)) {
             var entries = archive.entries();
             while (entries.hasMoreElements() && !wanted.isEmpty()) {
@@ -98,6 +107,24 @@ public final class PlayerSpeedHostContractTest {
     }
 
     @AfterClass public static void releaseOriginalFacts() { TYPES.clear(); }
+
+    @Test public void selectedHolderParamsFieldMatchesTheActualHostType() throws Exception {
+        HostAdaptation.Profile profile = HostApkTestProfile.profile(apk);
+        String fieldName = HostResourceProfile.feedItemParamsField(profile);
+        Field params = null;
+        for (Field field : TYPES.get(VIDEO_HOLDER).getFields()) {
+            if (fieldName.equals(field.getName())) params = field;
+        }
+        assertNotNull("Selected-holder item parameters field " + fieldName, params);
+        assertEquals("Gesture, auto-play and analytics must read VideoItemParams", ITEM_PARAMS, params.getType());
+        assertFalse("Item parameters belong to a holder instance", AccessFlags.STATIC.isSet(params.getAccessFlags()));
+        Field context = null;
+        for (Field field : TYPES.get(ITEM_PARAMS).getFields()) {
+            if ("mFeedContext".equals(field.getName())) context = field;
+        }
+        assertNotNull(context);
+        assertEquals(PREFIX + "feed/plato/core/IFeedContext;", context.getType());
+    }
 
     @Test public void allSpeedReadRulesUseTheNamedSpeedCommandInsteadOfTheMediaMetric() throws Exception {
         HostRuleSet rules;
@@ -118,8 +145,9 @@ public final class PlayerSpeedHostContractTest {
         assertCommandRule(rules, "adv_player_real_speed_command", REAL_SPEED_COMMAND);
     }
 
-    @Test public void bothVerifiedProfilesSelectTheSameSemanticCommandContract() throws Exception {
-        for (String asset : new String[]{"douyin-host-rules.tsv", "douyin-host-rules-40.6.0.tsv"}) {
+    @Test public void allVerifiedProfilesSelectTheSameSemanticCommandContract() throws Exception {
+        for (HostAdaptation.Profile profile : HostApkTestProfile.profiles()) {
+            String asset = profile.rulesAsset;
             HostRuleSet rules;
             try (FileInputStream input = new FileInputStream(HostApkTestProfile.assetFile(asset))) {
                 rules = HostRuleSet.parse(input);
@@ -162,7 +190,18 @@ public final class PlayerSpeedHostContractTest {
         assertTrue("Host has distinct named float readers for both commands: " + unreadCommands, unreadCommands.isEmpty());
     }
 
-    @Test public void desiredSpeedReadsPlaybackParametersWhileRealSpeedReadsTheEngineReport() {
+    @Test public void desiredAndRealSpeedRemainSeparateHostContracts() throws Exception {
+        if (HostApkTestProfile.is410(apk)) {
+            Method dispatch = method(commandDispatcher, "LJI", "Ljava/lang/Object;", COMMAND);
+            assertTrue(calls(dispatch, OPERATE_PROVIDER, "LJI", "Ljava/lang/Object;", COMMAND));
+            Method speed = method(infoImplementation, "LJIILL", "F");
+            Method realSpeed = method(infoImplementation, "LJIILJJIL", "F");
+            assertReadsSpeedCommand(speed, SPEED_COMMAND);
+            assertReadsSpeedCommand(realSpeed, REAL_SPEED_COMMAND);
+            assertTrue("Invalid real-speed values fall back to the desired speed getter",
+                    calls(realSpeed, infoImplementation, "LJIILL", "F"));
+            return;
+        }
         Method dispatch = method(commandDispatcher, "LJI", "Ljava/lang/Object;", COMMAND);
         assertTrue(callsInCommandBranch(dispatch, SPEED_COMMAND, VIDEO_ENGINE, "getPlaybackParams", PLAYBACK_PARAMS));
         assertTrue(callsInCommandBranch(dispatch, SPEED_COMMAND, PLAYBACK_PARAMS, "getSpeed", "F"));
@@ -364,6 +403,20 @@ public final class PlayerSpeedHostContractTest {
         assertEquals(id, descriptor, commandRule.getClassDescriptor());
         assertTrue(id, commandRule.getFieldNames().contains("f"));
         assertTrue(id, commandRule.getFieldTypes().contains(descriptor));
+    }
+
+    private static void assertReadsSpeedCommand(Method getter, String command) {
+        boolean readsSingleton = false;
+        for (var instruction : getter.getImplementation().getInstructions()) {
+            if (!(instruction instanceof ReferenceInstruction)
+                    || !(((ReferenceInstruction) instruction).getReference() instanceof FieldReference)) continue;
+            FieldReference field = (FieldReference) ((ReferenceInstruction) instruction).getReference();
+            if (instruction.getOpcode() == Opcode.SGET_OBJECT && command.equals(field.getDefiningClass())
+                    && "f".equals(field.getName()) && command.equals(field.getType())) readsSingleton = true;
+        }
+        assertTrue("Float getter queries its named speed command: " + command, readsSingleton);
+        assertTrue("Float getter sends the command to the host info provider",
+                calls(getter, "LX/0GmS;", "LJI", "Ljava/lang/Object;", COMMAND));
     }
 
     private static void assertReturnsOwnField(Method getter, String owner, String name, String type) {

@@ -11,6 +11,7 @@ import android.widget.FrameLayout;
 import com.douai.module.config.ExtendedSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.scan.HostCandidate;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
 
@@ -41,6 +42,10 @@ import static org.junit.Assert.*;
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class AutoPlayHookTest {
+    @org.junit.Before public void selectOriginalProfile() {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_408);
+    }
+    @org.junit.After public void resetOriginalProfile() { HostAdaptation.setCurrentProfile(null); }
     public static final class Aweme {
         private final String aid;
         Aweme(String aid) { this.aid = aid; }
@@ -51,7 +56,7 @@ public final class AutoPlayHookTest {
         public FeedPanel mFeedContext;
     }
 
-    public static final class Holder {
+    public static class Holder {
         public FrameLayout w;
         public ItemParams A2;
         public String aid;
@@ -59,6 +64,24 @@ public final class AutoPlayHookTest {
         public void selected() { }
         public void resume() { }
         public void pause() { }
+    }
+    public static final class ModernHolder extends Holder {
+        public Object A2 = new Object();
+        public ItemParams B2;
+        @Override public Aweme getAweme() { return super.getAweme(); }
+        @Override public void selected() { }
+        @Override public void resume() { }
+        @Override public void pause() { }
+    }
+
+    @Test public void modernHolderUsesB2ToAdvanceAfterCompletion() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try (Fixture f = new Fixture(Collections.emptyMap(), false, true)) {
+            f.swipe(600, 100);
+            f.completed("one");
+            assertEquals(1, f.panel.B3.nextCalls);
+            assertEquals(0, f.panel.B3.previousCalls);
+        }
     }
 
     public static final class PagerContext {
@@ -493,6 +516,7 @@ public final class AutoPlayHookTest {
         final LocalOptions options;
         final HostScanReport report;
         final AutoPlayHook hook;
+        final boolean modern;
         Holder selected;
 
         Fixture(Map<String, ?> values) throws Throwable {
@@ -500,10 +524,15 @@ public final class AutoPlayHookTest {
         }
 
         Fixture(Map<String, ?> values, boolean installLate) throws Throwable {
+            this(values, installLate, false);
+        }
+
+        Fixture(Map<String, ?> values, boolean installLate, boolean modern) throws Throwable {
+            this.modern = modern;
             options = new LocalOptions(values);
             activity.setContentView(root);
             panel.f = new FeedPager(activity);
-            report = report();
+            report = report(modern ? ModernHolder.class : Holder.class);
             assertTrue(root.isAttachedToWindow());
             assertTrue(root.isShown());
             if (installLate) {
@@ -531,18 +560,19 @@ public final class AutoPlayHookTest {
         }
 
         Holder holder(String aid) {
-            Holder value = new Holder();
+            Holder value = modern ? new ModernHolder() : new Holder();
             value.aid = aid;
             value.w = root;
             value.A2 = new ItemParams();
             value.A2.mFeedContext = panel;
+            if (modern) ((ModernHolder) value).B2 = value.A2;
             return value;
         }
 
         void select(Holder value) throws Throwable {
             selected = value;
             panel.current = value;
-            harness.invoke(Holder.class.getMethod("selected"), value);
+            harness.invoke(value.getClass().getMethod("selected"), value);
             idle();
         }
 
@@ -586,13 +616,13 @@ public final class AutoPlayHookTest {
         }
     }
 
-    private static HostScanReport report() throws Exception {
+    private static HostScanReport report(Class<? extends Holder> holderType) throws Exception {
         List<RuleScanResult> results = new ArrayList<>();
-        add(results, "feed_holder_page_selected", Holder.class.getMethod("selected"));
-        add(results, "feed_holder_resume", Holder.class.getMethod("resume"));
-        add(results, "feed_holder_pause", Holder.class.getMethod("pause"));
-        add(results, "feed_aweme_accessor", Holder.class.getMethod("getAweme"));
-        addType(results, "feed_holder_main_root", Holder.class);
+        add(results, "feed_holder_page_selected", holderType.getMethod("selected"));
+        add(results, "feed_holder_resume", holderType.getMethod("resume"));
+        add(results, "feed_holder_pause", holderType.getMethod("pause"));
+        add(results, "feed_aweme_accessor", holderType.getMethod("getAweme"));
+        addType(results, "feed_holder_main_root", holderType);
         addType(results, "adv_gesture_item_params", ItemParams.class);
         add(results, "auto_slide_panel_context", FeedPanel.class.getMethod("pagerContext"));
         add(results, "auto_slide_current_holder", FeedPanel.class.getMethod("currentHolder"));

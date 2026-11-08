@@ -344,7 +344,9 @@ public final class DownloadActionHook implements AutoCloseable {
     }
 
     private static Object currentAweme(Object module) throws ReflectiveOperationException {
-        Method method = findNoArgMethod(module.getClass(), "LJIIJJI");
+        String getter = com.douai.module.scan.HostResourceProfile.downloadAwemeGetter(
+                com.douai.module.scan.HostAdaptation.currentProfile());
+        Method method = findNoArgMethod(module.getClass(), getter);
         if (method == null) return null;
         method.setAccessible(true);
         return method.invoke(module);
@@ -729,7 +731,8 @@ public final class DownloadActionHook implements AutoCloseable {
             throw new IllegalArgumentException("Unexpected native download moduleName signature");
         }
         HostAdaptation.Profile profile = HostAdaptation.currentProfile();
-        if (profile != HostAdaptation.PROFILE_406 && profile != HostAdaptation.PROFILE_408) {
+        if (profile != HostAdaptation.PROFILE_406 && profile != HostAdaptation.PROFILE_408
+                && profile != HostAdaptation.PROFILE_410) {
             throw new IllegalArgumentException("Verified native download host profile is required");
         }
         String factoryName = profile == HostAdaptation.PROFILE_406 ? "LJJIFFI" : "LJJI";
@@ -739,7 +742,8 @@ public final class DownloadActionHook implements AutoCloseable {
                 || !View.class.isAssignableFrom(viewFactory.getReturnType())) {
             throw new IllegalArgumentException("Unexpected native download item factory signature");
         }
-        if (!"LJJIJIL".equals(nativeClick.getName()) || nativeClick.getParameterCount() != 1
+        String clickName = profile == HostAdaptation.PROFILE_410 ? "LJJIJIIJIL" : "LJJIJIL";
+        if (!clickName.equals(nativeClick.getName()) || nativeClick.getParameterCount() != 1
                 || nativeClick.getParameterTypes()[0] != View.class || nativeClick.getReturnType() != void.class) {
             throw new IllegalArgumentException("Unexpected native download click signature");
         }

@@ -29,14 +29,22 @@ public final class HostRuleAssetProfilesTest {
                 assertTrue("40.8.0 " + feature.id + " references missing rule " + id, newerIds.contains(id));
             }
         }
+        Set<String> assets = new HashSet<>(), fingerprints = new HashSet<>();
+        for (HostAdaptation.Profile profile : HostApkTestProfile.profiles()) {
+            HostRuleSet selected = rules(profile);
+            assertEquals(profile.versionName, profile.fingerprint, selected.getFingerprint());
+            assertEquals(profile.versionName, 242, selected.getRules().size());
+            assertEquals(profile.versionName, olderIds, ids(selected));
+            assertTrue("Profiles must not share rule assets", assets.add(profile.rulesAsset));
+            assertTrue("Profiles must not share rule fingerprints", fingerprints.add(profile.fingerprint));
+        }
     }
 
-    @Test public void bothProfilesReadPlaybackSpeedThroughTheNamedCommand() throws Exception {
+    @Test public void allProfilesReadPlaybackSpeedThroughTheNamedCommand() throws Exception {
         String command = "Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand;";
         String speedCommand = "Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand$Getter$VideoPlaySpeed;";
         String realSpeedCommand = "Lcom/ss/android/ugc/aweme/player/sdk/api/PlayerCommand$Getter$RealVideoPlaySpeed;";
-        for (HostAdaptation.Profile profile : new HostAdaptation.Profile[]{
-                HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
+        for (HostAdaptation.Profile profile : HostApkTestProfile.profiles()) {
             HostRuleSet rules = rules(profile);
             HostRule singleton = rule(rules, "adv_player_speed_command");
             assertEquals(profile.versionName, HostRule.Kind.CLASS, singleton.getKind());
@@ -58,12 +66,13 @@ public final class HostRuleAssetProfilesTest {
         }
     }
 
-    @Test public void bothProfilesBindNativeGestureInputsToTheirActualContainerDetectors() throws Exception {
+    @Test public void allProfilesBindNativeGestureInputsToTheirActualContainerDetectors() throws Exception {
         String container = "Lcom/ss/android/ugc/aweme/o/oplayer/client/gesture/detector/DVideoGestureContainer;";
-        for (HostAdaptation.Profile profile : new HostAdaptation.Profile[]{
-                HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
-            String detector = profile == HostAdaptation.PROFILE_406 ? "LX/1Z4d;" : "LX/1eom;";
-            String frameContainer = profile == HostAdaptation.PROFILE_406 ? "LX/06ns;" : "LX/07rz;";
+        for (HostAdaptation.Profile profile : HostApkTestProfile.profiles()) {
+            String detector = profile == HostAdaptation.PROFILE_406 ? "LX/1Z4d;"
+                    : profile.versionCode == 410001L ? "LX/1fN4;" : "LX/1eom;";
+            String frameContainer = profile == HostAdaptation.PROFILE_406 ? "LX/06ns;"
+                    : profile.versionCode == 410001L ? "LX/0HI9;" : "LX/07rz;";
             HostRuleSet rules = rules(profile);
             HostRule input = rule(rules, "adv_gesture_native_touch_detector");
             assertEquals(profile.versionName, detector, input.getClassDescriptor());
@@ -82,7 +91,7 @@ public final class HostRuleAssetProfilesTest {
         }
     }
 
-    @Test public void bothProfilesDeclareTheSameSdkSpeedBoundariesIncludingTheCachedOverride() throws Exception {
+    @Test public void allProfilesDeclareTheSameSdkSpeedBoundariesIncludingTheCachedOverride() throws Exception {
         String params = "Lcom/ss/ttm/player/PlaybackParams;";
         String[][] targets = {
                 {"adv_player_engine_set_params", "Lcom/ss/ttvideoengine/TTVideoEngine;", "setPlaybackParams", "(" + params + ")V"},
@@ -93,8 +102,7 @@ public final class HostRuleAssetProfilesTest {
                 {"adv_player_sdk_speed_params_caller", "Lcom/ss/ttm/player/TTPlayerClient;", "LJJJJLL", "(" + params + ")V"},
                 {"adv_player_sdk_float_option_caller", "Lcom/ss/ttm/player/TTPlayerClient;", "LJJIJIIJI", "(IF)I"}
         };
-        for (HostAdaptation.Profile profile : new HostAdaptation.Profile[]{
-                HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
+        for (HostAdaptation.Profile profile : HostApkTestProfile.profiles()) {
             HostRuleSet rules = rules(profile);
             for (String[] target : targets) {
                 HostRule boundary = rule(rules, target[0]);
@@ -104,7 +112,8 @@ public final class HostRuleAssetProfilesTest {
                 assertEquals(target[3], boundary.getMethodDescriptor());
             }
             HostRule mediaCaller = rule(rules, "adv_player_sdk_media_params_caller");
-            String owner = profile == HostAdaptation.PROFILE_406 ? "LX/0Cz1;" : "LX/0FfW;";
+            String owner = profile == HostAdaptation.PROFILE_406 ? "LX/0Cz1;"
+                    : profile.versionCode == 410001L ? "LX/0GGt;" : "LX/0FfW;";
             assertEquals(owner, mediaCaller.getClassDescriptor());
             assertEquals("setPlaybackParams", mediaCaller.getMethodName());
             assertEquals("(" + params + ")V", mediaCaller.getMethodDescriptor());

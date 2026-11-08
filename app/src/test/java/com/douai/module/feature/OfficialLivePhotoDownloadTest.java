@@ -210,9 +210,10 @@ public final class OfficialLivePhotoDownloadTest {
         File apk = new File(path);
         assertTrue("DOUAI_TEST_APK must point to the original host APK", apk.isFile());
         boolean legacy = com.douai.module.scan.HostApkTestProfile.is406(apk);
-        String albumType = legacy ? "LX/0PoP;" : "LX/0S4A;";
-        String resultType = legacy ? "LX/15De;" : "LX/1WiA;";
-        String romType = legacy ? "LX/0BDp;" : "LX/0eiB;";
+        boolean latest = com.douai.module.scan.HostApkTestProfile.is410(apk);
+        String albumType = legacy ? "LX/0PoP;" : latest ? "LX/0UlC;" : "LX/0S4A;";
+        String resultType = legacy ? "LX/15De;" : latest ? "LX/1DS6;" : "LX/1WiA;";
+        String romType = legacy ? "LX/0BDp;" : latest ? "LX/0qS2;" : "LX/0eiB;";
         Map<String, ClassDef> types = new HashMap<>();
         try (ZipFile archive = new ZipFile(apk)) {
             java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = archive.entries();
@@ -237,7 +238,7 @@ public final class OfficialLivePhotoDownloadTest {
                 "Companion", "Lcom/ss/android/ugc/aweme/services/IExternalService$Companion;", true);
         assertMethod(types.get("Lcom/ss/android/ugc/aweme/services/IExternalService$Companion;"),
                 "getOrDefault()Lcom/ss/android/ugc/aweme/services/IExternalService;", false);
-        assertMethod(types.get(albumType), (legacy ? "Xi" : "hj") + "(Ljava/lang/String;Ljava/lang/String;J)" + resultType, false);
+        assertMethod(types.get(albumType), (legacy ? "Xi" : latest ? "gj" : "hj") + "(Ljava/lang/String;Ljava/lang/String;J)" + resultType, false);
         assertMethod(types.get(albumType), "isLivePhoto(Ljava/lang/String;)Z", false);
         assertMethod(types.get(romType), "LIZLLL()Z", true);
         assertField(types.get(resultType), "LIZ", "Ljava/util/List;", false);

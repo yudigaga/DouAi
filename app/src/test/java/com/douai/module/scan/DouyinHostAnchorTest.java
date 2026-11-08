@@ -38,9 +38,12 @@ public final class DouyinHostAnchorTest {
         String apkPath = System.getenv("DOUAI_TEST_APK");
         File apk = apkPath == null ? null : new File(apkPath);
         Assume.assumeTrue(apk != null && apk.isFile());
-        boolean legacy = HostApkTestProfile.is406(apk);
-        String callbackType = legacy ? "LY/AObjectS313S0200000_35;" : "LY/AObjectS307S0200000_36;";
-        String modelType = legacy ? "LX/0yFs;" : "LX/13Zi;";
+        HostAdaptation.Profile profile = HostApkTestProfile.profile(apk);
+        boolean legacy = profile.versionCode == 400601L;
+        boolean latest = profile.versionCode == 410001L;
+        String callbackType = legacy ? "LY/AObjectS313S0200000_35;"
+                : latest ? "LY/AObjectS314S0200000_35;" : "LY/AObjectS307S0200000_36;";
+        String modelType = legacy ? "LX/0yFs;" : latest ? "LX/11tW;" : "LX/13Zi;";
         Method checked = null;
         Method callbackConstructor = null;
         try (ZipFile archive = new ZipFile(apk)) {
@@ -83,9 +86,9 @@ public final class DouyinHostAnchorTest {
             callbackFields.put(field.getName(), ((TwoRegisterInstruction) instruction).getRegisterA());
         }
         assertEquals("Host callback l0 stores the model argument",
-                Integer.valueOf(secondCallbackArgument), callbackFields.get("l0"));
+                Integer.valueOf(latest ? firstCallbackArgument : secondCallbackArgument), callbackFields.get("l0"));
         assertEquals("Host callback l1 stores the request argument",
-                Integer.valueOf(firstCallbackArgument), callbackFields.get("l1"));
+                Integer.valueOf(latest ? secondCallbackArgument : firstCallbackArgument), callbackFields.get("l1"));
         List<Instruction> instructions = new ArrayList<>();
         for (Instruction instruction : checked.getImplementation().getInstructions()) instructions.add(instruction);
         Map<Integer, String> objectRegisters = new HashMap<>();
@@ -115,16 +118,25 @@ public final class DouyinHostAnchorTest {
                         instruction instanceof FiveRegisterInstruction);
                 FiveRegisterInstruction construct = (FiveRegisterInstruction) instruction;
                 assertEquals("First callback argument retains the profiled role",
-                        "request", objectRegisters.get(construct.getRegisterD()));
+                        latest ? "model" : "request", objectRegisters.get(construct.getRegisterD()));
                 assertEquals("Second callback argument retains the profiled role",
-                        "model", objectRegisters.get(construct.getRegisterE()));
+                        latest ? "request" : "model", objectRegisters.get(construct.getRegisterE()));
                 callbackRegister = construct.getRegisterC();
             }
             if (!"Lcom/ss/android/ugc/aweme/comment/helper/AudioUploader;".equals(call.getDefiningClass())
-                    || !"LJFF".equals(call.getName())) continue;
+                    || !(latest ? "LJIIIIZZ" : "LJFF").equals(call.getName())) continue;
             assertTrue("Host constructs the owned callback before starting its audio upload", callbackRegister >= 0);
+            FiveRegisterInstruction upload = (FiveRegisterInstruction) instruction;
+            if (latest) {
+                assertEquals("410 uses the asynchronous uploader overload with both callbacks",
+                        Arrays.asList("LX/11uI;", "Ljava/lang/String;", callbackType, "LY/AObjectS825S0100000_35;"),
+                        call.getParameterTypes());
+                assertEquals("The checked publisher passes the owned callback as uploader arg 2",
+                        callbackRegister, upload.getRegisterF());
+                continue;
+            }
             assertEquals("The upload receives the callback whose l0 is model and l1 is request",
-                    callbackRegister, ((FiveRegisterInstruction) instruction).getRegisterF());
+                    callbackRegister, upload.getRegisterF());
             Instruction following = instructions.get(index + 1);
             assertEquals("Upload branch must retain its checked-submit return contract",
                     com.android.tools.smali.dexlib2.Opcode.RETURN, following.getOpcode());
@@ -142,7 +154,7 @@ public final class DouyinHostAnchorTest {
                 }
             }
         }
-        assertTrue("Host upload start must not be interpreted as checked-submit rejection", uploadReturnsFalse);
+        if (!latest) assertTrue("Host upload start must not be interpreted as checked-submit rejection", uploadReturnsFalse);
     }
 
     @Test public void downloadDirectoryResultContractExistsInTheTargetHost() throws Exception {

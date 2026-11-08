@@ -17,6 +17,8 @@ import android.widget.Toast;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.scan.HostScanReport;
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostResourceProfile;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -226,7 +228,8 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         if (drawer == null) throw new IllegalStateException("Missing native input drawer");
         Method provider = null;
         for (Class<?> current = drawer.getClass(); current != null && provider == null; current = current.getSuperclass()) {
-            try { provider = current.getDeclaredMethod("LJJJJJ"); }
+            try { provider = current.getDeclaredMethod(HostResourceProfile.ripsLogicProvider(
+                    HostAdaptation.currentProfile())); }
             catch (NoSuchMethodException ignored) { }
         }
         if (provider == null || !"com.ss.android.ugc.aweme.rips.BasicRipsLogic".equals(provider.getReturnType().getName())) {

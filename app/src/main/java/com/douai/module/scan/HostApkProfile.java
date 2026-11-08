@@ -24,8 +24,8 @@ public final class HostApkProfile {
         Identity identity = readIdentity(apk);
         HostAdaptation.Profile profile = HostAdaptation.forVersion(
                 identity.packageName, identity.versionName, identity.versionCode);
-        if (profile == HostAdaptation.PROFILE_408
-                && identity.updateVersionCode != HostAdaptation.VERIFIED_UPDATE_VERSION_CODE) return null;
+        if (profile != null && profile.updateVersionCode >= 0
+                && identity.updateVersionCode != profile.updateVersionCode) return null;
         return profile;
     }
 

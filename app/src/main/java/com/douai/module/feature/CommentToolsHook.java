@@ -431,7 +431,9 @@ public final class CommentToolsHook implements AutoCloseable {
     private void invokeNativeImageSaveAction(Context context, Object nativeAction) {
         DouAiLog.Operation operation = DouAiLog.begin("comment_tools", "save_comment_image");
         try {
-            Method click = nativeAction.getClass().getMethod("LJJI", int.class);
+            Method click = nativeAction.getClass().getMethod(
+                    com.douai.module.scan.HostResourceProfile.commentSaveClick(
+                            com.douai.module.scan.HostAdaptation.currentProfile()), int.class);
             if (click.getReturnType() != void.class) {
                 throw new NoSuchMethodException("Unexpected native image-save action signature");
             }
@@ -678,7 +680,8 @@ public final class CommentToolsHook implements AutoCloseable {
                     false, loader).isAssignableFrom(actionClass)) {
                 throw new IllegalStateException("Native image-save action type changed");
             }
-            actionClass.getMethod("LJJI", int.class);
+            actionClass.getMethod(com.douai.module.scan.HostResourceProfile.commentSaveClick(
+                    com.douai.module.scan.HostAdaptation.currentProfile()), int.class);
             actionClass.getMethod("LJJIFFI");
             return actionClass;
         } catch (ReflectiveOperationException | LinkageError | RuntimeException failure) {

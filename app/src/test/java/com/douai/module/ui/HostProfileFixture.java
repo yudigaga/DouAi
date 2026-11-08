@@ -25,7 +25,8 @@ public final class HostProfileFixture {
         try {
             ApplicationInfo application = new ApplicationInfo(info.applicationInfo);
             application.sourceDir = BinaryHostManifestFixture.apk(info.packageName, info.versionName,
-                    (int) info.getLongVersionCode(), "40.6.0".equals(info.versionName) ? 40609900 : 40809900).getAbsolutePath();
+                    (int) info.getLongVersionCode(), "40.6.0".equals(info.versionName) ? 40609900
+                            : "41.0.0".equals(info.versionName) ? 41009900 : 40809900).getAbsolutePath();
             application.publicSourceDir = application.sourceDir;
             info.applicationInfo = application;
         } catch (java.io.IOException failure) { throw new AssertionError(failure); }

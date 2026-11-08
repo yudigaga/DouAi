@@ -55,7 +55,9 @@ public final class AutoLikeHook implements AutoCloseable {
         Method bind = resolveMethod(report, "digg_core_presenter_bind", loader);
         Method like = resolveMethod(report, "digg_view_model_like", loader);
         Class<?> viewModelClass = resolveClass(report, "digg_view_model_state", loader);
-        Method viewModel = findNoArgMethod(bind.getDeclaringClass(), "LLLILZ");
+        String viewModelGetter = com.douai.module.scan.HostResourceProfile.diggViewModelGetter(
+                com.douai.module.scan.HostAdaptation.currentProfile());
+        Method viewModel = findNoArgMethod(bind.getDeclaringClass(), viewModelGetter);
         Field aweme = viewModelClass.getField("b");
         if (viewModel == null || aweme.getType() == null
                 || !"com.ss.android.ugc.aweme.feed.model.Aweme".equals(aweme.getType().getName())

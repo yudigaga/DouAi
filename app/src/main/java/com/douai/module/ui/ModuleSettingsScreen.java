@@ -161,7 +161,7 @@ public final class ModuleSettingsScreen {
         scroll.addView(content, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        addTitle("DouAi", "抖音 40.6.0 / 40.8.0");
+        addTitle("DouAi", "抖音 40.6.0 / 40.8.0 / 41.0.0");
         addScanStatus(ScanStatus.pending());
         if (repository.isInHost()) {
             addHostSettingsNotice();

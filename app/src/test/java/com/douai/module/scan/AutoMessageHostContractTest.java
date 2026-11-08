@@ -60,16 +60,15 @@ public final class AutoMessageHostContractTest {
         Assume.assumeTrue("DOUAI_TEST_APK is not configured", configured != null);
         File apk = new File(configured);
         assertTrue("DOUAI_TEST_APK must point to the original host APK", apk.isFile());
-        legacy = HostApkTestProfile.is406(apk);
-        names = new HostContractNameFacts(legacy);
+        HostAdaptation.Profile profile = HostApkTestProfile.profile(apk);
+        legacy = profile.versionCode == 400601L;
+        names = new HostContractNameFacts(profile);
         classes.clear();
         Set<String> required = new HashSet<>(Arrays.asList(UI, LOGIC, SINGLE, SESSION,
                 RIPS_UI, NESTED_UI, MODE, PLAIN, STATE, BOTTOM, BOTTOM_COMPONENT));
         try (ZipFile archive = new ZipFile(apk)) {
-            for (String name : legacy ? Arrays.asList("classes26.dex", "classes37.dex", "classes34.dex")
-                    : Arrays.asList("classes11.dex", "classes22.dex", "classes36.dex", "classes40.dex", "classes41.dex")) {
-                ZipEntry entry = archive.getEntry(name);
-                assertNotNull("Missing original DEX " + name, entry);
+            for (ZipEntry entry : HostApkTestProfile.dexEntries(archive)) {
+                if (required.isEmpty()) break;
                 try (BufferedInputStream input = new BufferedInputStream(archive.getInputStream(entry))) {
                     for (ClassDef type : DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input).getClasses()) {
                         if (required.remove(names.type(type.getType()))) classes.put(names.type(type.getType()), names.originalFacts(type));

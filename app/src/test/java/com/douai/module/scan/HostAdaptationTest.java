@@ -10,6 +10,21 @@ import java.util.Set;
 import static org.junit.Assert.*;
 
 public final class HostAdaptationTest {
+    @Test public void version410KeepsItsOwnProfileAndRejectsOtherVersionCodes() {
+        HostAdaptation.Profile profile = HostAdaptation.forVersion(
+                HostAdaptation.TARGET_PACKAGE, "41.0.0", 410001L);
+        assertNotNull("41.0.0 must have a separate verified profile", profile);
+        assertEquals("41.0.0", profile.versionName);
+        assertEquals(410001L, profile.versionCode);
+        assertNotEquals(HostAdaptation.PROFILE_406.rulesAsset, profile.rulesAsset);
+        assertNotEquals(HostAdaptation.PROFILE_408.rulesAsset, profile.rulesAsset);
+        assertFalse(profile.matchesRules(HostAdaptation.PROFILE_406.fingerprint));
+        assertFalse(profile.matchesRules(HostAdaptation.PROFILE_408.fingerprint));
+        assertNull(HostAdaptation.forVersion(HostAdaptation.TARGET_PACKAGE, "41.0.0", 400801L));
+        assertNull(HostAdaptation.forVersion(HostAdaptation.TARGET_PACKAGE, "40.8.0", 410001L));
+        assertNull(HostAdaptation.forVersion("other.application", "41.0.0", 410001L));
+    }
+
     @Test public void versionEvidenceRequiresPackageNameAndActualVersionCode() {
         assertTrue(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.8.0", 400801L));
         assertTrue(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.6.0", 400601L));
@@ -21,15 +36,17 @@ public final class HostAdaptationTest {
         assertFalse(HostAdaptation.matchesVersion(null, null, 0L));
     }
 
-    @Test public void bothProfilesKeepIndependentRulesAndImmutableResourceEvidence() throws Exception {
-        for (HostAdaptation.Profile profile : new HostAdaptation.Profile[]{
-                HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
+    @Test public void allProfilesKeepIndependentRulesAndImmutableResourceEvidence() throws Exception {
+        Set<String> assets = new HashSet<>(), fingerprints = new HashSet<>();
+        for (HostAdaptation.Profile profile : HostApkTestProfile.profiles()) {
             assertSame(profile, HostAdaptation.forVersion(profile.versionName, profile.versionCode));
             try (FileInputStream input = new FileInputStream(HostApkTestProfile.assetFile(profile.rulesAsset))) {
                 assertEquals(profile.fingerprint, HostRuleSet.parse(input).getFingerprint());
             }
             assertEquals(51, profile.getFeedResources().size());
             assertThrows(UnsupportedOperationException.class, () -> profile.getFeedResources().clear());
+            assertTrue("Each version needs an independent asset", assets.add(profile.rulesAsset));
+            assertTrue("Each version needs an independent fingerprint", fingerprints.add(profile.fingerprint));
         }
         assertNotEquals(HostAdaptation.PROFILE_406.rulesAsset, HostAdaptation.PROFILE_408.rulesAsset);
         assertFalse(HostAdaptation.PROFILE_406.matchesRules(HostAdaptation.PROFILE_408.fingerprint));

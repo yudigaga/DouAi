@@ -5,6 +5,7 @@ import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.diagnostics.DebugLog;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostCandidate;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
 
@@ -54,10 +55,14 @@ import static org.junit.Assert.assertTrue;
 @Config(sdk = 34)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class FeedGestureToolsHookTest {
-    @org.junit.Before public void requireDrainedDownloadTasks() { DownloadTaskTestIdle.beforeTest(); }
+    @org.junit.Before public void requireDrainedDownloadTasks() {
+        DownloadTaskTestIdle.beforeTest();
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_408);
+    }
 
     @org.junit.After public void cancelDownloadsStartedByTheTest() {
         DownloadTaskTestIdle.afterTest();
+        HostAdaptation.setCurrentProfile(null);
     }
     public static final class Aweme {
         final String aid;
@@ -68,7 +73,7 @@ public final class FeedGestureToolsHookTest {
         public String getAid() { return aid; }
     }
     public static final class ItemParams { public Panel mFeedContext; }
-    public static final class Holder {
+    public static class Holder {
         public FrameLayout w;
         public ItemParams A2;
         public String aid = "video-1";
@@ -77,6 +82,31 @@ public final class FeedGestureToolsHookTest {
         public void selected() { }
         public void resume() { }
         public void pause() { }
+    }
+    public static final class ModernHolder extends Holder {
+        public Object A2 = new Object();
+        public ItemParams B2;
+        @Override public Aweme getAweme() { return super.getAweme(); }
+        @Override public void selected() { }
+        @Override public void resume() { }
+        @Override public void pause() { }
+    }
+
+    @Test public void modernHolderUsesB2ForLongPressAndDoubleTapActions() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try (Fixture f = new Fixture(Map.of("long_press_top_left", "toggle_components",
+                "double_tap_top_left", "toggle_components"), false, true)) {
+            f.select();
+            assertTrue(f.hook.supports("long_press_action"));
+            assertTrue(f.hook.supports("double_tap_action"));
+            f.longPress(0, 0);
+            assertEquals(1, f.componentToggles);
+            MotionEvent tap = MotionEvent.obtain(0, 0, MotionEvent.ACTION_UP, 50, 100, 0);
+            try { f.harness.invoke(Panel.class.getMethod("doubleTap", MotionEvent.class), f.panel, tap); }
+            finally { tap.recycle(); }
+            ShadowLooper.idleMainLooper();
+            assertEquals(2, f.componentToggles);
+        }
     }
     public static final class Panel {
         public Holder current;
@@ -2355,7 +2385,7 @@ public final class FeedGestureToolsHookTest {
         final LongPress press = new LongPress(touch);
         final Panel panel = new Panel();
         final PlayerManager player = (PlayerManager) panel.currentPlayer;
-        final Holder holder = new Holder();
+        final Holder holder;
         final Harness harness = new Harness();
         final FeedGestureToolsHook hook;
         final List<String> nativeDispatchOrder = new ArrayList<>();
@@ -2371,6 +2401,11 @@ public final class FeedGestureToolsHookTest {
         }
 
         Fixture(Map<String, ?> values, boolean withNativeAncestors) throws Exception {
+            this(values, withNativeAncestors, false);
+        }
+
+        Fixture(Map<String, ?> values, boolean withNativeAncestors, boolean modern) throws Exception {
+            holder = modern ? new ModernHolder() : new Holder();
             touch.longPressRunnable = () -> {
                 try { harness.invoke(LongPress.class.getMethod("run"), press); }
                 catch (Throwable failure) { throw new AssertionError(failure); }
@@ -2412,8 +2447,9 @@ public final class FeedGestureToolsHookTest {
             holder.w = root;
             holder.A2 = new ItemParams();
             holder.A2.mFeedContext = panel;
+            if (modern) ((ModernHolder) holder).B2 = holder.A2;
             panel.current = holder;
-            hook = FeedGestureToolsHook.install(harness.framework, report(), getClass().getClassLoader(),
+            hook = FeedGestureToolsHook.install(harness.framework, report(holder.getClass()), getClass().getClassLoader(),
                     activity, new LocalOptions(values), ignored -> { });
             hook.setComponentVisibility(shown -> componentToggles++, () -> false);
             assertTrue(root.isAttachedToWindow());
@@ -2421,7 +2457,7 @@ public final class FeedGestureToolsHookTest {
         }
 
         void select() throws Throwable {
-            harness.invoke(Holder.class.getMethod("selected"), holder);
+            harness.invoke(holder.getClass().getMethod("selected"), holder);
             ShadowLooper.idleMainLooper();
         }
 
@@ -2517,13 +2553,13 @@ public final class FeedGestureToolsHookTest {
         }
     }
 
-    private static HostScanReport report() throws Exception {
+    private static HostScanReport report(Class<? extends Holder> holderType) throws Exception {
         List<RuleScanResult> results = new ArrayList<>();
-        add(results, "feed_holder_page_selected", Holder.class.getMethod("selected"));
-        add(results, "feed_holder_resume", Holder.class.getMethod("resume"));
-        add(results, "feed_holder_pause", Holder.class.getMethod("pause"));
-        add(results, "feed_aweme_accessor", Holder.class.getMethod("getAweme"));
-        addType(results, "feed_holder_main_root", Holder.class);
+        add(results, "feed_holder_page_selected", holderType.getMethod("selected"));
+        add(results, "feed_holder_resume", holderType.getMethod("resume"));
+        add(results, "feed_holder_pause", holderType.getMethod("pause"));
+        add(results, "feed_aweme_accessor", holderType.getMethod("getAweme"));
+        addType(results, "feed_holder_main_root", holderType);
         addType(results, "adv_gesture_item_params", ItemParams.class);
         addType(results, "adv_gesture_touch_layout", TouchLayout.class);
         add(results, "adv_gesture_long_press", LongPress.class.getMethod("run"));

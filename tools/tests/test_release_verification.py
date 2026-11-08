@@ -147,13 +147,14 @@ class ReleaseGateTest(unittest.TestCase):
         with self.assertRaisesRegex(gate.VerificationError, "Host APK"):
             self.seal()
 
-    def test_explicit_legacy_and_latest_profiles_are_both_valid_host_identities(self):
+    def test_three_explicit_profiles_are_valid_independent_host_identities(self):
         source = ('TARGET_PACKAGE = "com.ss.android.ugc.aweme"; '
                   'VERIFIED_VERSION_NAME = "40.8.0"; VERIFIED_VERSION_CODE = 400801L; '
                   'public static final Profile PROFILE_406 = new Profile("40.6.0", 400601L, "old", "hash", null); '
-                  'public static final Profile PROFILE_408 = new Profile("40.8.0", 400801L, "new", "hash", null);')
+                  'public static final Profile PROFILE_408 = new Profile("40.8.0", 400801L, "new", "hash", null); '
+                  'public static final Profile PROFILE_410 = new Profile("41.0.0", 410001L, "third", "hash", null);')
         identities = gate.verified_host_identities(source)
-        self.assertEqual({("40.6.0", 400601), ("40.8.0", 400801)},
+        self.assertEqual({("40.6.0", 400601), ("40.8.0", 400801), ("41.0.0", 410001)},
                          {(item["versionName"], item["versionCode"]) for item in identities})
         self.assertTrue(all(item["packageName"] == "com.ss.android.ugc.aweme" for item in identities))
 

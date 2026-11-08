@@ -15,6 +15,8 @@ import com.douai.module.config.ExtendedSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostResourceProfile;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -124,7 +126,8 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                 throw new IllegalStateException("Auto-slide holder relationship changed");
             }
             Field root = HostTargets.field(holder, "w");
-            Field params = HostTargets.field(holder, "A2");
+            Field params = HostTargets.field(holder,
+                    HostResourceProfile.feedItemParamsField(HostAdaptation.currentProfile()));
             Class<?> paramsType = HostTargets.type(report, "adv_gesture_item_params", loader);
             Field panel = HostTargets.field(paramsType, "mFeedContext");
             Method panelContext = HostTargets.method(report, "auto_slide_panel_context", loader);

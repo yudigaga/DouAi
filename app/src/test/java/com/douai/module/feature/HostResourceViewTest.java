@@ -6,6 +6,7 @@ import android.content.res.Resources;
 import android.view.View;
 import android.widget.FrameLayout;
 import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostApkTestProfile;
 import com.douai.module.scan.HostResourceProfile;
 import java.util.HashMap;
 import java.util.Map;
@@ -78,6 +79,20 @@ public final class HostResourceViewTest {
         FixtureResources partial = new FixtureResources(base);
         partial.entries.remove(0x7f0a1f69);
         assertNull(HostResourceCatalog.profile(partial));
+    }
+
+    @Test public void recognizesThe410SentinelIdsAndRejectsAResourceTableMixedWith408() {
+        Resources base = RuntimeEnvironment.getApplication().getResources();
+        HostAdaptation.Profile latest = HostApkTestProfile.profiles()[2];
+        FixtureResources resources = new FixtureResources(base, latest);
+        assertSame(latest, HostResourceCatalog.profile(resources));
+        assertEquals("j_e", resources.entries.get(0x7f0a4629));
+        assertEquals("d4s", resources.entries.get(0x7f0a1f3c));
+        assertEquals("comment_layout", resources.entries.get(0x7f0a2572));
+        assertEquals(0x7f0a4629, HostResourceCatalog.runtimeId(0x7f0a463c, resources));
+        assertEquals(0x7f0a463c, HostResourceCatalog.canonicalId(0x7f0a4629, resources));
+        resources.entries.putAll(HostAdaptation.PROFILE_408.getFeedResources());
+        assertNull(HostResourceCatalog.profile(resources));
     }
 
     private static final class FixtureResources extends Resources {

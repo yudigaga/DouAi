@@ -210,8 +210,8 @@ public final class DouAiModule extends XposedModule {
             HostAdaptation.setCurrentProfile(hostProfile);
             if (hostProfile != null) {
                 moduleLog(3, TAG, "Selected host profile " + hostProfile.versionName + " / " + hostProfile.versionCode
-                        + (hostProfile == HostAdaptation.PROFILE_408
-                        ? "; build=" + HostAdaptation.VERIFIED_UPDATE_VERSION_CODE : ""));
+                        + (hostProfile.updateVersionCode >= 0
+                        ? "; build=" + hostProfile.updateVersionCode : ""));
             } else {
                 com.douai.module.scan.HostApkProfile.Identity actual =
                         com.douai.module.scan.HostApkProfile.readIdentity(archives.get(0));
@@ -1143,7 +1143,10 @@ public final class DouAiModule extends XposedModule {
                 if (activity != null) feedGestureToolsHook.onActivityResumed(activity);
                 AutoPlayHook pauseState = autoPlayHook;
                 if (pauseState != null) feedGestureToolsHook.setPausedStateProvider(pauseState::pauseStateFor);
-            } catch (Throwable failure) { moduleLog(6, TAG, "Feed gesture tools failed", failure); }
+            } catch (Throwable failure) {
+                DouAiLog.failure("gesture", "installation", failure);
+                moduleLog(6, TAG, "Feed gesture tools failed", failure);
+            }
         }
         if (feedGestureToolsHook != null && feedUiHideHook != null) {
             feedGestureToolsHook.setComponentVisibility(feedUiHideHook::setComponentsTemporarilyShown,

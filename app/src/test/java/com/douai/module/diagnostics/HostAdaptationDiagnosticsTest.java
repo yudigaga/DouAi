@@ -24,6 +24,38 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class HostAdaptationDiagnosticsTest {
+    @Test public void original410BuildIsRequiredBeforeDiagnosticsSelectsTheThirdProfile() throws Exception {
+        for (long build : new long[]{41009900L, 41009985L, 40809900L, -1L}) {
+            java.io.File apk = com.douai.module.scan.BinaryHostManifestFixture.apk(
+                    HostAdaptation.TARGET_PACKAGE, "41.0.0", 410001, build);
+            android.content.pm.ApplicationInfo application = new android.content.pm.ApplicationInfo();
+            application.sourceDir = apk.getAbsolutePath();
+            android.content.Context context = new android.content.ContextWrapper(org.robolectric.RuntimeEnvironment.getApplication()) {
+                @Override public android.content.pm.ApplicationInfo getApplicationInfo() { return application; }
+            };
+            Bundle version = HostAdaptationDiagnostics.readInstalledVersion(context);
+            assertEquals(build, version.getLong("host_update_version_code"));
+            assertEquals(build == 41009900L, version.getBoolean("host_version_profile_matched"));
+        }
+    }
+
+    @Test public void thirdProfileRejectsEitherOlderRulesFingerprint() {
+        HostAdaptation.Profile profile = HostAdaptation.forVersion("41.0.0", 410001L);
+        assertNotNull(profile);
+        Bundle snapshot = new Bundle();
+        HostAdaptationDiagnostics.append(snapshot, version("41.0.0", 410001L), profile.fingerprint, report(""));
+        assertTrue(snapshot.getBoolean("host_adaptation_static_verified"));
+        assertEquals(profile.rulesAsset, snapshot.getString("host_adaptation_rules_asset"));
+        assertTrue(HostAdaptationDiagnostics.describe(snapshot).contains("匹配 41.0.0"));
+        for (HostAdaptation.Profile older : new HostAdaptation.Profile[]{
+                HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
+            HostAdaptationDiagnostics.append(snapshot, version("41.0.0", 410001L), older.fingerprint, report(""));
+            assertFalse(snapshot.getBoolean("host_adaptation_static_verified"));
+            HostAdaptationDiagnostics.append(snapshot, version(older.versionName, older.versionCode), profile.fingerprint, report(""));
+            assertFalse(snapshot.getBoolean("host_adaptation_static_verified"));
+        }
+    }
+
     @Test public void originalManifestBuildDistinguishes9900FromRetired9985InDiagnostics() throws Exception {
         for (long build : new long[]{40809900L, 40809985L}) {
             java.io.File apk = com.douai.module.scan.BinaryHostManifestFixture.apk(

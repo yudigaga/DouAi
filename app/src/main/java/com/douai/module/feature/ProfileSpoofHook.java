@@ -10,6 +10,7 @@ import android.widget.TextView;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.diagnostics.DouAiLog;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostScanReport;
 
 import io.github.libxposed.api.XposedInterface;
@@ -26,6 +27,7 @@ import java.util.function.Consumer;
 /** Changes only the current account's displayed statistics, never the shared User model. */
 public final class ProfileSpoofHook implements AutoCloseable {
     private static final String[] FIELDS = { "y", "w", "x", "F" };
+    private static final String[] MODERN_FIELDS = { "x", "v", "w", "E" };
     private static final String[] KEYS = { "profile_like_count", "profile_following_count",
             "profile_follower_count", "profile_mutual_count" };
     private final BehaviorHookGroup registration;
@@ -62,11 +64,13 @@ public final class ProfileSpoofHook implements AutoCloseable {
                     || !View.class.isAssignableFrom(root.getReturnType())) {
                 throw new IllegalStateException("Profile display relationship changed");
             }
-            Field[] fields = new Field[FIELDS.length];
+            String[] names = HostAdaptation.currentProfile() == HostAdaptation.PROFILE_410
+                    ? MODERN_FIELDS : FIELDS;
+            Field[] fields = new Field[names.length];
             for (int i = 0; i < fields.length; i++) {
-                fields[i] = HostTargets.field(bind.getDeclaringClass(), FIELDS[i]);
+                fields[i] = HostTargets.field(bind.getDeclaringClass(), names[i]);
                 if (!TextView.class.isAssignableFrom(fields[i].getType())) {
-                    throw new IllegalStateException("Profile statistic view changed: " + FIELDS[i]);
+                    throw new IllegalStateException("Profile statistic view changed: " + names[i]);
                 }
             }
             hook = new ProfileSpoofHook(options, registration, own, root, fields);

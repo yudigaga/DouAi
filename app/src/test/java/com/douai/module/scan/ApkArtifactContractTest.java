@@ -40,8 +40,7 @@ public final class ApkArtifactContractTest {
             assertEquals("true", metadata.getProperty("staticScope"));
             assertEquals(3, metadata.size());
 
-            for (HostAdaptation.Profile profile : new HostAdaptation.Profile[]{
-                    HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
+            for (HostAdaptation.Profile profile : HostApkTestProfile.profiles()) {
                 File source = HostApkTestProfile.assetFile(profile.rulesAsset);
                 byte[] packagedRules = read(release, "assets/" + profile.rulesAsset);
                 assertArrayEquals(profile.versionName + " packaged host rules differ from source",

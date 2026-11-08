@@ -17,6 +17,24 @@ import java.util.zip.ZipOutputStream;
 import static org.junit.Assert.*;
 
 public final class HostApkProfileTest {
+    @Test public void onlyVerified410BuildSelectsTheNewProfileFromEitherStringPoolEncoding() throws Exception {
+        HostAdaptation.Profile profile = HostAdaptation.forVersion(
+                HostAdaptation.TARGET_PACKAGE, "41.0.0", 410001L);
+        assertNotNull("Missing 41.0.0 profile", profile);
+        for (boolean utf8 : new boolean[]{true, false}) {
+            byte[] accepted = BinaryHostManifestFixture.manifest(HostAdaptation.TARGET_PACKAGE,
+                    "41.0.0", 410001, utf8, 41009900L);
+            assertEquals(41009900L, HostApkProfile.parseManifest(accepted).updateVersionCode);
+            assertSame(profile, HostApkProfile.read(apk(accepted)));
+        }
+        for (long build : new long[]{41009985L, 41009901L, 40809900L, -1L}) {
+            byte[] rejected = BinaryHostManifestFixture.manifest(HostAdaptation.TARGET_PACKAGE,
+                    "41.0.0", 410001, true, build);
+            assertNull("Unsupported 41.0 build must not use 41009900 rules: " + build,
+                    HostApkProfile.read(apk(rejected)));
+        }
+    }
+
     @Test public void readsBothReleasedProfilesFromUtf8AndUtf16BinaryManifests() throws Exception {
         assertSame(HostAdaptation.PROFILE_406, HostApkProfile.read(apk(manifest(
                 HostAdaptation.TARGET_PACKAGE, "40.6.0", 400601, true))));

@@ -25,7 +25,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 /**
- * View-only bridge to the Douyin 40.8.0 IM widgets verified in the workspace APK.
+ * View-only bridge to IM widgets verified separately in each supported host APK.
  * No SessionInfo, IM conversation, Rips logic, message binding or SDK send API is created.
  */
 final class HostNativeChatViews {
@@ -101,7 +101,7 @@ final class HostNativeChatViews {
         messageContainer = require(root, 0x7f0a202d, FrameLayout.class);
         FrameLayout composerSlot = require(root, 0x7f0a6444, FrameLayout.class);
 
-        Object composer = hostClass(INPUT_FACTORY, loader).getMethod("LJLJJLL", Context.class)
+        Object composer = hostClass(INPUT_FACTORY, loader).getMethod(HostResourceProfile.chatMethod(profile, "LJLJJLL"), Context.class)
                 .invoke(null, activity);
         if (!(composer instanceof ViewGroup)) throw incompatible("输入栏返回类型");
         inputContainer = (ViewGroup) composer;
@@ -139,7 +139,7 @@ final class HostNativeChatViews {
         updateComposer(false, false);
 
         Object nativeTitle = hostClass(TITLE_FACTORY, loader)
-                .getMethod("LJLIIL", int.class, Context.class).invoke(null, resourceId(0x7f0a900f), activity);
+                .getMethod(HostResourceProfile.chatMethod(profile, "LJLIIL"), int.class, Context.class).invoke(null, resourceId(0x7f0a900f), activity);
         if (!(nativeTitle instanceof TextView)) throw incompatible("官方标题返回类型");
         title = (TextView) nativeTitle;
         if (!hostClass("com.bytedance.ies.dmt.ui.widget.DmtTextView", loader).isInstance(title)) {
@@ -151,7 +151,7 @@ final class HostNativeChatViews {
         header.setMinimumHeight(dp(56));
         ImageView returnButton = hostIcon(0x7f0845cd, "返回");
         hostClass(HOST_PACKAGE + ".im.business.chat.feature.title.component.LeaveChatUI", loader)
-                .getMethod("LJLIIL", Context.class, ImageView.class).invoke(null, activity, returnButton);
+                .getMethod(HostResourceProfile.chatMethod(profile, "LJLIIL"), Context.class, ImageView.class).invoke(null, activity, returnButton);
         back = returnButton;
         header.addView(back, new LinearLayout.LayoutParams(dp(44), dp(44)));
         avatar = createAvatar(header);
@@ -205,7 +205,7 @@ final class HostNativeChatViews {
         tintReceivedBackground = hostClass("X.0uuG", loader).getMethod("LJII", GradientDrawable.class);
         Class<?> backgroundUi = hostClass(HOST_PACKAGE
                 + ".im.business.chat.msgcell.common.bg.NewBgContentCellUI", loader);
-        Object insets = backgroundUi.getMethod("LJJJIL").invoke(backgroundUi.getConstructor().newInstance());
+        Object insets = backgroundUi.getMethod(HostResourceProfile.chatMethod(profile, "LJJJIL")).invoke(backgroundUi.getConstructor().newInstance());
         if (!(insets instanceof Rect)) throw incompatible("官方气泡内容间距");
         bubbleInsets = new Rect((Rect) insets);
         nativeBubbleWidth = hostClass("X.0vK4", loader)
@@ -370,7 +370,7 @@ final class HostNativeChatViews {
 
     TextBubble createTextBubble(ViewGroup parent, boolean user) throws ReflectiveOperationException {
         Object factory = textFactory.getConstructor().newInstance();
-        Object created = textFactory.getMethod("LJJJJL", Context.class, ViewGroup.class)
+        Object created = textFactory.getMethod(HostResourceProfile.chatMethod(profile, "LJJJJL"), Context.class, ViewGroup.class)
                 .invoke(factory, activity, parent);
         if (!(created instanceof View)) throw incompatible("官方文本消息返回类型");
         View view = (View) created;
@@ -437,7 +437,7 @@ final class HostNativeChatViews {
         try {
             android.content.pm.ApplicationInfo info = context.getPackageManager().getApplicationInfo(HOST_PACKAGE, 0);
             HostAdaptation.Profile profile = com.douai.module.scan.HostApkProfile.read(new java.io.File(info.sourceDir));
-            if (profile == null) throw incompatible("当前官方聊天适配支持抖音 40.6.0 / 40.8.0（40809900）");
+            if (profile == null) throw incompatible("当前官方聊天适配支持抖音 40.6.0 / 40.8.0（40809900）/ 41.0.0（41009900）");
             return profile;
         } catch (android.content.pm.PackageManager.NameNotFoundException | java.io.IOException failure) {
             throw new ReflectiveOperationException("无法读取抖音版本", failure);

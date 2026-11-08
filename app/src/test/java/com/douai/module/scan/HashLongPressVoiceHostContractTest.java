@@ -10,9 +10,13 @@ import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction;
 import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction;
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction;
+import com.android.tools.smali.dexlib2.iface.instruction.OffsetInstruction;
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction;
+import com.android.tools.smali.dexlib2.iface.instruction.SwitchElement;
+import com.android.tools.smali.dexlib2.iface.instruction.SwitchPayload;
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference;
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference;
+import com.android.tools.smali.dexlib2.iface.reference.StringReference;
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference;
 import com.android.tools.smali.dexlib2.immutable.ImmutableClassDef;
 
@@ -24,6 +28,7 @@ import org.junit.Test;
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -46,20 +51,24 @@ public final class HashLongPressVoiceHostContractTest {
     private static final String VM = PREFIX + "arch/logic/StateViewModel;";
     private static final Map<String, ClassDef> classes = new HashMap<>();
     private static boolean old;
+    private static boolean latest;
     private static String style, factory, state, outer, pipeline, click;
 
     @BeforeClass public static void loadOriginalFacts() throws Exception {
         String path = System.getenv("DOUAI_TEST_APK");
         Assume.assumeNotNull(path);
         File apk = new File(path);
-        old = HostApkTestProfile.is406(apk);
-        style = old ? "LX/0yPh;" : "LX/13jo;";
-        factory = old ? "LX/0yPi;" : "LX/13jl;";
-        state = old ? "LX/0yK6;" : "LX/13e1;";
-        outer = old ? "LX/0yFT;" : "LX/13ZF;";
-        pipeline = old ? "LX/0yFX;" : "LX/13ZJ;";
-        click = old ? "LY/ACListenerS916S0100000_31;" : "LY/ACListenerS824S0100000_18;";
-        Set<String> wanted = new HashSet<>(Arrays.asList(UI, BASE, PUBLISH, EDIT, style, factory, state, outer, pipeline));
+        HostAdaptation.Profile profile = HostApkTestProfile.profile(apk);
+        old = profile == HostAdaptation.PROFILE_406;
+        latest = profile == HostAdaptation.PROFILE_410;
+        style = old ? "LX/0yPh;" : latest ? "LX/126m;" : "LX/13jo;";
+        factory = old ? "LX/0yPi;" : latest ? "LX/126i;" : "LX/13jl;";
+        state = old ? "LX/0yK6;" : latest ? "LX/1209;" : "LX/13e1;";
+        outer = old ? "LX/0yFT;" : latest ? "LX/11sf;" : "LX/13ZF;";
+        pipeline = old ? "LX/0yFX;" : latest ? "LX/11sr;" : "LX/13ZJ;";
+        click = old ? "LY/ACListenerS916S0100000_31;"
+                : latest ? "LY/ACListenerS875S0100000_31;" : "LY/ACListenerS824S0100000_18;";
+        Set<String> wanted = new HashSet<>(Arrays.asList(UI, BASE, PUBLISH, EDIT, style, factory, state, outer, pipeline, click));
         try (ZipFile archive = new ZipFile(apk)) {
             java.util.Enumeration<? extends ZipEntry> entries = archive.entries();
             while (entries.hasMoreElements() && !wanted.isEmpty()) {
@@ -82,6 +91,12 @@ public final class HashLongPressVoiceHostContractTest {
         assertEquals(PREFIX + "im/widget/SearchableEditText;", field(UI, "m").getType());
         assertEquals(PREFIX + "im/sdk/chat/SessionInfo;", field(UI, "e").getType());
         List<Instruction> code = code(method(UI, "onViewCreated", "V", "Landroid/view/View;"));
+        if (latest) {
+            Method sendClick = method(click, "onClick", "V", "Landroid/view/View;");
+            assertTrue("The listener's 41.0.0 dispatcher branch must emit the send-after-association action",
+                    dispatchCaseCallsString(sendClick, 0x2b, "send_after_association"));
+            return;
+        }
         boolean proved = false;
         for (int index = 0; index < code.size(); index++) {
             Instruction instruction = code.get(index);
@@ -100,7 +115,8 @@ public final class HashLongPressVoiceHostContractTest {
                     listenerRegister = ((OneRegisterInstruction) next).getRegisterA();
                 }
                 if (next instanceof NarrowLiteralInstruction
-                        && ((NarrowLiteralInstruction) next).getNarrowLiteral() == (old ? 0x23 : 0x72)) branch = true;
+                        && ((NarrowLiteralInstruction) next).getNarrowLiteral()
+                        == (old ? 0x23 : latest ? 0x2b : 0x72)) branch = true;
                 if (ref instanceof MethodReference && ((MethodReference) ref).getDefiningClass().equals(click)
                         && ((MethodReference) ref).getName().equals("<init>")) constructor = true;
                 if (!(ref instanceof MethodReference) || !(next instanceof FiveRegisterInstruction)) continue;
@@ -125,9 +141,11 @@ public final class HashLongPressVoiceHostContractTest {
         assertEquals("Landroid/view/ViewGroup;", field(style, "LIZJ").getType());
         assertEquals(VM, field(style, "LIZLLL").getType());
         assertEquals(PREFIX + "comment/widget/CommentMentionEditText;", field(EDIT, "n").getType());
-        assertNotNull(method(EDIT, "LJJIIZ", "V", "Landroid/view/View;"));
-        assertNotNull(method(PUBLISH, "LJJIIZ", "V", "Landroid/view/View;"));
-        assertNotNull(method(PUBLISH, old ? "LJJ" : "LJFF", "V", old ? "LX/0zh1;" : "LX/14xJ;"));
+        String bind = latest ? "LJJIIZI" : "LJJIIZ";
+        assertNotNull(method(EDIT, bind, "V", "Landroid/view/View;"));
+        assertNotNull(method(PUBLISH, bind, "V", "Landroid/view/View;"));
+        assertNotNull(method(PUBLISH, old ? "LJJ" : latest ? "LJI" : "LJFF", "V",
+                old ? "LX/0zh1;" : latest ? "LX/13RB;" : "LX/14xJ;"));
     }
 
     @Test public void replyIdentityComesFromTheActivePublishPresenterRatherThanAnUnrelatedComment() {
@@ -163,6 +181,53 @@ public final class HashLongPressVoiceHostContractTest {
         List<Instruction> code = new ArrayList<>();
         method.getImplementation().getInstructions().forEach(code::add);
         return code;
+    }
+
+    private static boolean dispatchCaseCallsString(Method method, int key, String value) {
+        List<Instruction> instructions = code(method);
+        int[] offsets = new int[instructions.size()];
+        Map<Integer, Integer> indexByOffset = new HashMap<>();
+        int offset = 0;
+        for (int i = 0; i < instructions.size(); i++) {
+            offsets[i] = offset;
+            indexByOffset.put(offset, i);
+            offset += instructions.get(i).getCodeUnits();
+        }
+        for (int i = 0; i < instructions.size(); i++) {
+            Instruction dispatch = instructions.get(i);
+            if (dispatch.getOpcode() != Opcode.PACKED_SWITCH || !(dispatch instanceof OffsetInstruction)) continue;
+            int payloadOffset = offsets[i] + ((OffsetInstruction) dispatch).getCodeOffset();
+            Integer payloadIndex = indexByOffset.get(payloadOffset);
+            if (payloadIndex == null || !(instructions.get(payloadIndex) instanceof SwitchPayload)) continue;
+            for (SwitchElement element : ((SwitchPayload) instructions.get(payloadIndex)).getSwitchElements()) {
+                if (element.getKey() != key) continue;
+                Integer start = indexByOffset.get(offsets[i] + element.getOffset());
+                if (start == null) return false;
+                ArrayDeque<Integer> pending = new ArrayDeque<>();
+                Set<Integer> visited = new HashSet<>();
+                pending.add(start);
+                while (!pending.isEmpty()) {
+                    int current = pending.remove();
+                    if (!visited.add(current)) continue;
+                    Instruction instruction = instructions.get(current);
+                    Object reference = reference(instruction);
+                    if (reference instanceof StringReference
+                            && value.equals(((StringReference) reference).getString())) return true;
+                    Opcode opcode = instruction.getOpcode();
+                    if (opcode.name().startsWith("RETURN") || opcode == Opcode.THROW) continue;
+                    if (opcode.name().startsWith("GOTO") || opcode.name().startsWith("IF_")) {
+                        if (instruction instanceof OffsetInstruction) {
+                            Integer target = indexByOffset.get(offsets[current]
+                                    + ((OffsetInstruction) instruction).getCodeOffset());
+                            if (target != null) pending.add(target);
+                        }
+                        if (opcode.name().startsWith("GOTO")) continue;
+                    }
+                    if (current + 1 < instructions.size()) pending.add(current + 1);
+                }
+            }
+        }
+        return false;
     }
     private static Object reference(Instruction instruction) {
         return instruction instanceof ReferenceInstruction ? ((ReferenceInstruction) instruction).getReference() : null;

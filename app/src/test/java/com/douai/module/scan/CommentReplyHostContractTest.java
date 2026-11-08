@@ -77,6 +77,7 @@ public final class CommentReplyHostContractTest {
             "Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;";
     private static final Map<String, ClassDef> classes = new HashMap<>();
     private static boolean legacy;
+    private static boolean latest;
     private static HostContractNameFacts names;
 
     @BeforeClass public static void readOnlyTheRequiredOriginalDexClasses() throws Exception {
@@ -85,8 +86,10 @@ public final class CommentReplyHostContractTest {
         Assume.assumeTrue("DOUAI_TEST_APK is not configured", configured != null);
         File apk = new File(configured);
         assertTrue("DOUAI_TEST_APK must point to the original host APK", apk.isFile());
-        legacy = HostApkTestProfile.is406(apk);
-        names = new HostContractNameFacts(legacy);
+        HostAdaptation.Profile profile = HostApkTestProfile.profile(apk);
+        legacy = profile.versionCode == 400601L;
+        latest = profile.versionCode == 410001L;
+        names = new HostContractNameFacts(profile);
         Set<String> required = new HashSet<>(Arrays.asList("LX/14LK;", "LX/14Mk;", FACTORY,
                 "LX/14Gs;", "LX/14MH;", "LX/14MA;", "LX/14MD;", "LX/14Jz;", "LX/14PE;", "LX/14jX;",
                 NOTICE, PAYLOAD, GENERAL, ADDITIONAL, DETAIL, ACCESSORS, "LX/14F9;", "LX/14FE;",
@@ -97,11 +100,14 @@ public final class CommentReplyHostContractTest {
                 PUBLISH_PRESENTER, PUBLISH_REQUEST));
         Set<String> taskClasses = new HashSet<>(Arrays.asList(TASK));
         try (ZipFile archive = new ZipFile(apk)) {
-            readSelectedClasses(archive, legacy ? "classes17.dex" : "classes22.dex", required);
-            if (!legacy) readSelectedClasses(archive, "classes31.dex", required);
-            readSelectedClasses(archive, legacy ? "classes30.dex" : "classes31.dex", commentClasses);
-            if (!legacy) readSelectedClasses(archive, "classes30.dex", commentClasses);
-            readSelectedClasses(archive, legacy ? "classes33.dex" : "classes41.dex", taskClasses);
+            required.addAll(commentClasses);
+            required.addAll(taskClasses);
+            for (ZipEntry entry : HostApkTestProfile.dexEntries(archive)) {
+                if (required.isEmpty()) break;
+                readSelectedClasses(archive, entry.getName(), required);
+            }
+            commentClasses.removeAll(classes.keySet());
+            taskClasses.removeAll(classes.keySet());
         }
         assertTrue("Missing original comment inbox classes: " + required, required.isEmpty());
         assertTrue("Missing original comment recipient/publish classes: " + commentClasses, commentClasses.isEmpty());
@@ -144,7 +150,7 @@ public final class CommentReplyHostContractTest {
         assertEquals(valueRegister, ((FiveRegisterInstruction) code.at(box)).getRegisterC());
         assertEquals(Opcode.MOVE_RESULT_OBJECT, code.at(box + 1).getOpcode());
         int boxedRegister = ((OneRegisterInstruction) code.at(box + 1)).getRegisterA();
-        assertCall(code.at(box + 2), "LX/0V8X;", "LLLLJI", "Ljava/lang/Object;",
+        assertCall(code.at(box + 2), "LX/0V8X;", latest ? "LLZLLIL" : "LLLLJI", "Ljava/lang/Object;",
                 "Ljava/util/HashMap;", "Ljava/lang/Object;", "Ljava/lang/Object;");
         FiveRegisterInstruction put = (FiveRegisterInstruction) code.at(box + 2);
         assertEquals("The default map must retain key 2", keyRegister, put.getRegisterD());
@@ -265,7 +271,7 @@ public final class CommentReplyHostContractTest {
 
         Code levelOne = new Code(method(ACCESSORS, "LJII", COMMENT, NOTICE));
         int payload = callIndex(levelOne, ACCESSORS, "LIZLLL");
-        int payloadLevelOne = callIndex(levelOne, PAYLOAD, "LJIILJJIL");
+        int payloadLevelOne = callIndex(levelOne, PAYLOAD, latest ? "LJIILIIL" : "LJIILJJIL");
         int detail = callIndex(levelOne, ACCESSORS, "LIZ");
         int detailLevelOne = callIndex(levelOne, DETAIL, "LIZJ");
         assertTrue(payload < payloadLevelOne && payloadLevelOne < detail && detail < detailLevelOne);
@@ -472,8 +478,9 @@ public final class CommentReplyHostContractTest {
             assertTrue(AccessFlags.PUBLIC.isSet(target.getAccessFlags()));
             assertTrue(AccessFlags.STATIC.isSet(target.getAccessFlags()));
             Code code = new Code(target);
-            int flag = callIndex(code, "LX/00s8;", "LIZ");
-            assertCall(code.at(flag), "LX/00s8;", "LIZ", "Z");
+            String routingFlag = latest ? "LX/00uL;" : "LX/00s8;";
+            int flag = callIndex(code, routingFlag, "LIZ");
+            assertCall(code.at(flag), routingFlag, "LIZ", "Z");
             assertEquals(Opcode.MOVE_RESULT, code.at(flag + 1).getOpcode());
             assertEquals(Opcode.IF_NEZ, code.at(flag + 2).getOpcode());
             assertEquals(((OneRegisterInstruction) code.at(flag + 1)).getRegisterA(),
@@ -562,7 +569,7 @@ public final class CommentReplyHostContractTest {
         assertSerializedField(MINE, "maxTime", "J", "max_time");
         assertSerializedField(MINE, "lastReadTime", "J", "last_read_time");
         assertTrue("The UI conversion marks entries mine locally; that flag alone cannot prove authorship",
-                calls(method(MINE, "getItems", "Ljava/util/List;"), PAYLOAD, "LJJIFFI"));
+                calls(method(MINE, "getItems", "Ljava/util/List;"), PAYLOAD, latest ? "LJJ" : "LJJIFFI"));
 
         Code nativeRequest = new Code(method("LX/14Kj;", "LJI", "V"));
         int invoke = callIndex(nativeRequest, "LX/14PD;", "getMineComment");
@@ -592,13 +599,14 @@ public final class CommentReplyHostContractTest {
         }
         Code item = new Code(method(REPLY_ARGS, "LIZ", STRING));
         int context = fieldIndex(item, REPLY_ARGS, "LIZ");
-        int resolve = callIndex(item, "LX/13eY;", "LJFF");
-        assertCall(item.at(resolve), "LX/13eY;", "LJFF", STRING, WORK_CONTEXT, STRING);
+        String workResolver = latest ? "LJI" : "LJFF";
+        int resolve = callIndex(item, "LX/13eY;", workResolver);
+        assertCall(item.at(resolve), "LX/13eY;", workResolver, STRING, WORK_CONTEXT, STRING);
         FiveRegisterInstruction resolveCall = (FiveRegisterInstruction) item.at(resolve);
         assertEquals(((OneRegisterInstruction) item.at(context)).getRegisterA(), resolveCall.getRegisterC());
         assertEquals(0, ((NarrowLiteralInstruction) item.at(resolve - 1)).getNarrowLiteral());
         assertEquals(((OneRegisterInstruction) item.at(resolve - 1)).getRegisterA(), resolveCall.getRegisterD());
-        Method nativeItem = method("LX/13eY;", "LJFF", STRING, WORK_CONTEXT, STRING);
+        Method nativeItem = method("LX/13eY;", workResolver, STRING, WORK_CONTEXT, STRING);
         assertTrue(calls(nativeItem, "LX/13eY;", "LIZJ"));
         assertTrue("The native resolver includes the captured Aweme aid, not a copied web signature",
                 referencesField(nativeItem, WORK, "aid"));

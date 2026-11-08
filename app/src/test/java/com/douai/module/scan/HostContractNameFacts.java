@@ -24,6 +24,7 @@ import java.util.Set;
  * are checked separately by each suite's actual Manifest-selected profile.
  */
 final class HostContractNameFacts {
+    private final HostAdaptation.Profile profile;
     private final boolean legacy;
     private final Map<String, String> types = new HashMap<>();
     private final Map<String, String> methods = new HashMap<>();
@@ -32,7 +33,14 @@ final class HostContractNameFacts {
     private final DexRewriter rewriter;
 
     HostContractNameFacts(boolean legacy) {
-        this.legacy = legacy;
+        this(HostAdaptation.forVersion(HostAdaptation.TARGET_PACKAGE,
+                legacy ? "40.6.0" : "40.8.0", legacy ? 400601L : 400801L));
+    }
+
+    HostContractNameFacts(HostAdaptation.Profile profile) {
+        if (profile == null) throw new IllegalArgumentException("A verified original APK profile is required");
+        this.profile = profile;
+        this.legacy = profile.versionCode == 400601L;
         for (String[] pair : new String[][]{
                 {"LX/0dFd;", "LX/14LK;"},
                 {"LX/0dHa;", "LX/14Jz;"},
@@ -115,9 +123,8 @@ final class HostContractNameFacts {
         method(logic, "LJJZZIII()Landroidx/lifecycle/MutableLiveData;", "LJLIIL");
         method("Lcom/ss/android/ugc/aweme/homepage/tab/bottom/MPFBottomTabComponent;",
                 "LJJL(Landroid/view/ViewGroup;)Landroid/view/View;", "LJJLIIIJL");
-        if (!legacy) {
-            // Current original APK build 40809900 is normalized to the existing
-            // semantic test labels; the retired 40809985 APK is never accepted.
+        if (profile.versionCode == 400801L) {
+            // Original APK build 40809900 is normalized to the semantic test labels.
             types.clear(); typeTargets.clear(); methods.clear(); methodTargets.clear();
             for (String[] pair : new String[][]{
                     {"LX/1NtM;", "LX/1SVO;"},
@@ -194,6 +201,100 @@ final class HostContractNameFacts {
             method("Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;", "LLIIIL()I", "LLIIIJ");
             method("Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;", "LLJILJILJ(Ljava/lang/String;)V", "LLJILLL");
             method("Lcom/ss/android/ugc/aweme/homepage/tab/bottom/MPFBottomTabComponent;", "LJJLIIIJ(Landroid/view/ViewGroup;)Landroid/view/View;", "LJJLIIIJL");
+        } else if (profile.versionCode == 410001L) {
+            types.clear(); typeTargets.clear(); methods.clear(); methodTargets.clear();
+            for (String[] pair : new String[][]{
+                    {"LX/00Qz;", "LX/00s8;"},
+                    {"LX/0Qqg;", "LX/0V8X;"},
+                    {"LX/19UT;", "LX/0YRa;"},
+                    {"LX/18Yq;", "LX/0YcX;"},
+                    {"LX/18Yt;", "LX/0Yce;"},
+                    {"LX/18Uq;", "LX/0Yca;"},
+                    {"LX/12a5;", "LX/14Mk;"},
+                    {"LX/12a6;", "LX/14Ml;"},
+                    {"LX/12YM;", "LX/14LK;"},
+                    {"LX/1Tp1;", "LX/14jX;"},
+                    {"LX/12WZ;", "LX/14Jz;"},
+                    {"LX/1TGa;", "LX/0vbu;"},
+                    {"LX/12U5;", "LX/14Gs;"},
+                    {"LX/12VZ;", "LX/14J4;"},
+                    {"LX/12Ym;", "LX/14MH;"},
+                    {"LX/12Yc;", "LX/14MA;"},
+                    {"LX/12Yb;", "LX/14Kj;"},
+                    {"LX/13Bm;", "LX/14u0;"},
+                    {"LX/12Yf;", "LX/14MD;"},
+                    {"LX/12TL;", "LX/14HZ;"},
+                    {"LX/12bj;", "LX/14PE;"},
+                    {"LX/12bi;", "LX/14PD;"},
+                    {"LY/AObjectS351S0000000_35;", "LY/AObjectS353S0000000_36;"},
+                    {"LX/11ol;", "LX/156M;"},
+                    {"LX/11nv;", "LX/13a7;"},
+                    {"LX/11oY;", "LX/13ao;"},
+                    {"LX/11ob;", "LX/13ar;"},
+                    {"LX/11us;", "LX/13ea;"},
+                    {"LX/11w6;", "LX/13eY;"},
+                    {"LX/11t9;", "LX/13hD;"},
+                    {"LX/11tV;", "LX/13hg;"},
+                    {"LX/11tb;", "LX/13iG;"},
+                    {"LX/11tW;", "LX/13hi;"},
+                    {"LX/11sn;", "LX/13gy;"},
+                    {"LX/12FZ;", "LX/12j8;"},
+                    {"LX/1290;", "LX/13wP;"},
+                    {"LX/12Qi;", "LX/14Es;"},
+                    {"LX/12Rm;", "LX/14F9;"},
+                    {"LX/12Rq;", "LX/14FE;"},
+                    {"LX/13N9;", "LX/155h;"},
+                    {"LX/12Qf;", "LX/14Ep;"},
+                    {"LX/12Rr;", "LX/159L;"},
+                    {"LX/12QW;", "LX/14Ec;"},
+                    {"LX/12QV;", "LX/14Ea;"},
+                    {"LX/1JgG;", "LX/0isP;"},
+                    {"LX/1JgC;", "LX/0io8;"},
+                    {"LX/1JgM;", "LX/0ioG;"},
+                    {"LX/16tl;", "LX/1SVO;"},
+                    {"LX/1YMi;", "LX/1WHh;"},
+                    {"LX/1Svj;", "LX/1Z99;"},
+                    {"LX/1SvD;", "LX/1Z9A;"},
+                    {"LX/1Som;", "LX/1Z6z;"},
+                    {"LX/1SpR;", "LX/1Z5F;"},
+                    {"LX/1SqW;", "LX/1Z5A;"},
+                    {"LX/1Stx;", "LX/1Z8C;"},
+                    {"LX/1Sv6;", "LX/1Z6p;"},
+                    {"LX/1T8I;", "LX/16Tc;"},
+                    {"LX/1Sg0;", "LX/16Pt;"},
+                    {"LY/ATCallbackS209S1200000_48;", "LY/ATCallbackS220S1200000_37;"},
+                    {"LY/ATRunnableS30S1110000_48;", "LY/ATRunnableS26S1110000_37;"},
+            }) {
+                if (types.put(pair[0], pair[1]) != null || !typeTargets.add(pair[1]))
+                    throw new AssertionError("Non-injective 41.0.0 original type alias");
+            }
+            method(comment, "LJLLL()" + comment, "LJZ");
+            method(comment, "LLIFFJFJJ()Ljava/lang/String;", "LLIIIJ");
+            method(comment, "LLJ()Ljava/lang/Long;", "LLJILLL");
+            method(comment, "LLLILZLLLI()Ljava/lang/String;", "LLLLIILL");
+            method(comment, "LLLLIIIILLL()Ljava/lang/String;", "LLLLJI");
+            method(comment, "LLLLILI()I", "LLLLLJLJLL");
+            method(comment, "LLLLLLZZ()Lcom/ss/android/ugc/aweme/profile/model/User;", "LLLLZLL");
+            method("Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;", "LLIFFJFJJ()I", "LLIIIJ");
+            method("Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;", "LLJ(Ljava/lang/String;)V", "LLJILLL");
+            method("Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;",
+                    "LJLIIL()Landroidx/lifecycle/MutableLiveData;", "LJLI");
+            method("Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;",
+                    "LJLILLLLZI()Landroidx/lifecycle/MutableLiveData;", "LJLIIL");
+            method("Lcom/ss/android/ugc/aweme/rips/RipsUI;",
+                    "LJJJI()Lcom/ss/android/ugc/aweme/rips/BasicRipsLogic;", "LJJJJJ");
+            method("Lcom/bytedance/im/core/model/ConversationListModel;",
+                    "LJLJI(Ljava/lang/String;ZLcom/bytedance/im/core/client/callback/IRequestListener;)V", "LJLIIL");
+            method("Lcom/bytedance/im/core/model/ConversationListModel;",
+                    "W2(Ljava/lang/String;[Lcom/bytedance/im/core/model/Conversation;)V", "f3");
+            method("LX/1Sg0;", "A2(Lcom/bytedance/im/core/model/Conversation;Z)V", "J2");
+            method("LX/1SqW;", "C2(LX/1SpR;)V", "M2");
+            method("LX/1Sv6;",
+                    "I3(Ljava/lang/String;Lcom/bytedance/im/core/model/Conversation;Ljava/util/List;Ljava/lang/Integer;LX/1Som;Ljava/util/ArrayList;Z)V",
+                    "R3");
+            method("LX/1TGa;", "LJFF()V", "LJJII");
+            method("Lcom/ss/android/ugc/aweme/homepage/tab/bottom/MPFBottomTabComponent;",
+                    "LJJJ(Landroid/view/ViewGroup;)Landroid/view/View;", "LJJLIIIJL");
         }
         rewriter = new DexRewriter(new RewriterModule() {
             @Override public Rewriter<String> getTypeRewriter(Rewriters rewriters) {
@@ -207,7 +308,8 @@ final class HostContractNameFacts {
                         if (name == null) {
                             name = original.getName();
                             if (methodTargets.contains(signature(renamedTypes)))
-                                name = (legacy ? "__douai_original406_" : "__douai_original4089900_") + name;
+                                name = (legacy ? "__douai_original406_" : profile.versionCode == 410001L
+                                        ? "__douai_original4109900_" : "__douai_original4089900_") + name;
                         }
                         return new ImmutableMethodReference(renamedTypes.getDefiningClass(), name,
                                 renamedTypes.getParameterTypes(), renamedTypes.getReturnType());
@@ -225,7 +327,8 @@ final class HostContractNameFacts {
         // A 40.6 APK may also contain an unrelated class already using a 40.8 alias.
         // Keep that original class in a reversible separate namespace, never merge it.
         return typeTargets.contains(original) ? "Ldouai/test/"
-                + (legacy ? "original406/" : "original4089900/") + original.substring(1) : original;
+                + (legacy ? "original406/" : profile.versionCode == 410001L
+                ? "original4109900/" : "original4089900/") + original.substring(1) : original;
     }
     ClassDef originalFacts(ClassDef original) {
         ClassDef result = ImmutableClassDef.of(rewriter.getClassDefRewriter().rewrite(original));

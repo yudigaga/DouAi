@@ -18,9 +18,14 @@ final class HostResourceCatalog {
 
     static HostAdaptation.Profile profile(Resources resources) {
         if (resources == null) return null;
-        boolean legacy = identifies(resources, HostAdaptation.PROFILE_406);
-        boolean latest = identifies(resources, HostAdaptation.PROFILE_408);
-        return legacy == latest ? null : legacy ? HostAdaptation.PROFILE_406 : HostAdaptation.PROFILE_408;
+        HostAdaptation.Profile matched = null;
+        for (HostAdaptation.Profile candidate : new HostAdaptation.Profile[]{
+                HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408, HostAdaptation.PROFILE_410}) {
+            if (!identifies(resources, candidate)) continue;
+            if (matched != null) return null;
+            matched = candidate;
+        }
+        return matched;
     }
 
     private static boolean identifies(Resources resources, HostAdaptation.Profile profile) {
@@ -74,7 +79,10 @@ final class HostResourceCatalog {
     static String expectedName(int canonicalId) { return expectedName(HostAdaptation.PROFILE_408, canonicalId); }
 
     private static String expectedName(HostAdaptation.Profile profile, int canonicalId) {
-        if (canonicalId == CHAPTER_MOUNT) return HostResourceProfile.legacy(profile) ? "i=5" : "i_f";
+        if (canonicalId == CHAPTER_MOUNT) {
+            if (HostResourceProfile.legacy(profile)) return "i=5";
+            return profile == HostAdaptation.PROFILE_410 ? "i=e" : "i_f";
+        }
         if (!HostAdaptation.PROFILE_408.getFeedResources().containsKey(canonicalId)) return null;
         return profile.getFeedResources().get(HostResourceProfile.id(profile, canonicalId));
     }

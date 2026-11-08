@@ -84,9 +84,11 @@ public final class HashLongPressVoiceHook implements AutoCloseable {
         if (!Map.class.isAssignableFrom(styleMap.getType())) {
             throw new IllegalStateException("Native publish styles are not a map");
         }
-        Method publishBind = publish.getDeclaredMethod("LJJIIZ", View.class);
+        String bindMethod = com.douai.module.scan.HostResourceProfile.textBindMethod(
+                com.douai.module.scan.HostAdaptation.currentProfile());
+        Method publishBind = publish.getDeclaredMethod(bindMethod, View.class);
         Method render = uniqueRender(publish);
-        Method editorBind = editorModule.getDeclaredMethod("LJJIIZ", View.class);
+        Method editorBind = editorModule.getDeclaredMethod(bindMethod, View.class);
         HashLongPressVoiceHook hook = new HashLongPressVoiceHook(options, messages, comments,
                 conversation, state, log);
         try {

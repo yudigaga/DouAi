@@ -2,7 +2,7 @@
     <string name="app_name">DouAi</string>
     <string name="module_brand">DouAi</string>
     <string name="module_version">模块版本 %1$s</string>
-    <string name="module_host_version">抖音 40.6.0</string>
+    <string name="module_host_version">抖音 40.6.0 / 40.8.0 / 41.0.0</string>
     <string name="module_status">模块状态</string>
     <string name="module_framework_connected">LSPosed 已连接</string>
     <string name="module_framework_disconnected">LSPosed 未连接</string>

@@ -47,6 +47,7 @@ public final class BackgroundMessageHostContractTest {
     private static final String OBSERVER_API = "Lcom/bytedance/im/core/internal/utils/IObserverUtils;";
     private static final Map<String, ClassDef> classes = new HashMap<>();
     private static boolean legacy;
+    private static boolean latest;
     private static HostContractNameFacts names;
 
     @BeforeClass public static void readActualHostContracts() throws Exception {
@@ -55,8 +56,10 @@ public final class BackgroundMessageHostContractTest {
         Assume.assumeTrue("DOUAI_TEST_APK is not configured", configured != null);
         File apk = new File(configured);
         assertTrue(apk.isFile());
-        legacy = HostApkTestProfile.is406(apk);
-        names = new HostContractNameFacts(legacy);
+        HostAdaptation.Profile profile = HostApkTestProfile.profile(apk);
+        legacy = profile.versionCode == 400601L;
+        latest = profile.versionCode == 410001L;
+        names = new HostContractNameFacts(profile);
         Set<String> wanted = new HashSet<>(Arrays.asList(OBSERVER, SDK_BASE, SDK, MESSAGE, EXTRA,
                 CONVERSATIONS, BIZ_OBSERVER, CORE_OBSERVER, "LX/1Z9A;", "LX/0vbu;", "LX/16Tc;",
                 "LX/1Z5A;", "LX/1Z6p;", "LX/16Pt;", "LY/ATRunnableS26S1110000_37;",
@@ -109,6 +112,11 @@ public final class BackgroundMessageHostContractTest {
     @Test public void applicationInitializationRegistersTheBusinessObserverGlobally() {
         Method initialize = callable("LX/0vbu;", "LJJII", "V", true);
         assertTrue(calls(initialize, BIZ_OBSERVER, "LIZ"));
+        if (latest) {
+            assertTrue(calls(initialize, "Lcom/bytedance/ies/im/core/api/IMCore;", "getPlatform"));
+            assertTrue(calls(initialize, "Lcom/bytedance/ies/im/core/api/service/IPlatformService;", "LJJIL"));
+            return;
+        }
         assertTrue(calls(initialize, "LX/16Tc;", "LIZ"));
         Method facade = callable("LX/16Tc;", "LIZ", "V", false, CLIENT_OBSERVER);
         assertTrue(calls(facade, CORE_OBSERVER, "LIZ"));

@@ -8,6 +8,8 @@ import com.douai.module.config.ExtendedSettings;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.scan.HostCandidate;
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostResourceProfile;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
 
@@ -125,7 +127,8 @@ public final class AutoMessageDraftHook implements AutoCloseable {
                 || Modifier.isStatic(inputTypeGetter.getModifiers())) {
             throw new IllegalStateException("Direct-message input type getter contract changed");
         }
-        Method provider = findMethodInHierarchy(drawer, "LJJJJJ");
+        Method provider = findMethodInHierarchy(drawer, HostResourceProfile.ripsLogicProvider(
+                HostAdaptation.currentProfile()));
         if (provider == null || Modifier.isStatic(provider.getModifiers())
                 || !"com.ss.android.ugc.aweme.rips.BasicRipsLogic".equals(
                 provider.getReturnType().getName())) {

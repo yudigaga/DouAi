@@ -6,6 +6,7 @@ import android.widget.FrameLayout;
 
 import com.douai.module.analytics.LocalAnalytics;
 import com.douai.module.scan.HostCandidate;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
 
@@ -37,7 +38,11 @@ import static org.junit.Assert.*;
 @Config(manifest = Config.NONE, sdk = 35)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class LocalAnalyticsHookTest {
-    public static final class Holder {
+    @org.junit.Before public void selectOriginalProfile() {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_408);
+    }
+    @org.junit.After public void resetOriginalProfile() { HostAdaptation.setCurrentProfile(null); }
+    public static class Holder {
         public FrameLayout w;
         public Params A2 = new Params();
         public String aid = "one";
@@ -46,6 +51,29 @@ public final class LocalAnalyticsHookTest {
         public void pageSelected() { }
         public void selected(int index) { }
         public void bind() { }
+    }
+    public static final class ModernHolder extends Holder {
+        public Object A2 = new Object();
+        public Params B2 = new Params();
+        @Override public Object getAweme() { return super.getAweme(); }
+        @Override public void pageSelected() { }
+        @Override public void selected(int index) { }
+    }
+
+    @Test public void modernHolderUsesB2ToRejectStaleSelectionAndEndStaleVisits() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try (Fixture f = new Fixture(true)) {
+            ModernHolder holder = (ModernHolder) f.holder;
+            holder.B2.mFeedContext.current = new Holder();
+            f.select();
+            assertEquals(0, f.count());
+            holder.B2.mFeedContext.current = holder;
+            f.select();
+            assertEquals(1, f.count());
+            holder.B2.mFeedContext.current = new Holder();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(750));
+            assertNull(activeVisit(f.hook));
+        }
     }
     public static final class Params { public Panel mFeedContext = new Panel(); }
     public static final class Panel {
@@ -296,12 +324,16 @@ public final class LocalAnalyticsHookTest {
     private static final class Fixture implements AutoCloseable {
         final Activity activity = Robolectric.buildActivity(Activity.class).setup().visible().get();
         final FeedRoot root = new FeedRoot(activity);
-        final Holder holder = new Holder();
+        final Holder holder;
         final Harness harness = new Harness();
         final LocalAnalytics store = LocalAnalytics.get(activity);
         final LocalAnalyticsHook hook;
 
         Fixture() throws Exception {
+            this(false);
+        }
+        Fixture(boolean modern) throws Exception {
+            holder = modern ? new ModernHolder() : new Holder();
             store.clear(); store.setEnabled(true);
             activity.setContentView(root);
             View decor = activity.getWindow().getDecorView();
@@ -309,7 +341,8 @@ public final class LocalAnalyticsHookTest {
                     View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY));
             decor.layout(0, 0, 500, 1000);
             holder.w = root; holder.A2.mFeedContext.current = holder;
-            hook = LocalAnalyticsHook.install(harness.framework, report(), getClass().getClassLoader(),
+            if (modern) ((ModernHolder) holder).B2.mFeedContext.current = holder;
+            hook = LocalAnalyticsHook.install(harness.framework, report(holder.getClass()), getClass().getClassLoader(),
                     activity, ignored -> { });
             hook.onActivityResumed(activity);
             assertTrue("fixture root attached", root.isAttachedToWindow());
@@ -318,7 +351,7 @@ public final class LocalAnalyticsHookTest {
             assertTrue("fixture root has screen area: " + root.getWidth() + "x" + root.getHeight(),
                     LocalAnalyticsHook.visible(root, activity));
         }
-        void select() throws Throwable { harness.invoke(Holder.class.getMethod("pageSelected"), holder); }
+        void select() throws Throwable { harness.invoke(holder.getClass().getMethod("pageSelected"), holder); }
         void focus(boolean focused) throws Exception {
             root.focused = focused;
             Method dispatch = android.view.ViewTreeObserver.class.getDeclaredMethod("dispatchOnWindowFocusChange", boolean.class);
@@ -331,11 +364,11 @@ public final class LocalAnalyticsHookTest {
         }
     }
 
-    private static HostScanReport report() throws Exception {
+    private static HostScanReport report(Class<? extends Holder> holderType) throws Exception {
         List<RuleScanResult> results = new ArrayList<>();
-        add(results, "feed_holder_page_selected", Holder.class.getMethod("pageSelected"));
-        add(results, "feed_holder_selected", Holder.class.getMethod("selected", int.class));
-        addType(results, "feed_holder_main_root", Holder.class);
+        add(results, "feed_holder_page_selected", holderType.getMethod("pageSelected"));
+        add(results, "feed_holder_selected", holderType.getMethod("selected", int.class));
+        addType(results, "feed_holder_main_root", holderType);
         add(results, "image_holder_page_selected", ImageHolder.class.getMethod("pageSelected"));
         addType(results, "image_holder_main_root", ImageHolder.class);
         return new HostScanReport("fixture", results, false);

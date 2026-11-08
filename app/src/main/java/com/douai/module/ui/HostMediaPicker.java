@@ -160,7 +160,7 @@ final class HostMediaPicker implements AutoCloseable {
         resultType.getMethod("getSelectedList");
         modelType = hostClass(MODEL);
         modelType.getMethod("getFilePath");
-        modelType.getMethod("LJIILJJIL");
+        modelType.getMethod(HostResourceProfile.mediaSourceGetter(profile));
         for (String field : new String[]{"type", "edited", "mimeType", "duration", "fileSize", "width", "height"}) {
             modelType.getField(field);
         }
@@ -189,7 +189,7 @@ final class HostMediaPicker implements AutoCloseable {
             boolean video = type == 1;
             if (video != videoOnly || (!video && type != 0 && type != 2)) continue;
             String filePath = (String) modelType.getMethod("getFilePath").invoke(model);
-            String original = (String) modelType.getMethod("LJIILJJIL").invoke(model);
+            String original = (String) modelType.getMethod(HostResourceProfile.mediaSourceGetter(profile)).invoke(model);
             boolean edited = modelType.getField("edited").getBoolean(model);
             Uri file = localUri(filePath);
             Uri source = localUri(original);

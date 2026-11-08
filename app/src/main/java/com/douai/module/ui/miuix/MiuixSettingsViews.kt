@@ -167,7 +167,7 @@ object MiuixSettingsViews {
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text("DouAi", fontSize = 26.sp, fontWeight = FontWeight.Bold)
-                        Text("抖音 40.6.0 / 40.8.0", color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                        Text("抖音 40.6.0 / 40.8.0 / 41.0.0", color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                     }
                     IconButton(onClick = { onClose.run() }) {
                         Icon(MiuixIcons.Basic.Close, contentDescription = "关闭设置")

@@ -173,22 +173,24 @@ final class OfficialLivePhotoDownload {
     }
 
     private static final class HostEncoder implements Encoder {
-        private static boolean legacyHost() throws ReflectiveOperationException {
+        private static HostAdaptation.Profile hostProfile() throws ReflectiveOperationException {
             HostAdaptation.Profile profile = HostAdaptation.currentProfile();
             if (profile == null) throw new ReflectiveOperationException("宿主实况编码适配版本未确认");
-            return profile == HostAdaptation.PROFILE_406;
+            return profile;
         }
 
         @Override public Encoded encode(ClassLoader loader, File image, File video) throws Exception {
-            boolean legacy = legacyHost();
+            HostAdaptation.Profile profile = hostProfile();
+            boolean legacy = profile == HostAdaptation.PROFILE_406;
+            boolean version410 = profile == HostAdaptation.PROFILE_410;
             // This ROM branch encodes directly into its system album, not a portable file.
-            Class<?> rom = Class.forName(legacy ? "X.0BDp" : "X.0eiB", true, loader);
+            Class<?> rom = Class.forName(legacy ? "X.0BDp" : version410 ? "X.0qS2" : "X.0eiB", true, loader);
             if (Boolean.TRUE.equals(invoke(rom.getMethod("LIZLLL"), null))) {
                 throw new UnsupportedOperationException("当前设备的实况编码不支持独立文件保存");
             }
             Object album = album(loader);
-            Class<?> contract = Class.forName(legacy ? "X.0PoP" : "X.0S4A", false, loader);
-            Object result = invoke(contract.getMethod(legacy ? "Xi" : "hj", String.class, String.class, long.class),
+            Class<?> contract = Class.forName(legacy ? "X.0PoP" : version410 ? "X.0UlC" : "X.0S4A", false, loader);
+            Object result = invoke(contract.getMethod(legacy ? "Xi" : version410 ? "gj" : "hj", String.class, String.class, long.class),
                     album, image.getAbsolutePath(), video.getAbsolutePath(), 0L);
             if (result == null) throw new IOException("宿主实况编码器没有返回结果");
             Object paths = field(result, "LIZ");
@@ -204,7 +206,9 @@ final class OfficialLivePhotoDownload {
         }
 
         @Override public boolean isLivePhoto(ClassLoader loader, File file) throws Exception {
-            Class<?> contract = Class.forName(legacyHost() ? "X.0PoP" : "X.0S4A", false, loader);
+            HostAdaptation.Profile profile = hostProfile();
+            Class<?> contract = Class.forName(profile == HostAdaptation.PROFILE_406 ? "X.0PoP"
+                    : profile == HostAdaptation.PROFILE_410 ? "X.0UlC" : "X.0S4A", false, loader);
             return Boolean.TRUE.equals(invoke(contract.getMethod("isLivePhoto", String.class),
                     album(loader), file.getAbsolutePath()));
         }

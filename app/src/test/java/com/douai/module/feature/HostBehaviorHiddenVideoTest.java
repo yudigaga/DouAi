@@ -43,6 +43,34 @@ public final class HostBehaviorHiddenVideoTest {
         return legacy ? HostBehaviorHooks.HiddenSafetyTaskContract.HOST_406 : HostBehaviorHooks.HiddenSafetyTaskContract.HOST_408;
     }
 
+    @Test public void productionAcceptsTheVerified410TaskPairAndRejectsCrossVersionPairs() {
+        HostBehaviorHooks.HiddenSafetyTaskContract latest = HostBehaviorHooks.HiddenSafetyTaskContract.resolve(
+                "Lkotlin/jvm/internal/ALambdaS43S1500000_47;", "LX/1R3E;");
+        assertNotNull(latest);
+        assertEquals(2, latest.currentBranch);
+            assertEquals(Integer.valueOf(3), latest.secondaryCurrentBranch);
+        assertNull(latest.backgroundBranch);
+        try {
+            java.lang.reflect.Method classifier = HostBehaviorHooks.HiddenSafetyTaskContract.class
+                    .getDeclaredMethod("blocksCurrentBranch", int.class);
+            classifier.setAccessible(true);
+            assertTrue((Boolean) classifier.invoke(latest, 2));
+            assertTrue("410 key 3 is also a safety_check_recall delete path", (Boolean) classifier.invoke(latest, 3));
+            assertFalse((Boolean) classifier.invoke(latest, 0));
+            assertFalse((Boolean) classifier.invoke(latest, 1));
+        } catch (ReflectiveOperationException missingContract) {
+            fail("The 410 current task must classify both safety branches: " + missingContract);
+        }
+        for (String[] pair : Arrays.asList(
+                new String[]{"Lkotlin/jvm/internal/ALambdaS43S1500000_47;", "LX/06ht;"},
+                new String[]{"Lkotlin/jvm/internal/ALambdaS43S1500000_47;", "LX/12bW;"},
+                new String[]{"Lkotlin/jvm/internal/ALambdaS32S1500000_4;", "LX/1R3E;"},
+                new String[]{"Lkotlin/jvm/internal/ALambdaS38S1500000_35;", "LX/1R3E;"})) {
+            assertThrows(IllegalStateException.class,
+                    () -> HostBehaviorHooks.HiddenSafetyTaskContract.resolve(pair[0], pair[1]));
+        }
+    }
+
     @Test public void productionContractsRequireOneOfTheTwoExactTaskPairs() {
         assertSame(HostBehaviorHooks.HiddenSafetyTaskContract.HOST_406,
                 HostBehaviorHooks.HiddenSafetyTaskContract.resolve("Lkotlin/jvm/internal/ALambdaS32S1500000_4;", "LX/06ht;"));

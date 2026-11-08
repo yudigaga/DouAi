@@ -11,6 +11,7 @@ import android.widget.TextView;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.scan.HostCandidate;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
 
@@ -64,6 +65,25 @@ public final class HostBehaviorViewTest {
             if (failOwn) throw new IllegalStateException("Profile fixture unavailable");
             return own;
         }
+        public View root() { return root; }
+    }
+
+    public static final class ModernProfile {
+        public final TextView x, v, w, E;
+        public final TextView y;
+        public final Object F = new Object();
+        public final LinearLayout root;
+        public boolean own;
+        public ModernProfile(Context context) {
+            root = new LinearLayout(context);
+            x = new TextView(context); v = new TextView(context);
+            w = new TextView(context); E = new TextView(context); y = new TextView(context);
+            for (TextView view : new TextView[]{x, v, w, E, y}) root.addView(view);
+            x.setText("12"); v.setText("34"); w.setText("56"); E.setText("78");
+            y.setText("获赞");
+        }
+        public void bind(Object user) { }
+        public boolean own() { return own; }
         public View root() { return root; }
     }
 
@@ -176,6 +196,57 @@ public final class HostBehaviorViewTest {
             assertEquals("56", profile.x.getText().toString());
             assertEquals("78", profile.F.getText().toString());
         } finally { hook.close(); activity.finish(); }
+    }
+
+    @Test public void modernProfileSpoofKeepsLabelsAndRestoresAllSemanticCounts() throws Throwable {
+        HostAdaptation.Profile previous = HostAdaptation.currentProfile();
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        ProfileSpoofHook hook = null;
+        try {
+            ModernProfile profile = new ModernProfile(activity);
+            activity.setContentView(profile.root);
+            Harness harness = new Harness();
+            Method bind = ModernProfile.class.getMethod("bind", Object.class);
+            LocalOptions enabled = new LocalOptions(Map.of("spoof_profile", true,
+                    "profile_like_count", "9001", "profile_following_count", "9002",
+                    "profile_follower_count", "9003", "profile_mutual_count", "9004"));
+            hook = ProfileSpoofHook.install(harness.framework, report(Map.of(
+                    "adv_profile_render", bind, "adv_profile_own", ModernProfile.class.getMethod("own"),
+                    "adv_profile_root", ModernProfile.class.getMethod("root"))), getClass().getClassLoader(),
+                    activity, enabled, ignored -> { });
+            harness.invoke(bind, profile);
+            assertModernCounts(profile, "12", "34", "56", "78");
+
+            profile.own = true;
+            harness.invoke(bind, profile);
+            assertModernCounts(profile, "9001", "9002", "9003", "9004");
+            profile.own = false;
+            harness.invoke(bind, profile);
+            assertModernCounts(profile, "12", "34", "56", "78");
+
+            profile.own = true;
+            harness.invoke(bind, profile);
+            hook.setOptions(new LocalOptions(Collections.emptyMap()));
+            assertModernCounts(profile, "12", "34", "56", "78");
+            hook.setOptions(enabled);
+            assertModernCounts(profile, "9001", "9002", "9003", "9004");
+            hook.close();
+            assertModernCounts(profile, "12", "34", "56", "78");
+        } finally {
+            if (hook != null) hook.close();
+            activity.finish();
+            HostAdaptation.setCurrentProfile(previous);
+        }
+    }
+
+    private static void assertModernCounts(ModernProfile profile, String likes, String following,
+                                           String followers, String mutual) {
+        assertEquals(likes, profile.x.getText().toString());
+        assertEquals(following, profile.v.getText().toString());
+        assertEquals(followers, profile.w.getText().toString());
+        assertEquals(mutual, profile.E.getText().toString());
+        assertEquals("获赞", profile.y.getText().toString());
     }
 
     @Test public void recallReflectionFailureRevokesRegistrationAndRestoresHighlightedBackground() throws Throwable {

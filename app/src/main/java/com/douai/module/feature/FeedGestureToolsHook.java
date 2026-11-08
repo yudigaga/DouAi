@@ -32,6 +32,8 @@ import com.douai.module.config.LocalOptions;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.SettingsRepository;
 import com.douai.module.scan.HostScanReport;
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostResourceProfile;
 import com.douai.module.ui.GestureQuickFeaturesDialog;
 import com.douai.module.ui.GestureQuickModelDialog;
 import com.douai.module.ui.GestureQuickVoiceDialog;
@@ -179,7 +181,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             }
             HostTargets.candidate(report, "feed_holder_main_root");
             Field root = HostTargets.field(selected.getDeclaringClass(), "w");
-            Field params = HostTargets.field(selected.getDeclaringClass(), "A2");
+            Field params = HostTargets.field(selected.getDeclaringClass(),
+                    HostResourceProfile.feedItemParamsField(HostAdaptation.currentProfile()));
             Class<?> paramsType = HostTargets.type(report, "adv_gesture_item_params", loader);
             if (params.getType() != paramsType || !View.class.isAssignableFrom(root.getType())) {
                 throw new IllegalStateException("Selected feed holder fields changed");

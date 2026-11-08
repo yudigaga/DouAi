@@ -15,6 +15,8 @@ import android.view.ViewTreeObserver;
 import com.douai.module.analytics.LocalAnalytics;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostResourceProfile;
 
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
@@ -33,6 +35,7 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<BehaviorHookGroup> groups = new ArrayList<>();
     private final Consumer<String> log;
+    private final String itemParamsField;
     private WeakReference<Activity> resumed = new WeakReference<>(null);
     private volatile boolean closed;
     private volatile long lifecycleEpoch;
@@ -59,6 +62,7 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
     private LocalAnalyticsHook(Application application, Consumer<String> log) {
         this.application = application;
         this.log = log;
+        this.itemParamsField = HostResourceProfile.feedItemParamsField(HostAdaptation.currentProfile());
     }
 
     public static LocalAnalyticsHook install(XposedInterface framework, HostScanReport report,
@@ -146,7 +150,7 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
             View root = (View) rootField.get(holder);
             if (!visible(root, resumed.get())) return;
             // Video holders expose the current panel selection. Reject stale neighbor holders even if attached.
-            Object params = HostTargets.read(holder, "A2");
+            Object params = HostTargets.read(holder, itemParamsField);
             Object panel = HostTargets.read(params, "mFeedContext");
             if (panel != null && HostTargets.invoke(panel, "getCurrentViewHolderP") != holder) return;
             Object work = aweme.invoke(holder);
@@ -209,7 +213,7 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
         try {
             View root = (View) visit.root.get(holder);
             if (root == null || !root.isAttachedToWindow() || candidateRoot.get() != root) return false;
-            Object panel = HostTargets.read(HostTargets.read(holder, "A2"), "mFeedContext");
+            Object panel = HostTargets.read(HostTargets.read(holder, itemParamsField), "mFeedContext");
             if (panel != null && HostTargets.invoke(panel, "getCurrentViewHolderP") != holder) return false;
             return visit.id.equals(AnalyticsAwemeReader.value(visit.aweme.invoke(holder), "getAid", "aid", "aweme_id"));
         } catch (ReflectiveOperationException | RuntimeException ignored) { return false; }

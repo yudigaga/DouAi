@@ -130,7 +130,7 @@ public final class NativeChatHostContractTest {
         assertTrue("Root factory must retain all three host experiment layouts", literals(root).containsAll(
                 Arrays.asList(rid(0x7f0d194a), rid(0x7f0d194b), rid(0x7f0d194c))));
 
-        Method input = method(DRAWER_FACTORY, "LJLJJLL",
+        Method input = method(DRAWER_FACTORY, HostResourceProfile.chatMethod(profile, "LJLJJLL"),
                 "Landroidx/constraintlayout/widget/ConstraintLayout;", "Landroid/content/Context;");
         assertTrue(AccessFlags.PUBLIC.isSet(input.getAccessFlags()));
         assertTrue(AccessFlags.STATIC.isSet(input.getAccessFlags()));
@@ -139,10 +139,10 @@ public final class NativeChatHostContractTest {
     }
 
     @Test public void titleTextAndBackgroundFactoriesRetainTheirReflectionContract() {
-        assertCallable(TITLE_FACTORY, "LJLIIL", "Lcom/bytedance/ies/dmt/ui/widget/DmtTextView;",
+        assertCallable(TITLE_FACTORY, HostResourceProfile.chatMethod(profile, "LJLIIL"), "Lcom/bytedance/ies/dmt/ui/widget/DmtTextView;",
                 true, "I", "Landroid/content/Context;");
         assertCallable(TEXT_FACTORY, "<init>", "V", false);
-        Method textFactory = assertCallable(TEXT_FACTORY, "LJJJJL", "Landroid/view/View;", false,
+        Method textFactory = assertCallable(TEXT_FACTORY, HostResourceProfile.chatMethod(profile, "LJJJJL"), "Landroid/view/View;", false,
                 "Landroid/content/Context;", "Landroid/view/ViewGroup;");
         assertTrue("Text cell must retain its IMMsgTextView ID", literals(textFactory).contains(rid(0x7f0a1dbf)));
         assertCallable(TEXT_WIDGET, "setText", "V", false, "Ljava/lang/CharSequence;");
@@ -172,6 +172,7 @@ public final class NativeChatHostContractTest {
         try (ZipFile archive = new ZipFile(apk)) {
             for (String path : HostResourceProfile.legacy(profile)
                     ? new String[]{"r/zw5.xml", "r/zw6.xml", "r/zw7.xml"}
+                    : profile.versionCode == 410001L ? new String[]{"r/z3u.xml", "r/z3v.xml", "r/z3w.xml"}
                     : new String[]{"r/zy5.xml", "r/zy6.xml", "r/zy7.xml"}) {
                 ZipEntry entry = archive.getEntry(path);
                 assertNotNull("Missing original host root layout " + path, entry);
@@ -188,7 +189,7 @@ public final class NativeChatHostContractTest {
     }
 
     @Test public void avatarProfileShellAndNavigationFactoriesHaveIndependentViewContracts() {
-        assertCallable(LEAVE_FACTORY, "LJLIIL", "V", true,
+        assertCallable(LEAVE_FACTORY, HostResourceProfile.chatMethod(profile, "LJLIIL"), "V", true,
                 "Landroid/content/Context;", "Landroid/widget/ImageView;");
         assertCallable(AUTO_RTL, "<init>", "V", false,
                 "Landroid/content/Context;", "Landroid/util/AttributeSet;");
@@ -199,7 +200,7 @@ public final class NativeChatHostContractTest {
         assertCallable(AVATAR_FACTORY, "getLayoutParams", "Landroid/view/ViewGroup$LayoutParams;", false);
         assertPublicInstanceField(AVATAR_FACTORY, "q", "Lcom/ss/android/ugc/exview/ImAvatarImageView;");
         assertCallable(BUBBLE_FACTORY, "<init>", "V", false);
-        assertCallable(BUBBLE_FACTORY, "LJJJIL", "Landroid/graphics/Rect;", false);
+        assertCallable(BUBBLE_FACTORY, HostResourceProfile.chatMethod(profile, "LJJJIL"), "Landroid/graphics/Rect;", false);
         assertCallable(PROFILE_FACTORY, "<init>", "V", false);
         Method profileView = assertCallable(PROFILE_FACTORY, HostResourceProfile.viewFactory(profile), "Landroid/view/View;", false,
                 "Landroid/content/Context;", "Landroid/view/ViewGroup;");
@@ -221,7 +222,8 @@ public final class NativeChatHostContractTest {
 
     @Test public void nativeProfileLayoutRetainsTheOfficialLargeAvatarAndNameWidgets() throws Exception {
         try (ZipFile archive = new ZipFile(apk)) {
-            ZipEntry entry = archive.getEntry(HostResourceProfile.legacy(profile) ? "r/z9=.xml" : "r/z_=.xml");
+            ZipEntry entry = archive.getEntry(HostResourceProfile.legacy(profile) ? "r/z9=.xml"
+                    : profile.versionCode == 410001L ? "r/0c3.xml" : "r/z_=.xml");
             assertNotNull("Missing original host profile layout", entry);
             byte[] xml;
             try (InputStream input = archive.getInputStream(entry)) { xml = input.readAllBytes(); }
@@ -240,7 +242,7 @@ public final class NativeChatHostContractTest {
         assertPublicInstanceField(ALBUM_PARAMETERS, "g", "Ljava/lang/String;");
         assertPublicInstanceField(ALBUM_PARAMETERS, "l", "LX/0vUA;");
         assertPublicInstanceField(ALBUM_PARAMETERS, "n", "J");
-        assertPublicInstanceField("LX/0vUA;", "g", "Z");
+        assertPublicInstanceField("LX/0vUA;", profile.versionCode == 410001L ? "h" : "g", "Z");
         Method constructor = method(ALBUM_PARAMETERS, "<init>", "V", "I");
         assertFalse("A fresh album parameter object must not manufacture a native direct-send config",
                 referencesField(constructor, ALBUM_PARAMETERS, "l"));
@@ -298,12 +300,13 @@ public final class NativeChatHostContractTest {
         assertTrue(type(ALBUM_RESULT).getInterfaces().contains("Ljava/io/Serializable;"));
         assertCallable(ALBUM_RESULT, "getSelectedList", "Ljava/util/ArrayList;", false);
         assertCallable(ALBUM_MODEL, "getFilePath", "Ljava/lang/String;", false);
-        assertCallable(ALBUM_MODEL, "LJIILJJIL", "Ljava/lang/String;", false);
+        assertCallable(ALBUM_MODEL, HostResourceProfile.mediaSourceGetter(profile), "Ljava/lang/String;", false);
         for (String field : new String[]{"type", "width", "height"}) assertPublicInstanceField(ALBUM_MODEL, field, "I");
         for (String field : new String[]{"duration", "fileSize"}) assertPublicInstanceField(ALBUM_MODEL, field, "J");
         assertPublicInstanceField(ALBUM_MODEL, "mimeType", "Ljava/lang/String;");
         assertPublicInstanceField(ALBUM_MODEL, "edited", "Z");
-        Method video = assertCallable(ALBUM_MODEL, HostResourceProfile.legacy(profile) ? "q2" : "s2", "Z", false);
+        Method video = assertCallable(ALBUM_MODEL, HostResourceProfile.legacy(profile) ? "q2"
+                : profile.versionCode == 410001L ? "r2" : "s2", "Z", false);
         assertTrue("Native video classification must still read MediaModel.type", referencesField(video, ALBUM_MODEL, "type"));
         assertTrue(literals(video).contains(1));
     }
@@ -328,7 +331,8 @@ public final class NativeChatHostContractTest {
         }
         assertTrue("The inspected completion method must include the native optional send path", send > 0);
         assertTrue("The native send path must first read the nullable params.l config", optionalConfig >= 0 && optionalConfig < send);
-        assertTrue("Native direct sending must also read its explicit enable flag", referencesField(complete, "LX/0vUA;", "g"));
+        assertTrue("Native direct sending must also read its explicit enable flag",
+                referencesField(complete, "LX/0vUA;", profile.versionCode == 410001L ? "h" : "g"));
         int configRegister = ((TwoRegisterInstruction) code.get(optionalConfig)).getRegisterA();
         int falseFlagRegister = -1;
         for (int i = optionalConfig + 1; i < send; i++) {
@@ -354,15 +358,16 @@ public final class NativeChatHostContractTest {
     }
 
     @Test public void scopedStorageSourceUrisRemainSeparateFromPotentialCachePaths() {
-        Method source = assertCallable(ALBUM_MODEL, "LJIILJJIL", "Ljava/lang/String;", false);
+        Method source = assertCallable(ALBUM_MODEL, HostResourceProfile.mediaSourceGetter(profile), "Ljava/lang/String;", false);
         Method destination = assertCallable(ALBUM_MODEL, "getFilePath", "Ljava/lang/String;", false);
         assertTrue(referencesField(source, ALBUM_MODEL, "relativePath"));
         assertTrue(referencesField(destination, ALBUM_MODEL, "filePath"));
         Method conversion = assertCallable("LX/1U1O;", "LJII", ALBUM_MODEL, true, "LX/1UWt;");
         assertTrue("The native media conversion must retain original-source metadata",
-                calls(conversion, ALBUM_MODEL, HostResourceProfile.legacy(profile) ? "LJJJJL" : "LJJJJJL"));
+                calls(conversion, ALBUM_MODEL, HostResourceProfile.legacy(profile) ? "LJJJJL"
+                        : profile.versionCode == 410001L ? "LJJJJI" : "LJJJJJL"));
         assertTrue("The native media conversion can independently assign a cache destination",
-                calls(conversion, ALBUM_MODEL, "LJJIJLIJ"));
+                calls(conversion, ALBUM_MODEL, profile.versionCode == 410001L ? "LJJIJIL" : "LJJIJLIJ"));
         assertTrue("The native scoped-storage guard must still distinguish content URIs", strings(conversion).contains("content"));
     }
 
@@ -453,7 +458,7 @@ public final class NativeChatHostContractTest {
     private static int rid(int canonicalId) { return HostResourceProfile.id(profile, canonicalId); }
 
     private static String completionMethod() {
-        return HostResourceProfile.legacy(profile) ? "LLLLZIL" : "LLLLLZIL";
+        return HostResourceProfile.legacy(profile) || profile.versionCode == 410001L ? "LLLLZIL" : "LLLLLZIL";
     }
 
     private static ClassDef type(String descriptor) { return types.get(hostDescriptor(descriptor)); }
