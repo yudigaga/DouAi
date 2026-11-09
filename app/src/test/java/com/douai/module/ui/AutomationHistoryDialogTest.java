@@ -47,6 +47,25 @@ public final class AutomationHistoryDialogTest {
         ShadowLooper.idleMainLooper();
     }
 
+    @Test public void anOldCommentRecordOffersTheVerifiedWorkFallbackAction() throws Exception {
+        store.upsert(new AutomationHistoryStore.Entry("old-comment", "comment", "123456", "作者",
+                "作品", "评论", "模型", "sent", 1, 1));
+        page.dialog().dismiss();
+        page = new AutomationHistoryDialog(activity, AutomationHistoryStore.COMMENT, false, worker);
+        page.dialog().show();
+        worker.runNextOnThread(); ShadowLooper.idleMainLooper();
+        list().getAdapter().getView(0, null, list()).performClick();
+        AlertDialog detail = (AlertDialog) org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertEquals("查看作品", detail.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertTrue(containsText(detail.getWindow().getDecorView(), "未保存评论定位"));
+        detail.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        android.content.Intent launched = org.robolectric.Shadows.shadowOf(activity).getNextStartedActivity();
+        assertNotNull(launched);
+        assertEquals("com.ss.android.ugc.aweme", launched.getPackage());
+        assertEquals("aweme://aweme/detail/123456", launched.getDataString());
+        assertFalse(page.dialog().isShowing());
+    }
+
     @Test public void openingReadsOffMainAndVirtualizesRowsWhilePreservingDetailsAndClear() throws Exception {
         for (int index = 0; index < 200; index++) {
             long createdAt = 1000 + index;

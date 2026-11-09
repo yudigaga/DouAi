@@ -16,6 +16,7 @@ import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.CommentAiSettings;
+import com.douai.module.config.SidebarSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.ThirdPartyDownloadSettings;
@@ -53,6 +54,36 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
 public final class ModuleSettingsReferenceTest {
+    @Test public void sidebarSelectionDefaultsOffAndCanBeSavedWithNoVisibleEntries() {
+        View page = openCategory("INTERFACE");
+        Switch enabled = toggle(page, "首页右滑打开侧边栏");
+        assertFalse(enabled.isChecked());
+        enabled.setChecked(true);
+        assertEquals(true, store.values.get(SidebarSettings.ENABLED));
+        option(page, "侧边栏显示项").performClick();
+        AlertDialog selection = (AlertDialog) ShadowDialog.getLatestDialog();
+        ListView list = selection.getListView();
+        assertEquals(23, list.getAdapter().getCount());
+        for (int position = 0; position < list.getAdapter().getCount(); position++) {
+            if (list.isItemChecked(position)) list.performItemClick(list.getAdapter().getView(position, null, list), position, position);
+        }
+        selection.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertEquals("", store.getString(SidebarSettings.ITEMS, "fallback"));
+        assertTrue(SidebarSettings.selected(store).isEmpty());
+    }
+
+    @Test public void sidebarHistoryEntryUsesTheSameDetailsSurfaceAndUnknownIdsDoNothing() {
+        screen.openSidebarEntry("comment_history");
+        Dialog history = ShadowDialog.getLatestDialog();
+        assertTrue(history.isShowing());
+        assertTrue(containsText(history.getWindow().getDecorView(), "评论历史记录"));
+        screen.openSidebarEntry("unknown");
+        assertSame(history, ShadowDialog.getLatestDialog());
+        assertTrue(history.isShowing());
+        screen.openSidebarEntry("module");
+        assertFalse(history.isShowing());
+    }
+
     private Activity activity;
     private MemoryStore store;
     private ModuleSettingsScreen screen;
@@ -84,7 +115,7 @@ public final class ModuleSettingsReferenceTest {
                 {"INTERFACE", "悬浮条", "隐藏拍摄+号图标", "隐藏上下黑边", "禁用双击点赞",
                         "不允许系统跳过已隐藏视频", "不允许中途插入视频", "拦截长按倍数启用场景",
                         "拦截系统长按手势", "长按事件", "双击事件", "沉浸式全屏", "隐藏顶部Tab开关",
-                        "设置顶部Tab", "首页刷新确认"},
+                        "设置顶部Tab", "首页刷新确认", "首页右滑打开侧边栏", "侧边栏显示项"},
                 {"FILTER", "过滤总开关", "整页筛空时保留原列表", "去广告开关", "去直播开关", "去推荐卡片开关",
                         "去推荐商家开关", "去商品/购物卡片开关", "去热点榜单卡开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
                         "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},

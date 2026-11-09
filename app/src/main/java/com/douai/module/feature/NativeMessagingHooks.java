@@ -1161,6 +1161,9 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     incoming.conversation, outputName.isEmpty() ? Long.toString(incoming.sender) : outputName,
                     input(incoming), response, modelName, status, createdAt, System.currentTimeMillis(),
                     requestImageCount, modelRequestSent, voice ? AutomationHistoryStore.DELIVERY_VOICE : AutomationHistoryStore.DELIVERY_TEXT)
+                    .withLocation(new AutomationHistoryStore.Location(Long.toString(account), "", "", "",
+                            incoming.conversation, incoming.serverId, incoming.group ? 1 : 0,
+                            incoming.group ? "" : Long.toString(incoming.sender)))
                     .withDiagnostics(reason, stage, queueMillis, mediaMillis, generationMillis,
                             sendStarted < 0 ? -1 : Math.max(0, SystemClock.elapsedRealtime() - sendStarted));
         }

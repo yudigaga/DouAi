@@ -39,6 +39,8 @@ public final class FeatureLogCatalog {
         add(entries, "auto_speed", "自动倍速", "PlaybackBehaviorHooks", Feature.PLAYBACK, "feature.auto_speed.installed", "auto_speed");
         add(entries, "auto_play", "连播及评论暂停", "AutoPlayHook", Feature.AUTO_PLAY, "auto_play_hook_installed", "auto_play_enabled");
         add(entries, "gesture", "九宫格手势及工具栏", "FeedGestureToolsHook", Feature.GESTURE, "feature.long_press_action.installed", "gesture_enabled");
+        add(entries, "home_sidebar", "首页右滑及模块侧边栏", "HomeSidebarGestureHook/HomeSidebarModuleHook", Feature.SIDEBAR,
+                "feature.home_sidebar.installed", "home_sidebar_enabled");
         add(entries, "comment_ai", "评论 AI 解析", "CommentAiAnalysisHook", Feature.MANUAL_AI,
                 "feature.comment_ai.installed", "comment_ai_takeover");
         add(entries, "manual_ai_search", "手动 AI 抖音搜索", "HostDouyinSearch", Feature.MANUAL_AI,

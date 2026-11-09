@@ -52,6 +52,11 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             if (audio != null) throw new IllegalStateException("Comment voice sender unavailable");
             send(event, text, valid, beforeSend, accepted, result);
         }
+        default void send(CommentReplyEvent event, String text, SpeechPreparation.Audio audio, BooleanSupplier valid,
+                          BooleanSupplier beforeSend, Runnable accepted, Consumer<String> result,
+                          Consumer<String> publishedCommentId) {
+            send(event, text, audio, valid, beforeSend, accepted, result);
+        }
         default boolean owns(Object model) { return false; }
         @Override default void close() { }
     }
@@ -176,6 +181,11 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 @Override public void send(CommentReplyEvent event, String text, SpeechPreparation.Audio audio,
                                            BooleanSupplier valid, BooleanSupplier before, Runnable accepted, Consumer<String> result) {
                     publisher.sendReply(event, text, audio, valid, before, accepted, result);
+                }
+                @Override public void send(CommentReplyEvent event, String text, SpeechPreparation.Audio audio,
+                                           BooleanSupplier valid, BooleanSupplier before, Runnable accepted, Consumer<String> result,
+                                           Consumer<String> publishedCommentId) {
+                    publisher.sendReply(event, text, audio, valid, before, accepted, result, publishedCommentId);
                 }
                 @Override public boolean owns(Object model) { return publisher.ownsPublish(model); }
                 @Override public void close() { publisher.close(); }
@@ -536,7 +546,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 if (task.finished.get() && ("sent".equals(outcome) || "failed".equals(outcome))) dispatcher.recordOutcome(entry(task, outcome));
                 done.accept(outcome);
             }, () -> done.accept(task.submitted ? "submitted" : "cancelled"));
-        });
+        }, cid -> task.publishedCommentId = cid);
     }
 
     private void submitLedger(Runnable action, Runnable rejected) {
@@ -640,6 +650,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             tasks.remove(task.identity, task);
             if (task.audio != null && !task.submitted) task.audio.delete();
             if ("failed".equals(status) && task.submitted) dispatcher.reportFinalFailure(entry(task, "failed"));
+            if ("sent".equals(status)) dispatcher.recordOutcome(entry(task, status));
             signal();
         }, () -> { tasks.remove(task.identity, task); signal(); });
     }
@@ -648,7 +659,10 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         long now = System.currentTimeMillis();
         return new AutomationHistoryStore.Entry(task.id, KIND, task.event.aid, task.event.senderName,
                 task.input, task.text, task.model, status, task.created, now, task.requestImageCount, task.modelRequestSent,
-                task.audio == null ? AutomationHistoryStore.DELIVERY_TEXT : AutomationHistoryStore.DELIVERY_VOICE);
+                task.audio == null ? AutomationHistoryStore.DELIVERY_TEXT : AutomationHistoryStore.DELIVERY_VOICE)
+                .withLocation(new AutomationHistoryStore.Location(Long.toString(task.account), task.event.aid,
+                        task.publishedCommentId.isEmpty() ? task.event.incomingId : task.publishedCommentId,
+                        task.event.rootId, "", task.event.incomingId));
     }
 
     static String input(CommentReplyEvent event) {
@@ -720,6 +734,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         final AtomicBoolean finished = new AtomicBoolean();
         final AtomicBoolean remembered = new AtomicBoolean();
         volatile String text = "", model = "";
+        volatile String publishedCommentId = "";
         volatile boolean submitted, persistedSubmission, boundaryFailed, uncertain, deferCancellation;
         volatile AutomationRateLimiter.Reservation reservation;
         volatile SpeechPreparation.Audio audio;

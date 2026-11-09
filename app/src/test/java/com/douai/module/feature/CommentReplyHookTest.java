@@ -1569,6 +1569,21 @@ public final class CommentReplyHookTest {
         assertEquals("sent", parentHistory.get(0).status);
     }
 
+    @Test public void confirmedReplyHistoryPrefersItsOwnReceiptAndKeepsTheIncomingThreadAsFallback() {
+        sender.publishedId = "published-reply";
+        open();
+        source.events.put(100L, List.of(event("incoming-for-navigation", "thread-root", "200", 1001)));
+        hook.requestScan();
+        processReplies();
+        AutomationHistoryStore.Entry sent = history().get(0);
+        assertEquals("sent", sent.status);
+        assertEquals("100", sent.location.accountId);
+        assertEquals("work", sent.location.awemeId);
+        assertEquals("published-reply", sent.location.commentId);
+        assertEquals("thread-root", sent.location.rootCommentId);
+        assertEquals("incoming-for-navigation", sent.location.messageId);
+    }
+
     @Test public void backgroundingFromReplyDetailsDefersEvenWhenDispatcherPausesBeforeTheHook() {
         configure("reply_tip", true);
         open();
@@ -2213,6 +2228,15 @@ public final class CommentReplyHookTest {
         boolean delaySubmission;
         boolean omitAccepted;
         String outcome = "sent";
+        String publishedId = "";
+        @Override public void send(CommentReplyEvent event, String text, SpeechPreparation.Audio audio, BooleanSupplier valid,
+                                   BooleanSupplier beforeSend, Runnable accepted, Consumer<String> result,
+                                   Consumer<String> publishedCommentId) {
+            send(event, text, audio, valid, beforeSend, accepted, status -> {
+                if ("sent".equals(status) && !publishedId.isEmpty()) publishedCommentId.accept(publishedId);
+                result.accept(status);
+            });
+        }
         @Override public void send(CommentReplyEvent event, String text, BooleanSupplier valid,
                                    BooleanSupplier beforeSend, Runnable accepted, Consumer<String> result) {
             send(event, text, null, valid, beforeSend, accepted, result);

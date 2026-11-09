@@ -551,7 +551,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 // The pre-send durable reservation remains. Never infer rejection from an IO backlog.
                 main.post(() -> publishResult(task, invoked.get() ? "submitted" : "cancelled", reservation[0], result));
             }
-        });
+        }, cid -> task.publishedCommentId = cid);
     }
 
     private void publishResult(Task task, String status, AutomationRateLimiter.Reservation reservation,
@@ -610,6 +610,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         return new AutomationHistoryStore.Entry(task.id, AutomationHistoryStore.COMMENT, task.aid, task.name,
                 task.input, task.text == null ? "" : task.text, task.model, status, task.createdAt,
                 System.currentTimeMillis(), task.requestImageCount, task.modelRequestSent, deliveryMode(task))
+                .withLocation(new AutomationHistoryStore.Location(Long.toString(task.account), task.aid,
+                        task.publishedCommentId, "", "", ""))
                 .withDiagnostics(task.reason, task.stage,
                         task.queueMillis, task.mediaMillis, task.generationMillis, task.sendMillis);
     }
@@ -743,6 +745,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         volatile AutomationHistoryStore.Stage stage = AutomationHistoryStore.Stage.QUEUE;
         volatile String text;
         volatile String model = "";
+        volatile String publishedCommentId = "";
         volatile int requestImageCount;
         volatile boolean modelRequestSent;
         volatile boolean approved;

@@ -122,7 +122,8 @@ public final class AutomationDispatcherTest {
         java.util.concurrent.atomic.AtomicReference<Consumer<String>> callback = new java.util.concurrent.atomic.AtomicReference<>();
         dispatcher.prepare(new AutomationHistoryStore.Entry("diagnostic", "reply", "u", "用户", "消息", "回复",
                 "model", "pending", 1, 1).withDiagnostics(AutomationHistoryStore.Reason.NONE,
-                AutomationHistoryStore.Stage.GENERATION, 11, 22, 33, -1), () -> true, result -> {
+                AutomationHistoryStore.Stage.GENERATION, 11, 22, 33, -1)
+                .withLocation(new AutomationHistoryStore.Location("100", "", "", "", "conversation-1", "message-1")), () -> true, result -> {
             sends.incrementAndGet();
             callback.set(result);
         }, ignored -> { });
@@ -132,6 +133,8 @@ public final class AutomationDispatcherTest {
         assertEquals(AutomationHistoryStore.Stage.SEND, sending.stage);
         assertEquals(22, sending.mediaMillis);
         assertEquals(33, sending.generationMillis);
+        assertEquals("100", sending.location.accountId);
+        assertEquals("conversation-1", sending.location.conversationId);
         assertTrue(sending.queueMillis >= 11);
         advance(30);
         worker.runAll();
@@ -148,6 +151,8 @@ public final class AutomationDispatcherTest {
         assertEquals(AutomationHistoryStore.Stage.COMPLETE, sent.stage);
         assertEquals(22, sent.mediaMillis);
         assertEquals(33, sent.generationMillis);
+        assertEquals("conversation-1", sent.location.conversationId);
+        assertEquals("message-1", sent.location.messageId);
         assertTrue(sent.sendMillis >= submitted.sendMillis);
         assertEquals(1, sends.get());
     }

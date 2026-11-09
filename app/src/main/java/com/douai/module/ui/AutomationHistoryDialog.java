@@ -184,24 +184,58 @@ final class AutomationHistoryDialog {
 
     private void showDetail(Entry entry) {
         if (detail != null) detail.dismiss();
-        TextView text = label("对象：" + entry.targetName + "\n标识：" + entry.targetId + "\n状态："
+        AutomationHistoryNavigation.Target destination = AutomationHistoryNavigation.target(context, entry);
+        java.util.concurrent.atomic.AtomicReference<Entry> located = new java.util.concurrent.atomic.AtomicReference<>(entry);
+        boolean resolveConversation = AutomationHistoryStore.REPLY.equals(entry.kind)
+                && entry.location.conversationType < 0 && "com.ss.android.ugc.aweme".equals(context.getPackageName());
+        TextView text = label(detailText(entry, destination.hint));
+        text.setTextIsSelectable(true);
+        text.setPadding(dp(16), dp(12), dp(16), dp(12));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(context);
+        scroll.addView(text);
+        MiuixDialogBuilder builder = new MiuixDialogBuilder(context, miuix);
+        builder.setTitle("历史详情").setView(scroll).setNegativeButton("关闭", null);
+        if (destination.enabled() || resolveConversation) builder.setPositiveButton(resolveConversation ? "正在读取定位…" : destination.label, null);
+        AlertDialog next = builder.create();
+        if (dialog.getOwnerActivity() != null) next.setOwnerActivity(dialog.getOwnerActivity());
+        next.setOnDismissListener(ignored -> { if (detail == next) detail = null; });
+        detail = next;
+        next.show();
+        if (destination.enabled() || resolveConversation) {
+            next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+                if (AutomationHistoryNavigation.open(context, located.get())) dialog.dismiss();
+            });
+        }
+        if (resolveConversation) {
+            next.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            try {
+                worker.execute(() -> {
+                    Entry resolved = AutomationHistoryNavigation.resolveLegacyConversation(context, entry);
+                    main.post(() -> {
+                        if (detail != next || !next.isShowing()) return;
+                        located.set(resolved);
+                        AutomationHistoryNavigation.Target target = AutomationHistoryNavigation.target(context, resolved);
+                        text.setText(detailText(entry, target.hint));
+                        next.getButton(AlertDialog.BUTTON_POSITIVE).setText(target.label);
+                        next.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(target.enabled());
+                    });
+                });
+            } catch (RuntimeException unavailable) {
+                next.getButton(AlertDialog.BUTTON_POSITIVE).setText("无法跳转");
+            }
+        }
+    }
+
+    private static String detailText(Entry entry, String hint) {
+        return "对象：" + entry.targetName + "\n标识：" + entry.targetId + "\n状态："
                 + status(entry.status) + "\n模型：" + entry.modelName + "\n时间："
                 + DateFormat.getDateTimeInstance().format(new Date(entry.createdAt))
                 + (AutomationHistoryStore.COMMENT_REPLY.equals(entry.kind) ? "\n来源：评论回复" : "")
                 + (isComment(entry.kind)
                 ? "\n发送方式：" + deliveryMode(entry) + "\n" + imageRequest(entry) : "")
                 + "\n" + AutomationDiagnostics.details(entry)
-                + "\n\n原内容\n" + entry.input + "\n\n生成内容\n" + entry.output);
-        text.setTextIsSelectable(true);
-        text.setPadding(dp(16), dp(12), dp(16), dp(12));
-        android.widget.ScrollView scroll = new android.widget.ScrollView(context);
-        scroll.addView(text);
-        AlertDialog next = new MiuixDialogBuilder(context, miuix).setTitle("历史详情").setView(scroll)
-                .setNegativeButton("关闭", null).create();
-        if (dialog.getOwnerActivity() != null) next.setOwnerActivity(dialog.getOwnerActivity());
-        next.setOnDismissListener(ignored -> { if (detail == next) detail = null; });
-        detail = next;
-        next.show();
+                + "\n\n定位：" + hint
+                + "\n\n原内容\n" + entry.input + "\n\n生成内容\n" + entry.output;
     }
 
     /** Also use as the parent's dismiss callback when its owner replaces the listener. */

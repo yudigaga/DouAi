@@ -34,6 +34,7 @@ import com.douai.module.config.ConfigurationCatalog;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.CommentAiSettings;
+import com.douai.module.config.SidebarSettings;
 import com.douai.module.config.PlaybackSpeedPresets;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.feature.FeedGestureToolsHook;
@@ -122,7 +123,8 @@ public final class ModuleSettingsScreen {
             new SearchEntry("comment-speech", "评论转语音", "评论相关 > 评论转语音", "语音 TTS # 单击发送 评论", SearchDestination.COMMENT, "settings.option.评论转语音"),
             new SearchEntry("hash-long-press-voice", "#长按发送转语音（全局）", "评论相关 > #长按发送转语音（全局）", "语音 TTS #长按 长按发送 全局 私信 群聊 评论", SearchDestination.COMMENT, "settings.toggle.#长按发送转语音（全局）"),
             new SearchEntry("ai-chat", "AI 测试对话", "扩展功能 > AI 模型设置 > 测试对话", "AI 聊天 测试模型 对话 图片", SearchDestination.AI_CHAT),
-            new SearchEntry("comment-ai", "评论 AI 解析与抖音搜索", "扩展功能 > AI 模型设置", "AI 解析 接管 评论 分析 搜索 抖音 联网 工具调用", SearchDestination.AI)
+            new SearchEntry("comment-ai", "评论 AI 解析与抖音搜索", "扩展功能 > AI 模型设置", "AI 解析 接管 评论 分析 搜索 抖音 联网 工具调用", SearchDestination.AI),
+            new SearchEntry("sidebar", "首页右滑侧边栏与模块快捷入口", "界面相关 > 首页右滑打开侧边栏", "侧边栏 右滑 商城 常用功能 评论历史 回复历史 快捷入口", SearchDestination.GESTURES, "settings.toggle.首页右滑打开侧边栏")
     };
 
     public ModuleSettingsScreen(Context context, SettingsStore repository) {
@@ -140,6 +142,46 @@ public final class ModuleSettingsScreen {
         this.onClose = onClose;
         this.analyticsDiagnostics = analyticsDiagnostics;
         this.settings = repository.load();
+    }
+
+    /** Opens catalog-owned viewing/configuration destinations without executing an automation action. */
+    public void openSidebarEntry(String id) {
+        if (closed || !repository.isInHost() || SidebarSettings.find(id) == null) return;
+        dismissChildPages();
+        switch (id) {
+            case "module": break;
+            case "comment_history": showAutomationHistory(com.douai.module.config.AutomationHistoryStore.COMMENT); break;
+            case "reply_history": showAutomationHistory(com.douai.module.config.AutomationHistoryStore.REPLY); break;
+            case "ai_chat": showAiChat(); break;
+            case "download_tasks": {
+                DownloadTasksDialog page = new DownloadTasksDialog(context, miuixHome != null);
+                showOptionDialog(page.dialog(), page::close); break;
+            }
+            case "analytics": showLocalAnalytics(); break;
+            case "ai_models": showAiModelSettings(); break;
+            case "speech": showSpeechSettings(); break;
+            case "auto_comment": openCategory(Category.AUTO_COMMENT); break;
+            case "auto_reply": openCategory(Category.AUTO_REPLY); break;
+            case "automation": showAutomationSettings(); break;
+            case "streak": openCategory(Category.STREAK); break;
+            case "feed_filter": openCategory(Category.FILTER); break;
+            case "component_hide": openCategory(Category.COMPONENT_HIDE); break;
+            case "autoplay": openCategory(Category.AUTOPLAY); break;
+            case "gestures": openCategory(Category.INTERFACE); break;
+            case "comment_tools": openCategory(Category.COMMENT); break;
+            case "message_management": openCategory(Category.MESSAGE); break;
+            case "download_settings": openCategory(Category.DOWNLOAD); break;
+            case "backup": showConfigBackup(); break;
+            case "debug_logs": showDebugLogs(); break;
+            case "help": showOptionDialog(new HelpDialog(context, miuixHome != null).dialog()); break;
+            case "about": openCategory(Category.ABOUT); break;
+            default: break;
+        }
+    }
+
+    private void showAutomationHistory(String kind) {
+        AutomationHistoryDialog page = new AutomationHistoryDialog(context, kind, miuixHome != null);
+        showOptionDialog(page.dialog(), page::closeDetails);
     }
 
     public View createView() {
@@ -543,6 +585,10 @@ public final class ModuleSettingsScreen {
                 addSwitch("首页刷新确认", "",
                         repository.getBoolean("confirm_refresh", false), true,
                         value -> repository.putBoolean("confirm_refresh", value));
+                addLocalSwitch("首页右滑打开侧边栏", "默认关闭，仅适配抖音 41.0.0；开启后替换侧边栏常用功能，关闭恢复原行为", SidebarSettings.ENABLED);
+                OptionRow[] sidebarItems = new OptionRow[1];
+                sidebarItems[0] = addOption("侧边栏显示项", "勾选要显示的模块入口；可以全部取消", sidebarSelectionPreview(), true,
+                        () -> showSidebarSelection(sidebarItems[0]));
                 break;
             case FILTER:
                 buildFeedFilters();
@@ -634,6 +680,31 @@ public final class ModuleSettingsScreen {
         LocalAnalyticsDialog page = new LocalAnalyticsDialog(context, repository, miuixHome != null,
                 analyticsDiagnostics);
         showOptionDialog(page.dialog(), page::close);
+    }
+
+    private String sidebarSelectionPreview() {
+        int count = SidebarSettings.selected(repository).size();
+        return count == 0 ? "不显示模块入口" : "已选择 " + count + " 项";
+    }
+
+    private void showSidebarSelection(OptionRow preview) {
+        String[] labels = new String[SidebarSettings.ENTRIES.size()];
+        boolean[] checked = new boolean[labels.length];
+        java.util.Set<String> selected = new java.util.HashSet<>();
+        for (SidebarSettings.Entry entry : SidebarSettings.selected(repository)) selected.add(entry.id);
+        for (int index = 0; index < labels.length; index++) {
+            SidebarSettings.Entry entry = SidebarSettings.ENTRIES.get(index);
+            labels[index] = entry.title;
+            checked[index] = selected.contains(entry.id);
+        }
+        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("侧边栏显示项")
+                .setMultiChoiceItems(labels, checked, (ignored, which, value) -> checked[which] = value)
+                .setNegativeButton("取消", null).setPositiveButton("保存", (ignored, which) -> {
+                    java.util.List<String> ids = new java.util.ArrayList<>();
+                    for (int index = 0; index < checked.length; index++) if (checked[index]) ids.add(SidebarSettings.ENTRIES.get(index).id);
+                    repository.putString(SidebarSettings.ITEMS, SidebarSettings.serialize(ids));
+                    preview.setValue(sidebarSelectionPreview());
+                }).create());
     }
 
     private void showConfigBackup() {
@@ -2084,7 +2155,7 @@ public final class ModuleSettingsScreen {
 
     private enum Category {
         BASIC("基本功能", 3),
-        INTERFACE("界面相关", 13),
+        INTERFACE("界面相关", 15),
         FILTER("视频筛选", 16),
         DOWNLOAD("下载相关", 14),
         AUTOPLAY("自动播放", 7),

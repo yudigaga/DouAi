@@ -84,6 +84,8 @@ import com.douai.module.feature.AutoMessageDraftHook;
 import com.douai.module.feature.CommentToolsHook;
 import com.douai.module.feature.ImmersiveModeController;
 import com.douai.module.feature.HomeNavigationHideController;
+import com.douai.module.feature.HomeSidebarGestureHook;
+import com.douai.module.feature.HomeSidebarModuleHook;
 import com.douai.module.ui.HostUiController;
 import io.github.libxposed.api.XposedInterface;
 
@@ -157,6 +159,9 @@ public final class DouAiModule extends XposedModule {
     private volatile ImmersiveModeController immersiveModeController;
     private volatile HomeNavigationHideController homeNavigationHideController;
     private volatile HostUiController hostUiController;
+    private volatile HomeSidebarGestureHook homeSidebarGestureHook;
+    private volatile HomeSidebarModuleHook homeSidebarModuleHook;
+    private volatile String homeSidebarFailure;
     private volatile XposedInterface.HookHandle applicationCreateHandle;
     private volatile XposedInterface.HookHandle activityResumeHandle;
     private volatile String feedHookFailure;
@@ -702,6 +707,10 @@ public final class DouAiModule extends XposedModule {
             }
             if (hostBehaviorHooks != null && (initial || changes.affects(Feature.HOST_BEHAVIOR))) hostBehaviorHooks.setOptions(options);
             if (feedGestureToolsHook != null && gestureChanged) feedGestureToolsHook.setOptions(options);
+            if (initial || changes.affects(Feature.SIDEBAR)) {
+                if (homeSidebarGestureHook != null) homeSidebarGestureHook.setOptions(options);
+                if (homeSidebarModuleHook != null) homeSidebarModuleHook.setOptions(options);
+            }
             if (commentAiAnalysisHook != null && (initial || changes.affects(Feature.MANUAL_AI))) {
                 commentAiAnalysisHook.setOptions(options);
             }
@@ -1096,6 +1105,24 @@ public final class DouAiModule extends XposedModule {
                 }
             }
         }
+        if (HostAdaptation.currentProfile() == HostAdaptation.PROFILE_410) {
+            try {
+                if (homeSidebarGestureHook == null) homeSidebarGestureHook = HomeSidebarGestureHook.install(
+                        hookFramework(), hostClassLoader, localOptions, message -> moduleLog(3, TAG, message));
+                if (homeSidebarModuleHook == null) {
+                    HostUiController ui = hostUiController;
+                    if (ui != null) homeSidebarModuleHook = HomeSidebarModuleHook.install(hookFramework(), hostClassLoader,
+                            localOptions, ui::showSidebarEntry, () -> homeSidebarGestureHook.closeSidebar(),
+                            message -> moduleLog(3, TAG, message));
+                }
+                homeSidebarFailure = null;
+            } catch (Exception | LinkageError unavailable) {
+                homeSidebarFailure = HostAdaptationDiagnostics.installationFailure(unavailable);
+                if (homeSidebarModuleHook != null) { homeSidebarModuleHook.close(); homeSidebarModuleHook = null; }
+                if (homeSidebarGestureHook != null) { homeSidebarGestureHook.close(); homeSidebarGestureHook = null; }
+                DouAiLog.failure("home_sidebar", "installation", unavailable);
+            }
+        }
         // Startup gates can also be installed synchronously before Application.onCreate.
         synchronized (this) {
             if (hostBehaviorHooks == null) {
@@ -1264,6 +1291,9 @@ public final class DouAiModule extends XposedModule {
     private Bundle diagnosticsSnapshot() {
         Bundle snapshot = new Bundle(scanDiagnostics);
         snapshot.putBoolean("feature.comment_ai.installed", commentAiAnalysisHook != null && commentAiAnalysisHook.isActive());
+        snapshot.putBoolean("feature.home_sidebar.installed", homeSidebarGestureHook != null && homeSidebarGestureHook.isActive()
+                && homeSidebarModuleHook != null && homeSidebarModuleHook.isActive());
+        if (homeSidebarFailure != null) snapshot.putString("feature.home_sidebar.failure", homeSidebarFailure);
         snapshot.putString("feature.comment_ai.failure", commentAiAnalysisFailure);
         snapshot.putBoolean("feature.manual_ai_search.installed", manualAiSearch != null);
         snapshot.putString("feature.manual_ai_search.failure", manualAiSearchFailure);

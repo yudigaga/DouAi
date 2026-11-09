@@ -4,6 +4,27 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public final class NativeCommentPublisherResponseTest {
+    @Test public void navigationReceiptRequiresTheSameVerifiedWorkAndReplyTargetWithoutChangingStatus() {
+        Response response = new Response();
+        response.comment = new Comment();
+        response.comment.cid = "published";
+        response.comment.awemeId = "origin";
+        assertEquals("published", NativeCommentPublisher.publishedCommentId(response, "origin", null, null));
+        response.comment.awemeId = "";
+        assertEquals("sent", NativeCommentPublisher.responseStatus(response, "origin", null, null));
+        assertEquals("", NativeCommentPublisher.publishedCommentId(response, "origin", null, null));
+        response.comment.awemeId = "other";
+        assertEquals("", NativeCommentPublisher.publishedCommentId(response, "origin", null, null));
+        response.comment.awemeId = "origin";
+        response.comment.replyId = "root";
+        response.comment.replyToReplyId = "incoming";
+        assertEquals("published", NativeCommentPublisher.publishedCommentId(response, "origin", "root", "incoming"));
+        response.comment.replyToReplyId = "another";
+        assertEquals("", NativeCommentPublisher.publishedCommentId(response, "origin", "root", "incoming"));
+        response.comment.replyToReplyId = "incoming";
+        response.status_code = 1;
+        assertEquals("", NativeCommentPublisher.publishedCommentId(response, "origin", "root", "incoming"));
+    }
     @Test public void successRequiresStatusAndARealCommentIdForTheOriginalWork() {
         Response response = new Response();
         response.comment = new Comment();

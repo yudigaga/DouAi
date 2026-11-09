@@ -127,6 +127,9 @@ public final class AutoCommentHookTest {
             assertEquals(1, Request.attempts);
             assertEquals("固定评论", Request.models.get(0).a);
             assertEquals("sent", entry("work").status);
+            assertEquals("100", entry("work").location.accountId);
+            assertEquals("work", entry("work").location.awemeId);
+            assertEquals("comment-id", entry("work").location.commentId);
             assertTrue(com.douai.module.diagnostics.DouAiLog.awaitIdle(3000));
             String started = records.stream().filter(line -> line.contains("\"feature_id\":\"auto_comment\"")
                     && line.contains("\"event\":\"operation_started\"")).findFirst().orElseThrow();

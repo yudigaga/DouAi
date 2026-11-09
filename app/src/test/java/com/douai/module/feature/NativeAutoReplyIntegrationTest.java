@@ -58,6 +58,11 @@ public final class NativeAutoReplyIntegrationTest {
             assertEquals("thread", fixture.database.imSdkContext.last.conversation.id());
             assertEquals("sent", fixture.history().get(0).status);
             assertEquals(AutomationHistoryStore.Stage.COMPLETE, fixture.history().get(0).stage);
+            assertEquals("100", fixture.history().get(0).location.accountId);
+            assertEquals("thread", fixture.history().get(0).location.conversationId);
+            assertEquals("9101", fixture.history().get(0).location.messageId);
+            assertEquals(0, fixture.history().get(0).location.conversationType);
+            assertEquals("200", fixture.history().get(0).location.peerUid);
         }
     }
 

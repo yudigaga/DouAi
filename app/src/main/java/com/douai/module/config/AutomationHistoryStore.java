@@ -75,11 +75,11 @@ public final class AutomationHistoryStore {
                     && entry.createdAt <= preferences.getLong("cleared_at_" + entry.kind, 0)) return;
             List<Entry> entries = readAll();
             for (Entry previous : entries) {
-                if (previous.kind.equals(entry.kind) && previous.id.equals(entry.id)
-                        && previous.modelRequestSent && !entry.modelRequestSent) {
+                if (!previous.kind.equals(entry.kind) || !previous.id.equals(entry.id)) continue;
+                if (previous.modelRequestSent && !entry.modelRequestSent)
                     entry = requestMetadata(entry, previous.requestImageCount);
-                    break;
-                }
+                entry = entry.withLocation(Location.merge(entry.kind, previous.location, entry.location));
+                break;
             }
             Entry updated = entry;
             entries.removeIf(previous -> previous.kind.equals(updated.kind) && previous.id.equals(updated.id));
@@ -111,7 +111,8 @@ public final class AutomationHistoryStore {
         return new Entry(entry.id, entry.kind, entry.targetId, entry.targetName,
                 entry.input, entry.output, entry.modelName, entry.status, entry.createdAt, entry.updatedAt,
                 imageCount, true, entry.deliveryMode).withDiagnostics(entry.reason, entry.stage,
-                entry.queueMillis, entry.mediaMillis, entry.generationMillis, entry.sendMillis);
+                entry.queueMillis, entry.mediaMillis, entry.generationMillis, entry.sendMillis)
+                .withLocation(entry.location);
     }
 
     private static void trimKind(List<Entry> entries, String kind) {
@@ -149,7 +150,8 @@ public final class AutomationHistoryStore {
                             diagnosticEnum(Reason.class, json.opt("reason"), Reason.NONE),
                             diagnosticEnum(Stage.class, json.opt("stage"), Stage.NONE),
                             diagnosticMillis(json.opt("queueMillis")), diagnosticMillis(json.opt("mediaMillis")),
-                            diagnosticMillis(json.opt("generationMillis")), diagnosticMillis(json.opt("sendMillis"))));
+                            diagnosticMillis(json.opt("generationMillis")), diagnosticMillis(json.opt("sendMillis")))
+                            .withLocation(Location.read(json.optJSONObject("location"))));
                 } catch (IllegalArgumentException ignored) { }
             }
         } catch (JSONException ignored) { }
@@ -179,7 +181,8 @@ public final class AutomationHistoryStore {
                         .put("reason", entry.reason.name().toLowerCase(java.util.Locale.ROOT))
                         .put("stage", entry.stage.name().toLowerCase(java.util.Locale.ROOT))
                         .put("queueMillis", entry.queueMillis).put("mediaMillis", entry.mediaMillis)
-                        .put("generationMillis", entry.generationMillis).put("sendMillis", entry.sendMillis));
+                        .put("generationMillis", entry.generationMillis).put("sendMillis", entry.sendMillis)
+                        .put("location", entry.location.json()));
             } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
         }
         return array.toString();
@@ -215,6 +218,111 @@ public final class AutomationHistoryStore {
         return value >= -1 && value <= MAX_DIAGNOSTIC_MILLIS ? value : -1;
     }
 
+    /** Identifiers only; navigation constructs its own reviewed route rather than persisting arbitrary URLs. */
+    public static final class Location {
+        public static final Location EMPTY = new Location("", "", "", "", "", "");
+        public final String accountId;
+        public final String awemeId;
+        public final String commentId;
+        public final String rootCommentId;
+        public final String conversationId;
+        public final String messageId;
+        public final int conversationType;
+        public final String peerUid;
+
+        public Location(String accountId, String awemeId, String commentId, String rootCommentId,
+                        String conversationId, String messageId) {
+            this(accountId, awemeId, commentId, rootCommentId, conversationId, messageId, -1);
+        }
+
+        public Location(String accountId, String awemeId, String commentId, String rootCommentId,
+                        String conversationId, String messageId, int conversationType) {
+            this(accountId, awemeId, commentId, rootCommentId, conversationId, messageId, conversationType, "");
+        }
+
+        public Location(String accountId, String awemeId, String commentId, String rootCommentId,
+                        String conversationId, String messageId, int conversationType, String peerUid) {
+            this.accountId = identifier(accountId, 256);
+            this.awemeId = identifier(awemeId, 256);
+            this.commentId = identifier(commentId, 256);
+            this.rootCommentId = identifier(rootCommentId, 256);
+            this.conversationId = identifier(conversationId, 512);
+            this.messageId = identifier(messageId, 256);
+            this.conversationType = conversationType == 0 || conversationType == 1 ? conversationType : -1;
+            this.peerUid = numericIdentifier(peerUid);
+        }
+
+        private static String identifier(String value, int maximum) {
+            if (value == null || value.length() > maximum) return "";
+            for (int index = 0; index < value.length(); index++) {
+                char character = value.charAt(index);
+                if (Character.isISOControl(character) || Character.isWhitespace(character)
+                        || Character.getType(character) == Character.FORMAT
+                        || "/\\?#&=%".indexOf(character) >= 0) return "";
+            }
+            return value;
+        }
+
+        private static Location read(JSONObject value) {
+            return value == null ? EMPTY : new Location(text(value, "accountId"), text(value, "awemeId"),
+                    text(value, "commentId"), text(value, "rootCommentId"),
+                    text(value, "conversationId"), text(value, "messageId"), conversationType(value.opt("conversationType")),
+                    text(value, "peerUid"));
+        }
+
+        private static String numericIdentifier(String value) {
+            String identifier = identifier(value, 256);
+            for (int index = 0; index < identifier.length(); index++) {
+                char digit = identifier.charAt(index);
+                if (digit < '0' || digit > '9') return "";
+            }
+            return identifier;
+        }
+
+        private static int conversationType(Object value) {
+            if (!(value instanceof Integer) && !(value instanceof Long)) return -1;
+            long type = ((Number) value).longValue();
+            return type == 0 || type == 1 ? (int) type : -1;
+        }
+
+        private static String text(JSONObject value, String key) {
+            Object raw = value.opt(key);
+            return raw instanceof String ? (String) raw : "";
+        }
+
+        private JSONObject json() throws JSONException {
+            return new JSONObject().put("accountId", accountId).put("awemeId", awemeId)
+                    .put("commentId", commentId).put("rootCommentId", rootCommentId)
+                    .put("conversationId", conversationId).put("messageId", messageId)
+                    .put("conversationType", conversationType).put("peerUid", peerUid);
+        }
+
+        private static Location merge(String kind, Location previous, Location next) {
+            if (!previous.accountId.isEmpty() && !next.accountId.isEmpty()
+                    && !previous.accountId.equals(next.accountId)) return next;
+            boolean sameWork = compatible(next.awemeId, previous.awemeId);
+            boolean sameConversation = compatible(next.conversationId, previous.conversationId);
+            boolean confirmedReply = COMMENT_REPLY.equals(kind) && sameWork && !previous.messageId.isEmpty()
+                    && !previous.commentId.isEmpty() && !previous.commentId.equals(previous.messageId);
+            boolean incomingFallback = !next.messageId.isEmpty() && next.commentId.equals(next.messageId);
+            // A dispatcher's old input location may arrive after the owned success receipt.
+            String commentId = confirmedReply && incomingFallback ? previous.commentId
+                    : prefer(next.commentId, sameWork ? previous.commentId : "");
+            return new Location(prefer(next.accountId, previous.accountId), prefer(next.awemeId, previous.awemeId),
+                    commentId,
+                    prefer(next.rootCommentId, sameWork ? previous.rootCommentId : ""),
+                    prefer(next.conversationId, previous.conversationId),
+                    prefer(next.messageId, sameConversation ? previous.messageId : ""),
+                    next.conversationType >= 0 ? next.conversationType : sameConversation ? previous.conversationType : -1,
+                    prefer(next.peerUid, sameConversation ? previous.peerUid : ""));
+        }
+
+        private static String prefer(String next, String previous) { return next.isEmpty() ? previous : next; }
+        private static boolean compatible(String next, String previous) {
+            return next.isEmpty() || previous.isEmpty() || next.equals(previous);
+        }
+    }
+
     public static final class Entry {
         public final String id;
         public final String kind;
@@ -235,6 +343,7 @@ public final class AutomationHistoryStore {
         public final long mediaMillis;
         public final long generationMillis;
         public final long sendMillis;
+        public final Location location;
 
         public Entry(String id, String kind, String targetId, String targetName,
                      String input, String output, String modelName, String status,
@@ -262,14 +371,15 @@ public final class AutomationHistoryStore {
                      long createdAt, long updatedAt, int requestImageCount, boolean modelRequestSent,
                      String deliveryMode) {
             this(id, kind, targetId, targetName, input, output, modelName, status, createdAt, updatedAt,
-                    requestImageCount, modelRequestSent, deliveryMode, Reason.NONE, Stage.NONE, -1, -1, -1, -1);
+                    requestImageCount, modelRequestSent, deliveryMode, Reason.NONE, Stage.NONE, -1, -1, -1, -1,
+                    Location.EMPTY);
         }
 
         private Entry(String id, String kind, String targetId, String targetName,
                       String input, String output, String modelName, String status,
                       long createdAt, long updatedAt, int requestImageCount, boolean modelRequestSent,
                       String deliveryMode, Reason reason, Stage stage,
-                      long queueMillis, long mediaMillis, long generationMillis, long sendMillis) {
+                      long queueMillis, long mediaMillis, long generationMillis, long sendMillis, Location location) {
             requireKind(kind);
             if (id == null || id.isEmpty()) throw new IllegalArgumentException("Entry ID is required");
             if (!"pending".equals(status) && !"cancelled".equals(status) && !"sent".equals(status)
@@ -297,6 +407,7 @@ public final class AutomationHistoryStore {
             this.mediaMillis = boundedMillis(mediaMillis);
             this.generationMillis = boundedMillis(generationMillis);
             this.sendMillis = boundedMillis(sendMillis);
+            this.location = location == null ? Location.EMPTY : location;
         }
 
         /** Adds only controlled diagnostics; delivery status and existing content are unchanged. */
@@ -304,7 +415,14 @@ public final class AutomationHistoryStore {
                                      long generationMillis, long sendMillis) {
             return new Entry(id, kind, targetId, targetName, input, output, modelName, status,
                     createdAt, updatedAt, requestImageCount, modelRequestSent, deliveryMode,
-                    reason, stage, queueMillis, mediaMillis, generationMillis, sendMillis);
+                    reason, stage, queueMillis, mediaMillis, generationMillis, sendMillis, location);
+        }
+
+        /** Retains all delivery and diagnostic state while adding a captured navigation location. */
+        public Entry withLocation(Location location) {
+            return new Entry(id, kind, targetId, targetName, input, output, modelName, status,
+                    createdAt, updatedAt, requestImageCount, modelRequestSent, deliveryMode,
+                    reason, stage, queueMillis, mediaMillis, generationMillis, sendMillis, location);
         }
     }
 }

@@ -520,7 +520,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         return new Entry(entry.id, entry.kind, entry.targetId, entry.targetName,
                 entry.input, entry.output, entry.modelName, status,
                 entry.createdAt, System.currentTimeMillis(), entry.requestImageCount, entry.modelRequestSent,
-                entry.deliveryMode).withDiagnostics(reason, stage, entry.queueMillis,
+                entry.deliveryMode).withLocation(entry.location).withDiagnostics(reason, stage, entry.queueMillis,
                 entry.mediaMillis, entry.generationMillis, entry.sendMillis);
     }
 

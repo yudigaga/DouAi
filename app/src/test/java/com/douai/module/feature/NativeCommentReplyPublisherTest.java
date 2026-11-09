@@ -81,6 +81,27 @@ public final class NativeCommentReplyPublisherTest {
         assertFalse(publisher.ownsPublish(model));
     }
 
+    @Test public void ownedReplyReceiptPublishesItsIdBeforeTheUnchangedBusinessOutcome() throws Throwable {
+        List<String> events = new ArrayList<>();
+        publisher.sendReply(event("incoming", "root"), "正文", null, () -> true, () -> true, () -> { },
+                status -> events.add("status:" + status), cid -> events.add("cid:" + cid));
+        ShadowLooper.idleMainLooper();
+        Response receipt = wireResponse(0);
+        complete(0, receipt);
+        assertEquals(List.of("cid:" + receipt.comment.cid, "status:sent"), events);
+        complete(0, receipt);
+        assertEquals(2, events.size());
+    }
+
+    @Test public void navigationObserverFailureCannotChangeANativeReplyOutcome() throws Throwable {
+        List<String> outcomes = new ArrayList<>();
+        publisher.sendReply(event("incoming", "root"), "正文", null, () -> true, () -> true, () -> { },
+                outcomes::add, cid -> { throw new IllegalStateException("observer"); });
+        ShadowLooper.idleMainLooper();
+        complete(0, wireResponse(0));
+        assertEquals(List.of("sent"), outcomes);
+    }
+
     @Test public void duplicateAndExpiredCallbacksKeepVerifiedTraceWithoutChangingBusinessOutcomes() throws Throwable {
         DouAiLog.awaitIdle(3000);
         boolean previousDebug = DebugLog.isEnabled();

@@ -27,6 +27,33 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
 public final class HostUiControllerTest {
+    @Test public void sidebarShortcutsReuseOneOwnedSettingsScreenAndCloseItsChildrenOnPause() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        HostUiController controller = new HostUiController(RuntimeEnvironment.getApplication(), ignored -> { });
+        try {
+            controller.onActivityResumed(activity);
+            controller.showSidebarEntry(activity, "module");
+            idleMainLooper();
+            Dialog settings = ShadowDialog.getLatestDialog();
+            assertTrue(settings.isShowing());
+            controller.showSidebarEntry(activity, "comment_history");
+            idleMainLooper();
+            Dialog history = ShadowDialog.getLatestDialog();
+            assertNotSame(settings, history);
+            assertTrue(history.isShowing());
+            assertTrue(settings.isShowing());
+            controller.showSidebarEntry(activity, "module");
+            idleMainLooper();
+            assertFalse(history.isShowing());
+            assertTrue(settings.isShowing());
+            controller.onActivityPaused(activity);
+            assertFalse(settings.isShowing());
+            controller.showSidebarEntry(activity, "reply_history");
+            idleMainLooper();
+            assertFalse(ShadowDialog.getLatestDialog().isShowing());
+        } finally { controller.close(); activity.finish(); }
+    }
+
     private static final String ENTRY_TAG = "DouAi.HostSettingsEntry";
 
     @Before public void resetAcknowledgment() {

@@ -180,7 +180,9 @@ final class NativeCommentPublisher implements AutoCloseable {
                                     } else if ("failed".equals(status) && tracked != null && tracked.audioPath != null) {
                                         detail += audioFailureHintDiagnostic(response) + tracked.audioWorkDiagnostic;
                                     }
-                                    publisher.received(owner, status, detail);
+                                    String publishedId = tracked == null ? "" : publishedCommentId(response,
+                                            tracked.aid, tracked.rootId, tracked.incomingId);
+                                    publisher.received(owner, status, detail, true, publishedId);
                                 });
                             }
                         });
@@ -203,7 +205,13 @@ final class NativeCommentPublisher implements AutoCloseable {
 
     void send(Object work, String aid, String text, SpeechPreparation.Audio audio, BooleanSupplier valid,
               BooleanSupplier beforeNativeSend, Runnable acceptedRequest, Consumer<String> result) {
-        send(work, aid, text, audio, null, valid, beforeNativeSend, acceptedRequest, result);
+        send(work, aid, text, audio, valid, beforeNativeSend, acceptedRequest, result, ignored -> { });
+    }
+
+    void send(Object work, String aid, String text, SpeechPreparation.Audio audio, BooleanSupplier valid,
+              BooleanSupplier beforeNativeSend, Runnable acceptedRequest, Consumer<String> result,
+              Consumer<String> publishedCommentId) {
+        send(work, aid, text, audio, null, valid, beforeNativeSend, acceptedRequest, result, publishedCommentId);
     }
 
     void sendReply(CommentReplyEvent event, String text, BooleanSupplier valid, BooleanSupplier beforeNativeSend,
@@ -214,12 +222,19 @@ final class NativeCommentPublisher implements AutoCloseable {
     void sendReply(CommentReplyEvent event, String text, SpeechPreparation.Audio audio,
                    BooleanSupplier valid, BooleanSupplier beforeNativeSend,
                    Runnable acceptedRequest, Consumer<String> result) {
+        sendReply(event, text, audio, valid, beforeNativeSend, acceptedRequest, result, ignored -> { });
+    }
+
+    void sendReply(CommentReplyEvent event, String text, SpeechPreparation.Audio audio,
+                   BooleanSupplier valid, BooleanSupplier beforeNativeSend,
+                   Runnable acceptedRequest, Consumer<String> result, Consumer<String> publishedCommentId) {
         if (event == null) { main.post(() -> result.accept("failed")); return; }
-        send(event.work, event.aid, text, audio, event, valid, beforeNativeSend, acceptedRequest, result);
+        send(event.work, event.aid, text, audio, event, valid, beforeNativeSend, acceptedRequest, result, publishedCommentId);
     }
 
     private void send(Object work, String aid, String text, SpeechPreparation.Audio audio, CommentReplyEvent reply,
-                      BooleanSupplier valid, BooleanSupplier beforeNativeSend, Runnable acceptedRequest, Consumer<String> result) {
+                      BooleanSupplier valid, BooleanSupplier beforeNativeSend, Runnable acceptedRequest, Consumer<String> result,
+                      Consumer<String> publishedCommentId) {
         DouAiLog.Operation trace = AutomationTrace.capture(reply == null ? "auto_comment" : "auto_comment_reply", "native_publish");
         trace.stage("native_prepare", "target_ref=" + DouAiLog.reference(aid) + ";media=" + (audio == null ? "text" : "audio"));
         main.post(trace.wrap(() -> {
@@ -267,7 +282,7 @@ final class NativeCommentPublisher implements AutoCloseable {
                 request = requestConstructor.newInstance();
                 pending = new Pending(aid, request, model, audio == null ? null : audio.file.getAbsolutePath(),
                         reply == null ? null : reply.rootId, reply == null ? null : reply.incomingId,
-                        audio == null ? "" : audioWorkDiagnostic(origin), sample, result);
+                        audio == null ? "" : audioWorkDiagnostic(origin), sample, result, publishedCommentId);
                 requests.put(request, pending);
                 if (!valid.getAsBoolean() || !beforeNativeSend.getAsBoolean()) {
                     received(request, "cancelled");
@@ -371,6 +386,10 @@ final class NativeCommentPublisher implements AutoCloseable {
     }
 
     private void received(Object request, String status, String detail, boolean hostCallback) {
+        received(request, status, detail, hostCallback, "");
+    }
+
+    private void received(Object request, String status, String detail, boolean hostCallback, String publishedId) {
         Pending pending = requests.remove(request);
         if (pending == null || closed) {
             if (pending != null) callbackHistory.remember(request, pending.trace, "publisher_closed", "unknown");
@@ -389,6 +408,10 @@ final class NativeCommentPublisher implements AutoCloseable {
         safeLog("Automatic comment native callback: " + status + detail + audioPhase(pending)
                 + "; kind=" + (pending.rootId == null ? "root" : "reply")
                 + "; media=" + (pending.audioPath == null ? "text" : "voice"));
+        if (hostCallback && "sent".equals(status) && publishedId != null && !publishedId.isEmpty()) {
+            try { pending.publishedCommentId.accept(publishedId); }
+            catch (RuntimeException ignored) { safeLog("Comment navigation receipt observer unavailable"); }
+        }
         pending.trace.wrapConsumer(pending.result).accept(status);
     }
 
@@ -619,6 +642,14 @@ final class NativeCommentPublisher implements AutoCloseable {
                 ? "sent" : "submitted";
     }
 
+    static String publishedCommentId(Object response, String aid, String rootId, String incomingId) {
+        if (!"sent".equals(responseStatus(response, aid, rootId, incomingId))) return "";
+        Object comment = HostTargets.read(response, "comment");
+        if (aid == null || !aid.equals(HostTargets.read(comment, "awemeId"))) return "";
+        Object cid = HostTargets.read(comment, "cid");
+        return cid instanceof String ? (String) cid : "";
+    }
+
     private void safeLog(String message) { try { log.accept(message); } catch (RuntimeException ignored) { } }
 
     @Override public void close() {
@@ -654,16 +685,19 @@ final class NativeCommentPublisher implements AutoCloseable {
         final String audioWorkDiagnostic;
         final CommentAudioDiagnostics.Sample sample;
         final Consumer<String> result;
+        final Consumer<String> publishedCommentId;
         final AtomicBoolean timedOut = new AtomicBoolean();
         boolean uploadStarted;
         boolean callbackSeen;
         Pending(String aid, Object owner, Object model, String audioPath, String rootId, String incomingId,
-                String audioWorkDiagnostic, CommentAudioDiagnostics.Sample sample, Consumer<String> result) {
+                String audioWorkDiagnostic, CommentAudioDiagnostics.Sample sample, Consumer<String> result,
+                Consumer<String> publishedCommentId) {
             this.trace = AutomationTrace.capture("native_comment_publish", "owned_request");
             this.aid = aid; this.owner = owner; this.model = model; this.audioPath = audioPath; this.result = result;
             this.rootId = rootId; this.incomingId = incomingId;
             this.audioWorkDiagnostic = audioWorkDiagnostic;
             this.sample = sample;
+            this.publishedCommentId = publishedCommentId == null ? ignored -> { } : publishedCommentId;
         }
     }
 }

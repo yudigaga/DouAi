@@ -348,6 +348,192 @@ public final class AutomationHistoryStoreTest {
         assertTrue(source.contains("\"stage\":\"generation\""));
     }
 
+    @Test public void legacyAndMalformedLocationDataKeepTheRecordWithoutInventingNavigation() throws Exception {
+        JSONObject json = new JSONObject().put("id", "legacy").put("kind", "comment")
+                .put("status", "sent").put("createdAt", 10).put("updatedAt", 20);
+        context.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE).edit()
+                .putString("entries_v1", new JSONArray().put(json).toString()).commit();
+        assertEmptyLocation(store.read("comment").get(0).location);
+        json.put("location", new JSONObject().put("accountId", 123).put("commentId", JSONObject.NULL)
+                .put("awemeId", "https://example.test/video/1"));
+        context.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE).edit()
+                .putString("entries_v1", new JSONArray().put(json).toString()).commit();
+        AutomationHistoryStore.Entry loaded = store.read("comment").get(0);
+        assertEquals("sent", loaded.status);
+        assertEmptyLocation(loaded.location);
+    }
+
+    @Test public void navigationSurvivesPersistenceDiagnosticsAndImageMetadataUpdates() {
+        AutomationHistoryStore.Location location = new AutomationHistoryStore.Location(
+                "100", "200", "300", "250", "0:1:100:400", "500");
+        AutomationHistoryStore.Entry original = entry("located", "comment_reply", "pending", 10, "原评论", "回复")
+                .withLocation(location);
+        AutomationHistoryStore.Entry diagnosed = original.withDiagnostics(AutomationHistoryStore.Reason.SEND_FAILED,
+                AutomationHistoryStore.Stage.SEND, 1, 2, 3, 4);
+        assertSame(location, diagnosed.location);
+        assertEmptyLocation(entry("empty", "comment", "pending", 1, "", "").location);
+        assertSame(AutomationHistoryStore.Location.EMPTY, original.withLocation(null).location);
+        store.upsert(diagnosed);
+        store.markModelRequestSent("comment_reply", "located", 2);
+        AutomationHistoryStore.Entry loaded = new AutomationHistoryStore(context).read("comment_reply").get(0);
+        assertLocation(location, loaded.location);
+        assertEquals(AutomationHistoryStore.Reason.SEND_FAILED, loaded.reason);
+        assertEquals(4, loaded.sendMillis);
+        assertTrue(loaded.modelRequestSent);
+        assertEquals(2, loaded.requestImageCount);
+
+        store.upsert(entry("located", "comment_reply", "sent", 10, "原评论", "回复"));
+        loaded = new AutomationHistoryStore(context).read("comment_reply").get(0);
+        assertEquals("sent", loaded.status);
+        assertLocation(location, loaded.location);
+        assertTrue(loaded.modelRequestSent);
+    }
+
+    @Test public void newerReceiptReplacesIncomingCommentButEmptyFieldsPreserveKnownLocation() {
+        store.upsert(entry("located", "comment_reply", "pending", 10, "原评论", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "200", "300", "250", "", "")));
+        store.upsert(entry("located", "comment_reply", "sent", 10, "原评论", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "", "301", "", "", "")));
+        AutomationHistoryStore.Location loaded = store.read("comment_reply").get(0).location;
+        assertEquals("100", loaded.accountId);
+        assertEquals("200", loaded.awemeId);
+        assertEquals("301", loaded.commentId);
+        assertEquals("250", loaded.rootCommentId);
+        store.upsert(entry("located", "comment_reply", "sent", 10, "原评论", "回复"));
+        assertEquals("301", store.read("comment_reply").get(0).location.commentId);
+    }
+
+    @Test public void staleIncomingCommentStatusCannotReplaceAnAlreadyConfirmedReplyReceipt() {
+        AutomationHistoryStore.Location incoming = new AutomationHistoryStore.Location(
+                "100", "200", "300", "250", "", "300");
+        store.upsert(entry("late-reply", "comment_reply", "submitted", 10, "原评论", "回复").withLocation(incoming));
+        store.upsert(entry("late-reply", "comment_reply", "sent", 10, "原评论", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "200", "301", "250", "", "300")));
+
+        // The dispatcher can finish after the publisher observer persisted the actual reply CID.
+        store.upsert(entry("late-reply", "comment_reply", "sent", 10, "原评论", "更新正文")
+                .withLocation(incoming).withDiagnostics(AutomationHistoryStore.Reason.NONE,
+                        AutomationHistoryStore.Stage.COMPLETE, 1, 2, 3, 4));
+        AutomationHistoryStore.Entry loaded = new AutomationHistoryStore(context).read("comment_reply").get(0);
+        assertEquals("301", loaded.location.commentId);
+        assertEquals("300", loaded.location.messageId);
+        assertEquals("sent", loaded.status);
+        assertEquals("更新正文", loaded.output);
+        assertEquals(4, loaded.sendMillis);
+
+        store.upsert(entry("late-reply", "comment_reply", "sent", 10, "原评论", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "200", "302", "250", "", "300")));
+        assertEquals("302", store.read("comment_reply").get(0).location.commentId);
+
+        store.upsert(entry("late-reply", "comment_reply", "sent", 10, "原评论", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "201", "400", "350", "", "400")));
+        assertEquals("400", store.read("comment_reply").get(0).location.commentId);
+        assertEquals("201", store.read("comment_reply").get(0).location.awemeId);
+    }
+
+    @Test public void differentAccountsNeverMixThePreviousNavigationFieldsIntoAnUpdate() {
+        store.upsert(entry("same", "reply", "sent", 10, "原消息", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "200", "300", "250", "conversation-1", "500")));
+        store.upsert(entry("same", "reply", "sent", 10, "新消息", "新回复")
+                .withLocation(new AutomationHistoryStore.Location("101", "", "", "", "conversation-2", "")));
+        AutomationHistoryStore.Location loaded = store.read("reply").get(0).location;
+        assertEquals("101", loaded.accountId);
+        assertEquals("conversation-2", loaded.conversationId);
+        assertEquals("", loaded.awemeId);
+        assertEquals("", loaded.commentId);
+        assertEquals("", loaded.rootCommentId);
+        assertEquals("", loaded.messageId);
+    }
+
+    @Test public void conversationTypePersistsWithoutGuessingLegacyTypesOrMixingDifferentChats() {
+        assertEquals(-1, new AutomationHistoryStore.Location("100", "", "", "", "conversation-1", "500").conversationType);
+        store.upsert(entry("located-chat", "reply", "sent", 10, "消息", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "", "", "", "conversation-1", "500", 1)));
+        store.markModelRequestSent("reply", "located-chat", 0);
+        store.upsert(entry("located-chat", "reply", "sent", 10, "消息", "回复"));
+        AutomationHistoryStore.Location loaded = new AutomationHistoryStore(context).read("reply").get(0).location;
+        assertEquals("conversation-1", loaded.conversationId);
+        assertEquals("500", loaded.messageId);
+        assertEquals(1, loaded.conversationType);
+
+        store.upsert(entry("located-chat", "reply", "sent", 10, "消息", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "", "", "", "conversation-2", "", 0)));
+        loaded = store.read("reply").get(0).location;
+        assertEquals("conversation-2", loaded.conversationId);
+        assertEquals("", loaded.messageId);
+        assertEquals(0, loaded.conversationType);
+        assertEquals(-1, new AutomationHistoryStore.Location("", "", "", "", "", "", 2).conversationType);
+    }
+
+    @Test public void singleChatPeerSurvivesUpdatesButDoesNotCrossAnAccountOrConversationChange() {
+        assertEquals("", new AutomationHistoryStore.Location("100", "", "", "", "conversation-1", "500", 0).peerUid);
+        store.upsert(entry("peer-chat", "reply", "pending", 10, "消息", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "", "", "", "conversation-1", "500", 0, "400")));
+        store.markModelRequestSent("reply", "peer-chat", 0);
+        store.upsert(entry("peer-chat", "reply", "sent", 10, "消息", "回复"));
+        AutomationHistoryStore.Location loaded = new AutomationHistoryStore(context).read("reply").get(0).location;
+        assertEquals("400", loaded.peerUid);
+        assertEquals(0, loaded.conversationType);
+
+        store.upsert(entry("peer-chat", "reply", "sent", 10, "消息", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "", "", "", "conversation-2", "", 0)));
+        assertEquals("", store.read("reply").get(0).location.peerUid);
+        store.upsert(entry("peer-chat", "reply", "sent", 10, "消息", "回复")
+                .withLocation(new AutomationHistoryStore.Location("100", "", "", "", "conversation-2", "", 0, "401")));
+        assertEquals("401", store.read("reply").get(0).location.peerUid);
+        store.upsert(entry("peer-chat", "reply", "sent", 10, "消息", "回复")
+                .withLocation(new AutomationHistoryStore.Location("101", "", "", "", "conversation-2", "", 0)));
+        assertEquals("", store.read("reply").get(0).location.peerUid);
+        assertEquals("", new AutomationHistoryStore.Location("", "", "", "", "", "", 0, "not-a-user").peerUid);
+        assertEquals("", new AutomationHistoryStore.Location("", "", "", "", "", "", 0, "400\n").peerUid);
+    }
+
+    @Test public void clearedHistoryCannotBeRestoredByALateLocatedReceipt() {
+        long created = System.currentTimeMillis() - 100;
+        AutomationHistoryStore.Entry original = entry("old", "comment", "pending", created, "作品", "评论")
+                .withLocation(new AutomationHistoryStore.Location("100", "200", "", "", "", ""));
+        store.upsert(original);
+        store.clear("comment");
+        store.upsert(entry("old", "comment", "sent", created, "作品", "评论")
+                .withLocation(new AutomationHistoryStore.Location("100", "200", "300", "", "", "")));
+        store.markModelRequestSent("comment", "old", 1);
+        assertTrue(store.read("comment").isEmpty());
+    }
+
+    @Test public void navigationIdentifiersRejectControlsUrlsAndOversizedValuesInsteadOfTruncatingIds() {
+        String accepted = "x".repeat(256);
+        String conversation = "x".repeat(512);
+        AutomationHistoryStore.Location valid = new AutomationHistoryStore.Location(
+                accepted, accepted, accepted, accepted, conversation, accepted);
+        assertEquals(accepted, valid.accountId);
+        assertEquals(conversation, valid.conversationId);
+        AutomationHistoryStore.Location invalid = new AutomationHistoryStore.Location(
+                "account\n100", "https://example.test/video/1", "x".repeat(257),
+                "comment\u202e123", "x".repeat(513), "message?token=secret");
+        assertEmptyLocation(invalid);
+        assertEmptyLocation(new AutomationHistoryStore.Location(null, null, null, null, null, null));
+        store.upsert(entry("bounded-navigation", "comment", "sent", 10, "", "").withLocation(invalid));
+        String serialized = context.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE)
+                .getString("entries_v1", "");
+        assertFalse(serialized.contains("example.test"));
+        assertFalse(serialized.contains("secret"));
+    }
+
+    private static void assertEmptyLocation(AutomationHistoryStore.Location location) {
+        assertLocation(AutomationHistoryStore.Location.EMPTY, location);
+    }
+
+    private static void assertLocation(AutomationHistoryStore.Location expected, AutomationHistoryStore.Location actual) {
+        assertEquals(expected.accountId, actual.accountId);
+        assertEquals(expected.awemeId, actual.awemeId);
+        assertEquals(expected.commentId, actual.commentId);
+        assertEquals(expected.rootCommentId, actual.rootCommentId);
+        assertEquals(expected.conversationId, actual.conversationId);
+        assertEquals(expected.messageId, actual.messageId);
+        assertEquals(expected.conversationType, actual.conversationType);
+        assertEquals(expected.peerUid, actual.peerUid);
+    }
+
     private static AutomationHistoryStore.Entry entry(String id, String kind, String status,
                                                       long createdAt, String input, String output) {
         return new AutomationHistoryStore.Entry(id, kind, "target-id", "目标用户", input, output,

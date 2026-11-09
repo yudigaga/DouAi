@@ -19,7 +19,7 @@ public final class ConfigurationCatalog {
         FEED_FILTER, DOWNLOAD, REPLY, COMMENT_AUTOMATION, COMMENT_REPLY, FEED_UI,
         PLAYBACK, AUTO_PLAY, GESTURE, MESSAGE_RECALL, SPOOF, FOLLOW_LISTS, AUTOMATION_DISPATCH,
         HOST_BEHAVIOR, DIRECT_MESSAGE_SPEECH, MEDIA_MODEL, COMMENT_ENHANCEMENTS,
-        COMMENT_VOICE, NATIVE_COMMENT_SPEECH, AUTO_LIKE, AUTO_FOLLOW, AUTO_MESSAGE,
+        COMMENT_VOICE, NATIVE_COMMENT_SPEECH, AUTO_LIKE, AUTO_FOLLOW, AUTO_MESSAGE, SIDEBAR,
         COMMENT_TOOLS, IMMERSIVE, VERSION, TOP_TABS, REFRESH, DIAGNOSTICS, MANUAL_AI
     }
 
@@ -79,6 +79,8 @@ public final class ConfigurationCatalog {
         add(keys, "boolean", LocalOptions.HASH_LONG_PRESS_VOICE);
         add(keys, "boolean", LocalOptions.MODULE_ONLY_SPEED);
         add(keys, "boolean", CommentAiSettings.TAKEOVER + " " + CommentAiSettings.SEARCH);
+        add(keys, "boolean", SidebarSettings.ENABLED);
+        add(keys, "string", SidebarSettings.ITEMS);
         add(keys, "boolean", LocalOptions.REPLY_RECOGNIZE_IMAGES + " " + LocalOptions.REPLY_RECOGNIZE_VIDEO);
         add(keys, "boolean", LocalOptions.COMMENT_REPLY_ENABLED
                 + " comment_reply_tip_enabled comment_reply_failure_notify");
@@ -154,6 +156,7 @@ public final class ConfigurationCatalog {
         depend(Feature.DIAGNOSTICS, LocalOptions.DEBUG_LOGGING, "");
         depend(Feature.MANUAL_AI, CommentAiSettings.TAKEOVER + " " + CommentAiSettings.SEARCH
                 + " " + CommentAiSettings.MODEL_ID + " " + AiModelSettings.KEY, "");
+        depend(Feature.SIDEBAR, SidebarSettings.ENABLED + " " + SidebarSettings.ITEMS, "");
         Map<String, Object> defaults = new LinkedHashMap<>();
         defaults.put(LocalOptions.DEBUG_LOGGING, false);
         defaults.put(LocalOptions.HASH_LONG_PRESS_VOICE, false);
@@ -161,6 +164,8 @@ public final class ConfigurationCatalog {
         defaults.put(CommentAiSettings.TAKEOVER, false);
         defaults.put(CommentAiSettings.SEARCH, false);
         defaults.put(CommentAiSettings.MODEL_ID, "");
+        defaults.put(SidebarSettings.ENABLED, false);
+        defaults.put(SidebarSettings.ITEMS, SidebarSettings.DEFAULT_ITEMS);
         defaults.put("hide_product_cards", false);
         defaults.put("hide_hotspot_rank_cards", false);
         defaults.put(PLAYBACK_SPEED, PLAYBACK_SPEED_DEFAULT);
@@ -241,6 +246,11 @@ public final class ConfigurationCatalog {
 
     /** Type validation stays separate so version-1 backups can migrate old custom strings. */
     static Object normalizedTransferValue(String key, Object value) {
+        if (SidebarSettings.ITEMS.equals(key) && value instanceof String) {
+            java.util.List<String> selected = new java.util.ArrayList<>();
+            for (SidebarSettings.Entry entry : SidebarSettings.parse((String) value)) selected.add(entry.id);
+            return SidebarSettings.serialize(selected);
+        }
         if (SpeechSettings.RANDOM_SOURCES.equals(key) && value instanceof String) {
             return SpeechSettings.validateRandomSources((String) value);
         }

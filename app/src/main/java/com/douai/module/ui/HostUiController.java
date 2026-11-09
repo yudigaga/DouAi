@@ -21,6 +21,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.douai.module.config.HostSettingsStore;
+import com.douai.module.config.SidebarSettings;
 import com.douai.module.feature.AiMessageEntryHook;
 
 import java.lang.ref.WeakReference;
@@ -42,6 +43,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     private WeakReference<Activity> resumedActivity = new WeakReference<>(null);
     private Dialog scanDialog;
     private Dialog settingsDialog;
+    private ModuleSettingsScreen settingsScreen;
     private TextView scanTitle;
     private TextView scanDetail;
     private ProgressBar scanProgress;
@@ -220,17 +222,32 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         mainHandler.post(() -> showSettings(activity, false));
     }
 
+    /** Uses the same owned settings branch for every allowlisted sidebar destination. */
+    public void showSidebarEntry(Activity activity, String id) {
+        if (SidebarSettings.find(id) == null) return;
+        mainHandler.post(() -> showSettings(activity, false, id));
+    }
+
     private void showSettings(Activity activity, boolean settingsPageOnly) {
-        if (closed || settingsPageOnly && !isSettingsPage(activity) || resumedActivity.get() != activity
+        showSettings(activity, settingsPageOnly, null);
+    }
+
+    private void showSettings(Activity activity, boolean settingsPageOnly, String sidebarEntry) {
+        if (closed || activity == null || settingsPageOnly && !isSettingsPage(activity) || resumedActivity.get() != activity
                 || activity.isFinishing() || activity.isDestroyed()) return;
-        if (settingsDialog != null && settingsDialog.isShowing()) return;
+        if (settingsDialog != null && settingsDialog.isShowing()) {
+            if (sidebarEntry != null && settingsDialog.getOwnerActivity() == activity && settingsScreen != null) {
+                openSidebarEntry(activity, settingsScreen, sidebarEntry);
+            }
+            return;
+        }
         Dialog dialog = new Dialog(activity, ModuleTheme.dialogTheme(activity));
         dialog.setOwnerActivity(activity);
         dialog.setCanceledOnTouchOutside(true);
         ModuleSettingsScreen screen = createSettingsScreen(activity, dialog::dismiss);
         dialog.setOnDismissListener(ignored -> {
             screen.close();
-            if (settingsDialog == dialog) settingsDialog = null;
+            if (settingsDialog == dialog) { settingsDialog = null; settingsScreen = null; }
         });
         try {
             dialog.setContentView(screen.createMiuixView());
@@ -251,19 +268,30 @@ public final class HostUiController implements Application.ActivityLifecycleCall
             window.setAttributes(attributes);
         }
         settingsDialog = dialog;
+        settingsScreen = screen;
         try {
             dialog.show();
             screen.bindMiuixBackNavigation(dialog);
             HostDialogBounds.install(activity, dialog, false);
+            if (sidebarEntry != null) openSidebarEntry(activity, screen, sidebarEntry);
         } catch (RuntimeException failure) {
             screen.close();
             settingsDialog = null;
+            settingsScreen = null;
             safeLog("Could not show in-host settings page: " + failure.getMessage());
         }
     }
 
     ModuleSettingsScreen createSettingsScreen(Activity activity, Runnable onClose) {
         return new ModuleSettingsScreen(activity, settingsStore, onClose, this::safeLog);
+    }
+
+    private void openSidebarEntry(Activity activity, ModuleSettingsScreen screen, String id) {
+        try { screen.openSidebarEntry(id); }
+        catch (RuntimeException | LinkageError unavailable) {
+            safeLog("Could not open sidebar destination: " + unavailable.getClass().getSimpleName());
+            Toast.makeText(activity, "入口暂不可用，请从模块设置中查看", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void renderScanDialog() {
@@ -464,6 +492,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     private void dismissSettingsDialog() {
         Dialog current = settingsDialog;
         settingsDialog = null;
+        settingsScreen = null;
         if (current != null && current.isShowing()) current.dismiss();
     }
 
