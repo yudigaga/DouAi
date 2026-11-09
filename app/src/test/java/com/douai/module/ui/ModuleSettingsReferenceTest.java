@@ -62,12 +62,14 @@ public final class ModuleSettingsReferenceTest {
         assertEquals(true, store.values.get(SidebarSettings.ENABLED));
         option(page, "侧边栏显示项").performClick();
         AlertDialog selection = (AlertDialog) ShadowDialog.getLatestDialog();
+        bindDialogChoices(selection);
         ListView list = selection.getListView();
         assertEquals(23, list.getAdapter().getCount());
         for (int position = 0; position < list.getAdapter().getCount(); position++) {
             if (list.isItemChecked(position)) list.performItemClick(list.getAdapter().getView(position, null, list), position, position);
         }
         selection.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper();
         assertEquals("", store.getString(SidebarSettings.ITEMS, "fallback"));
         assertTrue(SidebarSettings.selected(store).isEmpty());
     }
@@ -279,8 +281,14 @@ public final class ModuleSettingsReferenceTest {
                 boolean privateMessageVoice = "MESSAGE".equals(category)
                         && "自动文本转语音".contentEquals(control.getContentDescription());
                 boolean moduleOnlySpeed = "仅模块控制倍速".contentEquals(control.getContentDescription());
+                boolean homeSidebar = "首页右滑打开侧边栏".contentEquals(control.getContentDescription());
                 assertEquals(category + ": " + control.getContentDescription(),
-                        voiceComment || globalHashVoice || privateMessageVoice || moduleOnlySpeed ? 2 : 1, visibleLabels);
+                        voiceComment || globalHashVoice || privateMessageVoice || moduleOnlySpeed || homeSidebar ? 2 : 1, visibleLabels);
+                if (homeSidebar) {
+                    assertTrue(containsText(labels, "默认关闭"));
+                    assertTrue(containsText(labels, "仅适配抖音 41.0.0"));
+                    assertTrue(containsText(labels, "关闭恢复原行为"));
+                }
                 if (globalHashVoice) {
                     assertTrue(containsText(labels, "适用于私信、群聊和评论"));
                     assertTrue(containsText(labels, "只发送语音，不发送文字"));

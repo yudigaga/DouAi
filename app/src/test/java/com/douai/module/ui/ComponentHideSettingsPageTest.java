@@ -147,7 +147,7 @@ public final class ComponentHideSettingsPageTest {
         View root = screen.createView();
         String[][] expected = {
                 {"BASIC", "基本功能", "3项"},
-                {"INTERFACE", "界面相关", "13项"},
+                {"INTERFACE", "界面相关", "15项"},
                 {"FILTER", "视频筛选", "16项"},
                 {"DOWNLOAD", "下载相关", "14项"},
                 {"AUTOPLAY", "自动播放", "7项"},
