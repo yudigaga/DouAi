@@ -27,7 +27,7 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
 public final class HostUiControllerTest {
-    @Test public void sidebarShortcutsReuseOneOwnedSettingsScreenAndCloseItsChildrenOnPause() {
+    @Test public void sidebarShortcutsReuseOneOwnedSettingsScreenAndCloseItsChildrenOnPause() throws Exception {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         HostUiController controller = new HostUiController(RuntimeEnvironment.getApplication(), ignored -> { });
         try {

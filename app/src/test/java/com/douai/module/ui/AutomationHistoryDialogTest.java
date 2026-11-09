@@ -14,6 +14,8 @@ import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.shadow.api.Shadow;
+import org.robolectric.shadows.ShadowActivity;
 import org.robolectric.shadows.ShadowLooper;
 
 import java.util.ArrayDeque;
@@ -53,13 +55,16 @@ public final class AutomationHistoryDialogTest {
         page.dialog().dismiss();
         page = new AutomationHistoryDialog(activity, AutomationHistoryStore.COMMENT, false, worker);
         page.dialog().show();
+        ShadowLooper.idleMainLooper();
         worker.runNextOnThread(); ShadowLooper.idleMainLooper();
-        list().getAdapter().getView(0, null, list()).performClick();
+        View row = list().getAdapter().getView(0, null, list());
+        assertEquals("automation.history.old-comment", row.getTag());
+        assertTrue(row.performClick());
         AlertDialog detail = (AlertDialog) org.robolectric.shadows.ShadowDialog.getLatestDialog();
         assertEquals("查看作品", detail.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
         assertTrue(containsText(detail.getWindow().getDecorView(), "未保存评论定位"));
         detail.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        android.content.Intent launched = org.robolectric.Shadows.shadowOf(activity).getNextStartedActivity();
+        android.content.Intent launched = ((ShadowActivity) Shadow.extract(activity)).getNextStartedActivity();
         assertNotNull(launched);
         assertEquals("com.ss.android.ugc.aweme", launched.getPackage());
         assertEquals("aweme://aweme/detail/123456", launched.getDataString());

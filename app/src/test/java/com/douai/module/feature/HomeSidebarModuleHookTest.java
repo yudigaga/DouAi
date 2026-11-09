@@ -74,7 +74,7 @@ public final class HomeSidebarModuleHookTest {
         params.bottomMargin = 12;
         nativeView.setLayoutParams(params);
         List<String> clicked = new ArrayList<>();
-        HomeSidebarModuleHook.Binding binding = new HomeSidebarModuleHook.Binding(nativeView, false, clicked::add);
+        HomeSidebarModuleHook.Binding binding = new HomeSidebarModuleHook.Binding(nativeView, false, id -> clicked.add(id));
         try {
             binding.update(true, SidebarSettings.parse("comment_history,reply_history"));
             assertSame(params, binding.view().getLayoutParams());
@@ -105,7 +105,7 @@ public final class HomeSidebarModuleHookTest {
             binding.update(true, SidebarSettings.parse("module"));
             TextView row = binding.view().findViewWithTag("douai.sidebar.module");
             assertEquals(0xE6FFFFFF, row.getCurrentTextColor());
-            assertTrue(row.getMinimumHeight() >= 48 * activity.getResources().getDisplayMetrics().density);
+            assertEquals(Math.round(48 * activity.getResources().getDisplayMetrics().density), row.getMinHeight());
             assertTrue(binding.module instanceof LinearLayout);
             assertEquals("android.widget.Button", row.getAccessibilityClassName().toString());
         } finally { binding.restore(); activity.finish(); }

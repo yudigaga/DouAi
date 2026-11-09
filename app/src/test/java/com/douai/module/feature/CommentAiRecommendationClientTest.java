@@ -2,6 +2,7 @@ package com.douai.module.feature;
 
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
+import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -67,7 +68,12 @@ public final class CommentAiRecommendationClientTest {
     @Test public void synchronousTrickledResponseStillStopsAtTheOverallBudget() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.start();
-            server.enqueue(json(answer(AiModelConfig.CHAT, "late answer")).throttleBody(1, 1, TimeUnit.SECONDS));
+            MockResponse slow = json(answer(AiModelConfig.CHAT, "late answer"))
+                    .throttleBody(1, 1, TimeUnit.SECONDS);
+            // QueueDispatcher.peek() would also throttle request-body reads.
+            server.setDispatcher(new Dispatcher() {
+                @Override public MockResponse dispatch(RecordedRequest request) { return slow; }
+            });
             AiModelSettings settings = settings(server, AiModelConfig.CHAT, false, 60);
             ChatCompletionClient client = new ChatCompletionClient();
             long started = System.nanoTime();
