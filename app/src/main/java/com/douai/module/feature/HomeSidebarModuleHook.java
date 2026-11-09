@@ -1,5 +1,6 @@
 package com.douai.module.feature;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Context;
 import android.content.ContextWrapper;
@@ -239,6 +240,7 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
     }
 
     /** Only the native grid under this owner's direct module child can establish cached identity. */
+    @SuppressLint("ResourceType") // ID belongs to the verified host APK, not module resources.
     static ViewGroup cachedSectionRoot(View cell, ViewGroup list) {
         View current = cell;
         for (int depth = 0; current != null && depth < 12 && current != list; depth++) {
