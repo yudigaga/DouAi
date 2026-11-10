@@ -86,6 +86,7 @@ import com.douai.module.feature.ImmersiveModeController;
 import com.douai.module.feature.HomeNavigationHideController;
 import com.douai.module.feature.HomeSidebarGestureHook;
 import com.douai.module.feature.HomeSidebarModuleHook;
+import com.douai.module.feature.VideoQualityHook;
 import com.douai.module.ui.HostUiController;
 import io.github.libxposed.api.XposedInterface;
 
@@ -161,6 +162,9 @@ public final class DouAiModule extends XposedModule {
     private volatile HostUiController hostUiController;
     private volatile HomeSidebarGestureHook homeSidebarGestureHook;
     private volatile HomeSidebarModuleHook homeSidebarModuleHook;
+    private volatile VideoQualityHook videoQualityHook;
+    private volatile String videoQualityFailure;
+    private volatile boolean hostApplicationCreated;
     private volatile String homeSidebarFailure;
     private volatile XposedInterface.HookHandle applicationCreateHandle;
     private volatile XposedInterface.HookHandle activityResumeHandle;
@@ -254,6 +258,7 @@ public final class DouAiModule extends XposedModule {
             downloadHookFailure = "抖音 ClassLoader 不可用";
             return;
         }
+        ensureVideoQualityHook(false);
         installEarlyCachedHooks();
         installFeatureHooksIfReady();
     }
@@ -276,6 +281,20 @@ public final class DouAiModule extends XposedModule {
         } catch (Exception failure) {
             moduleLog(5, TAG, "Startup cache unavailable; asynchronous scan retained: " + failure.getClass().getSimpleName());
         } finally { android.os.Trace.endSection(); }
+    }
+
+    private synchronized void ensureVideoQualityHook(boolean includePlayer) {
+        if (hostProfile != HostAdaptation.PROFILE_410 || hostClassLoader == null) return;
+        try {
+            if (videoQualityHook == null) videoQualityHook = VideoQualityHook.installEarly(hookFramework(), hostClassLoader,
+                    localOptions, message -> moduleLog(3, TAG, message));
+            if (includePlayer) videoQualityHook.installPlayer(hookFramework());
+            videoQualityFailure = null;
+        } catch (Exception | LinkageError unavailable) {
+            videoQualityFailure = HostAdaptationDiagnostics.installationFailure(unavailable);
+            if (videoQualityHook != null) { videoQualityHook.close(); videoQualityHook = null; }
+            DouAiLog.failure("video_quality", "installation", unavailable);
+        }
     }
 
     private void scanHost(List<File> archives) {
@@ -389,18 +408,25 @@ public final class DouAiModule extends XposedModule {
                         .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH)
                         .intercept(chain -> {
                             Object application = chain.getArg(0);
-                            if (hostBehaviorHooks != null && application instanceof Application) {
+                            if ((hostBehaviorHooks != null || hostProfile == HostAdaptation.PROFILE_410)
+                                    && application instanceof Application) {
                                 try {
                                     SharedPreferences preferences = ((Application) application).getSharedPreferences(
                                             SettingsRepository.PREFERENCES_NAME, Context.MODE_PRIVATE);
                                     localOptions = LocalOptions.readFrom(preferences);
-                                    hostBehaviorHooks.setOptions(localOptions);
+                                    if (hostBehaviorHooks != null) hostBehaviorHooks.setOptions(localOptions);
+                                    ensureVideoQualityHook(false);
+                                    if (videoQualityHook != null) videoQualityHook.setOptions(localOptions);
                                 } catch (RuntimeException failure) {
                                     moduleLog(5, TAG, "Could not read startup options: " + failure.getClass().getSimpleName());
                                 }
                             }
                             Object result = chain.proceed();
                             if (application instanceof Application) {
+                                if (TARGET_PACKAGE.equals(((Application) application).getPackageName())) {
+                                    hostApplicationCreated = true;
+                                    ensureVideoQualityHook(true);
+                                }
                                 try {
                                     ensureHostUiController((Application) application);
                                     ExtendedSettings startupSettings = extendedSettings;
@@ -710,6 +736,9 @@ public final class DouAiModule extends XposedModule {
             if (initial || changes.affects(Feature.SIDEBAR)) {
                 if (homeSidebarGestureHook != null) homeSidebarGestureHook.setOptions(options);
                 if (homeSidebarModuleHook != null) homeSidebarModuleHook.setOptions(options);
+            }
+            if (videoQualityHook != null && (initial || changes.affects(Feature.VIDEO_QUALITY))) {
+                videoQualityHook.setOptions(options);
             }
             if (commentAiAnalysisHook != null && (initial || changes.affects(Feature.MANUAL_AI))) {
                 commentAiAnalysisHook.setOptions(options);
@@ -1123,6 +1152,7 @@ public final class DouAiModule extends XposedModule {
                 DouAiLog.failure("home_sidebar", "installation", unavailable);
             }
         }
+        ensureVideoQualityHook(hostApplicationCreated);
         // Startup gates can also be installed synchronously before Application.onCreate.
         synchronized (this) {
             if (hostBehaviorHooks == null) {
@@ -1294,6 +1324,8 @@ public final class DouAiModule extends XposedModule {
         snapshot.putBoolean("feature.home_sidebar.installed", homeSidebarGestureHook != null && homeSidebarGestureHook.isActive()
                 && homeSidebarModuleHook != null && homeSidebarModuleHook.isActive());
         if (homeSidebarFailure != null) snapshot.putString("feature.home_sidebar.failure", homeSidebarFailure);
+        snapshot.putBoolean("feature.video_quality.installed", videoQualityHook != null && videoQualityHook.isActive());
+        if (videoQualityFailure != null) snapshot.putString("feature.video_quality.failure", videoQualityFailure);
         snapshot.putString("feature.comment_ai.failure", commentAiAnalysisFailure);
         snapshot.putBoolean("feature.manual_ai_search.installed", manualAiSearch != null);
         snapshot.putString("feature.manual_ai_search.failure", manualAiSearchFailure);

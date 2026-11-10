@@ -78,6 +78,17 @@ public final class ConfigurationCatalogTest {
         assertEquals(false, ConfigurationCatalog.settings().get(LocalOptions.DEBUG_LOGGING).defaultValue);
         assertConsumers(LocalOptions.DEBUG_LOGGING, EnumSet.of(DIAGNOSTICS));
     }
+    @Test public void highestVideoQualityTransfersWithFalseDefaultAndDoesNotRefreshPlaybackSpeed() {
+        String key = LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY;
+        assertEquals("boolean", ConfigKeys.TYPES.get(key));
+        assertEquals(false, ConfigurationCatalog.settings().get(key).defaultValue);
+        assertConsumers(key, EnumSet.of(VIDEO_QUALITY));
+        ConfigurationChanges removed = ConfigurationChanges.between(Map.of(key, true), Collections.emptyMap());
+        for (ConfigurationCatalog.Feature feature : ConfigurationCatalog.Feature.values()) {
+            assertEquals("quality removal must only notify its own consumer: " + feature,
+                    feature == VIDEO_QUALITY, removed.affects(feature));
+        }
+    }
     @Test public void moduleOnlySpeedTransfersWithFalseDefaultAndRefreshesItsThreeConsumers() {
         assertEquals("boolean", ConfigKeys.TYPES.get(LocalOptions.MODULE_ONLY_SPEED));
         assertEquals(false, ConfigurationCatalog.settings().get(LocalOptions.MODULE_ONLY_SPEED).defaultValue);

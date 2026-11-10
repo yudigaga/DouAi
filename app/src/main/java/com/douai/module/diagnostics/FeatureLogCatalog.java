@@ -37,6 +37,8 @@ public final class FeatureLogCatalog {
         add(entries, "comment_reply", "评论回复", "CommentReplyHook", Feature.COMMENT_REPLY, "comment_reply_hook_installed", "comment_reply_enabled");
         add(entries, "feed_ui", "视频图文组件隐藏及透明度", "FeedUiHideHook", Feature.FEED_UI, "feed_ui_hook_installed", "feed_ui_active");
         add(entries, "auto_speed", "自动倍速", "PlaybackBehaviorHooks", Feature.PLAYBACK, "feature.auto_speed.installed", "auto_speed");
+        add(entries, "video_quality", "锁定最高画质", "VideoQualityHook", Feature.VIDEO_QUALITY,
+                "feature.video_quality.installed", "lock_highest_video_quality");
         add(entries, "auto_play", "连播及评论暂停", "AutoPlayHook", Feature.AUTO_PLAY, "auto_play_hook_installed", "auto_play_enabled");
         add(entries, "gesture", "九宫格手势及工具栏", "FeedGestureToolsHook", Feature.GESTURE, "feature.long_press_action.installed", "gesture_enabled");
         add(entries, "home_sidebar", "首页右滑及模块侧边栏", "HomeSidebarGestureHook/HomeSidebarModuleHook", Feature.SIDEBAR,

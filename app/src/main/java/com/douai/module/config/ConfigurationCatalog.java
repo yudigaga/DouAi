@@ -17,7 +17,7 @@ public final class ConfigurationCatalog {
 
     public enum Feature {
         FEED_FILTER, DOWNLOAD, REPLY, COMMENT_AUTOMATION, COMMENT_REPLY, FEED_UI,
-        PLAYBACK, AUTO_PLAY, GESTURE, MESSAGE_RECALL, SPOOF, FOLLOW_LISTS, AUTOMATION_DISPATCH,
+        PLAYBACK, VIDEO_QUALITY, AUTO_PLAY, GESTURE, MESSAGE_RECALL, SPOOF, FOLLOW_LISTS, AUTOMATION_DISPATCH,
         HOST_BEHAVIOR, DIRECT_MESSAGE_SPEECH, MEDIA_MODEL, COMMENT_ENHANCEMENTS,
         COMMENT_VOICE, NATIVE_COMMENT_SPEECH, AUTO_LIKE, AUTO_FOLLOW, AUTO_MESSAGE, SIDEBAR,
         COMMENT_TOOLS, IMMERSIVE, VERSION, TOP_TABS, REFRESH, DIAGNOSTICS, MANUAL_AI
@@ -78,6 +78,7 @@ public final class ConfigurationCatalog {
         add(keys, "boolean", LocalOptions.DEBUG_LOGGING);
         add(keys, "boolean", LocalOptions.HASH_LONG_PRESS_VOICE);
         add(keys, "boolean", LocalOptions.MODULE_ONLY_SPEED);
+        add(keys, "boolean", LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY);
         add(keys, "boolean", CommentAiSettings.TAKEOVER + " " + CommentAiSettings.SEARCH);
         add(keys, "boolean", SidebarSettings.ENABLED);
         add(keys, "string", SidebarSettings.ITEMS);
@@ -132,6 +133,7 @@ public final class ConfigurationCatalog {
         depend(Feature.COMMENT_REPLY, "native_comment_reply", "");
         depend(Feature.FEED_UI, "hide_interface video_right_alpha component_hide_enabled component_hide_uniform_enabled component_hide_uniform_alpha component_hide_on_switch component_hide_open_comments_on_show component_hide_show_on_pause component_hide_custom_views", "component_alpha_");
         depend(Feature.PLAYBACK, "auto_speed playback_speed " + LocalOptions.MODULE_ONLY_SPEED, "");
+        depend(Feature.VIDEO_QUALITY, LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY, "");
         depend(Feature.AUTO_PLAY, "auto_play smart_swipe pause_auto_on_comments", "");
         depend(Feature.GESTURE, "playback_speed toolbar_enabled long_press_action double_tap_action intercept_native_long_press remove_watermark download_custom_name download_name_template remove_download_limits download_method download_directory_uri " + LocalOptions.MODULE_ONLY_SPEED, "long_press_ double_tap_ toolbar_ third_party_");
         depend(Feature.MESSAGE_RECALL, "prevent_message_recall recall_self recall_other recall_background", "");
@@ -161,6 +163,7 @@ public final class ConfigurationCatalog {
         defaults.put(LocalOptions.DEBUG_LOGGING, false);
         defaults.put(LocalOptions.HASH_LONG_PRESS_VOICE, false);
         defaults.put(LocalOptions.MODULE_ONLY_SPEED, false);
+        defaults.put(LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY, false);
         defaults.put(CommentAiSettings.TAKEOVER, false);
         defaults.put(CommentAiSettings.SEARCH, false);
         defaults.put(CommentAiSettings.MODEL_ID, "");

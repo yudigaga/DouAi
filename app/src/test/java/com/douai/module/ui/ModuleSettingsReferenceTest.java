@@ -122,7 +122,7 @@ public final class ModuleSettingsReferenceTest {
                         "去推荐商家开关", "去商品/购物卡片开关", "去热点榜单卡开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
                         "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},
                 {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
-                {"AUTOPLAY", "自动滑动到下一个视频", "仅模块控制倍速", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
+                {"AUTOPLAY", "自动滑动到下一个视频", "仅模块控制倍速", "自动倍速播放", "倍速数值", "锁定最高画质", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
                 {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "素材识别", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
                         "接收评论回复", "每日最大回复数", "同一用户回复间隔（分钟）", "发送与记录"},
@@ -162,7 +162,8 @@ public final class ModuleSettingsReferenceTest {
                 {"PDF", "analytics", "扩展功能 > 本地数据分析", "analytics.root"},
                 {"调试", "debug-logs", "关于 > 调试与日志", "debug.logs.enabled"},
                 {"#长按", "hash-long-press-voice", "评论相关 > #长按发送转语音（全局）", "settings.toggle.#长按发送转语音（全局）"},
-                {"仅模块控制倍速", "module-only-speed", "自动播放 > 仅模块控制倍速", "settings.toggle.仅模块控制倍速"}};
+                {"仅模块控制倍速", "module-only-speed", "自动播放 > 仅模块控制倍速", "settings.toggle.仅模块控制倍速"},
+                {"画质", "video-quality", "自动播放 > 锁定最高画质", "settings.toggle.锁定最高画质"}};
         for (String[] item : cases) {
             search.setText(item[0]);
             View result = home.findViewWithTag("settings.search.result." + item[1]);

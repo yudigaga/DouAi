@@ -111,6 +111,8 @@ public final class ModuleSettingsScreen {
             new SearchEntry("speed", "自动倍速与自动播放", "自动播放 > 倍速数值", "倍速 播放速度 自动滑动 智能滑动 暂停评论", SearchDestination.AUTOPLAY),
             new SearchEntry("module-only-speed", "仅模块控制倍速", "自动播放 > 仅模块控制倍速", "倍速 独占 模块控制 官方倍速 长按 手动优先 1x 4x", SearchDestination.AUTOPLAY,
                     "settings.toggle.仅模块控制倍速"),
+            new SearchEntry("video-quality", "锁定最高画质", "自动播放 > 锁定最高画质", "画质 清晰度 最高画质 自动 高清 超清 分辨率 1080 2K 4K", SearchDestination.AUTOPLAY,
+                    "settings.toggle.锁定最高画质"),
             new SearchEntry("interaction", "互动自动化", "自动播放 > 互动自动化", "自动点赞 自动关注 停止自动化", SearchDestination.INTERACTION),
             new SearchEntry("feed-filter", "视频筛选", "视频筛选 > 过滤总开关", "过滤 广告 直播 图集 关键词 时长 低赞 推荐商家 商品卡 购物卡 热点榜单", SearchDestination.FILTER),
             new SearchEntry("component-hide", "组件隐藏", "组件隐藏 > 隐藏与透明度", "界面 隐藏 透明度 自定义控件 暂停显示", SearchDestination.COMPONENT_HIDE),
@@ -601,6 +603,7 @@ public final class ModuleSettingsScreen {
                         repository.getBoolean("auto_play", false), true,
                         value -> repository.putBoolean("auto_play", value));
                 buildPlaybackSpeedControls();
+                addLocalSwitch("锁定最高画质", "默认关闭，仅适配抖音41.0.0；自动保持视频原生支持的最高档位，不支持时沿用原生策略。修改后重启抖音生效。", LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY);
                 addLocalSwitch("打开评论时,不滑动视频", "", "pause_auto_on_comments");
                 addSwitch("滑动智能判断上下", "",
                         repository.getBoolean("smart_swipe", true), true,
@@ -2158,7 +2161,7 @@ public final class ModuleSettingsScreen {
         INTERFACE("界面相关", 15),
         FILTER("视频筛选", 16),
         DOWNLOAD("下载相关", 14),
-        AUTOPLAY("自动播放", 7),
+        AUTOPLAY("自动播放", 8),
         AUTO_REPLY("自动回复", 13),
         AUTO_COMMENT("自动评论", 8),
         COMMENT("评论相关", 11),
