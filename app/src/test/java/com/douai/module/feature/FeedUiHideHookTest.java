@@ -15,6 +15,7 @@ import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
 
+import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -1809,6 +1810,243 @@ public final class FeedUiHideHookTest {
         hook.close();
         idleMainLooper();
         activity.finish();
+    }
+
+    @Test
+    public void customOpacityIsIndependentAndCachedFramesDoNotCompoundHostAlpha() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout page = new FrameLayout(activity);
+        FrameLayout feed = new FrameLayout(activity);
+        TextView feedControl = new TextView(activity);
+        feedControl.setId(android.R.id.text1);
+        feedControl.setAlpha(0.8f);
+        feedControl.setClickable(true);
+        feedControl.setFocusable(true);
+        feed.addView(feedControl);
+        TextView windowControl = new TextView(activity);
+        windowControl.setId(android.R.id.text2);
+        windowControl.setAlpha(0.6f);
+        page.addView(feed);
+        page.addView(windowControl);
+        activity.setContentView(page);
+        CustomViewLocator feedLocator = CustomViewLocator.capture(page.getRootView(), feed, feedControl);
+        CustomViewLocator windowLocator = CustomViewLocator.capture(page.getRootView(), feed, windowControl);
+        JSONObject rules = new JSONObject(CustomViewLocator.serialize(Arrays.asList(feedLocator, windowLocator)));
+        rules.getJSONArray("items").getJSONObject(0).put("alpha", 128);
+        rules.getJSONArray("items").getJSONObject(1).put("alpha", 64);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putBoolean(ComponentHideSettings.UNIFORM_ENABLED, true)
+                .putString(ComponentHideSettings.UNIFORM_ALPHA, "255")
+                .putString(ComponentHideSettings.CUSTOM_VIEWS, rules.toString()).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(feed));
+            idleMainLooper();
+            assertEquals(View.VISIBLE, feedControl.getVisibility());
+            assertEquals(0.4015686f, feedControl.getAlpha(), 0.001f);
+            assertEquals(0.1505882f, windowControl.getAlpha(), 0.001f);
+            assertTrue(feedControl.isClickable());
+            for (int frame = 0; frame < 12; frame++) page.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(0.4015686f, feedControl.getAlpha(), 0.001f);
+
+            feedControl.setAlpha(0.5f);
+            windowControl.setVisibility(View.INVISIBLE);
+            page.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(0.2509804f, feedControl.getAlpha(), 0.001f);
+            assertEquals(View.INVISIBLE, windowControl.getVisibility());
+            rules.getJSONArray("items").getJSONObject(0).put("alpha", -1);
+            rules.getJSONArray("items").getJSONObject(1).put("alpha", 255);
+            preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS, rules.toString()).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.INVISIBLE, feedControl.getVisibility());
+            assertFalse(feedControl.isClickable());
+            assertEquals(View.INVISIBLE, windowControl.getVisibility());
+            assertEquals(0.6f, windowControl.getAlpha(), 0.001f);
+
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.VISIBLE, feedControl.getVisibility());
+            assertEquals(0.5f, feedControl.getAlpha(), 0.001f);
+            assertTrue(feedControl.isClickable());
+            assertTrue(feedControl.isFocusable());
+            assertEquals(View.INVISIBLE, windowControl.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void playbackPauseRevealsBothCustomScopesAndPlayingRestoresTheirRules() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout page = new FrameLayout(activity);
+        FrameLayout feed = new FrameLayout(activity);
+        TextView feedControl = new TextView(activity);
+        feedControl.setId(android.R.id.text1);
+        feedControl.setAlpha(0.8f);
+        feed.addView(feedControl);
+        TextView windowControl = new TextView(activity);
+        windowControl.setId(android.R.id.text2);
+        page.addView(feed);
+        page.addView(windowControl);
+        activity.setContentView(page);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS,
+                CustomViewLocator.serialize(Arrays.asList(
+                        CustomViewLocator.capture(page.getRootView(), feed, feedControl),
+                        CustomViewLocator.capture(page.getRootView(), feed, windowControl)))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(feed));
+            idleMainLooper();
+            assertEquals(View.GONE, feedControl.getVisibility());
+            assertEquals(View.GONE, windowControl.getVisibility());
+            intercept(hooks.get("DouAi.FeedUi.PlayerPause"), new PlayerFixture(), "current");
+            idleMainLooper();
+            assertTrue(hook.areComponentsTemporarilyShown());
+            assertEquals(View.VISIBLE, feedControl.getVisibility());
+            assertEquals(View.VISIBLE, windowControl.getVisibility());
+            assertEquals(0.8f, feedControl.getAlpha(), 0.001f);
+            page.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.VISIBLE, feedControl.getVisibility());
+            assertEquals(View.VISIBLE, windowControl.getVisibility());
+            intercept(hooks.get("DouAi.FeedUi.PlayerPlaying"), new PlayerFixture(), "current");
+            idleMainLooper();
+            assertEquals(View.GONE, feedControl.getVisibility());
+            assertEquals(View.GONE, windowControl.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void pauseRevealsAModuleHiddenFeedAncestor() throws Throwable {
+        assertPauseThroughCustomAncestor(View.VISIBLE, true);
+    }
+
+    @Test
+    public void pauseIgnoresAHostHiddenFeedAncestor() throws Throwable {
+        assertPauseThroughCustomAncestor(View.INVISIBLE, false);
+        assertPauseThroughCustomAncestor(View.GONE, false);
+    }
+
+    private void assertPauseThroughCustomAncestor(int hostVisibility, boolean expectShown) throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout page = new FrameLayout(activity);
+        page.setVisibility(hostVisibility);
+        page.setAlpha(0.7f);
+        FrameLayout feed = new FrameLayout(activity);
+        page.addView(feed);
+        activity.setContentView(page);
+        CustomViewLocator locator = CustomViewLocator.capture(page.getRootView(), feed, page);
+        assertNotNull(locator);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS,
+                CustomViewLocator.serialize(Collections.singletonList(locator))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(feed));
+            idleMainLooper();
+            assertFalse(feed.isShown());
+            intercept(hooks.get("DouAi.FeedUi.PlayerPause"), new PlayerFixture(), "current");
+            idleMainLooper();
+            assertEquals(expectShown, hook.areComponentsTemporarilyShown());
+            assertEquals(hostVisibility, page.getVisibility());
+            assertEquals(0.7f, page.getAlpha(), 0.001f);
+            page.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(hostVisibility, page.getVisibility());
+            if (expectShown) {
+                intercept(hooks.get("DouAi.FeedUi.PlayerPlaying"), new PlayerFixture(), "current");
+                idleMainLooper();
+                assertEquals(View.GONE, page.getVisibility());
+            }
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void playbackPauseRestoresCustomTargetsInEveryTrackedWindow() throws Throwable {
+        Activity currentActivity = Robolectric.buildActivity(Activity.class).setup().get();
+        Activity otherActivity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout feed = new FrameLayout(currentActivity);
+        TextView currentControl = new TextView(currentActivity);
+        currentControl.setId(android.R.id.text1);
+        currentControl.setAlpha(0.8f);
+        feed.addView(currentControl);
+        currentActivity.setContentView(feed);
+        FrameLayout otherPage = new FrameLayout(otherActivity);
+        TextView otherControl = new TextView(otherActivity);
+        otherControl.setId(android.R.id.text1);
+        otherControl.setAlpha(0.6f);
+        otherControl.setClickable(true);
+        otherPage.addView(otherControl);
+        otherActivity.setContentView(otherPage);
+        CustomViewLocator locator = CustomViewLocator.capture(feed.getRootView(), currentControl);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS,
+                CustomViewLocator.serialize(Collections.singletonList(locator))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(feed));
+            hook.onActivityCreated(otherActivity, null);
+            idleMainLooper();
+            assertEquals(View.GONE, currentControl.getVisibility());
+            assertEquals(View.GONE, otherControl.getVisibility());
+            intercept(hooks.get("DouAi.FeedUi.PlayerPause"), new PlayerFixture(), "current");
+            idleMainLooper();
+            assertEquals(View.VISIBLE, currentControl.getVisibility());
+            assertEquals(View.VISIBLE, otherControl.getVisibility());
+            assertEquals(0.8f, currentControl.getAlpha(), 0.001f);
+            assertEquals(0.6f, otherControl.getAlpha(), 0.001f);
+            assertTrue(otherControl.isClickable());
+            otherPage.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.VISIBLE, otherControl.getVisibility());
+            intercept(hooks.get("DouAi.FeedUi.PlayerPlaying"), new PlayerFixture(), "current");
+            idleMainLooper();
+            assertEquals(View.GONE, currentControl.getVisibility());
+            assertEquals(View.GONE, otherControl.getVisibility());
+        } finally {
+            hook.close();
+            idleMainLooper();
+            currentActivity.finish();
+            otherActivity.finish();
+        }
+    }
+
+    @Test
+    public void gestureRevealKeepsCustomViewsShownUntilConfiguredVideoSwitch() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout feed = new FrameLayout(activity);
+        TextView custom = new TextView(activity);
+        custom.setAlpha(0.7f);
+        feed.addView(custom);
+        activity.setContentView(feed);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putBoolean(ComponentHideSettings.HIDE_ON_SWITCH, false)
+                .putString(ComponentHideSettings.CUSTOM_VIEWS, CustomViewLocator.serialize(Collections.singletonList(
+                        CustomViewLocator.capture(feed.getRootView(), feed, custom)))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        FeedHolderFixture holder = holder(feed);
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder);
+            idleMainLooper();
+            hook.setComponentsTemporarilyShown(true);
+            idleMainLooper();
+            assertEquals(View.VISIBLE, custom.getVisibility());
+            holder.aid = "next";
+            intercept(hooks.get("DouAi.FeedUi.HideVideoActions"), holder);
+            idleMainLooper();
+            assertEquals(View.VISIBLE, custom.getVisibility());
+            assertEquals(0.7f, custom.getAlpha(), 0.001f);
+            preferences.edit().putBoolean(ComponentHideSettings.HIDE_ON_SWITCH, true).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            holder.aid = "third";
+            intercept(hooks.get("DouAi.FeedUi.HideVideoActions"), holder);
+            idleMainLooper();
+            assertEquals(View.GONE, custom.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
     }
 
     @Test

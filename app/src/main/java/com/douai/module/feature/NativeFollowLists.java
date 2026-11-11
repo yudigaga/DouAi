@@ -56,6 +56,11 @@ public final class NativeFollowLists implements AutoCloseable {
     private final Map<FollowListSnapshot.Kind, Long> attempts = new EnumMap<>(FollowListSnapshot.Kind.class);
     private final Map<FollowListSnapshot.Kind, Long> refreshDeadlines = new EnumMap<>(FollowListSnapshot.Kind.class);
     private final List<Runnable> refreshCallbacks = new ArrayList<>();
+    private final List<PickerRequest> pickerRequests = new ArrayList<>();
+    private List<PickerRequest> activePickerRequests = Collections.emptyList();
+    private boolean pickerQueued;
+    private NativeUserProfiles userProfiles;
+    private NativeUserSearch userSearch;
     private volatile LocalOptions options = new LocalOptions(Collections.emptyMap());
     private volatile boolean closed;
     private volatile FollowListSnapshot.Kind loading;
@@ -83,6 +88,14 @@ public final class NativeFollowLists implements AutoCloseable {
         if (previous != null) previous.close();
         active = service;
         service.syncAccount(service.accounts.current());
+        try { service.userProfiles = NativeUserProfiles.install(new NativeUserProfileSource(loader, report)); }
+        catch (Throwable unavailable) {
+            service.log.accept("Native user profiles unavailable: " + unavailable.getClass().getSimpleName());
+        }
+        try { service.userSearch = NativeUserSearch.install(new NativeUserSearchSource(loader, report)); }
+        catch (Throwable unavailable) {
+            service.log.accept("Native user search unavailable: " + unavailable.getClass().getSimpleName());
+        }
         service.setOptions(options);
         service.start();
         return service;
@@ -141,6 +154,111 @@ public final class NativeFollowLists implements AutoCloseable {
 
     public static boolean isAvailable() { return active != null && !active.closed; }
 
+    /** Loads a complete relationship list for a picker without enabling relationship automation. */
+    public static AutoCloseable load(FollowListSnapshot.Kind kind, Consumer<Boolean> completed) {
+        java.util.Objects.requireNonNull(kind, "kind");
+        NativeFollowLists service = active;
+        if (service == null || service.closed) { completed.accept(false); return () -> { }; }
+        Account account = service.accounts.current();
+        service.syncAccount(account);
+        service.expire(System.currentTimeMillis());
+        PickerRequest request = new PickerRequest(kind, account == null ? "" : account.uid,
+                FollowListSnapshot.current().accountEpoch, completed);
+        synchronized (service) {
+            if (service.closed || active != service) {
+                service.main.post(() -> { if (!request.cancelled) completed.accept(false); });
+                return request;
+            }
+            FollowListSnapshot.State state = FollowListSnapshot.current();
+            if (kind == FollowListSnapshot.Kind.FOLLOWING ? state.followingKnown : state.followersKnown) {
+                service.main.post(() -> service.completePicker(request));
+                return request;
+            }
+            service.pickerRequests.add(request);
+            service.queuePicker();
+        }
+        return request;
+    }
+
+    public static AutoCloseable loadFollowing(Consumer<Boolean> completed) {
+        return load(FollowListSnapshot.Kind.FOLLOWING, completed);
+    }
+
+    private synchronized void queuePicker() {
+        if (closed || pickerQueued) return;
+        pickerQueued = true;
+        try { worker.execute(this::loadPickerSnapshots); }
+        catch (java.util.concurrent.RejectedExecutionException unavailable) {
+            pickerQueued = false;
+            List<PickerRequest> rejected = new ArrayList<>(pickerRequests);
+            pickerRequests.clear();
+            for (PickerRequest request : rejected) main.post(() -> {
+                if (!request.cancelled && !closed && active == this) request.completed.accept(false);
+            });
+        }
+    }
+
+    private void loadPickerSnapshots() {
+        List<PickerRequest> callbacks;
+        synchronized (this) {
+            callbacks = new ArrayList<>(pickerRequests);
+            pickerRequests.clear();
+            activePickerRequests = callbacks;
+        }
+        try {
+            for (FollowListSnapshot.Kind kind : FollowListSnapshot.Kind.values()) {
+                if (callbacks.stream().anyMatch(request -> request.kind == kind && !request.cancelled)) {
+                    refreshNow(false, kind);
+                }
+            }
+        }
+        finally {
+            for (PickerRequest request : callbacks) main.post(() -> completePicker(request));
+            synchronized (this) {
+                activePickerRequests = Collections.emptyList();
+                pickerQueued = false;
+                if (!pickerRequests.isEmpty()) queuePicker();
+            }
+        }
+    }
+
+    private void completePicker(PickerRequest request) {
+        if (request.cancelled || closed || active != this) return;
+        Account current = accounts.current();
+        syncAccount(current);
+        expire(System.currentTimeMillis());
+        FollowListSnapshot.State state = FollowListSnapshot.current();
+        if (!request.cancelled && !closed && active == this) {
+            request.completed.accept(!request.accountUid.isEmpty() && current != null
+                    && request.accountUid.equals(current.uid) && request.accountEpoch == state.accountEpoch
+                    && (request.kind == FollowListSnapshot.Kind.FOLLOWING ? state.followingKnown : state.followersKnown));
+        }
+    }
+
+    private synchronized boolean pickerWanted(FollowListSnapshot.Kind kind, String accountUid, long accountEpoch) {
+        for (PickerRequest request : activePickerRequests) {
+            if (!request.cancelled && request.kind == kind && request.accountUid.equals(accountUid)
+                    && request.accountEpoch == accountEpoch) return true;
+        }
+        for (PickerRequest request : pickerRequests) {
+            if (!request.cancelled && request.kind == kind && request.accountUid.equals(accountUid)
+                    && request.accountEpoch == accountEpoch) return true;
+        }
+        return false;
+    }
+
+    private static final class PickerRequest implements AutoCloseable {
+        final FollowListSnapshot.Kind kind;
+        final String accountUid;
+        final long accountEpoch;
+        final Consumer<Boolean> completed;
+        volatile boolean cancelled;
+        PickerRequest(FollowListSnapshot.Kind kind, String accountUid, long accountEpoch, Consumer<Boolean> completed) {
+            this.kind = kind; this.accountUid = accountUid; this.accountEpoch = accountEpoch; this.completed = completed;
+        }
+        @Override public void close() { cancelled = true; }
+    }
+
     public static String currentAccountUid() {
         NativeFollowLists service = active;
         if (service == null || service.closed) return "";
@@ -164,6 +282,26 @@ public final class NativeFollowLists implements AutoCloseable {
     public static AutoCloseable listen(Runnable action) {
         listeners.add(action);
         return () -> listeners.remove(action);
+    }
+
+    /** Reports each successful kind from this forced refresh, excluding usable but failed old caches. */
+    public static boolean refreshRelationships(Consumer<Set<FollowListSnapshot.Kind>> completed) {
+        java.util.Objects.requireNonNull(completed, "completed");
+        NativeFollowLists service = active;
+        if (service == null || service.closed) return false;
+        return refresh(() -> {
+            Set<FollowListSnapshot.Kind> refreshed = java.util.EnumSet.noneOf(FollowListSnapshot.Kind.class);
+            synchronized (service) {
+                FollowListSnapshot.State state = FollowListSnapshot.current();
+                if (active == service && !service.closed && state.active) {
+                    for (FollowListSnapshot.Kind kind : FollowListSnapshot.Kind.values()) {
+                        boolean known = kind == FollowListSnapshot.Kind.FOLLOWING ? state.followingKnown : state.followersKnown;
+                        if (known && !service.errors.containsKey(kind)) refreshed.add(kind);
+                    }
+                }
+            }
+            completed.accept(Collections.unmodifiableSet(refreshed));
+        });
     }
 
     public static boolean refresh(Runnable completed) {
@@ -233,11 +371,12 @@ public final class NativeFollowLists implements AutoCloseable {
     }
 
     public static ProfileListEntry findMember(String uid) {
+        ProfileListEntry result = new ProfileListEntry(uid, AutomationScopePolicy.cachedName(uid), "");
         for (FollowListSnapshot.Kind kind : FollowListSnapshot.Kind.values()) {
             ProfileListEntry entry = memberDetails(kind).get(uid);
-            if (entry != null) return entry;
+            if (entry != null) result = result.withFallback(entry);
         }
-        return new ProfileListEntry(uid, AutomationScopePolicy.cachedName(uid), "");
+        return result;
     }
 
     public static String statusText() {
@@ -299,36 +438,48 @@ public final class NativeFollowLists implements AutoCloseable {
         }
     }
 
-    void refreshNow(boolean force) {
+    void refreshNow(boolean force) { refreshNow(force, null); }
+
+    private void refreshNow(boolean force, FollowListSnapshot.Kind pickerKind) {
         if (closed) return;
         Account account = accounts.current();
         syncAccount(account);
         long now = SystemClock.elapsedRealtime();
         expire(System.currentTimeMillis());
         if (account == null || account.uid.isEmpty()) { DouAiLog.event("relationship_lists", "eligibility", "account_unavailable", "ready=false"); return; }
+        boolean picker = pickerKind != null;
         for (FollowListSnapshot.Kind kind : FollowListSnapshot.Kind.values()) {
+            if (picker && kind != pickerKind) continue;
             FollowListSnapshot.State state = FollowListSnapshot.current();
+            if (picker && !pickerWanted(kind, account.uid, state.accountEpoch)) return;
             boolean known = kind == FollowListSnapshot.Kind.FOLLOWING ? state.followingKnown : state.followersKnown;
             synchronized (this) {
-                if (!force && (!needed(options, kind) || known || attempts.containsKey(kind) && now - attempts.get(kind) < RETRY_MS)) { DouAiLog.event("relationship_lists", "eligibility", "not_needed_cached_or_retry_delay", "kind=" + kind + ";cached=" + known + ";retry_delay_ms=" + RETRY_MS); continue; }
+                if (picker ? known : !force && (!needed(options, kind) || known
+                        || attempts.containsKey(kind) && now - attempts.get(kind) < RETRY_MS)) { DouAiLog.event("relationship_lists", "eligibility", "not_needed_cached_or_retry_delay", "kind=" + kind + ";cached=" + known + ";retry_delay_ms=" + RETRY_MS); continue; }
                 attempts.put(kind, now);
                 errors.remove(kind);
                 loading = kind;
             }
             FollowListSnapshot.Refresh token = FollowListSnapshot.beginRefresh(account.uid, kind);
             if (token == null) { DouAiLog.event("relationship_lists", "eligibility", "refresh_token_unavailable", "kind=" + kind); loading = null; return; }
-            DouAiLog.Operation trace = DouAiLog.begin("relationship_lists", force ? "manual_refresh" : "policy_refresh");
+            DouAiLog.Operation trace = DouAiLog.begin("relationship_lists", picker ? "picker_load" : force ? "manual_refresh" : "policy_refresh");
             trace.stage("fetch_pages", "kind=" + kind + ";account_ref=" + DouAiLog.reference(account.uid) + ";deadline_minutes=10");
             try {
                 long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(10);
                 Map<String, ProfileListEntry> result = FollowListPager.loadDetails(FollowListPager.Kind.valueOf(kind.name()),
                         account.uid, account.secUid, fetcher,
-                        () -> !closed && account.uid.equals(accounts.current().uid)
-                                && account.uid.equals(FollowListSnapshot.current().accountUid)
-                                && System.nanoTime() < deadline);
+                        () -> {
+                            Account current = accounts.current();
+                            FollowListSnapshot.State currentState = FollowListSnapshot.current();
+                            return !closed && current != null && account.uid.equals(current.uid)
+                                    && account.uid.equals(currentState.accountUid) && state.accountEpoch == currentState.accountEpoch
+                                    && (!picker || pickerWanted(kind, account.uid, state.accountEpoch))
+                                    && System.nanoTime() < deadline;
+                        }, stats -> DouAiLog.event("relationship_lists", "fetch_page", "page_loaded", stats));
                 syncAccount(accounts.current());
                 synchronized (this) {
-                    if (!closed && FollowListSnapshot.publish(token, result.keySet())) {
+                    if (!closed && (!picker || pickerWanted(kind, account.uid, state.accountEpoch))
+                            && FollowListSnapshot.publish(token, result.keySet())) {
                         Map<String, String> loadedNames = new LinkedHashMap<>();
                         for (ProfileListEntry entry : result.values()) loadedNames.put(entry.uid, entry.name);
                         names.put(kind, Collections.unmodifiableMap(loadedNames));
@@ -344,7 +495,10 @@ public final class NativeFollowLists implements AutoCloseable {
             } catch (Exception failure) {
                 syncAccount(accounts.current());
                 synchronized (this) {
-                    if (account.uid.equals(FollowListSnapshot.current().accountUid)) errors.put(kind, "拉取失败，请重试");
+                    FollowListSnapshot.State current = FollowListSnapshot.current();
+                    if (!closed && account.uid.equals(current.accountUid) && state.accountEpoch == current.accountEpoch) {
+                        errors.put(kind, "拉取失败，请重试");
+                    }
                 }
                 trace.error("fetch_pages", failure);
                 trace.finish(DouAiLog.Outcome.FAILED, "relationship_fetch_failed", "kind=" + kind + ";snapshot_published=false");
@@ -385,11 +539,24 @@ public final class NativeFollowLists implements AutoCloseable {
         } catch (ReflectiveOperationException | RuntimeException failure) { return new Account("", ""); }
     }
 
-    @Override public synchronized void close() {
-        if (closed) return;
-        closed = true;
-        worker.shutdownNow();
-        if (active == this) { active = null; FollowListSnapshot.activateAccount(""); }
+    @Override public void close() {
+        NativeUserProfiles profiles;
+        NativeUserSearch search;
+        synchronized (this) {
+            if (closed) return;
+            closed = true;
+            worker.shutdownNow();
+            for (PickerRequest request : pickerRequests) request.close();
+            for (PickerRequest request : activePickerRequests) request.close();
+            pickerRequests.clear();
+            profiles = userProfiles;
+            userProfiles = null;
+            search = userSearch;
+            userSearch = null;
+            if (active == this) { active = null; FollowListSnapshot.activateAccount(""); }
+        }
+        if (profiles != null) profiles.close();
+        if (search != null) search.close();
     }
 
     private static final class NativeFetcher implements FollowListPager.Fetcher {

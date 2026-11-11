@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /** Loads a complete native relationship list before exposing any membership. */
 public final class FollowListPager {
@@ -32,9 +33,16 @@ public final class FollowListPager {
 
     public static Map<String, ProfileListEntry> loadDetails(Kind kind, String accountUid, String secUid,
                                            Fetcher fetcher, BooleanSupplier accountCurrent) throws Exception {
+        return loadDetails(kind, accountUid, secUid, fetcher, accountCurrent, ignored -> { });
+    }
+
+    public static Map<String, ProfileListEntry> loadDetails(Kind kind, String accountUid, String secUid,
+                                            Fetcher fetcher, BooleanSupplier accountCurrent,
+                                            Consumer<String> pageTrace) throws Exception {
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(fetcher, "fetcher");
         Objects.requireNonNull(accountCurrent, "accountCurrent");
+        Objects.requireNonNull(pageTrace, "pageTrace");
         String uid = uid(accountUid);
         if (uid.isEmpty()) throw new IllegalArgumentException("Invalid account UID");
         if (secUid == null || secUid.trim().isEmpty()) {
@@ -42,7 +50,7 @@ public final class FollowListPager {
         }
         Map<String, ProfileListEntry> users = new LinkedHashMap<>();
         Set<Cursor> seen = new HashSet<>();
-        Cursor cursor = new Cursor(0, 0, 0, "", 0);
+        Cursor cursor = new Cursor(0, 0, "", 0);
         seen.add(cursor);
         for (int page = 0; page < MAX_PAGES; page++) {
             requireCurrent(accountCurrent);
@@ -54,6 +62,7 @@ public final class FollowListPager {
                     new String[]{"items"}, new String[]{"getItems"});
             if (!(items instanceof Iterable<?>)) throw failure("Missing relationship users");
             int rows = 0;
+            int accepted = 0;
             for (Object user : (Iterable<?>) items) {
                 if (++rows > MAX_USERS) throw failure("Relationship page exceeds user limit");
                 requireCurrent(accountCurrent);
@@ -61,17 +70,18 @@ public final class FollowListPager {
                 if (!member(kind, user)) continue;
                 String memberUid = uid(value(user, "uid", new String[]{"uid"}, new String[]{"getUid"}));
                 if (memberUid.isEmpty()) throw failure("Relationship user has no valid UID");
-                Object nameValue = value(user, "nickname", new String[]{"nickname"}, new String[]{"getNickname"});
-                String name = nameValue instanceof String ? ((String) nameValue).trim() : "";
-                if (!users.containsKey(memberUid) || users.get(memberUid).name.isEmpty()) {
-                    users.put(memberUid, new ProfileListEntry(memberUid, name, ProfileListEntry.avatar(user)));
-                }
+                accepted++;
+                ProfileListEntry profile = ProfileListEntry.fromUser(memberUid, user, null);
+                ProfileListEntry previous = users.get(memberUid);
+                users.put(memberUid, previous == null ? profile : previous.withFallback(profile));
                 if (users.size() > MAX_USERS) throw failure("Relationship list exceeds user limit");
             }
             requireCurrent(accountCurrent);
+            pageTrace.accept("kind=" + kind + ";page=" + (page + 1) + ";raw_rows=" + rows
+                    + ";accepted_rows=" + accepted + ";unique_total=" + users.size() + ";has_more=" + hasMore);
             if (!hasMore) return Collections.unmodifiableMap(new LinkedHashMap<>(users));
             if (rows == 0) throw failure("Empty relationship page still has more users");
-            cursor = next(kind, response, cursor);
+            cursor = next(response, cursor);
             if (!seen.add(cursor)) throw failure("Relationship pagination repeated a cursor");
         }
         throw failure("Relationship pagination exceeds page limit");
@@ -90,7 +100,8 @@ public final class FollowListPager {
         query.put("vcd_count", Integer.toString(cursor.vcdCount));
         query.put("store_page", cursor.storePage);
         if (kind == Kind.FOLLOWING) {
-            query.put("min_time", Long.toString(cursor.minTime));
+            // Native source_type=1 advances max_time while keeping the reverse boundary unset.
+            query.put("min_time", "0");
             query.put("vcd_auth_first_time", "0");
             query.put("relation_filter_type", "0");
             query.put("scene", "0");
@@ -100,12 +111,9 @@ public final class FollowListPager {
         return Collections.unmodifiableMap(query);
     }
 
-    private static Cursor next(Kind kind, Object response, Cursor previous) {
+    private static Cursor next(Object response, Cursor previous) {
         long maxTime = requiredNonnegative(value(response, "min_time", new String[]{"minTime"},
                 new String[]{"getMinTime"}), "min_time");
-        long minTime = kind == Kind.FOLLOWING
-                ? requiredNonnegative(value(response, "max_time", new String[]{"maxTime"},
-                new String[]{"getMaxTime"}), "max_time") : 0;
         int offset = requiredInt(value(response, "offset", new String[]{"offset"},
                 new String[]{"getOffset"}), "offset");
         Object storeValue = value(response, "store_page", new String[]{"storePage"},
@@ -116,7 +124,7 @@ public final class FollowListPager {
         Object vcdValue = value(response, "vcd_count", new String[]{"vcdCount"},
                 new String[]{"getVcdCount"});
         int vcdCount = vcdValue == null ? previous.vcdCount : requiredInt(vcdValue, "vcd_count");
-        return new Cursor(maxTime, minTime, offset, storePage, vcdCount);
+        return new Cursor(maxTime, offset, storePage, vcdCount);
     }
 
     private static boolean member(Kind kind, Object user) {
@@ -209,20 +217,19 @@ public final class FollowListPager {
 
     private static final class Cursor {
         final long maxTime;
-        final long minTime;
         final int offset;
         final String storePage;
         final int vcdCount;
-        Cursor(long maxTime, long minTime, int offset, String storePage, int vcdCount) {
-            this.maxTime = maxTime; this.minTime = minTime; this.offset = offset;
+        Cursor(long maxTime, int offset, String storePage, int vcdCount) {
+            this.maxTime = maxTime; this.offset = offset;
             this.storePage = storePage; this.vcdCount = vcdCount;
         }
         @Override public boolean equals(Object other) {
             if (!(other instanceof Cursor)) return false;
             Cursor cursor = (Cursor) other;
-            return maxTime == cursor.maxTime && minTime == cursor.minTime && offset == cursor.offset
+            return maxTime == cursor.maxTime && offset == cursor.offset
                     && storePage.equals(cursor.storePage);
         }
-        @Override public int hashCode() { return Objects.hash(maxTime, minTime, offset, storePage); }
+        @Override public int hashCode() { return Objects.hash(maxTime, offset, storePage); }
     }
 }

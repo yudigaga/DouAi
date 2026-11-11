@@ -1,5 +1,6 @@
 package com.douai.module.ui.miuix
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
@@ -35,6 +36,8 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardType
@@ -47,6 +50,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.douai.module.BuildConfig
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.Checkbox
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
@@ -63,6 +67,9 @@ object MiuixFormControls {
     @JvmStatic
     fun checkbox(context: Context, label: String, checked: Boolean): CheckBox =
         FormCheckbox(context, label, checked)
+
+    @JvmStatic
+    fun selectionCheckbox(context: Context, activate: Runnable): CheckBox = FormSelection(context, activate)
 
     @JvmStatic
     fun spinner(context: Context): Spinner = FormSpinner(context)
@@ -214,6 +221,49 @@ private class FormInput(context: Context, label: String, initial: String, secret
                     modifier = Modifier.padding(start = 12.dp, top = 4.dp).testTag("${state.tag}.error"))
             }
         }
+    }
+}
+
+private class SelectionState : ControlState("miuix.form.selection") {
+    var checked by mutableStateOf(false)
+}
+
+/** The trailing checkbox delegates to the identity row's single selection action. */
+@SuppressLint("ViewConstructor") // Created in code with a required row action; never inflated from XML.
+private class FormSelection(context: Context, private val activate: Runnable) : CheckBox(context), FormControl {
+    private var state: SelectionState? = null
+    override val miuixView by lazy {
+        formView(context, this, state!!) {
+            val state = state!!
+            Checkbox(
+                state = if (state.checked) ToggleableState.On else ToggleableState.Off,
+                onClick = { activate.run() },
+                modifier = Modifier.size(44.dp).testTag(state.tag).semantics {
+                    toggleableState = if (state.checked) ToggleableState.On else ToggleableState.Off
+                    role = Role.Checkbox
+                },
+            )
+        }
+    }
+
+    init {
+        state = SelectionState()
+        hideProxy(this)
+    }
+
+    override fun setChecked(checked: Boolean) {
+        super.setChecked(checked)
+        state?.checked = isChecked
+    }
+
+    override fun setVisibility(visibility: Int) {
+        super.setVisibility(visibility)
+        state?.view?.visibility = visibility
+    }
+
+    override fun setTag(tag: Any?) {
+        super.setTag(tag)
+        if (tag != null) state?.tag = tag.toString()
     }
 }
 

@@ -84,6 +84,40 @@ class ComponentHideEditorTest {
         assertEquals(1, editor.settings.customViews.size)
     }
 
+    @Test
+    fun customAlphaEditsPreserveNewRulesUniformModeAndDeletedRules() {
+        val context = RuntimeEnvironment.getApplication()
+        val root = FrameLayout(context)
+        val first = TextView(context).apply { id = android.R.id.title }
+        val second = TextView(context).apply { id = android.R.id.summary }
+        root.addView(first)
+        root.addView(second)
+        val edited = CustomViewLocator.capture(root, first)!!
+        val retained = CustomViewLocator.capture(root, second)!!
+        val store = MemoryStore()
+        store.putBoolean(ComponentHideSettings.ENABLED, true)
+        store.putBoolean(ComponentHideSettings.UNIFORM_ENABLED, true)
+        store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(listOf(edited)))
+        val editor = ComponentHideEditor(store)
+        store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(listOf(edited, retained)))
+
+        editor.setCustomAlpha(edited, 128)
+
+        assertEquals(listOf(128, -2), editor.settings.customViews.map { it.alpha })
+        assertEquals(listOf(edited.identityKey(), retained.identityKey()),
+            editor.settings.customViews.map { it.identityKey() })
+        assertTrue(editor.settings.uniformEnabled)
+        editor.deleteCustomView(edited)
+        editor.setCustomAlpha(edited, 0)
+        assertEquals(listOf(retained.identityKey()), editor.settings.customViews.map { it.identityKey() })
+        val saved = store.getString(CustomViewLocator.SETTINGS_KEY, "")
+        for (value in listOf(-3, 256, Int.MAX_VALUE)) {
+            try { editor.setCustomAlpha(retained, value); org.junit.Assert.fail("invalid alpha accepted") }
+            catch (_: IllegalArgumentException) { }
+            assertEquals(saved, store.getString(CustomViewLocator.SETTINGS_KEY, ""))
+        }
+    }
+
     private class MemoryStore : SettingsStore {
         private val values = mutableMapOf<String, Any>()
         private var features = FeatureSettings.defaults()

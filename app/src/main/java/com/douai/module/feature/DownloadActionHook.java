@@ -520,7 +520,7 @@ public final class DownloadActionHook implements AutoCloseable {
         return fieldByJsonName(target, jsonName);
     }
 
-    private static Field findFieldByJsonName(Class<?> type, String jsonName) {
+    static Field findFieldByJsonName(Class<?> type, String jsonName) {
         for (Class<?> current = type; current != null; current = current.getSuperclass()) {
             for (Field field : current.getDeclaredFields()) {
                 String mapped = serializedName(field);

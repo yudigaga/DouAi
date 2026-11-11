@@ -30,6 +30,55 @@ import static org.junit.Assert.assertTrue;
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
 public final class CustomViewLocatorTest {
     @Test
+    public void storedAlphaRoundTripsWithoutChangingTheTargetIdentity() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        TextView target = new TextView(activity);
+        root.addView(target);
+        CustomViewLocator locator = CustomViewLocator.capture(root, target);
+        for (int alpha : new int[]{-2, -1, 0, 128, 255}) {
+            JSONObject encoded = new JSONObject(encode(locator));
+            encoded.getJSONArray("items").getJSONObject(0).put("alpha", alpha);
+            List<CustomViewLocator> parsed = CustomViewLocator.parse(encoded.toString());
+            assertEquals(1, parsed.size());
+            assertEquals(locator.identityKey(), parsed.get(0).identityKey());
+            assertSame(target, parsed.get(0).resolve(root));
+            JSONObject saved = new JSONObject(CustomViewLocator.serialize(parsed));
+            assertEquals(alpha, saved.getJSONArray("items").getJSONObject(0).optInt("alpha", -999));
+        }
+        activity.finish();
+    }
+
+    @Test
+    public void legacyLocatorKeepsItsGoneDefaultWhenSavedAgain() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        TextView target = new TextView(activity);
+        root.addView(target);
+        JSONObject legacy = new JSONObject(encode(CustomViewLocator.capture(root, target)));
+        legacy.getJSONArray("items").getJSONObject(0).remove("alpha");
+        JSONObject saved = new JSONObject(CustomViewLocator.serialize(CustomViewLocator.parse(legacy.toString())));
+        assertEquals(2, saved.getInt("version"));
+        assertEquals(-2, saved.getJSONArray("items").getJSONObject(0).optInt("alpha", -999));
+        activity.finish();
+    }
+
+    @Test
+    public void malformedAlphaFailsClosedInsteadOfSilentlyHidingTheTarget() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        TextView target = new TextView(activity);
+        root.addView(target);
+        String encoded = encode(CustomViewLocator.capture(root, target));
+        for (Object alpha : new Object[]{-3, 256, 0.5, "128", JSONObject.NULL}) {
+            JSONObject invalid = new JSONObject(encoded);
+            invalid.getJSONArray("items").getJSONObject(0).put("alpha", alpha);
+            assertTrue("Invalid alpha " + alpha, CustomViewLocator.parse(invalid.toString()).isEmpty());
+        }
+        activity.finish();
+    }
+
+    @Test
     public void uniqueIdSurvivesHierarchyMovementAndJsonRoundTrip() {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);

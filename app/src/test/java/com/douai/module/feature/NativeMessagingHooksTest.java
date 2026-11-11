@@ -285,7 +285,7 @@ public final class NativeMessagingHooksTest {
             NativeMessagingHooks.loadContacts(true, completions::add);
             timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
             assertEquals(1, group.memberReads);
-            assertEquals("群友", NativeMessagingHooks.availableGroupMembers().get("300").name);
+            assertEquals("", NativeMessagingHooks.availableGroupMembers().get("300").name);
             Method dirty = NativeMessagingHooks.class.getDeclaredMethod("markContactsDirty"); dirty.setAccessible(true);
             for (int index = 0; index < 50; index++) dirty.invoke(hook);
             timer.advance(10 * 60_000);
@@ -295,6 +295,101 @@ public final class NativeMessagingHooksTest {
             assertEquals(3, sdk.model.reads);
             assertEquals(1, group.memberReads);
         } finally { hook.close(); }
+    }
+
+    @Test public void contactProfilesUseRawHostIdentityInsteadOfConversationRemarkAndIcon() throws Exception {
+        NativeFollowListsTest.ManualTimer timer = new NativeFollowListsTest.ManualTimer();
+        NativeMessagingHooks hook = enumerationHook(new LocalOptions(Collections.singletonMap("native_auto_reply", true)), timer);
+        EnumerationSdk sdk = (EnumerationSdk) HostTargets.read(hook, "sdk");
+        Conversation conversation = new Conversation(true, "thread", "我的备注");
+        conversation.icon = "https://p9.douyinpic.com/conversation.jpg";
+        sdk.model.rows.add(conversation);
+        configureProfiles(hook);
+        ImProfiles.users.put("200", new ImProfile("200", "真实昵称", "alice.id", "12345"));
+        try {
+            NativeMessagingHooks.loadContacts(false, ignored -> { });
+            timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            ProfileListEntry profile = NativeMessagingHooks.availableContactProfiles().get("200");
+            assertEquals("真实昵称", profile.name);
+            assertEquals("alice.id", profile.douyinId);
+            assertEquals("https://p3.douyinpic.com/avatar.jpg", profile.avatarUrl);
+            assertEquals("会话显示名", profile.senderName);
+            assertEquals("我的备注", NativeMessagingHooks.availableContacts().get("200"));
+            ContentValues incoming = new ContentValues(); incoming.put("sender", 200L);
+            Method receipt = NativeMessagingHooks.class.getDeclaredMethod("onIncoming", ContentValues.class, String.class);
+            receipt.setAccessible(true); receipt.invoke(hook, incoming, "fixture");
+            assertEquals("会话显示名", incoming.getAsString("sender_name"));
+        } finally { ImProfiles.users.clear(); hook.close(); }
+    }
+
+    @Test public void missingProfileDoesNotPresentConversationRemarkAsRealNickname() throws Exception {
+        NativeFollowListsTest.ManualTimer timer = new NativeFollowListsTest.ManualTimer();
+        NativeMessagingHooks hook = enumerationHook(new LocalOptions(Collections.emptyMap()), timer);
+        EnumerationSdk sdk = (EnumerationSdk) HostTargets.read(hook, "sdk");
+        sdk.model.rows.add(new Conversation(true, "thread", "我的备注"));
+        try {
+            NativeMessagingHooks.loadContacts(false, ignored -> { });
+            timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals("", NativeMessagingHooks.availableContactProfiles().get("200").name);
+        } finally { hook.close(); }
+    }
+
+    @Test public void incompleteImCacheRetainsRelationshipDouyinIdAndRejectsMismatchedUid() throws Exception {
+        NativeMessagingHooks hook = enumerationHook(new LocalOptions(Collections.emptyMap()));
+        configureProfiles(hook);
+        ProfileListEntry fallback = new ProfileListEntry("200", "关系昵称", "", "alice.id");
+        Method memberProfile = NativeMessagingHooks.class.getDeclaredMethod("memberProfile", String.class, ProfileListEntry.class);
+        memberProfile.setAccessible(true);
+        try {
+            ImProfiles.users.put("200", new ImProfile("200", "真实昵称", "", ""));
+            ProfileListEntry profile = (ProfileListEntry) memberProfile.invoke(hook, "200", fallback);
+            assertEquals("真实昵称", profile.name);
+            assertEquals("alice.id", profile.douyinId);
+            assertEquals("会话显示名", profile.senderName);
+            ImProfiles.users.put("200", new ImProfile("999", "其他用户", "other.id", ""));
+            assertSame(fallback, memberProfile.invoke(hook, "200", fallback));
+        } finally { ImProfiles.users.clear(); hook.close(); }
+    }
+
+    @Test public void groupAliasRemainsAvailableToReplyRulesWithoutBecomingRealNickname() throws Exception {
+        NativeFollowListsTest.ManualTimer timer = new NativeFollowListsTest.ManualTimer();
+        NativeMessagingHooks hook = enumerationHook(new LocalOptions(Collections.singletonMap("native_auto_reply", true)), timer);
+        EnumerationSdk sdk = (EnumerationSdk) HostTargets.read(hook, "sdk");
+        sdk.model.rows.add(new Conversation(false, "group", "群聊"));
+        try {
+            NativeMessagingHooks.loadContacts(true, ignored -> { });
+            timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals("", NativeMessagingHooks.availableGroupMembers().get("300").name);
+            assertTrue(NativeMessagingHooks.availableGroupProfiles().get("group").conversation);
+            ContentValues incoming = new ContentValues();
+            incoming.put("conversation_id", "group"); incoming.put("sender", 300L);
+            Method receipt = NativeMessagingHooks.class.getDeclaredMethod("onIncoming", ContentValues.class, String.class);
+            receipt.setAccessible(true); receipt.invoke(hook, incoming, "fixture");
+            assertEquals("群友", incoming.getAsString("sender_name"));
+        } finally { hook.close(); }
+    }
+
+    private static void configureProfiles(NativeMessagingHooks hook) throws Exception {
+        ImProfiles.users.clear();
+        HostTargets.field(NativeMessagingHooks.class, "imProfileCache").set(hook, ImProfiles.class.getMethod("cache"));
+        HostTargets.field(NativeMessagingHooks.class, "imProfileGet").set(hook, Map.class.getMethod("get", Object.class));
+    }
+
+    public static final class ImProfiles {
+        static final Map<String, Object> users = new HashMap<>();
+        public static Map<String, Object> cache() { return users; }
+    }
+
+    public static final class ImProfile {
+        public final String uid;
+        @com.google.gson.annotations.SerializedName("nickname") public final String nickName;
+        public final String uniqueId, shortId;
+        ImProfile(String uid, String nickname, String uniqueId, String shortId) {
+            this.uid = uid; this.nickName = nickname; this.uniqueId = uniqueId; this.shortId = shortId;
+        }
+        public String getUid() { return uid; }
+        public String getNickname() { return "会话显示名"; }
+        public ProfileListEntryTest.GetterAvatar getDisplayAvatar() { return new ProfileListEntryTest.GetterAvatar(); }
     }
 
     @Test public void cancelledContactConsumerDoesNoWorkAndAccountSwitchCannotDeliverOldSelection() throws Exception {
@@ -542,20 +637,21 @@ public final class NativeMessagingHooksTest {
     public static final class Conversation {
         final boolean single;
         final String id, name;
+        String icon = "";
         int memberReads;
         Conversation(boolean single, String id, String name) { this.single = single; this.id = id; this.name = name; }
         public String id() { return id; }
         public boolean single() { return single; }
         public List<Long> members() { return Arrays.asList(100L, 200L); }
         public List<Member> getMembers() { memberReads++; return Collections.singletonList(new Member()); }
-        public Core core() { return new Core(name); }
+        public Core core() { return new Core(name, icon); }
     }
 
     public static final class Core {
-        final String label;
-        Core(String label) { this.label = label; }
+        final String label, icon;
+        Core(String label, String icon) { this.label = label; this.icon = icon; }
         public String name() { return label; }
-        public String getIcon() { return ""; }
+        public String getIcon() { return icon; }
     }
 
     public static final class Member {

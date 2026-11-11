@@ -1,6 +1,5 @@
 package com.douai.module.feature;
 
-import android.os.Looper;
 import android.os.SystemClock;
 import com.douai.module.config.LocalOptions;
 import io.github.libxposed.api.XposedInterface;
@@ -22,7 +21,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.LooperMode;
 import static org.junit.Assert.*;
-import static org.robolectric.Shadows.shadowOf;
+import org.robolectric.shadows.ShadowLooper;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
@@ -298,7 +297,7 @@ public final class VideoQualityHookTest {
         return new LocalOptions(Map.of(LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY, enabled));
     }
 
-    private static void idle(long millis) { shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(millis)); }
+    private static void idle(long millis) { ShadowLooper.shadowMainLooper().idleFor(Duration.ofMillis(millis)); }
 
     private static Method method(Class<?> owner, String name, Class<?>... parameters) {
         try { return owner.getMethod(name, parameters); }

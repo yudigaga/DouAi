@@ -223,8 +223,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     public static Map<String, String> availableContacts() { checkContactAccount(); return contacts; }
     public static Map<String, String> availableGroups() { checkContactAccount(); return groups; }
-    public static Map<String, ProfileListEntry> availableContactProfiles() { checkContactAccount(); return profiles(contacts, contactProfiles); }
-    public static Map<String, ProfileListEntry> availableGroupProfiles() { checkContactAccount(); return profiles(groups, groupProfiles); }
+    public static Map<String, ProfileListEntry> availableContactProfiles() { checkContactAccount(); return profiles(contacts, contactProfiles, false); }
+    public static Map<String, ProfileListEntry> availableGroupProfiles() { checkContactAccount(); return profiles(groups, groupProfiles, true); }
     public static Map<String, ProfileListEntry> availableGroupMembers() {
         checkContactAccount();
         Map<String, ProfileListEntry> result = new LinkedHashMap<>();
@@ -344,10 +344,16 @@ public final class NativeMessagingHooks implements AutoCloseable {
         return StreakSendLedger.countUnknown(state);
     }
 
-    private static Map<String, ProfileListEntry> profiles(Map<String, String> names, Map<String, ProfileListEntry> details) {
+    private static Map<String, ProfileListEntry> profiles(Map<String, String> names,
+                                                       Map<String, ProfileListEntry> details, boolean conversation) {
         Map<String, ProfileListEntry> result = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : names.entrySet()) result.put(entry.getKey(), details.getOrDefault(entry.getKey(),
-                new ProfileListEntry(entry.getKey(), entry.getValue(), "")));
+        for (Map.Entry<String, String> entry : names.entrySet()) {
+            ProfileListEntry profile = details.get(entry.getKey());
+            if (profile == null) profile = conversation
+                    ? ProfileListEntry.conversation(entry.getKey(), entry.getValue(), "")
+                    : NativeFollowLists.findMember(entry.getKey());
+            result.put(entry.getKey(), profile);
+        }
         return Collections.unmodifiableMap(result);
     }
 
@@ -670,11 +676,11 @@ public final class NativeMessagingHooks implements AutoCloseable {
         catch (RuntimeException ignored) { return; }
         if (members != null && senderUid != null && values.getAsString("sender_name") == null) {
             ProfileListEntry profile = members.get(Long.toString(senderUid));
-            if (profile != null && !profile.name.isEmpty()) values.put("sender_name", profile.name);
+            if (profile != null && !profile.senderName.isEmpty()) values.put("sender_name", profile.senderName);
         }
         if (senderUid != null && values.getAsString("sender_name") == null) {
             ProfileListEntry profile = memberProfile(senderUid.toString());
-            if (!profile.name.isEmpty()) values.put("sender_name", profile.name);
+            if (!profile.senderName.isEmpty()) values.put("sender_name", profile.senderName);
         }
         if (!NativeFollowLists.ensureAccount(Long.toString(account))) {
             DouAiLog.event("auto_reply", "receipt_skipped", "account_changed", "source=" + source);
@@ -1477,9 +1483,14 @@ public final class NativeMessagingHooks implements AutoCloseable {
             Map<String, ProfileListEntry> discoveredGroupProfiles = new LinkedHashMap<>();
             Map<String, Map<String, ProfileListEntry>> discoveredGroupMembers = new LinkedHashMap<>();
             Map<String, ProfileListEntry> knownProfiles = new LinkedHashMap<>();
+            Set<String> resolvedProfiles = new HashSet<>();
             if (includeMembers) {
                 knownProfiles.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING));
-                knownProfiles.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS));
+                for (Map.Entry<String, ProfileListEntry> entry : NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS).entrySet()) {
+                    ProfileListEntry previous = knownProfiles.get(entry.getKey());
+                    knownProfiles.put(entry.getKey(), entry.getValue().withFallback(previous)
+                            .withSenderName(entry.getValue().senderName));
+                }
             }
             for (Object conversation : (List<?>) raw) {
                 if (!contactsStillWanted(requests, self, accountEpoch) || closed || sdk != source || ownUid() != self
@@ -1493,7 +1504,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     if (!(id instanceof String) || ((String) id).isEmpty()) continue;
                     String groupName = name instanceof String && !((String) name).isEmpty() ? (String) name : (String) id;
                     discoveredGroups.put((String) id, groupName);
-                    discoveredGroupProfiles.put((String) id, new ProfileListEntry((String) id, groupName,
+                    discoveredGroupProfiles.put((String) id, ProfileListEntry.conversation((String) id, groupName,
                             icon instanceof String ? (String) icon : ""));
                     if (!includeMembers) continue;
                     Map<String, ProfileListEntry> members = new LinkedHashMap<>();
@@ -1507,14 +1518,17 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         if (!(uid instanceof Number) || ((Number) uid).longValue() <= 0) continue;
                         String memberUid = uid.toString();
                         ProfileListEntry profile = knownProfiles.get(memberUid);
-                        if (profile == null) {
-                            profile = memberProfile(memberUid, new ProfileListEntry(memberUid, "", ""));
+                        if (resolvedProfiles.add(memberUid)) {
+                            ProfileListEntry fallback = profile;
+                            profile = memberProfile(memberUid, fallback == null ? new ProfileListEntry(memberUid, "", "") : fallback);
+                            // Keep the existing nickname-rule source while displaying the raw host nickname.
+                            if (fallback != null) profile = profile.withSenderName(fallback.senderName);
                             knownProfiles.put(memberUid, profile);
                         }
                         Object alias = HostTargets.invoke(member, "getAlias");
                         if (!(alias instanceof String)) alias = HostTargets.read(member, "alias");
-                        members.put(memberUid, new ProfileListEntry(memberUid, !profile.name.isEmpty() ? profile.name
-                                : alias instanceof String ? (String) alias : "", profile.avatarUrl));
+                        members.put(memberUid, profile.senderName.isEmpty()
+                                ? profile.withSenderName(alias instanceof String ? (String) alias : "") : profile);
                     }
                     discoveredGroupMembers.put((String) id, Collections.unmodifiableMap(members));
                     continue;
@@ -1526,8 +1540,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     String uid = member.toString();
                     String label = name instanceof String && !((String) name).isEmpty() ? (String) name : uid;
                     discovered.put(uid, label);
-                    discoveredProfiles.put(uid, new ProfileListEntry(uid, label,
-                            icon instanceof String ? (String) icon : memberProfile(uid).avatarUrl));
+                    discoveredProfiles.put(uid, memberProfile(uid));
                 }
             }
             synchronized (contactsLock) {
@@ -1635,9 +1648,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
             Object user = imProfileGet.invoke(imProfileCache.invoke(null), uid);
             if (user == null || !uid.equals(HostTargets.invoke(user, "getUid"))) return fallback;
             Object name = HostTargets.invoke(user, "getNickname");
-            String avatar = ProfileListEntry.avatar(user);
-            return new ProfileListEntry(uid, name instanceof String && !((String) name).isEmpty() ? (String) name : fallback.name,
-                    !avatar.isEmpty() ? avatar : fallback.avatarUrl);
+            return ProfileListEntry.fromUser(uid, user, fallback).withSenderName(
+                    name instanceof String && !((String) name).isEmpty() ? (String) name : fallback.senderName);
         } catch (ReflectiveOperationException | RuntimeException ignored) { return fallback; }
     }
 }

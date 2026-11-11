@@ -1694,8 +1694,11 @@ final class SpeechSettingsDialog implements AutoCloseable {
             return singleFishVoiceLabel(fish);
         }
         if (settings.breeze) return translatedVoiceLabel(settings.breezeSettings.voiceId, settings.breezeSettings.voiceName);
-        if (settings.minimax) return settings.minimaxVoiceName.isEmpty() ? settings.minimaxVoiceId
-                : settings.minimaxVoiceName + " · " + settings.minimaxVoiceId;
+        if (settings.minimax) {
+            String single = settings.minimaxVoiceName.isEmpty() ? settings.minimaxVoiceId
+                    : settings.minimaxVoiceName + " · " + settings.minimaxVoiceId;
+            return settings.minimaxOptions.hasMixedVoices() ? "混音预设 · 备用单音色：" + single : single;
+        }
         return settings.selectedVoiceName.isEmpty() ? settings.selectedVoice : settings.selectedVoiceName + " · " + settings.selectedVoice;
     }
 

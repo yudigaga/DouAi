@@ -12,6 +12,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextReplacement
 import com.douai.module.config.ComponentHideSettings
 import com.douai.module.config.CustomViewLocator
 import com.douai.module.config.HostSettingsStore
@@ -82,5 +83,29 @@ class MiuixComponentHideDeleteTest {
             assertTrue(page!!.isShowing())
         }
         compose.onNodeWithText("暂无自定义视图").assertIsDisplayed()
+    }
+
+    @Test fun plainHostBackDismissesNumberInputBeforeComponentPage() {
+        compose.runOnUiThread {
+            controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
+            store = HostSettingsStore(controller!!.get())
+            store.putBoolean(ComponentHideSettings.ENABLED, true)
+            store.putString(ComponentHideSettings.Component.LIKE.key, "81")
+            page = MiuixComponentHidePage(controller!!.get(), store).also { it.show() }
+        }
+        val key = ComponentHideSettings.Component.LIKE.key
+        compose.onNodeWithTag("component.list").performScrollToNode(hasTestTag(key))
+        compose.onNodeWithTag("$key.value").performClick()
+        compose.onNodeWithTag("component.alpha.input").performTextReplacement("0")
+        compose.runOnUiThread {
+            val window = ShadowDialog.getLatestDialog()
+            window.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK))
+            window.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK))
+        }
+        compose.onNodeWithTag("component.alpha.input").assertDoesNotExist()
+        compose.runOnIdle {
+            assertEquals("81", store.getString(key, ""))
+            assertTrue(page!!.isShowing())
+        }
     }
 }

@@ -130,12 +130,22 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                 value -> repository.putBoolean(LocalOptions.REPLY_VOICE, value));
         OptionRow[] privateRange = new OptionRow[1];
         addSwitch(panel, "接收私聊", "", repository.getBoolean("reply_private_chats", true), true,
-                value -> { repository.putBoolean("reply_private_chats", value); privateRange[0].setValue(privateReplyPreview()); });
+                value -> {
+                    repository.putBoolean("reply_private_chats", value);
+                    privateRange[0].setValue(privateReplyPreview());
+                    privateRange[0].view.setVisibility(value ? View.VISIBLE : View.GONE);
+                });
         privateRange[0] = addOption(panel, "私聊范围", "", privateReplyPreview(), true, () -> showPrivateReplySettings(privateRange[0]));
+        privateRange[0].view.setVisibility(repository.getBoolean("reply_private_chats", true) ? View.VISIBLE : View.GONE);
         OptionRow[] groupRange = new OptionRow[1];
         addSwitch(panel, "接收群聊", "", repository.getBoolean("reply_group_chats", false), true,
-                value -> { repository.putBoolean("reply_group_chats", value); groupRange[0].setValue(groupReplyPreview()); });
+                value -> {
+                    repository.putBoolean("reply_group_chats", value);
+                    groupRange[0].setValue(groupReplyPreview());
+                    groupRange[0].view.setVisibility(value ? View.VISIBLE : View.GONE);
+                });
         groupRange[0] = addOption(panel, "群聊范围", "", groupReplyPreview(), true, () -> showGroupReplySettings(groupRange[0]));
+        groupRange[0].view.setVisibility(repository.getBoolean("reply_group_chats", false) ? View.VISIBLE : View.GONE);
         commentReplies[0] = addSwitch(panel, "接收评论回复", commentReplySummary(),
                 repository.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false), true, value -> {
                     repository.setEnabled("comment_reply", value);
@@ -147,8 +157,9 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     }
 
     private String commentReplySummary() {
+        String scope = "私聊和群聊名单不适用";
         return repository.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false) && !repository.getBoolean("native_auto_reply", false)
-                ? "已暂停：自动回复未开启" : "";
+                ? "已暂停：自动回复未开启\n" + scope : scope;
     }
 
     private String replyMediaPreview() {
@@ -177,17 +188,59 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     }
 
     private static String scopeLabel(String mode) {
-        return "whitelist".equals(mode) ? "白名单" : "blacklist".equals(mode) ? "黑名单" : "全部";
+        return "whitelist".equals(mode) ? "仅名单内" : "blacklist".equals(mode) ? "排除名单内" : "全部";
     }
 
     private String privateReplyPreview() {
         return repository.getBoolean("reply_private_chats", true)
-                ? scopeLabel(ReplyScopePolicy.scopeMode(repository.scope("reply"))) : "未启用";
+                ? identityScopePreview("reply") : "未启用";
     }
 
     private String groupReplyPreview() {
-        return repository.getBoolean("reply_group_chats", false)
-                ? scopeLabel(repository.getString("reply_group_scope_mode", "all")) : "未启用";
+        if (!repository.getBoolean("reply_group_chats", false)) return "未启用";
+        String scope = repository.getString("reply_group_scope_mode", "all");
+        String preview = scopeLabel(scope);
+        if (!"all".equals(scope)) {
+            int count = GroupReplyPolicy.entries(repository.getString("reply_group_targets", "")).size();
+            preview += count == 0 ? ("whitelist".equals(scope) ? " · 空名单，不会回复" : " · 空名单，不排除群聊")
+                    : " · 已选择 " + count + " 个群聊";
+        }
+        String trigger = repository.getString("reply_group_mode", "all");
+        if ("selected".equals(trigger)) {
+            int count = GroupReplyPolicy.entries(repository.getString("reply_group_members", "")).size();
+            preview += count == 0 ? " · 成员为空，不会回复" : " · 指定成员 " + count + " 人";
+        } else preview += "mentions".equals(trigger) ? " · 仅 @我" : " · 全员";
+        return preview;
+    }
+
+    private String identityScopePreview(String kind) {
+        LocalOptions options = repository.scope(kind);
+        String mode = ContentScopePolicy.scopeMode(kind, options);
+        String preview = scopeLabel(mode);
+        if (!"all".equals(mode)) {
+            String key = "reply".equals(kind) ? "reply_targets" : "comment_scope_users";
+            int users = AutomationScopePolicy.targets(repository.getString(key, "")).size();
+            int relations = AutomationScopePolicy.targets(options.text(kind + "_scope_relations", "")).size();
+            preview += users == 0 && relations == 0
+                    ? ("whitelist".equals(mode) ? " · 空名单，不会" + ("reply".equals(kind) ? "回复" : "评论") : " · 空名单，不排除用户")
+                    : " · " + users + " 人" + (relations == 0 ? "" : "、" + relations + " 类关系");
+        }
+        String filter = ContentScopePolicy.filterMode(kind, options);
+        return preview + " · " + (ContentScopePolicy.INCLUDE.equals(filter) ? "包含关键词"
+                : ContentScopePolicy.EXCLUDE.equals(filter) ? "排除关键词" : "不限关键词");
+    }
+
+    private String selectedUserPreview(String key) {
+        String configured = repository.getString(key, "");
+        int selected = "reply_group_members".equals(key) ? GroupReplyPolicy.entries(configured).size()
+                : AutomationScopePolicy.targets(configured).size();
+        return selected == 0 ? "未选择" : "已选择 " + selected + " 人";
+    }
+
+    private void scopeNotice(LinearLayout panel, String message) {
+        TextView notice = text(message, 12, MUTED, false);
+        notice.setPadding(0, dp(4), 0, dp(8));
+        panel.addView(notice, matchWrap());
     }
 
     private void showReplyContentSettings() {
@@ -210,29 +263,36 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         repository.prepareContentFilter("reply");
         LinearLayout panel = form();
         Runnable[] build = new Runnable[1];
+        Runnable changed = () -> {
+            preview.setValue(privateReplyPreview());
+            if (isActive(panel)) rebuildAutomationPanel(panel, build[0]);
+        };
         build[0] = () -> {
             LocalOptions scopeOptions = repository.scope("reply");
             String scope = ReplyScopePolicy.scopeMode(scopeOptions);
-            addChoiceOption(panel, "用户范围", "reply_scope_mode", new String[]{"全部", "白名单", "黑名单"},
-                    new String[]{"all", "whitelist", "blacklist"}, scope, () -> {
-                        preview.setValue(privateReplyPreview());
-                        rebuildAutomationPanel(panel, build[0]);
-                    });
+            addChoiceOption(panel, "用户范围", "reply_scope_mode", new String[]{"全部", "仅名单内", "排除名单内"},
+                    new String[]{"all", "whitelist", "blacklist"}, scope, changed);
             if (!"all".equals(scope)) {
-                addMultiChoiceCsvOption(panel, "关注关系", "reply_scope_relations", new String[]{"我关注的", "关注我的", "陌生人"},
-                        new String[]{AutomationScopePolicy.FOLLOWING, AutomationScopePolicy.FOLLOWERS, AutomationScopePolicy.STRANGERS});
-                addOption(panel, "指定用户", "", repository.getString("reply_targets", ""), true,
-                        () -> showTargetSelection("指定用户", "reply_targets"));
+                scopeNotice(panel, "所选关系或手选用户任一命中即匹配名单；互不关注表示双方均未关注。");
+                addMultiChoiceCsvOption(panel, "关注关系", "reply_scope_relations", new String[]{"我关注", "关注我", "互不关注"},
+                        new String[]{AutomationScopePolicy.FOLLOWING, AutomationScopePolicy.FOLLOWERS, AutomationScopePolicy.STRANGERS}, changed);
+                String title = "blacklist".equals(scope) ? "排除用户" : "选择用户";
+                addOption(panel, title, "", selectedUserPreview("reply_targets"), true,
+                        () -> showTargetSelection(title, "reply_targets", changed));
+                if (AutomationScopePolicy.targets(repository.getString("reply_targets", "")).isEmpty()
+                        && AutomationScopePolicy.targets(repository.getString("reply_scope_relations", "")).isEmpty()) {
+                    scopeNotice(panel, "whitelist".equals(scope) ? "名单为空，不会回复任何私聊用户。" : "名单为空，不排除任何私聊用户。");
+                }
             }
-            addFollowListsOption(panel);
             String filter = ReplyScopePolicy.filterMode(scopeOptions);
             addChoiceOption(panel, "消息筛选", "reply_filter_mode", new String[]{"不限", "包含关键词", "排除关键词"},
-                    new String[]{"off", "include", "exclude"}, filter, () -> rebuildAutomationPanel(panel, build[0]));
+                    new String[]{"off", "include", "exclude"}, filter, changed);
             if (!ReplyScopePolicy.OFF.equals(filter)) {
                 addEditableOption(panel, "筛选关键词", "", ReplyScopePolicy.keywords(scopeOptions), false, true,
-                        value -> repository.putString("reply_filter_keywords", value));
+                        value -> { repository.putString("reply_filter_keywords", value); changed.run(); });
                 addMultiChoiceCsvOption(panel, "匹配对象", "reply_filter_fields", new String[]{"发送者", "消息内容"},
-                        new String[]{AutomationScopePolicy.AUTHOR, AutomationScopePolicy.CAPTION});
+                        new String[]{AutomationScopePolicy.AUTHOR, AutomationScopePolicy.CAPTION}, changed);
+                scopeNotice(panel, "消息筛选还需同时满足，不会扩大上面的用户范围。");
             }
         };
         showAutomationPanel("私聊范围", panel, build[0]);
@@ -241,21 +301,28 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     private void showGroupReplySettings(OptionRow preview) {
         LinearLayout panel = form();
         Runnable[] build = new Runnable[1];
+        Runnable changed = () -> {
+            preview.setValue(groupReplyPreview());
+            if (isActive(panel)) rebuildAutomationPanel(panel, build[0]);
+        };
         build[0] = () -> {
             String scope = repository.getString("reply_group_scope_mode", "all");
-            addChoiceOption(panel, "群聊作用域", "reply_group_scope_mode",
-                    new String[]{"全部", "白名单", "黑名单"}, new String[]{"all", "whitelist", "blacklist"}, "all", () -> {
-                        preview.setValue(groupReplyPreview());
-                        rebuildAutomationPanel(panel, build[0]);
-                    });
+            addChoiceOption(panel, "群聊范围", "reply_group_scope_mode",
+                    new String[]{"全部", "仅名单内", "排除名单内"}, new String[]{"all", "whitelist", "blacklist"}, "all", changed);
             if (!"all".equals(scope)) {
-                OptionRow[] groups = new OptionRow[1];
-                groups[0] = addOption(panel, "选择群聊", "", selectedGroupPreview(), true, () -> showGroupSelection(groups[0]));
+                String title = "blacklist".equals(scope) ? "排除群聊" : "选择群聊";
+                addOption(panel, title, "", selectedGroupPreview(), true, () -> showGroupSelection(title, changed));
+                if (GroupReplyPolicy.entries(repository.getString("reply_group_targets", "")).isEmpty()) {
+                    scopeNotice(panel, "whitelist".equals(scope) ? "群聊名单为空，不会回复任何群聊。" : "群聊名单为空，不排除任何群聊。");
+                }
             }
             addChoiceOption(panel, "触发条件", "reply_group_mode", new String[]{"全员", "指定成员", "仅 @我"},
-                    new String[]{"all", "selected", "mentions"}, "all", () -> rebuildAutomationPanel(panel, build[0]));
+                    new String[]{"all", "selected", "mentions"}, "all", changed);
             if ("selected".equals(repository.getString("reply_group_mode", "all"))) {
-                addOption(panel, "指定成员", "", repository.getString("reply_group_members", ""), true, this::showGroupMemberSelection);
+                addOption(panel, "选择成员", "", selectedUserPreview("reply_group_members"), true, () -> showGroupMemberSelection(changed));
+                if (GroupReplyPolicy.entries(repository.getString("reply_group_members", "")).isEmpty()) {
+                    scopeNotice(panel, "成员名单为空，不会触发群聊回复。");
+                }
             }
         };
         showAutomationPanel("群聊范围", panel, build[0]);
@@ -297,43 +364,43 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         return selected == 0 ? "未选择" : "已选择 " + selected + " 个群聊";
     }
 
-    private void showGroupSelection(OptionRow preview) {
-        withNativeContacts(false, () -> showGroupSelectionLoaded(preview));
+    private void showGroupSelection(String title, Runnable changed) {
+        withNativeContacts(false, () -> showGroupSelectionLoaded(title, changed));
     }
 
-    private void showGroupSelectionLoaded(OptionRow preview) {
+    private void showGroupSelectionLoaded(String title, Runnable changed) {
         java.util.Map<String, String> groups = NativeMessagingHooks.availableGroups();
         java.util.Set<String> selected = GroupReplyPolicy.entries(repository.getString("reply_group_targets", ""));
         if (groups.isEmpty() && selected.isEmpty()) {
-            showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle("选择群聊")
+            showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle(title)
                     .setMessage("暂无可用群会话。")
                     .setNeutralButton("填写会话 ID", (dialog, which) ->
-                            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> showGroupConversationIds(preview)))
+                            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> showGroupConversationIds(changed)))
                     .setNegativeButton("返回", null).create());
             return;
         }
-        showProfileSelection("选择群聊", NativeMessagingHooks.availableGroupProfiles(), selected, next -> {
+        showProfileSelection(title, NativeMessagingHooks.availableGroupProfiles(), selected, next -> {
                     repository.putString("reply_group_targets", String.join(",", next));
-                    preview.setValue(selectedGroupPreview());
-                }, () -> showGroupConversationIds(preview));
+                    changed.run();
+                }, () -> showGroupConversationIds(changed), false, true);
     }
 
-    private void showGroupConversationIds(OptionRow preview) {
+    private void showGroupConversationIds(Runnable changed) {
         LinearLayout form = form();
         EditText input = formInput(form, "群会话 ID，以逗号分隔", repository.getString("reply_group_targets", ""), false);
         showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle("填写会话 ID").setView(form)
                 .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
                     if (closed) return;
                     repository.putString("reply_group_targets", String.join(",", GroupReplyPolicy.entries(input.getText().toString())));
-                    preview.setValue(selectedGroupPreview());
+                    changed.run();
                 }).create());
     }
 
-    private void showGroupMemberSelection() {
-        withNativeContacts(true, () -> showGroupMemberSelectionLoaded());
+    private void showGroupMemberSelection(Runnable changed) {
+        withNativeContacts(true, () -> showGroupMemberSelectionLoaded(changed));
     }
 
-    private void showGroupMemberSelectionLoaded() {
+    private void showGroupMemberSelectionLoaded(Runnable changed) {
         java.util.Map<String, ProfileListEntry> members = NativeMessagingHooks.availableGroupMembers();
         java.util.Set<String> selected = new java.util.LinkedHashSet<>(GroupReplyPolicy.entries(
                 repository.getString("reply_group_members", "")));
@@ -345,32 +412,41 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                 selected.add(entry.uid);
             }
         }
-        showProfileSelection("选择群成员", members, selected, next ->
-                repository.putString("reply_group_members", String.join(",", next)), this::showGroupMemberIds);
+        java.util.Map<String, ProfileListEntry> users = availableUsers();
+        members.forEach((uid, profile) ->
+                users.merge(uid, profile, (existing, incoming) -> incoming.withFallback(existing)));
+        for (String entry : selected) if (!entry.matches("[1-9][0-9]{0,19}") && !users.containsKey(entry)) {
+            users.put(entry, ProfileListEntry.named(entry));
+        }
+        showProfileSelection("选择成员", users, selected, next -> {
+                    repository.putString("reply_group_members", String.join(",", next));
+                    changed.run();
+                }, () -> showGroupMemberIds(changed), true, false);
     }
 
-    private void showGroupMemberIds() {
+    private void showGroupMemberIds(Runnable changed) {
         LinearLayout form = form();
         EditText input = formInput(form, "成员 UID 或昵称", repository.getString("reply_group_members", ""), false);
         showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle("指定成员").setView(form)
-                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) ->
-                        repository.putString("reply_group_members", String.join(",", GroupReplyPolicy.entries(input.getText().toString())))).create());
+                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
+                    repository.putString("reply_group_members", String.join(",", GroupReplyPolicy.entries(input.getText().toString())));
+                    changed.run();
+                }).create());
     }
 
     private void showProfileSelection(String title, java.util.Map<String, ProfileListEntry> available,
                                       java.util.Set<String> selected, java.util.function.Consumer<java.util.Set<String>> saved,
-                                      Runnable manual) {
+                                      Runnable manual, boolean directoryEnabled, boolean conversations) {
         java.util.Map<String, ProfileListEntry> entries = new java.util.LinkedHashMap<>(available);
         for (String uid : selected) if (!entries.containsKey(uid)) {
-            entries.put(uid, "选择群成员".equals(title) && !uid.matches("[1-9][0-9]{0,19}")
-                    ? ProfileListEntry.named(uid) : new ProfileListEntry(uid, "", ""));
+            entries.put(uid, conversations ? ProfileListEntry.conversation(uid, "", "") : NativeFollowLists.findMember(uid));
         }
         MemberListView list = new MemberListView(useMiuix ? rowContext() : context, useMiuix,
-                new ArrayList<>(entries.values()), selected, true);
+                new ArrayList<>(entries.values()), selected, true, directoryEnabled);
         MiuixDialogBuilder builder = new MiuixDialogBuilder(context, useMiuix);
         builder.setTitle(title).setView(list).setNegativeButton("取消", null)
                 .setPositiveButton("保存", (dialog, which) -> saved.accept(list.selected()));
-        if (manual != null) builder.setNeutralButton("选择群聊".equals(title) ? "填写会话 ID" : "填写 UID", (dialog, which) ->
+        if (manual != null) builder.setNeutralButton(conversations ? "填写会话 ID" : "填写 UID", (dialog, which) ->
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(manual));
         showOptionDialog(builder.create(), list::close);
     }
@@ -389,7 +465,7 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                 repository.getBoolean(LocalOptions.COMMENT_VOICE, false), true,
                 value -> repository.putBoolean(LocalOptions.COMMENT_VOICE, value));
         OptionRow[] scope = new OptionRow[1];
-        scope[0] = addOption(panel, "作品范围", "", scopeLabel(ContentScopePolicy.scopeMode("comment", repository.scope("comment"))),
+        scope[0] = addOption(panel, "作品范围", "", identityScopePreview("comment"),
                 true, () -> showCommentScopeSettings(scope[0]));
         boolean ai = "ai".equals(repository.getString("comment_mode", "ai"));
         media[0] = addOption(panel, "素材识别", "", commentMediaPreview(), ai, () -> showCommentMediaSettings(media[0]));
@@ -417,44 +493,48 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         repository.prepareContentFilter("comment");
         LinearLayout panel = form();
         Runnable[] build = new Runnable[1];
+        Runnable changed = () -> {
+            preview.setValue(identityScopePreview("comment"));
+            if (isActive(panel)) rebuildAutomationPanel(panel, build[0]);
+        };
         build[0] = () -> {
             LocalOptions scopeOptions = repository.scope("comment");
             String mode = ContentScopePolicy.scopeMode("comment", scopeOptions);
-            addChoiceOption(panel, "作者范围", "comment_scope_mode", new String[]{"全部", "白名单", "黑名单"},
-                    new String[]{"all", "whitelist", "blacklist"}, mode, () -> {
-                        preview.setValue(scopeLabel(repository.getString("comment_scope_mode", "all")));
-                        rebuildAutomationPanel(panel, build[0]);
-                    });
+            addChoiceOption(panel, "作者范围", "comment_scope_mode", new String[]{"全部", "仅名单内", "排除名单内"},
+                    new String[]{"all", "whitelist", "blacklist"}, mode, changed);
             if (!"all".equals(mode)) {
-                addMultiChoiceCsvOption(panel, "关注关系", "comment_scope_relations", new String[]{"我关注的", "关注我的", "陌生人"},
-                        new String[]{AutomationScopePolicy.FOLLOWING, AutomationScopePolicy.FOLLOWERS, AutomationScopePolicy.STRANGERS});
-                addOption(panel, "指定作者", "", repository.getString("comment_scope_users", ""), true, this::showCommentAuthorSelection);
+                scopeNotice(panel, "所选关系或手选作者任一命中即匹配名单；互不关注表示双方均未关注。");
+                addMultiChoiceCsvOption(panel, "关注关系", "comment_scope_relations", new String[]{"我关注", "关注我", "互不关注"},
+                        new String[]{AutomationScopePolicy.FOLLOWING, AutomationScopePolicy.FOLLOWERS, AutomationScopePolicy.STRANGERS}, changed);
+                String title = "blacklist".equals(mode) ? "排除作者" : "选择作者";
+                addOption(panel, title, "", selectedUserPreview("comment_scope_users"), true,
+                        () -> showTargetSelection(title, "comment_scope_users", changed));
+                if (AutomationScopePolicy.targets(repository.getString("comment_scope_users", "")).isEmpty()
+                        && AutomationScopePolicy.targets(repository.getString("comment_scope_relations", "")).isEmpty()) {
+                    scopeNotice(panel, "whitelist".equals(mode) ? "名单为空，不会对任何作者的作品评论。" : "名单为空，不排除任何作者。");
+                }
             }
-            addFollowListsOption(panel);
             String filter = ContentScopePolicy.filterMode("comment", scopeOptions);
             addChoiceOption(panel, "作品筛选", "comment_filter_mode", new String[]{"不限", "包含关键词", "排除关键词"},
-                    new String[]{"off", "include", "exclude"}, filter, () -> rebuildAutomationPanel(panel, build[0]));
+                    new String[]{"off", "include", "exclude"}, filter, changed);
             if (!ContentScopePolicy.OFF.equals(filter)) {
                 addEditableOption(panel, "筛选关键词", "", ContentScopePolicy.keywords("comment", scopeOptions),
-                        false, true, value -> repository.putString("comment_filter_keywords", value));
+                        false, true, value -> { repository.putString("comment_filter_keywords", value); changed.run(); });
                 addMultiChoiceCsvOption(panel, "匹配对象", "comment_filter_fields", new String[]{"作者", "文案", "标题"},
-                        new String[]{AutomationScopePolicy.AUTHOR, AutomationScopePolicy.CAPTION, AutomationScopePolicy.TITLE});
+                        new String[]{AutomationScopePolicy.AUTHOR, AutomationScopePolicy.CAPTION, AutomationScopePolicy.TITLE}, changed);
+                scopeNotice(panel, "作品筛选还需同时满足，不会扩大上面的作者范围。");
             }
         };
         showAutomationPanel("作品范围", panel, build[0]);
     }
 
-    private void showCommentAuthorSelection() {
-        withNativeContacts(false, () -> showCommentAuthorSelectionLoaded());
-    }
-
-    private void showCommentAuthorSelectionLoaded() {
-        java.util.Map<String, ProfileListEntry> authors = new java.util.LinkedHashMap<>(NativeMessagingHooks.availableContactProfiles());
-        authors.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING));
-        authors.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS));
-        showProfileSelection("指定作者", authors, AutomationScopePolicy.targets(repository.getString("comment_scope_users", "")),
-                next -> repository.putString("comment_scope_users", String.join(",", next)),
-                () -> showTargetIds("指定作者 UID", "comment_scope_users"));
+    private java.util.Map<String, ProfileListEntry> availableUsers() {
+        java.util.Map<String, ProfileListEntry> users = new java.util.LinkedHashMap<>(NativeMessagingHooks.availableContactProfiles());
+        NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING).forEach((uid, profile) ->
+                users.merge(uid, profile, (existing, incoming) -> incoming.withFallback(existing)));
+        NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS).forEach((uid, profile) ->
+                users.merge(uid, profile, (existing, incoming) -> incoming.withFallback(existing)));
+        return users;
     }
 
     private String commentMediaPreview() {
@@ -472,80 +552,6 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             addSwitch(panel, "识别视频", "", repository.getBoolean("comment_recognize_video", false), true,
                     value -> { repository.putBoolean("comment_recognize_video", value); preview.setValue(commentMediaPreview()); });
         });
-    }
-
-    private void addFollowListsOption(LinearLayout panel) {
-        OptionRow[] preview = new OptionRow[1];
-        preview[0] = addOption(panel, "关注与粉丝名单", "", NativeFollowLists.statusText(), true,
-                () -> showFollowLists(preview[0]));
-    }
-
-    private void showFollowLists(OptionRow preview) {
-        LinearLayout form = form();
-        Button following = formButton();
-        following.setText("我关注的");
-        following.setTag("settings.followLists.following");
-        following.setOnClickListener(ignored -> showFollowListMembers(FollowListSnapshot.Kind.FOLLOWING));
-        form.addView(MiuixFormControls.viewFor(following), matchWrap());
-        Button followers = formButton();
-        followers.setText("关注我的");
-        followers.setTag("settings.followLists.followers");
-        followers.setOnClickListener(ignored -> showFollowListMembers(FollowListSnapshot.Kind.FOLLOWERS));
-        LinearLayout.LayoutParams followersParams = matchWrap();
-        followersParams.topMargin = dp(8);
-        form.addView(MiuixFormControls.viewFor(followers), followersParams);
-        AlertDialog dialog = new MiuixDialogBuilder(context, useMiuix)
-                .setTitle("关注与粉丝名单").setMessage(NativeFollowLists.statusText()).setView(form)
-                .setNegativeButton("返回", null).setPositiveButton("刷新名单", null).create();
-        showOptionDialog(dialog);
-        Button refresh = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-        refresh.setOnClickListener(ignored -> {
-            if (closed || !dialog.isShowing()) return;
-            refresh.setEnabled(false);
-            boolean started = NativeFollowLists.refresh(() -> {
-                if (!dialog.isShowing()) return;
-                String status = NativeFollowLists.statusText();
-                dialog.setMessage(status);
-                preview.setValue(status);
-                refresh.setEnabled(true);
-            });
-            if (started) {
-                dialog.setMessage(NativeFollowLists.statusText());
-            } else {
-                repository.putString(NativeFollowLists.REFRESH_KEY, Long.toString(System.currentTimeMillis()));
-                String status = "已请求刷新。请打开抖音内的模块设置查看实际名单。";
-                dialog.setMessage(status);
-                preview.setValue(status);
-                refresh.setEnabled(true);
-            }
-        });
-    }
-
-    private void showFollowListMembers(FollowListSnapshot.Kind kind) {
-        java.util.Map<String, String> members = NativeFollowLists.members(kind);
-        FollowListSnapshot.State snapshot = FollowListSnapshot.current();
-        String title = kind == FollowListSnapshot.Kind.FOLLOWING ? "我关注的" : "关注我的";
-        boolean known = kind == FollowListSnapshot.Kind.FOLLOWING
-                ? snapshot.followingKnown : snapshot.followersKnown;
-        java.util.Set<String> ids = kind == FollowListSnapshot.Kind.FOLLOWING
-                ? snapshot.following : snapshot.followers;
-        MiuixDialogBuilder builder = new MiuixDialogBuilder(context, useMiuix);
-        builder.setTitle(known ? title + "（" + ids.size() + "人）" : title);
-        if (!snapshot.active) {
-            builder.setMessage(repository.isInHost() ? "尚未读取登录账号。" : "请在抖音内查看实际名单。");
-        } else if (!known) {
-            builder.setMessage("名单尚未加载。\n" + NativeFollowLists.statusText());
-        } else if (ids.isEmpty()) {
-            builder.setMessage("列表为空。");
-        } else {
-            MemberListView list = new MemberListView(useMiuix ? rowContext() : context, useMiuix,
-                    new ArrayList<>(NativeFollowLists.memberDetails(kind).values()), java.util.Collections.emptySet(), false);
-            builder.setView(list).setNegativeButton("返回", null);
-            showOptionDialog(builder.create(), list::close);
-            return;
-        }
-        builder.setNegativeButton("返回", null);
-        showOptionDialog(builder.create());
     }
 
     private void addPromptOption(LinearLayout panel, String title, String value, ValueTextListener listener) {
@@ -688,7 +694,7 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         preview[0] = row;
     }
 
-    private void addMultiChoiceCsvOption(LinearLayout panel, String title, String key, String[] labels, String[] values) {
+    private void addMultiChoiceCsvOption(LinearLayout panel, String title, String key, String[] labels, String[] values, Runnable changed) {
         OptionRow[] preview = new OptionRow[1];
         preview[0] = addOption(panel, title, "", scopeLabels(labels, values, repository.getString(key, "")), true, () -> {
             java.util.Set<String> selected = AutomationScopePolicy.targets(repository.getString(key, ""));
@@ -697,11 +703,13 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle(title)
                     .setMultiChoiceItems(labels, checked, (dialog, which, value) -> checked[which] = value)
                     .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
+                        if (!isActive(panel)) return;
                         List<String> next = new ArrayList<>();
                         for (int index = 0; index < values.length; index++) if (checked[index]) next.add(values[index]);
                         String saved = String.join(",", next);
                         repository.putString(key, saved);
                         preview[0].setValue(scopeLabels(labels, values, saved));
+                        if (changed != null) changed.run();
                     }).create());
         });
     }
@@ -736,27 +744,48 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         });
     }
 
-    private void showTargetSelection(String title, String key) {
-        withNativeContacts(false, () -> showTargetSelectionLoaded(title, key));
+    private void showTargetSelection(String title, String key, Runnable changed) {
+        withNativeContacts(false, () -> withFollowing(complete -> showTargetSelectionLoaded(title, key, complete, changed)));
     }
 
-    private void showTargetSelectionLoaded(String title, String key) {
-        java.util.Map<String, String> contacts = NativeMessagingHooks.availableContacts();
-        if (contacts.isEmpty()) {
-            showTargetIds(title, key);
-            return;
-        }
+    private void withFollowing(java.util.function.Consumer<Boolean> showSelection) {
+        if (closed) return;
+        java.util.concurrent.atomic.AtomicBoolean waiting = new java.util.concurrent.atomic.AtomicBoolean(true);
+        AutoCloseable[] request = new AutoCloseable[1];
+        AlertDialog progress = new MiuixDialogBuilder(context, useMiuix).setTitle("读取关注名单")
+                .setMessage("正在分页读取我关注的用户，请稍候…").setNegativeButton("取消", null).create();
+        showOptionDialog(progress, () -> {
+            if (waiting.getAndSet(false) && request[0] != null) {
+                try { request[0].close(); } catch (Exception ignored) { }
+            }
+        });
+        request[0] = NativeFollowLists.loadFollowing(complete -> {
+            if (!waiting.getAndSet(false) || closed) return;
+            progress.dismiss();
+            showSelection.accept(complete);
+        });
+    }
+
+    private void showTargetSelectionLoaded(String title, String key, boolean followingComplete, Runnable changed) {
+        java.util.Map<String, ProfileListEntry> users = availableUsers();
         java.util.Set<String> selected = com.douai.module.feature.ReplyPolicy.targets(repository.getString(key, ""));
-        showProfileSelection(title, NativeMessagingHooks.availableContactProfiles(), selected,
-                next -> repository.putString(key, String.join(",", next)), () -> showTargetIds(title, key));
+        showProfileSelection(title, users, selected, next -> {
+                    repository.putString(key, String.join(",", next));
+                    changed.run();
+                }, () -> showTargetIds(title, key, followingComplete, changed), true, false);
     }
 
-    private void showTargetIds(String title, String key) {
+    private void showTargetIds(String title, String key, boolean followingComplete, Runnable changed) {
         LinearLayout form = form();
         EditText input = formInput(form, "用户 UID，以逗号分隔", repository.getString(key, ""), false);
-        showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle(title).setView(form)
-                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) ->
-                        repository.putString(key, String.join(",", com.douai.module.feature.ReplyPolicy.targets(input.getText().toString())))).create());
+        MiuixDialogBuilder builder = new MiuixDialogBuilder(context, useMiuix);
+        builder.setTitle(title).setView(form);
+        if (!followingComplete) builder.setMessage("关注名单未加载完整，仍可填写用户 UID。可稍后重新打开重试。");
+        showOptionDialog(builder
+                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
+                    repository.putString(key, String.join(",", com.douai.module.feature.ReplyPolicy.targets(input.getText().toString())));
+                    changed.run();
+                }).create());
     }
 
     private EditText formInput(LinearLayout parent, String label, String value, boolean secret) {

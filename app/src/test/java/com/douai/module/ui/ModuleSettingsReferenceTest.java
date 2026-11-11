@@ -23,6 +23,8 @@ import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.feature.FollowListPager;
 import com.douai.module.feature.FollowListSnapshot;
 import com.douai.module.feature.NativeFollowLists;
+import com.douai.module.feature.NativeMessagingHooks;
+import com.douai.module.feature.ProfileListEntry;
 
 import org.junit.After;
 import org.json.JSONArray;
@@ -122,8 +124,8 @@ public final class ModuleSettingsReferenceTest {
                         "去推荐商家开关", "去商品/购物卡片开关", "去热点榜单卡开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
                         "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},
                 {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
-                {"AUTOPLAY", "自动滑动到下一个视频", "仅模块控制倍速", "自动倍速播放", "倍速数值", "锁定最高画质", "打开评论时,不滑动视频",
-                        "滑动智能判断上下", "互动自动化"},
+                {"AUTOPLAY", "自动滑动到下一个视频", "打开评论时,不滑动视频", "滑动智能判断上下",
+                        "仅模块控制倍速", "自动倍速播放", "倍速数值", "锁定最高画质", "互动自动化"},
                 {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "素材识别", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
                         "接收评论回复", "每日最大回复数", "同一用户回复间隔（分钟）", "发送与记录"},
                 {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "语音评论", "作品范围", "素材识别",
@@ -131,10 +133,10 @@ public final class ModuleSettingsReferenceTest {
                 {"COMMENT", "评论自动添加后缀", "后缀内容", "替换语音文件", "评论语音文件",
                         "评论转语音", "文本转语音设置", "#长按发送转语音（全局）", "长按操作", "彩色评论", "彩色评论类型"},
                 {"STREAK", "自动续火花", "选择用户", "续火花内容", "续火花成功弹出Tip",
-                        "重试结果未知的续火花", "清空续火花记录", "续火花限制时间", "内容Api"},
+                        "续火花限制时间", "内容Api", "重试结果未知的续火花", "清空续火花记录"},
                 {"MESSAGE", "消息防撤回", "自己撤回的消息", "对方撤回的消息", "撤回的背景色", "替换私聊语音",
                         "私聊语音文件", "自动文本转语音", "文本转语音设置"},
-                {"SPOOF", "伪装总开关", "获赞数量", "关注数量", "粉丝数量", "互关数量", "版本信息"},
+                {"SPOOF", "个人资料数量伪装", "获赞数量", "关注数量", "粉丝数量", "互关数量", "版本信息"},
                 {"EXTENSION", "AI 模型设置", "文本转语音设置", "本地数据分析", "配置备份"}
         };
         for (String[] reference : references) {
@@ -183,6 +185,7 @@ public final class ModuleSettingsReferenceTest {
     }
 
     @Test public void downloadSearchScrollsToEachSpecificRowAndRestoresItsHighlight() {
+        store.putBoolean("download_custom_name", true);
         EditText search = home.findViewWithTag("settings.search");
         String[][] targets = {{"download-mode", "settings.option.下载方式"},
                 {"download-directory", "settings.option.保存位置"},
@@ -283,8 +286,14 @@ public final class ModuleSettingsReferenceTest {
                         && "自动文本转语音".contentEquals(control.getContentDescription());
                 boolean moduleOnlySpeed = "仅模块控制倍速".contentEquals(control.getContentDescription());
                 boolean homeSidebar = "首页右滑打开侧边栏".contentEquals(control.getContentDescription());
+                boolean highestQuality = "锁定最高画质".contentEquals(control.getContentDescription());
+                boolean commentReply = "AUTO_REPLY".equals(category)
+                        && "接收评论回复".contentEquals(control.getContentDescription());
                 assertEquals(category + ": " + control.getContentDescription(),
-                        voiceComment || globalHashVoice || privateMessageVoice || moduleOnlySpeed || homeSidebar ? 2 : 1, visibleLabels);
+                        voiceComment || globalHashVoice || privateMessageVoice || moduleOnlySpeed || homeSidebar || highestQuality || commentReply ? 2 : 1, visibleLabels);
+                if (commentReply) {
+                    assertTrue(containsText(labels, "私聊和群聊名单不适用"));
+                }
                 if (homeSidebar) {
                     assertTrue(containsText(labels, "默认关闭"));
                     assertTrue(containsText(labels, "仅适配抖音 41.0.0"));
@@ -637,7 +646,7 @@ public final class ModuleSettingsReferenceTest {
         assertTrue(option(page, "私聊范围").isEnabled());
         assertTrue(toggle(page, "接收私聊").isChecked());
         assertFalse(toggle(page, "接收群聊").isChecked());
-        assertTrue(option(page, "群聊范围").isEnabled());
+        assertEquals(View.GONE, option(page, "群聊范围").getVisibility());
         assertTrue(option(page, "发送与记录").isEnabled());
         assertTrue(option(page, "回复模式").isEnabled());
         assertTrue(option(page, "回复模式").isEnabled());
@@ -697,9 +706,9 @@ public final class ModuleSettingsReferenceTest {
         option(reply, "群聊范围").performClick();
         Dialog groups = ShadowDialog.getLatestDialog();
         View page = groups.getWindow().getDecorView();
-        assertEquals(Arrays.asList("群聊作用域", "触发条件"), settingTitles(page));
+        assertEquals(Arrays.asList("群聊范围", "触发条件"), settingTitles(page));
 
-        option(page, "群聊作用域").performClick();
+        option(page, "群聊范围").performClick();
         AlertDialog scope = (AlertDialog) ShadowDialog.getLatestDialog();
         assertTrue(scope.getListView().isItemChecked(0));
         scope.getListView().performItemClick(null, 1, 1);
@@ -711,8 +720,9 @@ public final class ModuleSettingsReferenceTest {
         assertTrue(mode.getListView().isItemChecked(0));
         mode.getListView().performItemClick(null, 1, 1);
         assertEquals("selected", store.getString("reply_group_mode", ""));
-        option(page, "指定成员").performClick();
+        option(page, "选择成员").performClick();
         AlertDialog members = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertUserDirectory(members.getWindow().getDecorView());
         members.getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
         org.robolectric.shadows.ShadowLooper.idleMainLooper();
         AlertDialog memberIds = (AlertDialog) ShadowDialog.getLatestDialog();
@@ -720,12 +730,15 @@ public final class ModuleSettingsReferenceTest {
         memberIds.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         org.robolectric.shadows.ShadowLooper.idleMainLooper();
         assertEquals("222,333", store.getString("reply_group_members", ""));
+        assertTrue(settingValue(page, "选择成员").contains("2"));
+        assertTrue(settingValue(page, "选择成员").contains("人"));
+        assertFalse(settingValue(page, "选择成员").contains("222"));
 
         option(page, "触发条件").performClick();
         mode = (AlertDialog) ShadowDialog.getLatestDialog();
         mode.getListView().performItemClick(null, 2, 2);
         assertEquals("mentions", store.getString("reply_group_mode", ""));
-        assertNull(page.findViewWithTag("settings.option.指定成员"));
+        assertNull(page.findViewWithTag("settings.option.选择成员"));
         assertEquals("blacklist", store.getString("reply_scope_mode", ""));
         assertEquals("123", store.getString("reply_targets", ""));
         assertEquals("following", store.getString("reply_scope_relations", ""));
@@ -734,38 +747,217 @@ public final class ModuleSettingsReferenceTest {
         assertTrue(groups.isShowing());
     }
 
-    @Test public void followingListSearchMatchesNicknameAndUidAndRetainsCompleteCount() throws Exception {
-        installFollowNames();
-        View reply = openCategory("AUTO_REPLY");
-        option(reply, "私聊范围").performClick();
-        reply = ShadowDialog.getLatestDialog().getWindow().getDecorView();
-        option(reply, "关注与粉丝名单").performClick();
-        Dialog lists = ShadowDialog.getLatestDialog();
-        View following = lists.getWindow().getDecorView().findViewWithTag("settings.followLists.following");
-        assertNotNull(following);
-        following.performClick();
-        Dialog members = ShadowDialog.getLatestDialog();
-        View page = members.getWindow().getDecorView();
-        EditText search = page.findViewWithTag("settings.followLists.search");
+    @Test public void identityScopesExposeOnlyRelevantSelectableListsAndPreserveHiddenRules() {
+        for (String kind : new String[]{"reply", "comment"}) {
+            screen.dismissChildPages();
+            boolean reply = "reply".equals(kind);
+            String key = reply ? "reply_targets" : "comment_scope_users";
+            String picker = reply ? "选择用户" : "选择作者";
+            String excluded = reply ? "排除用户" : "排除作者";
+            store.putString(kind + "_scope_mode", "all");
+            store.putString(kind + "_scope_relations", "following,strangers");
+            store.putString(key, "1000");
+            View owner = openCategory(reply ? "AUTO_REPLY" : "AUTO_COMMENT");
+            option(owner, reply ? "私聊范围" : "作品范围").performClick();
+            View page = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+            assertNull("Read-only browsing must not impersonate a selection", page.findViewWithTag("settings.option.关注与粉丝名单"));
+            assertNull(page.findViewWithTag("settings.option." + picker));
+            assertNull(page.findViewWithTag("settings.option." + excluded));
+            assertNull(page.findViewWithTag("settings.option.关注关系"));
+            option(page, reply ? "用户范围" : "作者范围").performClick();
+            AlertDialog modes = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals(Arrays.asList("全部", "仅名单内", "排除名单内"), Arrays.asList(
+                    modes.getListView().getAdapter().getItem(0).toString(), modes.getListView().getAdapter().getItem(1).toString(),
+                    modes.getListView().getAdapter().getItem(2).toString()));
+            modes.getListView().performItemClick(null, 1, 1);
+            ShadowLooper.idleMainLooper();
+            assertEquals("whitelist", store.getString(kind + "_scope_mode", ""));
+            assertNotNull(page.findViewWithTag("settings.option." + picker));
+            assertTrue(settingValue(page, picker).contains("1"));
+            assertTrue(settingValue(page, picker).contains("人"));
+            assertFalse(settingValue(page, picker).contains("1000"));
+            assertTrue("Relation rules and chosen users form a union", containsText(page, "任一"));
+            option(page, "关注关系").performClick();
+            AlertDialog relations = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals("互不关注", relations.getListView().getAdapter().getItem(2).toString());
+            relations.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            option(page, reply ? "用户范围" : "作者范围").performClick();
+            ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, 2, 2);
+            assertNotNull(page.findViewWithTag("settings.option." + excluded));
+            assertNull(page.findViewWithTag("settings.option." + picker));
+            assertEquals("blacklist", store.getString(kind + "_scope_mode", ""));
+            option(page, reply ? "用户范围" : "作者范围").performClick();
+            ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, 0, 0);
+            assertNull(page.findViewWithTag("settings.option." + excluded));
+            assertEquals("1000", store.getString(key, ""));
+            assertEquals("following,strangers", store.getString(kind + "_scope_relations", ""));
+        }
+    }
+
+    @Test public void userAndAuthorSelectionsCommitOnceOnlyOnSaveAndRefreshTheirParentSummaries() throws Exception {
+        installFollowingProfiles(2);
+        for (String kind : new String[]{"reply", "comment"}) {
+            screen.dismissChildPages();
+            boolean reply = "reply".equals(kind);
+            String key = reply ? "reply_targets" : "comment_scope_users";
+            String title = reply ? "选择用户" : "选择作者";
+            String parentTitle = reply ? "私聊范围" : "作品范围";
+            store.putString(kind + "_scope_mode", "whitelist");
+            store.putString(kind + "_filter_mode", "include");
+            store.putString(kind + "_filter_keywords", "茶");
+            store.putString(kind + "_filter_fields", "caption");
+            store.putString(key, "1000");
+            int writes = store.stringWrites.getOrDefault(key, 0);
+            View owner = openCategory(reply ? "AUTO_REPLY" : "AUTO_COMMENT");
+            option(owner, parentTitle).performClick();
+            View page = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+            for (boolean back : new boolean[]{false, true}) {
+                option(page, title).performClick(); ShadowLooper.idleMainLooper();
+                AlertDialog picker = (AlertDialog) ShadowDialog.getLatestDialog();
+                togglePickerUser(picker, "1001");
+                assertEquals("1000", store.getString(key, ""));
+                picker.getWindow().getDecorView().findViewWithTag("settings.followLists.refreshProfiles").performClick();
+                assertEquals(writes, (int) store.stringWrites.getOrDefault(key, 0));
+                if (back) picker.cancel(); else picker.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+                ShadowLooper.idleMainLooper();
+                assertEquals("1000", store.getString(key, ""));
+                assertEquals(writes, (int) store.stringWrites.getOrDefault(key, 0));
+            }
+            option(page, title).performClick(); ShadowLooper.idleMainLooper();
+            AlertDialog picker = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals(java.util.Collections.singleton("1000"), ((MemberListView) picker.getWindow().getDecorView()
+                    .findViewWithTag("settings.followLists.members").getParent()).selected());
+            togglePickerUser(picker, "1001");
+            picker.getButton(AlertDialog.BUTTON_POSITIVE).performClick(); ShadowLooper.idleMainLooper();
+            assertEquals(new java.util.LinkedHashSet<>(Arrays.asList("1000", "1001")),
+                    com.douai.module.feature.AutomationScopePolicy.targets(store.getString(key, "")));
+            assertEquals(writes + 1, (int) store.stringWrites.getOrDefault(key, 0));
+            assertTrue(settingValue(page, title).contains("2"));
+            assertTrue(settingValue(page, title).contains("人"));
+            assertFalse(settingValue(page, title).contains("1000"));
+            assertTrue(containsText(option(owner, parentTitle), "仅名单内"));
+            assertTrue(containsText(option(owner, parentTitle), "关键词"));
+        }
+    }
+
+    @Test public void disabledChannelsHideTheirRangesAndKeepPresetValuesAndCommentReplyScopeClear() {
+        store.putString("reply_targets", "1000");
+        store.putString("reply_group_targets", "group101");
+        store.putString("reply_group_members", "1001");
+        View page = openCategory("AUTO_REPLY");
+        assertEquals(View.GONE, option(page, "群聊范围").getVisibility());
+        toggle(page, "接收私聊").setChecked(false);
+        assertEquals(View.GONE, option(page, "私聊范围").getVisibility());
+        toggle(page, "接收群聊").setChecked(true);
+        assertEquals(View.VISIBLE, option(page, "群聊范围").getVisibility());
+        toggle(page, "接收私聊").setChecked(true);
+        assertEquals(View.VISIBLE, option(page, "私聊范围").getVisibility());
+        toggle(page, "开启自动回复").setChecked(false);
+        assertTrue(option(page, "私聊范围").isEnabled());
+        assertEquals("1000", store.getString("reply_targets", ""));
+        assertEquals("group101", store.getString("reply_group_targets", ""));
+        assertEquals("1001", store.getString("reply_group_members", ""));
+        assertTrue(containsText((View) toggle(page, "接收评论回复").getParent(), "私聊和群聊名单不适用"));
+    }
+
+    @Test public void scopeKeywordTextRemainsDraftUntilItsExplicitSave() {
+        store.putString("reply_scope_mode", "all");
+        store.putString("reply_filter_mode", "include");
+        store.putString("reply_filter_keywords", "原关键词");
+        View owner = openCategory("AUTO_REPLY");
+        option(owner, "私聊范围").performClick();
+        View page = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        int writes = store.stringWrites.getOrDefault("reply_filter_keywords", 0);
+        option(page, "筛选关键词").performClick();
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        setEditorInput(editor, "筛选关键词", "未保存关键词");
+        editor.cancel(); ShadowLooper.idleMainLooper();
+        assertEquals("原关键词", store.getString("reply_filter_keywords", ""));
+        assertEquals(writes, (int) store.stringWrites.getOrDefault("reply_filter_keywords", 0));
+        option(page, "筛选关键词").performClick();
+        editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        setEditorInput(editor, "筛选关键词", "新关键词");
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick(); ShadowLooper.idleMainLooper();
+        assertEquals("新关键词", store.getString("reply_filter_keywords", ""));
+        assertEquals(writes + 1, (int) store.stringWrites.getOrDefault("reply_filter_keywords", 0));
+        assertEquals("新关键词", settingValue(page, "筛选关键词"));
+    }
+
+    @Test public void groupExclusionPickerKeepsConversationIdentityAndConditionalMemberRules() {
+        store.putBoolean("reply_group_chats", true);
+        store.putString("reply_group_scope_mode", "blacklist");
+        store.putString("reply_group_targets", "group101");
+        store.putString("reply_group_members", "1001");
+        option(openCategory("AUTO_REPLY"), "群聊范围").performClick();
+        View page = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertNull(page.findViewWithTag("settings.option.选择群聊"));
+        option(page, "排除群聊").performClick();
+        AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+        ListView list = choices.getWindow().getDecorView().findViewWithTag("settings.followLists.members");
+        assertNotNull(list); assertNoUserDirectory(choices.getWindow().getDecorView());
+        ProfileListEntry entry = (ProfileListEntry) list.getAdapter().getItem(0);
+        assertTrue("Exclusion titles must not turn conversation IDs into user IDs", entry.conversation);
+        assertEquals("group101", entry.uid);
+        choices.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        option(page, "触发条件").performClick();
+        ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, 1, 1);
+        assertNotNull(page.findViewWithTag("settings.option.选择成员"));
+        option(page, "触发条件").performClick();
+        ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, 2, 2);
+        assertNull(page.findViewWithTag("settings.option.选择成员"));
+        assertEquals("1001", store.getString("reply_group_members", ""));
+        assertEquals("group101", store.getString("reply_group_targets", ""));
+    }
+
+    private static String settingValue(View page, String title) {
+        TextView value = page.findViewWithTag("settings.value." + title);
+        assertNotNull("Missing value for " + title, value);
+        return value.getText().toString();
+    }
+
+    private static void togglePickerUser(AlertDialog picker, String uid) {
+        View page = picker.getWindow().getDecorView();
+        ((EditText) page.findViewWithTag("settings.followLists.search")).setText(uid);
         ListView list = page.findViewWithTag("settings.followLists.members");
-        TextView count = page.findViewWithTag("settings.followLists.resultCount");
-        assertNotNull(search);
-        assertEquals(2, list.getAdapter().getCount());
-        assertEquals("2 / 2 项", count.getText().toString());
-        search.setText("ALICE");
         assertEquals(1, list.getAdapter().getCount());
-        assertEquals("101", ((com.douai.module.feature.ProfileListEntry) list.getAdapter().getItem(0)).uid);
-        assertEquals("Alice 茶", ((com.douai.module.feature.ProfileListEntry) list.getAdapter().getItem(0)).name);
-        assertEquals("1 / 2 项", count.getText().toString());
-        search.setText("202");
-        assertEquals("202", ((com.douai.module.feature.ProfileListEntry) list.getAdapter().getItem(0)).uid);
-        search.setText("无匹配昵称");
-        assertEquals(0, list.getAdapter().getCount());
-        assertEquals("无匹配结果 · 共 2 项", count.getText().toString());
-        search.setText("");
-        assertEquals(2, list.getAdapter().getCount());
-        assertEquals(View.VISIBLE, list.getVisibility());
-        assertTrue(lists.isShowing());
+        assertEquals(uid, ((ProfileListEntry) list.getAdapter().getItem(0)).uid);
+        list.getAdapter().getView(0, null, list).performClick();
+    }
+
+    @Test public void groupMemberPickerUsesTheSameAggregateFiltersAndSavesOnlyMemberUids() throws Exception {
+        installFollowingProfiles(1);
+        installFollowers(java.util.Collections.emptyMap());
+        java.lang.reflect.Field groupMembers = NativeMessagingHooks.class.getDeclaredField("groupMembers");
+        groupMembers.setAccessible(true);
+        Object previousMembers = groupMembers.get(null);
+        try {
+            groupMembers.set(null, java.util.Collections.singletonMap("group101",
+                    java.util.Collections.singletonMap("777", new ProfileListEntry("777", "Group member", "", "member.dy"))));
+            store.putString("reply_group_members", "777");
+            store.putString("reply_group_targets", "group101");
+            store.putString("reply_targets", "202");
+            AlertDialog choices = openUserPicker("group-member");
+            View page = choices.getWindow().getDecorView();
+            Spinner scope = assertUserDirectory(page);
+            ListView list = page.findViewWithTag("settings.followLists.members");
+            assertEquals(new java.util.LinkedHashSet<>(Arrays.asList("777", "1000")), userUids(list));
+            scope.setSelection(1);
+            ShadowLooper.idleMainLooper();
+            assertEquals(java.util.Collections.singleton("777"), userUids(list));
+            list.getAdapter().getView(0, null, list).performClick();
+            scope.setSelection(2);
+            ShadowLooper.idleMainLooper();
+            assertEquals(java.util.Collections.singleton("1000"), userUids(list));
+            list.getAdapter().getView(0, null, list).performClick();
+            scope.setSelection(0);
+            ShadowLooper.idleMainLooper();
+            assertEquals(java.util.Collections.singleton("1000"), ((MemberListView) list.getParent()).selected());
+            choices.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            ShadowLooper.idleMainLooper();
+            assertEquals("1000", store.getString("reply_group_members", ""));
+            assertEquals("group101", store.getString("reply_group_targets", ""));
+            assertEquals("202", store.getString("reply_targets", ""));
+        } finally { groupMembers.set(null, previousMembers); }
     }
 
     @Test public void groupSelectionCanRemoveSavedConversationWithoutCurrentGroupName() {
@@ -778,6 +970,7 @@ public final class ModuleSettingsReferenceTest {
         View page = settings.getWindow().getDecorView();
         option(page, "选择群聊").performClick();
         AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNoUserDirectory(choices.getWindow().getDecorView());
         ListView list = choices.getWindow().getDecorView().findViewWithTag("settings.followLists.members");
         int remove = -1;
         for (int index = 0; index < list.getAdapter().getCount(); index++) {
@@ -855,6 +1048,285 @@ public final class ModuleSettingsReferenceTest {
         }
         assertTrue(store.values.isEmpty());
         assertFalse(store.load().automationEnabled);
+    }
+
+    @Test public void streakUserSelectionDisplaysProfileIdentityAndSavesUid() throws Exception {
+        store.putBoolean("streak_enabled", true);
+        java.lang.reflect.Field contacts = NativeMessagingHooks.class.getDeclaredField("contacts");
+        java.lang.reflect.Field profiles = NativeMessagingHooks.class.getDeclaredField("contactProfiles");
+        contacts.setAccessible(true);
+        profiles.setAccessible(true);
+        Object previousContacts = contacts.get(null);
+        Object previousProfiles = profiles.get(null);
+        try {
+            contacts.set(null, java.util.Collections.singletonMap("101", "好友备注"));
+            profiles.set(null, java.util.Collections.singletonMap("101",
+                    new ProfileListEntry("101", "真实昵称", "", "alice.dy")));
+
+            option(openCategory("STREAK"), "选择用户").performClick();
+            ShadowLooper.idleMainLooper();
+            AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+            ListView list = choices.getWindow().getDecorView().findViewWithTag("settings.followLists.members");
+            assertNotNull("续火花应使用用户资料列表", list);
+            assertEquals(1, list.getAdapter().getCount());
+            View row = list.getAdapter().getView(0, null, list);
+            assertEquals("真实昵称", ((TextView) row.findViewWithTag("member.name")).getText().toString());
+            assertEquals("抖音号：alice.dy", ((TextView) row.findViewWithTag("member.uid")).getText().toString());
+            assertTrue(row.performClick());
+            choices.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            ShadowLooper.idleMainLooper();
+
+            assertEquals("101", store.getString("streak_targets", ""));
+        } finally {
+            contacts.set(null, previousContacts);
+            profiles.set(null, previousProfiles);
+        }
+    }
+
+    @Test public void emptyUserPickersKeepTheGlobalSearchAndRelationshipScopeInsteadOfOpeningManualIds() throws Exception {
+        installFollowingProfiles(0);
+        java.lang.reflect.Field contacts = NativeMessagingHooks.class.getDeclaredField("contacts");
+        java.lang.reflect.Field profiles = NativeMessagingHooks.class.getDeclaredField("contactProfiles");
+        contacts.setAccessible(true); profiles.setAccessible(true);
+        Object previousContacts = contacts.get(null), previousProfiles = profiles.get(null);
+        try {
+            contacts.set(null, java.util.Collections.emptyMap());
+            profiles.set(null, java.util.Collections.emptyMap());
+            for (String kind : new String[]{"streak", "reply", "comment", "group-member"}) {
+                AlertDialog choices = openUserPicker(kind);
+                View page = choices.getWindow().getDecorView();
+                ListView list = page.findViewWithTag("settings.followLists.members");
+                assertNotNull(kind + " must keep the searchable picker with no cached candidates", list);
+                assertEquals(kind, 0, list.getAdapter().getCount());
+                assertUserDirectory(page);
+                View search = page.findViewWithTag("settings.followLists.searchAll");
+                assertNotNull(kind + " must allow searching users outside the cached lists", search);
+                assertEquals(View.VISIBLE, search.getVisibility());
+                assertEquals("", store.getString(userPickerKey(kind), ""));
+                choices.dismiss();
+                screen.dismissChildPages();
+            }
+        } finally { contacts.set(null, previousContacts); profiles.set(null, previousProfiles); }
+    }
+
+    @Test @SuppressWarnings("unchecked")
+    public void streakPickerActuallyFiltersFollowingAndFollowersAndKeepsTheSelectedUids() throws Exception {
+        installFollowingProfiles(2);
+        Map<String, String> followers = java.util.Collections.singletonMap("9000", "Follower");
+        java.lang.reflect.Field names = NativeFollowLists.class.getDeclaredField("names");
+        names.setAccessible(true);
+        ((Map<FollowListSnapshot.Kind, Map<String, String>>) names.get(followLists))
+                .put(FollowListSnapshot.Kind.FOLLOWERS, followers);
+        FollowListSnapshot.publish(FollowListSnapshot.beginRefresh("42", FollowListSnapshot.Kind.FOLLOWERS), followers.keySet());
+        AlertDialog choices = openUserPicker("streak");
+        View page = choices.getWindow().getDecorView();
+        Spinner scope = page.findViewWithTag("settings.followLists.scope");
+        assertNotNull("续火花入口必须提供筛选", scope);
+        ListView list = page.findViewWithTag("settings.followLists.members");
+        scope.setSelection(2);
+        ShadowLooper.idleMainLooper();
+        assertEquals(2, list.getAdapter().getCount());
+        assertEquals("1000", ((ProfileListEntry) list.getAdapter().getItem(0)).uid);
+        list.getAdapter().getView(0, null, list).performClick();
+        scope.setSelection(3);
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, list.getAdapter().getCount());
+        assertEquals("9000", ((ProfileListEntry) list.getAdapter().getItem(0)).uid);
+        list.getAdapter().getView(0, null, list).performClick();
+        scope.setSelection(0);
+        ShadowLooper.idleMainLooper();
+        assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("1000", "9000")),
+                ((MemberListView) list.getParent()).selected());
+        choices.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("1000", "9000")),
+                com.douai.module.feature.ReplyPolicy.targets(store.getString("streak_targets", "")));
+    }
+
+    @Test public void userPickersMergeAll120FollowingUsersBeyondThe39ExistingConversationsAndSaveUid() throws Exception {
+        installFollowingProfiles(120);
+        java.lang.reflect.Field contacts = NativeMessagingHooks.class.getDeclaredField("contacts");
+        java.lang.reflect.Field profiles = NativeMessagingHooks.class.getDeclaredField("contactProfiles");
+        contacts.setAccessible(true); profiles.setAccessible(true);
+        Object previousContacts = contacts.get(null), previousProfiles = profiles.get(null);
+        Map<String, String> names = new java.util.LinkedHashMap<>();
+        Map<String, ProfileListEntry> identities = new java.util.LinkedHashMap<>();
+        for (int index = 0; index < 39; index++) {
+            String uid = Integer.toString(1000 + index);
+            names.put(uid, "Conversation " + index);
+            identities.put(uid, new ProfileListEntry(uid, "User " + index, ""));
+        }
+        try {
+            contacts.set(null, names); profiles.set(null, identities);
+            for (String kind : new String[]{"streak", "reply", "comment", "group-member"}) {
+                AlertDialog choices = openUserPicker(kind);
+                ListView list = choices.getWindow().getDecorView().findViewWithTag("settings.followLists.members");
+                assertNotNull(kind, list);
+                assertEquals(kind + " must include following users without an existing IM conversation", 120,
+                        list.getAdapter().getCount());
+                EditText search = choices.getWindow().getDecorView().findViewWithTag("settings.followLists.search");
+                search.setText("1119");
+                assertEquals(1, list.getAdapter().getCount());
+                assertTrue(list.getAdapter().getView(0, null, list).performClick());
+                choices.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                ShadowLooper.idleMainLooper();
+                assertEquals(kind, "1119", store.getString(userPickerKey(kind), ""));
+                screen.dismissChildPages();
+            }
+        } finally { contacts.set(null, previousContacts); profiles.set(null, previousProfiles); }
+    }
+
+    @Test public void manualSelectedUidStillUsesTheProfilePickerWhenNoContactsOrFollowingAreAvailable() throws Exception {
+        installFollowingProfiles(0);
+        java.lang.reflect.Field contacts = NativeMessagingHooks.class.getDeclaredField("contacts");
+        java.lang.reflect.Field profiles = NativeMessagingHooks.class.getDeclaredField("contactProfiles");
+        contacts.setAccessible(true); profiles.setAccessible(true);
+        Object previousContacts = contacts.get(null), previousProfiles = profiles.get(null);
+        try {
+            contacts.set(null, java.util.Collections.emptyMap()); profiles.set(null, java.util.Collections.emptyMap());
+            for (String kind : new String[]{"streak", "reply", "comment", "group-member"}) {
+                store.putString(userPickerKey(kind), "9999");
+                AlertDialog choices = openUserPicker(kind);
+                ListView list = choices.getWindow().getDecorView().findViewWithTag("settings.followLists.members");
+                assertNotNull(kind + " must hydrate the selected manual UID", list);
+                assertEquals(1, list.getAdapter().getCount());
+                assertEquals("9999", ((ProfileListEntry) list.getAdapter().getItem(0)).uid);
+                assertTrue(((MemberListView) list.getParent()).selected().contains("9999"));
+                choices.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                ShadowLooper.idleMainLooper();
+                assertEquals("9999", store.getString(userPickerKey(kind), ""));
+                screen.dismissChildPages();
+            }
+        } finally { contacts.set(null, previousContacts); profiles.set(null, previousProfiles); }
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test public void userPickerKeepsContactsCachedFollowersAndManualUidsWhileDeduplicatingFollowing() throws Exception {
+        installFollowingProfiles(2);
+        java.lang.reflect.Field names = NativeFollowLists.class.getDeclaredField("names");
+        names.setAccessible(true);
+        Map<String, String> followers = new java.util.LinkedHashMap<>();
+        followers.put("1001", "Existing following"); followers.put("3000", "Cached follower");
+        ((Map<FollowListSnapshot.Kind, Map<String, String>>) names.get(followLists))
+                .put(FollowListSnapshot.Kind.FOLLOWERS, followers);
+        FollowListSnapshot.publish(FollowListSnapshot.beginRefresh("42", FollowListSnapshot.Kind.FOLLOWERS), followers.keySet());
+        java.lang.reflect.Field contacts = NativeMessagingHooks.class.getDeclaredField("contacts");
+        java.lang.reflect.Field profiles = NativeMessagingHooks.class.getDeclaredField("contactProfiles");
+        contacts.setAccessible(true); profiles.setAccessible(true);
+        Object previousContacts = contacts.get(null), previousProfiles = profiles.get(null);
+        try {
+            Map<String, String> conversations = new java.util.LinkedHashMap<>();
+            conversations.put("1000", "Existing following"); conversations.put("2000", "Contact only");
+            contacts.set(null, conversations); profiles.set(null, java.util.Collections.emptyMap());
+            store.putString("streak_targets", "9999");
+            AlertDialog choices = openUserPicker("streak");
+            ListView list = choices.getWindow().getDecorView().findViewWithTag("settings.followLists.members");
+            assertNotNull(list);
+            java.util.Set<String> uids = new java.util.LinkedHashSet<>();
+            for (int index = 0; index < list.getAdapter().getCount(); index++) {
+                uids.add(((ProfileListEntry) list.getAdapter().getItem(index)).uid);
+            }
+            assertEquals(new java.util.LinkedHashSet<>(Arrays.asList("1000", "1001", "2000", "3000", "9999")), uids);
+            assertEquals(5, list.getAdapter().getCount());
+        } finally { contacts.set(null, previousContacts); profiles.set(null, previousProfiles); }
+    }
+
+    @Test public void unavailableFollowingStillOffersCachedContactsWithAnExplicitIncompleteNotice() throws Exception {
+        java.lang.reflect.Field contacts = NativeMessagingHooks.class.getDeclaredField("contacts");
+        java.lang.reflect.Field profiles = NativeMessagingHooks.class.getDeclaredField("contactProfiles");
+        contacts.setAccessible(true); profiles.setAccessible(true);
+        Object previousContacts = contacts.get(null), previousProfiles = profiles.get(null);
+        try {
+            contacts.set(null, java.util.Collections.singletonMap("101", "Conversation"));
+            profiles.set(null, java.util.Collections.singletonMap("101", new ProfileListEntry("101", "Alice", "")));
+            AlertDialog choices = openUserPicker("streak");
+            ListView list = choices.getWindow().getDecorView().findViewWithTag("settings.followLists.members");
+            assertNotNull(list);
+            assertEquals(1, list.getAdapter().getCount());
+            assertTrue(containsText(choices.getWindow().getDecorView(), "部分关系名单未读取完整，点击刷新重试"));
+            assertTrue(list.getAdapter().getView(0, null, list).performClick());
+            choices.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            ShadowLooper.idleMainLooper();
+            assertEquals("101", store.getString("streak_targets", ""));
+        } finally { contacts.set(null, previousContacts); profiles.set(null, previousProfiles); }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void installFollowingProfiles(int count) throws Exception {
+        installFollowNames();
+        Map<String, String> following = new java.util.LinkedHashMap<>();
+        for (int index = 0; index < count; index++) following.put(Integer.toString(1000 + index), "User " + index);
+        java.lang.reflect.Field names = NativeFollowLists.class.getDeclaredField("names");
+        names.setAccessible(true);
+        ((Map<FollowListSnapshot.Kind, Map<String, String>>) names.get(followLists))
+                .put(FollowListSnapshot.Kind.FOLLOWING, following);
+        FollowListSnapshot.publish(FollowListSnapshot.beginRefresh("42", FollowListSnapshot.Kind.FOLLOWING), following.keySet());
+    }
+
+    @SuppressWarnings("unchecked")
+    private void installFollowers(Map<String, String> followers) throws Exception {
+        java.lang.reflect.Field names = NativeFollowLists.class.getDeclaredField("names");
+        names.setAccessible(true);
+        ((Map<FollowListSnapshot.Kind, Map<String, String>>) names.get(followLists))
+                .put(FollowListSnapshot.Kind.FOLLOWERS, followers);
+        FollowListSnapshot.publish(FollowListSnapshot.beginRefresh("42", FollowListSnapshot.Kind.FOLLOWERS), followers.keySet());
+    }
+
+    private AlertDialog openUserPicker(String kind) {
+        if ("streak".equals(kind)) {
+            store.putBoolean("streak_enabled", true);
+            option(openCategory("STREAK"), "选择用户").performClick();
+        }
+        else if ("group-member".equals(kind)) {
+            store.putBoolean("reply_group_chats", true);
+            store.putString("reply_group_mode", "selected");
+            option(openCategory("AUTO_REPLY"), "群聊范围").performClick();
+            option(ShadowDialog.getLatestDialog().getWindow().getDecorView(), "选择成员").performClick();
+        }
+        else {
+            boolean reply = "reply".equals(kind);
+            store.putString(kind + "_scope_mode", "whitelist");
+            option(openCategory(reply ? "AUTO_REPLY" : "AUTO_COMMENT"), reply ? "私聊范围" : "作品范围").performClick();
+            option(ShadowDialog.getLatestDialog().getWindow().getDecorView(), reply ? "选择用户" : "选择作者").performClick();
+        }
+        ShadowLooper.idleMainLooper();
+        return (AlertDialog) ShadowDialog.getLatestDialog();
+    }
+
+    private static String userPickerKey(String kind) {
+        return "streak".equals(kind) ? "streak_targets" : "reply".equals(kind) ? "reply_targets"
+                : "group-member".equals(kind) ? "reply_group_members" : "comment_scope_users";
+    }
+
+    private static Spinner assertUserDirectory(View root) {
+        Spinner scope = root.findViewWithTag("settings.followLists.scope");
+        assertNotNull("Every user list must use the shared aggregate directory", scope);
+        assertEquals(View.VISIBLE, scope.getVisibility());
+        assertEquals(4, scope.getAdapter().getCount());
+        assertEquals("全部", scope.getAdapter().getItem(0));
+        assertEquals("未关注", scope.getAdapter().getItem(1));
+        assertEquals("我关注", scope.getAdapter().getItem(2));
+        assertEquals("关注我", scope.getAdapter().getItem(3));
+        View search = root.findViewWithTag("settings.followLists.searchAll");
+        assertNotNull(search);
+        assertEquals(View.VISIBLE, search.getVisibility());
+        return scope;
+    }
+
+    private static java.util.Set<String> userUids(ListView list) {
+        java.util.Set<String> result = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < list.getAdapter().getCount(); i++) {
+            result.add(((ProfileListEntry) list.getAdapter().getItem(i)).uid);
+        }
+        return result;
+    }
+
+    private static void assertNoUserDirectory(View root) {
+        for (String tag : new String[]{"settings.followLists.scope", "settings.followLists.searchAll", "settings.followLists.loadMore"}) {
+            View control = root.findViewWithTag(tag);
+            assertTrue("This list must stay within its existing member or conversation scope: " + tag,
+                    control == null || control.getVisibility() == View.GONE);
+        }
     }
 
     @Test
@@ -1580,11 +2052,11 @@ public final class ModuleSettingsReferenceTest {
         assertEquals("include", store.getString("comment_filter_mode", ""));
         assertEquals("title", store.getString("comment_filter_fields", ""));
         assertEquals("茶", store.getString("comment_filter_keywords", ""));
-        assertNull(fields.findViewWithTag("settings.option.指定作者"));
+        assertNull(fields.findViewWithTag("settings.option.选择作者"));
         assertNotNull(fields.findViewWithTag("settings.option.筛选关键词"));
         option(fields, "作者范围").performClick();
         ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, 1, 1);
-        assertNotNull(fields.findViewWithTag("settings.option.指定作者"));
+        assertNotNull(fields.findViewWithTag("settings.option.选择作者"));
         assertEquals("茶", store.getString("comment_scope_keywords", ""));
         assertEquals("title", store.getString("comment_scope_fields", ""));
     }
@@ -1595,7 +2067,7 @@ public final class ModuleSettingsReferenceTest {
         store.putString("reply_notice_seconds", "23");
         View reply = openCategory("AUTO_REPLY");
         toggle(reply, "接收私聊").setChecked(false);
-        assertTrue(option(reply, "私聊范围").isEnabled());
+        assertEquals(View.GONE, option(reply, "私聊范围").getVisibility());
         toggle(reply, "接收私聊").setChecked(true);
         assertTrue(option(reply, "私聊范围").isEnabled());
         option(reply, "私聊范围").performClick();
@@ -1604,7 +2076,7 @@ public final class ModuleSettingsReferenceTest {
         option(fields, "用户范围").performClick();
         ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, 0, 0);
         assertNull(fields.findViewWithTag("settings.option.关注关系"));
-        assertNull(fields.findViewWithTag("settings.option.指定用户"));
+        assertNull(fields.findViewWithTag("settings.option.选择用户"));
         assertEquals("following", store.getString("reply_scope_relations", ""));
         assertEquals("101", store.getString("reply_targets", ""));
         scope.dismiss();
@@ -1858,7 +2330,7 @@ public final class ModuleSettingsReferenceTest {
     }
 
     @Test
-    public void dismissingCommentChoicesKeepsTheirSelectionAndUpdatesTheOptionSummary() {
+    public void commentChoiceDraftIsDiscardedOnBackAndOnlySaveUpdatesTheOptionSummary() {
         View page = openCategory("COMMENT");
         View tools = option(page, "长按操作");
         assertNull(page.findViewWithTag("settings.toggle.长按操作"));
@@ -1868,20 +2340,20 @@ public final class ModuleSettingsReferenceTest {
         choices.getListView().performItemClick(null, 0, 0);
         choices.cancel();
         ShadowLooper.idleMainLooper();
-        assertTrue(store.getBoolean("copy_comment_text", false));
+        assertFalse(store.getBoolean("copy_comment_text", false));
         assertFalse(store.getBoolean("comment_media_tools", false));
-        assertTrue(containsText(tools, "复制评论"));
+        assertFalse(containsText(tools, "复制评论"));
         assertTrue(tools.performClick());
         choices = (AlertDialog) ShadowDialog.getLatestDialog();
         bindDialogChoices(choices);
-        assertTrue(choices.getListView().isItemChecked(0));
+        assertFalse(choices.getListView().isItemChecked(0));
         choices.getListView().performItemClick(null, 0, 0);
         choices.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         ShadowLooper.idleMainLooper();
-        assertFalse(store.getBoolean("copy_comment_text", true));
+        assertTrue(store.getBoolean("copy_comment_text", false));
         assertFalse(store.getBoolean("comment_media_tools", false));
         assertFalse(store.getBoolean("copy_source_data", false));
-        assertFalse(containsText(tools, "复制评论"));
+        assertTrue(containsText(tools, "复制评论"));
     }
 
     @Test
@@ -2025,7 +2497,10 @@ public final class ModuleSettingsReferenceTest {
             panel.measure(View.MeasureSpec.makeMeasureSpec(296, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(560, View.MeasureSpec.EXACTLY));
             panel.layout(0, 0, 296, 560);
+            int measuredRows = 0;
             for (ViewGroup row : settingRows(page)) {
+                if (hasGoneAncestor(row, page)) continue;
+                measuredRows++;
                 assertTrue(category + " label width", row.getChildAt(0).getWidth() > 0);
                 View labels = row.getChildAt(0);
                 TextView title = (TextView) ((ViewGroup) labels).getChildAt(0);
@@ -2040,8 +2515,17 @@ public final class ModuleSettingsReferenceTest {
                     assertTrue(title.getText().toString(), control.getRight() <= row.getWidth());
                 }
             }
+            assertTrue(category + " must retain visible settings rows", measuredRows > 0);
             assertEquals(0, collect(page, EditText.class).size());
             screen.dismissChildPages();
+        }
+    }
+
+    private static boolean hasGoneAncestor(View view, View boundary) {
+        while (true) {
+            if (view.getVisibility() == View.GONE) return true;
+            if (view == boundary || !(view.getParent() instanceof View)) return false;
+            view = (View) view.getParent();
         }
     }
 
@@ -2177,6 +2661,7 @@ public final class ModuleSettingsReferenceTest {
 
     private static final class MemoryStore implements SettingsStore {
         final Map<String, Object> values = new HashMap<>();
+        final Map<String, Integer> stringWrites = new HashMap<>();
         FeatureSettings settings = FeatureSettings.defaults();
         public FeatureSettings load() { return settings; }
         public void save(FeatureSettings settings) { this.settings = settings; }
@@ -2187,7 +2672,10 @@ public final class ModuleSettingsReferenceTest {
             return values.containsKey(key) ? (String) values.get(key) : fallback;
         }
         public void putBoolean(String key, boolean value) { values.put(key, value); }
-        public void putString(String key, String value) { values.put(key, value); }
+        public void putString(String key, String value) {
+            values.put(key, value);
+            stringWrites.put(key, stringWrites.getOrDefault(key, 0) + 1);
+        }
         public boolean isInHost() { return true; }
     }
 }

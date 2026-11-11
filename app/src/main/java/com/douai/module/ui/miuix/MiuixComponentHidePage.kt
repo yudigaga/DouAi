@@ -8,6 +8,7 @@ import android.graphics.Color as AndroidColor
 import android.graphics.drawable.ColorDrawable
 import android.view.WindowManager
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -35,14 +38,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.douai.module.config.ComponentHideSettings
@@ -59,6 +69,7 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
@@ -76,6 +87,7 @@ class MiuixComponentHidePage(
     private var dialog: Dialog? = null
     private var session: HostComposeEnvironment? = null
     private var pendingDelete by mutableStateOf<CustomViewLocator?>(null)
+    private var alphaInput by mutableStateOf<AlphaInput?>(null)
     private var customDetails: Dialog? = null
 
     fun show() {
@@ -96,6 +108,7 @@ class MiuixComponentHidePage(
                 dialog = null
                 session = null
                 pendingDelete = null
+                alphaInput = null
             }
         }
         view.setContent {
@@ -125,6 +138,7 @@ class MiuixComponentHidePage(
         val current = dialog
         dialog = null
         pendingDelete = null
+        alphaInput = null
         try {
             current?.dismiss()
         } finally {
@@ -135,6 +149,7 @@ class MiuixComponentHidePage(
 
     private fun requestBack() {
         if (customDetails?.isShowing == true) dismissCustomDetails()
+        else if (alphaInput != null) alphaInput = null
         else if (pendingDelete != null) pendingDelete = null else dismiss()
     }
 
@@ -171,29 +186,37 @@ class MiuixComponentHidePage(
                     item(key = ComponentHideSettings.ENABLED) {
                         Toggle("隐藏总开关", ComponentHideSettings.ENABLED, settings.enabled, editor)
                     }
-                    item(key = ComponentHideSettings.UNIFORM_ENABLED) {
-                        Toggle("统一透明度开关", ComponentHideSettings.UNIFORM_ENABLED,
-                            settings.uniformEnabled, editor)
-                    }
-                    item(key = ComponentHideSettings.UNIFORM_ALPHA) {
-                        Alpha("统一透明度", null, ComponentHideSettings.UNIFORM_ALPHA,
-                            settings.uniformAlpha, editor)
-                    }
-                    item(key = ComponentHideSettings.HIDE_ON_SWITCH) {
-                        Toggle("切换视频时,自动执行隐藏View", ComponentHideSettings.HIDE_ON_SWITCH,
-                            settings.hideOnSwitch, editor)
-                    }
-                    item(key = ComponentHideSettings.OPEN_COMMENTS_ON_SHOW) {
-                        Toggle("显示View时,自动打开评论列表", ComponentHideSettings.OPEN_COMMENTS_ON_SHOW,
-                            settings.openCommentsOnShow, editor)
-                    }
-                    item(key = ComponentHideSettings.SHOW_ON_PAUSE) {
-                        Toggle("暂停播放时,显示View", ComponentHideSettings.SHOW_ON_PAUSE,
-                            settings.showOnPause, editor)
-                    }
-                    items(Component.values().toList(), key = { it.key }) { component ->
-                        Alpha(component.title, if (component == Component.CARD) "作者昵称头顶的" else null,
-                            component.key, settings.individualAlpha(component), editor)
+                    if (settings.enabled) {
+                        item(key = ComponentHideSettings.UNIFORM_ENABLED) {
+                            Toggle("统一透明度开关", ComponentHideSettings.UNIFORM_ENABLED,
+                                settings.uniformEnabled, editor)
+                        }
+                        if (settings.uniformEnabled) {
+                            item(key = ComponentHideSettings.UNIFORM_ALPHA) {
+                                Alpha("统一透明度", null, ComponentHideSettings.UNIFORM_ALPHA,
+                                    settings.uniformAlpha, editor)
+                            }
+                        }
+                        item(key = ComponentHideSettings.HIDE_ON_SWITCH) {
+                            Toggle("切换视频时,自动执行隐藏View", ComponentHideSettings.HIDE_ON_SWITCH,
+                                settings.hideOnSwitch, editor)
+                        }
+                        item(key = ComponentHideSettings.SHOW_ON_PAUSE) {
+                            Toggle("暂停播放时,显示View", ComponentHideSettings.SHOW_ON_PAUSE,
+                                settings.showOnPause, editor)
+                        }
+                        if (settings.showOnPause) {
+                            item(key = ComponentHideSettings.OPEN_COMMENTS_ON_SHOW) {
+                                Toggle("暂停显示时打开评论", ComponentHideSettings.OPEN_COMMENTS_ON_SHOW,
+                                    settings.openCommentsOnShow, editor)
+                            }
+                        }
+                        if (!settings.uniformEnabled) {
+                            items(Component.values().toList(), key = { it.key }) { component ->
+                                Alpha(component.title, if (component == Component.CARD) "作者昵称头顶的" else null,
+                                    component.key, settings.individualAlpha(component), editor)
+                            }
+                        }
                     }
                     item(key = "component.custom.header") {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -228,6 +251,10 @@ class MiuixComponentHidePage(
                                 }
                             },
                         )
+                        if (settings.enabled) {
+                            Alpha("透明度", null, "component.custom.alpha.${locator.identityKey()}",
+                                locator.alpha, editor, locator)
+                        }
                     }
                     item(key = "component.bottom") { Spacer(Modifier.height(20.dp)) }
                 }
@@ -247,6 +274,9 @@ class MiuixComponentHidePage(
                     }, modifier = Modifier.weight(1f).testTag("component.custom.confirm_delete"))
                 }
             }
+            alphaInput?.let { input ->
+                AlphaInputDialog(input)
+            }
         }
     }
 
@@ -263,13 +293,21 @@ class MiuixComponentHidePage(
     @Composable
     private fun Alpha(
         title: String, subtitle: String?, key: String, initial: Int, editor: ComponentHideEditor,
+        locator: CustomViewLocator? = null,
     ) {
         var alpha by remember(key, initial) { mutableIntStateOf(initial) }
         var touching by remember(key) { mutableStateOf(false) }
+        var dragging by remember(key) { mutableStateOf(false) }
         var dirty by remember(key) { mutableStateOf(false) }
+        val save by rememberUpdatedState<(Int) -> Unit> { value ->
+            if (locator == null) editor.setAlpha(key, value) else editor.setCustomAlpha(locator, value)
+        }
+        val edit by rememberUpdatedState {
+            alphaInput = AlphaInput(title, alpha, save)
+        }
         val commit by rememberUpdatedState {
             if (dirty) {
-                editor.setAlpha(key, alpha)
+                save(alpha)
                 dirty = false
             }
         }
@@ -283,11 +321,14 @@ class MiuixComponentHidePage(
                             color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                     }
                 }
-                Text("透明度 $alpha", modifier = Modifier.width(98.dp), fontSize = 14.sp)
+                Text("透明度 $alpha", modifier = Modifier.width(98.dp).heightIn(min = 48.dp)
+                    .clickable(onClickLabel = "输入透明度", onClick = { edit() })
+                    .padding(vertical = 14.dp).testTag("$key.value"), fontSize = 14.sp)
             }
             Slider(
                 value = (alpha + 2).toFloat(),
                 onValueChange = {
+                    if (touching && !dragging) return@Slider
                     val changed = it.roundToInt().coerceIn(0, 257) - 2
                     if (alpha != changed) {
                         alpha = changed
@@ -302,23 +343,70 @@ class MiuixComponentHidePage(
                     .semantics {
                         contentDescription = title
                         stateDescription = "透明度 $alpha"
+                        onClick(label = "输入透明度") { edit(); true }
                     }
                     .pointerInput(key) {
                         // Miuix accessibility changes do not invoke onValueChangeFinished.
                         awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                             touching = true
+                            dragging = false
+                            var tapped = false
                             try {
                                 do {
                                     val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val pointer = event.changes.firstOrNull { it.id == down.id }
+                                    if (event.changes.size > 1 || pointer == null ||
+                                        (pointer.position - down.position).getDistance() > viewConfiguration.touchSlop) {
+                                        dragging = true
+                                    }
+                                    tapped = !dragging && pointer != null && !pointer.pressed &&
+                                        pointer.uptimeMillis - down.uptimeMillis < viewConfiguration.longPressTimeoutMillis
                                 } while (event.changes.any { it.pressed })
+                                // Keep the slider's release callback inside the same touch transaction.
+                                awaitPointerEvent(PointerEventPass.Final)
                             } finally {
                                 touching = false
                                 commit()
                             }
+                            if (tapped) edit()
                         }
                     },
             )
+        }
+    }
+
+    private class AlphaInput(val title: String, val initial: Int, val save: (Int) -> Unit)
+
+    @Composable
+    private fun AlphaInputDialog(input: AlphaInput) {
+        var value by remember(input) {
+            mutableStateOf(TextFieldValue(input.initial.toString(), TextRange(0, input.initial.toString().length)))
+        }
+        var error by remember(input) { mutableStateOf(false) }
+        val focus = remember(input) { FocusRequester() }
+        OverlayDialog(show = true, title = input.title,
+            summary = "输入 -2～255 的整数；-2 移除视图，-1 隐藏占位，0 全透明，255 不透明。",
+            onDismissRequest = { alphaInput = null }) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                TextField(value = value, onValueChange = { value = it; error = false },
+                    singleLine = true, label = "透明度",
+                    // The signed sentinel values need a keyboard with a minus key.
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus).testTag("component.alpha.input"))
+                if (error) Text("请输入 -2～255 的整数", modifier = Modifier.testTag("component.alpha.error"),
+                    color = hostThemeColor(0xFFB3261E.toInt()), fontSize = 12.sp)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TextButton("取消", onClick = { alphaInput = null }, modifier = Modifier.weight(1f)
+                        .testTag("component.alpha.cancel"))
+                    TextButton("确定", onClick = {
+                        val alpha = value.text.trim().toIntOrNull()
+                        if (alpha == null || alpha !in -2..255) error = true
+                        else { input.save(alpha); alphaInput = null }
+                    }, modifier = Modifier.weight(1f).testTag("component.alpha.confirm"))
+                }
+            }
+            LaunchedEffect(input) { focus.requestFocus() }
         }
     }
 
@@ -360,6 +448,14 @@ internal class ComponentHideEditor(private val store: SettingsStore) {
     fun deleteCustomView(locator: CustomViewLocator) {
         val latest = ComponentHideSettings.readFrom(store).customViews
         val updated = latest.filterNot { it.identityKey() == locator.identityKey() }
+        store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(updated))
+        settings = ComponentHideSettings.readFrom(store)
+    }
+
+    fun setCustomAlpha(locator: CustomViewLocator, alpha: Int) {
+        require(alpha in -2..255)
+        val latest = ComponentHideSettings.readFrom(store).customViews
+        val updated = latest.map { if (it.identityKey() == locator.identityKey()) it.withAlpha(alpha) else it }
         store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(updated))
         settings = ComponentHideSettings.readFrom(store)
     }

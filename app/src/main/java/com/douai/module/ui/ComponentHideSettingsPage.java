@@ -11,14 +11,18 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
+import android.text.InputType;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.LinearLayout;
+import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -33,7 +37,10 @@ import com.douai.module.config.SettingsStore;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.IntConsumer;
 
 /** The component controls share the same store in the module and host settings. */
 public final class ComponentHideSettingsPage {
@@ -46,9 +53,14 @@ public final class ComponentHideSettingsPage {
     private final SettingsStore store;
     private Dialog dialog;
     private Dialog customDetails;
+    private Dialog alphaInput;
     private LinearLayout content;
     private LinearLayout customSection;
     private Switch uniformToggle;
+    private final Map<String, View> controlRows = new LinkedHashMap<>();
+    private final Map<String, View> controlDividers = new LinkedHashMap<>();
+    private final List<View> customAlphaRows = new ArrayList<>();
+    private final List<String> customViewIdentities = new ArrayList<>();
 
     public ComponentHideSettingsPage(Context context, SettingsStore store) {
         this.context = ModuleTheme.themedContext(context);
@@ -64,6 +76,7 @@ public final class ComponentHideSettingsPage {
         next.setCanceledOnTouchOutside(true);
         next.setOnDismissListener(ignored -> {
             dismissCustomDetails();
+            dismissAlphaInput();
             if (dialog == next) dialog = null;
         });
         next.setContentView(createView());
@@ -98,6 +111,7 @@ public final class ComponentHideSettingsPage {
 
     public void dismiss() {
         dismissCustomDetails();
+        dismissAlphaInput();
         Dialog current = dialog;
         dialog = null;
         if (current != null) current.dismiss();
@@ -105,6 +119,8 @@ public final class ComponentHideSettingsPage {
 
     View createView() {
         ComponentHideSettings settings = ComponentHideSettings.readFrom(store);
+        controlRows.clear();
+        controlDividers.clear();
         LinearLayout panel = new LinearLayout(context);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(12), 0, dp(12), dp(12));
@@ -128,15 +144,16 @@ public final class ComponentHideSettingsPage {
         addAlpha("统一透明度", null, ComponentHideSettings.UNIFORM_ALPHA, settings.uniformAlpha);
         addToggle("切换视频时,自动执行隐藏View", ComponentHideSettings.HIDE_ON_SWITCH,
                 settings.hideOnSwitch);
-        addToggle("显示View时,自动打开评论列表", ComponentHideSettings.OPEN_COMMENTS_ON_SHOW,
-                settings.openCommentsOnShow);
         addToggle("暂停播放时,显示View", ComponentHideSettings.SHOW_ON_PAUSE,
                 settings.showOnPause);
+        addToggle("暂停显示时打开评论", ComponentHideSettings.OPEN_COMMENTS_ON_SHOW,
+                settings.openCommentsOnShow);
         for (Component component : Component.values()) {
             addAlpha(component.title, null,
                     component.key, settings.individualAlpha(component));
         }
         addCustomViewsSection(settings.customViews);
+        updateControlVisibility();
         ModuleTheme.bind(panel);
         return panel;
     }
@@ -152,6 +169,8 @@ public final class ComponentHideSettingsPage {
     private void renderCustomViews(List<CustomViewLocator> locators) {
         if (customSection == null) return;
         customSection.removeAllViews();
+        customAlphaRows.clear();
+        customViewIdentities.clear();
         addDividerTo(customSection);
         LinearLayout heading = new LinearLayout(context);
         heading.setGravity(Gravity.CENTER_VERTICAL);
@@ -202,7 +221,31 @@ public final class ComponentHideSettingsPage {
         remove.setOnClickListener(ignored -> confirmDelete(locator));
         row.addView(remove, new LinearLayout.LayoutParams(dp(48), dp(48)));
         customSection.addView(row, matchWrap());
+        String alphaKey = "component.custom.alpha." + locator.identityKey();
+        View alphaRow = createAlphaRow("透明度", null, alphaKey, locator.alpha,
+                alpha -> saveCustomAlpha(locator, alpha));
+        alphaRow.findViewWithTag(alphaKey).setContentDescription(locator.label + "透明度");
+        alphaRow.findViewWithTag(alphaKey + ".value").setContentDescription(
+                locator.label + "，点击输入透明度");
+        customSection.addView(alphaRow, matchWrap());
+        customAlphaRows.add(alphaRow);
+        customViewIdentities.add(locator.identityKey());
+        alphaRow.setVisibility(ComponentHideSettings.readFrom(store).enabled ? View.VISIBLE : View.GONE);
         addDividerTo(customSection);
+    }
+
+    private void saveCustomAlpha(CustomViewLocator locator, int alpha) {
+        List<CustomViewLocator> updated = new ArrayList<>(ComponentHideSettings.readFrom(store).customViews);
+        for (int index = 0; index < updated.size(); index++) {
+            CustomViewLocator current = updated.get(index);
+            if (!current.identityKey().equals(locator.identityKey())) continue;
+            updated.set(index, current.withAlpha(alpha));
+            store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(updated));
+            break;
+        }
+        List<String> identities = new ArrayList<>(updated.size());
+        for (CustomViewLocator item : updated) identities.add(item.identityKey());
+        if (!customViewIdentities.equals(identities)) renderCustomViews(updated);
     }
 
     /** Shared by the native and Miuix component lists; this reads locator metadata only. */
@@ -259,6 +302,12 @@ public final class ComponentHideSettingsPage {
         if (current != null) current.dismiss();
     }
 
+    private void dismissAlphaInput() {
+        Dialog current = alphaInput;
+        alphaInput = null;
+        if (current != null) current.dismiss();
+    }
+
     private void confirmDelete(CustomViewLocator locator) {
         new MiuixDialogBuilder(context, false).setTitle("删除自定义视图")
                 .setMessage("删除后会恢复该视图。")
@@ -309,16 +358,30 @@ public final class ComponentHideSettingsPage {
         toggle.setOnCheckedChangeListener((button, value) -> {
             initializeMaster();
             store.putBoolean(key, value);
+            updateControlVisibility();
         });
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         params.leftMargin = dp(12);
         row.addView(toggle, params);
-        content.addView(row, matchWrap());
-        addDivider();
+        addControlRow(key, row);
     }
 
     private void addAlpha(String title, String subtitle, String key, int initialValue) {
+        View row = createAlphaRow(title, subtitle, key, initialValue, alpha -> {
+            initializeMaster();
+            if (!ComponentHideSettings.UNIFORM_ALPHA.equals(key)) {
+                store.putBoolean(ComponentHideSettings.UNIFORM_ENABLED, false);
+                if (uniformToggle != null) uniformToggle.setChecked(false);
+            }
+            store.putString(key, Integer.toString(alpha));
+            updateControlVisibility();
+        });
+        addControlRow(key, row);
+    }
+
+    private View createAlphaRow(String title, String subtitle, String key, int initialValue,
+                                IntConsumer save) {
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.VERTICAL);
         row.setPadding(dp(12), dp(14), dp(12), dp(10));
@@ -331,16 +394,60 @@ public final class ComponentHideSettingsPage {
         heading.addView(labels, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         TextView value = text("透明度 " + initialValue, 14, TEXT, false);
+        value.setTag(key + ".value");
+        value.setFocusable(true);
         value.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         value.setMaxLines(1);
         value.setAutoSizeTextTypeUniformWithConfiguration(11, 14, 1,
                 TypedValue.COMPLEX_UNIT_SP);
-        LinearLayout.LayoutParams valueParams = new LinearLayout.LayoutParams(dp(98), dp(30));
+        LinearLayout.LayoutParams valueParams = new LinearLayout.LayoutParams(dp(98), dp(48));
         valueParams.leftMargin = dp(6);
         heading.addView(value, valueParams);
         row.addView(heading, matchWrap());
 
-        SeekBar slider = new SeekBar(context);
+        SeekBar slider = new SeekBar(context) {
+            private final int touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+            private float downX;
+            private float downY;
+            private boolean dragging;
+
+            @Override public boolean onTouchEvent(MotionEvent event) {
+                if (!isEnabled()) return false;
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        downX = event.getX();
+                        downY = event.getY();
+                        dragging = false;
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        if (!dragging && Math.abs(event.getX() - downX) > touchSlop
+                                && Math.abs(event.getX() - downX) >= Math.abs(event.getY() - downY)) {
+                            dragging = true;
+                            if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                            MotionEvent down = MotionEvent.obtain(event);
+                            down.setAction(MotionEvent.ACTION_DOWN);
+                            down.setLocation(downX, downY);
+                            super.onTouchEvent(down);
+                            down.recycle();
+                        }
+                        return !dragging || super.onTouchEvent(event);
+                    case MotionEvent.ACTION_UP:
+                        if (!dragging) return performClick();
+                        break;
+                    case MotionEvent.ACTION_CANCEL:
+                        if (!dragging) return true;
+                        break;
+                }
+                boolean handled = super.onTouchEvent(event);
+                if (event.getActionMasked() == MotionEvent.ACTION_UP
+                        || event.getActionMasked() == MotionEvent.ACTION_CANCEL) dragging = false;
+                return handled;
+            }
+
+            @Override public boolean performClick() {
+                return !dragging && super.performClick();
+            }
+        };
         slider.setMax(257);
         slider.setProgress(initialValue + 2);
         slider.setTag(key);
@@ -352,28 +459,92 @@ public final class ComponentHideSettingsPage {
                 int alpha = progress - 2;
                 value.setText("透明度 " + alpha);
                 setAlphaStateDescription(seekBar, alpha);
-                if (fromUser && !tracking) save(alpha);
+                if (fromUser && !tracking) save.accept(alpha);
             }
             @Override public void onStartTrackingTouch(SeekBar seekBar) { tracking = true; }
             @Override public void onStopTrackingTouch(SeekBar seekBar) {
                 tracking = false;
-                save(seekBar.getProgress() - 2);
-            }
-            private void save(int alpha) {
-                initializeMaster();
-                if (!ComponentHideSettings.UNIFORM_ALPHA.equals(key)) {
-                    store.putBoolean(ComponentHideSettings.UNIFORM_ENABLED, false);
-                    if (uniformToggle != null) uniformToggle.setChecked(false);
-                }
-                store.putString(key, Integer.toString(alpha));
+                save.accept(seekBar.getProgress() - 2);
             }
         });
+        slider.setOnClickListener(ignored -> showAlphaInput(slider.getContentDescription().toString(), slider, save));
+        value.setOnClickListener(ignored -> showAlphaInput(slider.getContentDescription().toString(), slider, save));
+        value.setContentDescription(title + "，点击输入透明度");
         LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
         sliderParams.topMargin = dp(8);
         row.addView(slider, sliderParams);
+        return row;
+    }
+
+    private void showAlphaInput(String title, SeekBar slider, IntConsumer save) {
+        Activity activity = ownerActivity(context);
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        dismissAlphaInput();
+        EditText input = new EditText(context);
+        input.setTag("component.alpha.input");
+        input.setContentDescription(title);
+        input.setSingleLine(true);
+        // Keep pasted text intact so invalid decimals cannot silently become another integer.
+        input.setRawInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        input.setText(String.format(java.util.Locale.ROOT, "%d", slider.getProgress() - 2));
+        input.selectAll();
+        LinearLayout body = new LinearLayout(context);
+        body.setPadding(dp(20), dp(4), dp(20), dp(4));
+        body.addView(input, matchWrap());
+        ModuleTheme.bind(body);
+        AlertDialog next = new MiuixDialogBuilder(context, false).setTitle(title)
+                .setMessage("请输入 -2 到 255 的整数")
+                .setView(body).setNegativeButton("取消", null).setPositiveButton("保存", null).create();
+        next.setOwnerActivity(activity);
+        next.setOnDismissListener(ignored -> { if (alphaInput == next) alphaInput = null; });
+        next.setOnShowListener(ignored -> HostDialogBounds.install(activity, next, false));
+        alphaInput = next;
+        try {
+            next.show();
+            next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(button -> {
+                if (alphaInput != next || !next.isShowing()) return;
+                final int alpha;
+                try {
+                    String raw = input.getText().toString().trim();
+                    if (!raw.matches("-?[0-9]+")) throw new NumberFormatException();
+                    alpha = Integer.parseInt(raw);
+                    if (alpha < -2 || alpha > 255) throw new NumberFormatException();
+                } catch (NumberFormatException invalid) {
+                    input.setError("请输入 -2 到 255 的整数");
+                    return;
+                }
+                slider.setProgress(alpha + 2);
+                save.accept(alpha);
+                next.dismiss();
+            });
+            input.requestFocus();
+            if (next.getWindow() != null) next.getWindow().setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        } catch (RuntimeException unavailable) {
+            dismissAlphaInput();
+        }
+    }
+
+    private void addControlRow(String key, View row) {
         content.addView(row, matchWrap());
-        addDivider();
+        controlRows.put(key, row);
+        controlDividers.put(key, addDivider());
+    }
+
+    private void updateControlVisibility() {
+        ComponentHideSettings settings = ComponentHideSettings.readFrom(store);
+        for (Map.Entry<String, View> entry : controlRows.entrySet()) {
+            String key = entry.getKey();
+            boolean visible = ComponentHideSettings.ENABLED.equals(key) || settings.enabled;
+            if (ComponentHideSettings.UNIFORM_ALPHA.equals(key)) visible &= settings.uniformEnabled;
+            else if (ComponentHideSettings.isAlphaKey(key)) visible &= !settings.uniformEnabled;
+            else if (ComponentHideSettings.OPEN_COMMENTS_ON_SHOW.equals(key)) visible &= settings.showOnPause;
+            int visibility = visible ? View.VISIBLE : View.GONE;
+            entry.getValue().setVisibility(visibility);
+            controlDividers.get(key).setVisibility(visibility);
+        }
+        for (View row : customAlphaRows) row.setVisibility(settings.enabled ? View.VISIBLE : View.GONE);
     }
 
     private void initializeMaster() {
@@ -384,11 +555,11 @@ public final class ComponentHideSettingsPage {
         if (Build.VERSION.SDK_INT >= 30) slider.setStateDescription("透明度 " + alpha);
     }
 
-    private void addDivider() {
-        addDividerTo(content);
+    private View addDivider() {
+        return addDividerTo(content);
     }
 
-    private void addDividerTo(LinearLayout target) {
+    private View addDividerTo(LinearLayout target) {
         View divider = new View(context);
         divider.setBackgroundColor(LINE);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
@@ -396,6 +567,7 @@ public final class ComponentHideSettingsPage {
         params.leftMargin = dp(12);
         params.rightMargin = dp(12);
         target.addView(divider, params);
+        return divider;
     }
 
     private TextView text(String value, float size, int color, boolean bold) {

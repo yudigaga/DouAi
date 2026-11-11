@@ -25,8 +25,8 @@ android {
         applicationId = "io.github.yudigaga.douai"
         minSdk = 28
         targetSdk = 35
-        versionCode = 155
-        versionName = "0.2.54"
+        versionCode = 161
+        versionName = "0.2.60"
         require(versionName.orEmpty().matches(Regex("""[0-9]+\.[0-9]\.(?:0|[1-9][0-9]?)"""))) {
             "Version must carry at patch 100 and minor 10 (0.1.99 -> 0.2.0; 0.9.99 -> 1.0.0)."
         }
@@ -93,6 +93,11 @@ kotlin {
 }
 
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    // Original-host and packaged-APK contracts must rerun when their configured input changes.
+    for (variable in listOf("DOUAI_TEST_APK", "DOUAI_VERIFY_RELEASE_APK")) {
+        inputs.files(providers.environmentVariable(variable).map { listOf(rootProject.file(it)) }.orElse(emptyList()))
+            .withPropertyName(variable).withPathSensitivity(org.gradle.api.tasks.PathSensitivity.NONE)
+    }
     // Robolectric SDKs and full-size host APK DEX contracts share a worker JVM.
     // Keep their bounded test heap separate from the module's runtime budget.
     maxHeapSize = "1g"

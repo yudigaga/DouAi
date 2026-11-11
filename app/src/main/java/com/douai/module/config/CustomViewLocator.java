@@ -29,6 +29,7 @@ public final class CustomViewLocator {
     public final String viewClassName;
     public final String resourceName;
     public final String label;
+    public final int alpha;
     private final boolean uniqueId;
     private final int anchorIndex;
     private final List<Segment> path;
@@ -36,14 +37,27 @@ public final class CustomViewLocator {
     private CustomViewLocator(Scope scope, String rootClassName, String viewClassName,
                               String resourceName, boolean uniqueId, int anchorIndex,
                               List<Segment> path) {
+        this(scope, rootClassName, viewClassName, resourceName, uniqueId, anchorIndex, path, -2);
+    }
+
+    private CustomViewLocator(Scope scope, String rootClassName, String viewClassName,
+                              String resourceName, boolean uniqueId, int anchorIndex,
+                              List<Segment> path, int alpha) {
         this.scope = scope;
         this.rootClassName = rootClassName;
         this.viewClassName = viewClassName;
         this.resourceName = resourceName;
         this.label = resourceName.isEmpty() ? simpleName(viewClassName) : resourceName;
+        this.alpha = alpha;
         this.uniqueId = uniqueId;
         this.anchorIndex = anchorIndex;
         this.path = Collections.unmodifiableList(new ArrayList<>(path));
+    }
+
+    public CustomViewLocator withAlpha(int alpha) {
+        if (alpha < -2 || alpha > 255) throw new IllegalArgumentException("Invalid custom view alpha");
+        return new CustomViewLocator(scope, rootClassName, viewClassName, resourceName,
+                uniqueId, anchorIndex, path, alpha);
     }
 
     public static CustomViewLocator capture(View root, View target) {
@@ -227,6 +241,8 @@ public final class CustomViewLocator {
                 if ((!uniqueId && !"path".equals(mode)) || (uniqueId && id.isEmpty())
                         || !label.equals(id.isEmpty() ? simpleName(viewClass) : id)) return Collections.emptyList();
                 int anchor = requiredInt(item, "anchor");
+                int alpha = item.has("alpha") ? requiredInt(item, "alpha") : -2;
+                if (alpha < -2 || alpha > 255) return Collections.emptyList();
                 JSONArray encodedPath = item.getJSONArray("path");
                 if (encodedPath.length() == 0 || encodedPath.length() > MAX_DEPTH
                         || anchor < -1 || anchor >= encodedPath.length() - 1
@@ -248,7 +264,7 @@ public final class CustomViewLocator {
                         || (anchor >= 0 && segments.get(anchor).resourceName.isEmpty())) {
                     return Collections.emptyList();
                 }
-                result.add(new CustomViewLocator(scope, rootClass, viewClass, id, uniqueId, anchor, segments));
+                result.add(new CustomViewLocator(scope, rootClass, viewClass, id, uniqueId, anchor, segments, alpha));
             }
             return Collections.unmodifiableList(result);
         } catch (JSONException | RuntimeException ignored) {
@@ -281,6 +297,7 @@ public final class CustomViewLocator {
                     item.put("label", locator.label);
                     item.put("mode", locator.uniqueId ? "id" : "path");
                     item.put("anchor", locator.anchorIndex);
+                    item.put("alpha", locator.alpha);
                     for (Segment segment : locator.path) {
                         if (segment.className.length() > MAX_NAME_LENGTH
                                 || segment.resourceName.length() > MAX_NAME_LENGTH

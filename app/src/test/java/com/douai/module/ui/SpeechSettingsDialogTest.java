@@ -1632,6 +1632,33 @@ public final class SpeechSettingsDialogTest {
         }
     }
 
+    @Test public void miniMaxMixPreviewExplainsThePresetAndKeepsTheSingleVoiceLibraryAvailable() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        store.putString(SpeechSettings.MINIMAX_VOICE_ID, "saved-single");
+        store.putString(SpeechSettings.MINIMAX_VOICE_NAME, "备用名字");
+        store.putString(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "one/20\ntwo/30");
+        store.putBoolean("automation_enabled", false);
+        store.putBoolean("reply_voice", false);
+        store.putBoolean("comment_voice", false);
+        open(false);
+        String preview = value("音色");
+        assertTrue("The active preset must identify mixed synthesis", preview.contains("混音"));
+        assertTrue("The stored ordinary voice must be explained as a backup", preview.contains("备用"));
+        assertNotNull(root.findViewWithTag("settings.option.试听"));
+        AlertDialog voices = option("音色");
+        assertNotNull("The single-voice library remains a management entry", voices.getListView());
+        assertEquals("手动填写", voices.getButton(Dialog.BUTTON_NEUTRAL).getText().toString());
+        voices.dismiss();
+        assertEquals("saved-single", store.getString(SpeechSettings.MINIMAX_VOICE_ID, ""));
+        assertEquals("one/20\ntwo/30", store.getString(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, ""));
+        View effects = miniMaxSection("混音与声音效果");
+        AlertDialog editor = option(effects, "混合音色（每行 voice_id/weight）");
+        input(editor, "混合音色（每行 voice_id/weight）").setText("");
+        save(editor);
+        assertEquals("", store.getString(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, ""));
+        assertEquals("备用名字 · saved-single", value("音色"));
+    }
+
     @Test public void miniMaxMixEditorValidatesWeightsAndRetainsTheSavedSingleVoice() {
         store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
         store.putString(SpeechSettings.MINIMAX_VOICE_ID, "saved-single");

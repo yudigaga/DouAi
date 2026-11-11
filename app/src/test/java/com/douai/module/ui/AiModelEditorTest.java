@@ -11,6 +11,7 @@ import android.widget.LinearLayout;
 import android.widget.EditText;
 import android.widget.CheckBox;
 import android.widget.Spinner;
+import android.widget.TextView;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.FeatureSettings;
@@ -334,12 +335,48 @@ public final class AiModelEditorTest {
         for (String[] field : fields) {
             CheckBox toggle = checkbox(editor.dialog().getWindow().getDecorView(), field[0]);
             EditText value = input(editor.dialog(), field[1]);
+            TextView title = label(editor.dialog().getWindow().getDecorView(), field[1]);
+            assertNotNull(field[1], title);
             assertFalse(field[1], value.isEnabled());
+            assertFalse(field[1] + " title must be hidden while disabled", title.isShown());
+            assertFalse(field[1] + " input must be hidden while disabled", value.isShown());
             toggle.setChecked(true);
             assertTrue(field[1], value.isEnabled());
+            assertTrue(field[1], title.isShown());
+            assertTrue(field[1], value.isShown());
             toggle.setChecked(false);
             assertFalse(field[1], value.isEnabled());
+            assertFalse(field[1], title.isShown());
+            assertFalse(field[1], value.isShown());
         }
+    }
+
+    @Test public void hidingOptionalParameterFieldsPreservesTheirDraftAndCancelDoesNotWrite() throws Exception {
+        AiModelConfig original = AiModelConfig.fromJson(profile().toJson().put("temperature", 0.7)
+                .put("maxTokens", 512).put("topP", 0.9));
+        new AiModelSettings(Collections.singletonList(original), original.id).save(store);
+        String saved = store.getString(AiModelSettings.KEY, "");
+        editor = new AiModelEditor(activity, store, original, false, () -> { });
+        show(editor);
+        String[][] fields = {{"设置温度", "温度", "1.4"}, {"限制最大输出 Token", "最大输出 Token", "1234"},
+                {"设置 Top P", "Top P", "0.6"}};
+        for (String[] field : fields) {
+            CheckBox toggle = checkbox(editor.dialog().getWindow().getDecorView(), field[0]);
+            EditText value = input(editor.dialog(), field[1]);
+            toggle.setChecked(true);
+            value.setText(field[2]);
+            toggle.setChecked(false);
+            assertFalse(field[1], value.isShown());
+            assertFalse(field[1], label(editor.dialog().getWindow().getDecorView(), field[1]).isShown());
+            toggle.setChecked(true);
+            assertEquals(field[1], field[2], value.getText().toString());
+            assertTrue(field[1], value.isShown());
+        }
+        assertEquals(saved, store.getString(AiModelSettings.KEY, ""));
+        editor.dialog().getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        assertEquals(saved, store.getString(AiModelSettings.KEY, ""));
+        assertFalse(editor.dialog().isShowing());
     }
 
     @Test public void disabledOptionalParametersDoNotBlockSavingAndKeepSavedValues() throws Exception {
@@ -370,6 +407,19 @@ public final class AiModelEditorTest {
             ViewGroup group = (ViewGroup) root;
             for (int index = 0; index < group.getChildCount(); index++) {
                 CheckBox found = checkbox(group.getChildAt(index), label);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private static TextView label(View root, String text) {
+        if (root instanceof TextView && !(root instanceof EditText) && !(root instanceof CheckBox)
+                && text.contentEquals(((TextView) root).getText())) return (TextView) root;
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int index = 0; index < group.getChildCount(); index++) {
+                TextView found = label(group.getChildAt(index), text);
                 if (found != null) return found;
             }
         }

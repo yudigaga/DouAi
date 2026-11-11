@@ -23,6 +23,7 @@ import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
 
+import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -141,31 +142,36 @@ public final class ComponentHideSettingsPageTest {
     }
 
     @Test
-    public void homepageUsesReferenceCategoryNamesAndCounts() {
+    public void homepageUsesReferenceCategoryNamesWithoutMisleadingFixedCounts() {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         ModuleSettingsScreen screen = new ModuleSettingsScreen(activity, new MemoryStore());
         View root = screen.createView();
         String[][] expected = {
-                {"BASIC", "基本功能", "3项"},
-                {"INTERFACE", "界面相关", "15项"},
-                {"FILTER", "视频筛选", "16项"},
-                {"DOWNLOAD", "下载相关", "14项"},
-                {"AUTOPLAY", "自动播放", "7项"},
-                {"AUTO_REPLY", "自动回复", "13项"},
-                {"AUTO_COMMENT", "自动评论", "8项"},
-                {"COMMENT", "评论相关", "11项"},
-                {"STREAK", "自动续火花", "7项"},
-                {"COMPONENT_HIDE", "组件隐藏", "24项"},
-                {"MESSAGE", "消息管理", "8项"},
-                {"SPOOF", "本地伪装", "6项"},
-                {"EXTENSION", "扩展功能", "4项"},
-                {"ABOUT", "关于", ""}
+                {"BASIC", "基本功能"},
+                {"INTERFACE", "界面相关"},
+                {"FILTER", "视频筛选"},
+                {"DOWNLOAD", "下载相关"},
+                {"AUTOPLAY", "自动播放"},
+                {"AUTO_REPLY", "自动回复"},
+                {"AUTO_COMMENT", "自动评论"},
+                {"COMMENT", "评论相关"},
+                {"STREAK", "自动续火花"},
+                {"COMPONENT_HIDE", "组件隐藏"},
+                {"MESSAGE", "消息管理"},
+                {"SPOOF", "本地伪装"},
+                {"EXTENSION", "扩展功能"},
+                {"ABOUT", "关于"}
         };
         for (String[] item : expected) {
             View row = root.findViewWithTag("settings.category." + item[0]);
             assertNotNull(item[0], row);
             assertEquals(item[1], ((TextView) ((ViewGroup) row).getChildAt(0)).getText().toString());
-            assertEquals(item[2], ((TextView) ((ViewGroup) row).getChildAt(1)).getText().toString());
+            ViewGroup children = (ViewGroup) row;
+            if (children.getChildCount() > 1) {
+                TextView badge = (TextView) children.getChildAt(1);
+                assertTrue(item[0] + " must not show a fixed count for conditional settings",
+                        badge.getVisibility() == View.GONE || badge.getText().length() == 0);
+            }
         }
         activity.finish();
     }
@@ -229,7 +235,7 @@ public final class ComponentHideSettingsPageTest {
         List<String> expected = new ArrayList<>(Arrays.asList(
                 ComponentHideSettings.ENABLED, ComponentHideSettings.UNIFORM_ENABLED,
                 ComponentHideSettings.UNIFORM_ALPHA, ComponentHideSettings.HIDE_ON_SWITCH,
-                ComponentHideSettings.OPEN_COMMENTS_ON_SHOW, ComponentHideSettings.SHOW_ON_PAUSE));
+                ComponentHideSettings.SHOW_ON_PAUSE, ComponentHideSettings.OPEN_COMMENTS_ON_SHOW));
         for (Component component : Component.values()) expected.add(component.key);
         List<String> actual = new ArrayList<>();
         collectControlKeys(root, actual);
@@ -285,7 +291,10 @@ public final class ComponentHideSettingsPageTest {
         root.layout(0, 0, root.getMeasuredWidth(), root.getMeasuredHeight());
         ((Switch) root.findViewWithTag(ComponentHideSettings.SHOW_ON_PAUSE)).setChecked(false);
         assertTrue(store.getBoolean(ComponentHideSettings.ENABLED, false));
+        int visibleSliders = 0;
         for (SeekBar slider : collect(root, SeekBar.class)) {
+            if (hasGoneAncestor(slider, root)) continue;
+            visibleSliders++;
             assertTrue(slider.getWidth() > 0);
             assertTrue(slider.getRight() <= ((View) slider.getParent()).getWidth());
             slider.setProgress(0);
@@ -293,12 +302,17 @@ public final class ComponentHideSettingsPageTest {
             slider.setProgress(257);
             assertEquals(257, slider.getProgress());
         }
+        assertTrue(visibleSliders > 0);
+        int visibleToggles = 0;
         for (Switch toggle : collect(root, Switch.class)) {
+            if (hasGoneAncestor(toggle, root)) continue;
+            visibleToggles++;
             ViewGroup row = (ViewGroup) toggle.getParent();
             View label = row.getChildAt(0);
             assertTrue(label.getRight() <= toggle.getLeft());
             assertTrue(toggle.getRight() <= row.getWidth());
         }
+        assertTrue(visibleToggles > 0);
         ViewGroup panel = (ViewGroup) root;
         assertTrue(panel.getChildAt(1) instanceof ScrollView);
         assertTrue(panel.getChildAt(1).getTop() >= panel.getChildAt(0).getBottom());
@@ -414,6 +428,311 @@ public final class ComponentHideSettingsPageTest {
         assertEquals("-2", store.getString(ComponentHideSettings.UNIFORM_ALPHA, ""));
         assertTrue(settings.enabled);
         activity.finish();
+    }
+
+    @Test public void executionControlsFollowEffectiveMasterUniformAndPauseWithoutClearingPresets() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        MemoryStore store = new MemoryStore();
+        store.putBoolean(ComponentHideSettings.ENABLED, false);
+        store.putBoolean(ComponentHideSettings.UNIFORM_ENABLED, true);
+        store.putString(ComponentHideSettings.UNIFORM_ALPHA, "64");
+        store.putString(Component.LIKE.key, "81");
+        store.putBoolean(ComponentHideSettings.SHOW_ON_PAUSE, false);
+        store.putBoolean(ComponentHideSettings.OPEN_COMMENTS_ON_SHOW, true);
+        Map<String, Object> before = new HashMap<>(store.values);
+        View root = new ComponentHideSettingsPage(activity, store).createView();
+        assertTrue(visibleControl(root, ComponentHideSettings.ENABLED));
+        assertFalse(visibleControl(root, ComponentHideSettings.UNIFORM_ENABLED));
+        assertFalse(visibleControl(root, ComponentHideSettings.UNIFORM_ALPHA));
+        assertFalse(visibleControl(root, ComponentHideSettings.HIDE_ON_SWITCH));
+        assertFalse(visibleControl(root, ComponentHideSettings.SHOW_ON_PAUSE));
+        assertFalse(visibleControl(root, ComponentHideSettings.OPEN_COMMENTS_ON_SHOW));
+        for (Component component : Component.values()) assertFalse(component.key, visibleControl(root, component.key));
+        assertTrue(visibleControl(root, "component.custom.section"));
+        assertEquals(before, store.values);
+        ((Switch) root.findViewWithTag(ComponentHideSettings.ENABLED)).setChecked(true);
+        assertTrue(visibleControl(root, ComponentHideSettings.UNIFORM_ENABLED));
+        assertTrue(visibleControl(root, ComponentHideSettings.UNIFORM_ALPHA));
+        assertFalse(visibleControl(root, Component.LIKE.key));
+        assertTrue(visibleControl(root, ComponentHideSettings.SHOW_ON_PAUSE));
+        assertFalse(visibleControl(root, ComponentHideSettings.OPEN_COMMENTS_ON_SHOW));
+        ((Switch) root.findViewWithTag(ComponentHideSettings.UNIFORM_ENABLED)).setChecked(false);
+        assertFalse(visibleControl(root, ComponentHideSettings.UNIFORM_ALPHA));
+        assertTrue(visibleControl(root, Component.LIKE.key));
+        assertEquals(83, ((SeekBar) root.findViewWithTag(Component.LIKE.key)).getProgress());
+        ((Switch) root.findViewWithTag(ComponentHideSettings.SHOW_ON_PAUSE)).setChecked(true);
+        assertTrue(visibleControl(root, ComponentHideSettings.OPEN_COMMENTS_ON_SHOW));
+        assertEquals("暂停显示时打开评论", root.findViewWithTag(ComponentHideSettings.OPEN_COMMENTS_ON_SHOW).getContentDescription());
+        ((Switch) root.findViewWithTag(ComponentHideSettings.ENABLED)).setChecked(false);
+        assertFalse(visibleControl(root, Component.LIKE.key));
+        assertTrue(visibleControl(root, "component.custom.section"));
+        ((Switch) root.findViewWithTag(ComponentHideSettings.ENABLED)).setChecked(true);
+        assertTrue(visibleControl(root, Component.LIKE.key));
+        assertEquals("81", store.getString(Component.LIKE.key, ""));
+        assertEquals("64", store.getString(ComponentHideSettings.UNIFORM_ALPHA, ""));
+        assertTrue(store.getBoolean(ComponentHideSettings.OPEN_COMMENTS_ON_SHOW, false));
+        activity.finish();
+    }
+
+    @Test public void legacyEnabledControlsAndCustomRuleManagementStayAvailableWithoutChangingMasterOnDelete() {
+        for (String legacy : new String[]{"hide_interface", "video_right_alpha"}) {
+            Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+            MemoryStore store = new MemoryStore();
+            if ("hide_interface".equals(legacy)) store.putBoolean(legacy, true); else store.putString(legacy, "37");
+            FrameLayout host = new FrameLayout(activity);
+            TextView target = new TextView(activity); target.setId(android.R.id.title); host.addView(target);
+            CustomViewLocator locator = CustomViewLocator.capture(host, target);
+            store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(java.util.Collections.singletonList(locator)));
+            Map<String, Object> before = new HashMap<>(store.values);
+            ComponentHideSettings initial = ComponentHideSettings.readFrom(store);
+            View root = new ComponentHideSettingsPage(activity, store).createView();
+            assertTrue(((Switch) root.findViewWithTag(ComponentHideSettings.ENABLED)).isChecked());
+            assertTrue(visibleControl(root, Component.LIKE.key));
+            assertFalse(visibleControl(root, ComponentHideSettings.UNIFORM_ALPHA));
+            assertEquals(before, store.values);
+            ((Switch) root.findViewWithTag(ComponentHideSettings.ENABLED)).setChecked(false);
+            assertFalse(visibleControl(root, Component.LIKE.key));
+            assertTrue(visibleControl(root, "component.custom.section"));
+            View remove = root.findViewWithTag("component.custom.delete." + locator.identityKey());
+            assertNotNull(remove); assertTrue(remove.performClick());
+            AlertDialog confirm = (AlertDialog) ShadowDialog.getLatestDialog();
+            confirm.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            ShadowLooper.idleMainLooper();
+            assertEquals(1, ComponentHideSettings.readFrom(store).customViews.size());
+            assertTrue(remove.performClick());
+            confirm = (AlertDialog) ShadowDialog.getLatestDialog();
+            confirm.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            ShadowLooper.idleMainLooper();
+            assertTrue(ComponentHideSettings.readFrom(store).customViews.isEmpty());
+            assertFalse(ComponentHideSettings.readFrom(store).enabled);
+            assertEquals(initial.individualAlpha(Component.LIKE), ComponentHideSettings.readFrom(store).individualAlpha(Component.LIKE));
+            activity.finish();
+        }
+    }
+
+    @Test public void alphaTapOpensInputWithoutChangingValueAndRejectsInvalidIntegers() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        MemoryStore store = new MemoryStore();
+        store.putBoolean(ComponentHideSettings.ENABLED, true);
+        store.putString(Component.LIKE.key, "83");
+        View root = new ComponentHideSettingsPage(activity, store).createView();
+        SeekBar slider = root.findViewWithTag(Component.LIKE.key);
+        slider.measure(View.MeasureSpec.makeMeasureSpec(300, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(48, View.MeasureSpec.EXACTLY));
+        slider.layout(0, 0, 300, 48);
+        Map<String, Object> before = new HashMap<>(store.values);
+        sendTouch(slider, MotionEvent.ACTION_DOWN, 270);
+        sendTouch(slider, MotionEvent.ACTION_UP, 270);
+        AlertDialog inputDialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNotNull("A slider tap must open numeric input", inputDialog);
+        assertTrue(inputDialog.isShowing());
+        EditText input = inputDialog.getWindow().getDecorView().findViewWithTag("component.alpha.input");
+        assertNotNull(input);
+        assertEquals("83", input.getText().toString());
+        assertEquals(85, slider.getProgress());
+        for (String invalid : Arrays.asList("", "-3", "256", "1.5", "abc", "2147483648")) {
+            input.setText(invalid);
+            inputDialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            assertTrue(invalid, inputDialog.isShowing());
+            assertNotNull(invalid, input.getError());
+            assertEquals(invalid, before, store.values);
+        }
+        input.setText("120");
+        inputDialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        assertFalse(inputDialog.isShowing());
+        assertEquals(before, store.values);
+        activity.finish();
+    }
+
+    @Test public void numericAlphaInputSupportsAllSentinelsAndKeepsUniformSaveRules() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        MemoryStore store = new MemoryStore();
+        store.putBoolean(ComponentHideSettings.ENABLED, true);
+        store.putBoolean(ComponentHideSettings.UNIFORM_ENABLED, true);
+        View root = new ComponentHideSettingsPage(activity, store).createView();
+        SeekBar uniform = root.findViewWithTag(ComponentHideSettings.UNIFORM_ALPHA);
+        assertTrue(uniform.performClick());
+        AlertDialog inputDialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        EditText input = inputDialog.getWindow().getDecorView().findViewWithTag("component.alpha.input");
+        input.setText("64");
+        inputDialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertEquals("64", store.getString(ComponentHideSettings.UNIFORM_ALPHA, ""));
+        assertTrue(ComponentHideSettings.readFrom(store).uniformEnabled);
+        ((Switch) root.findViewWithTag(ComponentHideSettings.UNIFORM_ENABLED)).setChecked(false);
+        TextView value = root.findViewWithTag(Component.LIKE.key + ".value");
+        assertNotNull("The numeric label must also open the input", value);
+        SeekBar slider = root.findViewWithTag(Component.LIKE.key);
+        for (int alpha : new int[]{-2, -1, 0, 255}) {
+            assertTrue(value.performClick());
+            inputDialog = (AlertDialog) ShadowDialog.getLatestDialog();
+            input = inputDialog.getWindow().getDecorView().findViewWithTag("component.alpha.input");
+            input.setText(Integer.toString(alpha));
+            inputDialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            assertFalse(inputDialog.isShowing());
+            assertEquals(Integer.toString(alpha), store.getString(Component.LIKE.key, ""));
+            assertEquals(alpha + 2, slider.getProgress());
+            assertEquals("透明度 " + alpha, value.getText().toString());
+            assertFalse(ComponentHideSettings.readFrom(store).uniformEnabled);
+        }
+        assertEquals("64", store.getString(ComponentHideSettings.UNIFORM_ALPHA, ""));
+        activity.finish();
+    }
+
+    @Test public void customAlphaAppearsOnlyWithMasterWhileDetailsAndDeleteRemainAvailable() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout host = new FrameLayout(activity);
+        TextView target = new TextView(activity); target.setId(android.R.id.title); host.addView(target);
+        CustomViewLocator locator = CustomViewLocator.capture(host, target);
+        MemoryStore store = new MemoryStore();
+        store.putBoolean(ComponentHideSettings.ENABLED, false);
+        store.putBoolean(ComponentHideSettings.UNIFORM_ENABLED, true);
+        store.putString(CustomViewLocator.SETTINGS_KEY, encodedCustomAlpha(locator, 91));
+        Map<String, Object> before = new HashMap<>(store.values);
+        ComponentHideSettingsPage page = new ComponentHideSettingsPage(activity, store);
+        View root = page.createView();
+        String alphaKey = "component.custom.alpha." + locator.identityKey();
+        SeekBar slider = root.findViewWithTag(alphaKey);
+        assertNotNull("Each custom rule needs its own alpha slider", slider);
+        assertEquals(93, slider.getProgress());
+        assertFalse(visibleControl(root, alphaKey));
+        assertTrue(visibleControl(root, "component.custom." + locator.identityKey()));
+        assertTrue(visibleControl(root, "component.custom.delete." + locator.identityKey()));
+        assertEquals(before, store.values);
+        root.findViewWithTag("component.custom." + locator.identityKey()).performClick();
+        assertTrue(ShadowDialog.getLatestDialog().isShowing());
+        page.dismiss();
+        ((Switch) root.findViewWithTag(ComponentHideSettings.ENABLED)).setChecked(true);
+        assertTrue(visibleControl(root, alphaKey));
+        assertTrue(ComponentHideSettings.readFrom(store).uniformEnabled);
+        ((Switch) root.findViewWithTag(ComponentHideSettings.ENABLED)).setChecked(false);
+        assertFalse(visibleControl(root, alphaKey));
+        assertEquals(91, storedCustomAlpha(store, locator.identityKey()));
+        activity.finish();
+    }
+
+    @Test public void customAlphaUpdatesLatestRulesWithoutChangingUniformModeOrResurrectingDeletedRule() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout host = new FrameLayout(activity);
+        TextView first = new TextView(activity); first.setId(android.R.id.title); host.addView(first);
+        TextView second = new TextView(activity); second.setId(android.R.id.summary); host.addView(second);
+        CustomViewLocator locator = CustomViewLocator.capture(host, first);
+        CustomViewLocator other = CustomViewLocator.capture(host, second);
+        MemoryStore store = new MemoryStore();
+        store.putBoolean(ComponentHideSettings.ENABLED, true);
+        store.putBoolean(ComponentHideSettings.UNIFORM_ENABLED, true);
+        store.putString(ComponentHideSettings.UNIFORM_ALPHA, "48");
+        store.putString(CustomViewLocator.SETTINGS_KEY, encodedCustomAlpha(locator, 91));
+        View root = new ComponentHideSettingsPage(activity, store).createView();
+        SeekBar slider = root.findViewWithTag("component.custom.alpha." + locator.identityKey());
+        assertNotNull(slider);
+        assertTrue(slider.performClick());
+        AlertDialog inputDialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        EditText input = inputDialog.getWindow().getDecorView().findViewWithTag("component.alpha.input");
+        store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(Arrays.asList(locator, other)));
+        input.setText("125");
+        inputDialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertEquals(125, storedCustomAlpha(store, locator.identityKey()));
+        assertEquals(2, ComponentHideSettings.readFrom(store).customViews.size());
+        assertEquals(-2, storedCustomAlpha(store, other.identityKey()));
+        assertTrue(ComponentHideSettings.readFrom(store).uniformEnabled);
+        assertEquals("48", store.getString(ComponentHideSettings.UNIFORM_ALPHA, ""));
+        slider = root.findViewWithTag("component.custom.alpha." + locator.identityKey());
+        assertTrue(slider.performClick());
+        inputDialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        input = inputDialog.getWindow().getDecorView().findViewWithTag("component.alpha.input");
+        store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(java.util.Collections.singletonList(other)));
+        input.setText("200");
+        inputDialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertEquals(1, ComponentHideSettings.readFrom(store).customViews.size());
+        assertEquals(other.identityKey(), ComponentHideSettings.readFrom(store).customViews.get(0).identityKey());
+        assertNull(root.findViewWithTag("component.custom.alpha." + locator.identityKey()));
+        activity.finish();
+    }
+
+    @Test public void pageDismissClosesPendingAlphaInputWithoutSaving() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        MemoryStore store = new MemoryStore();
+        store.putBoolean(ComponentHideSettings.ENABLED, true);
+        store.putString(Component.LIKE.key, "83");
+        ComponentHideSettingsPage page = new ComponentHideSettingsPage(activity, store);
+        page.show();
+        Dialog main = ShadowDialog.getLatestDialog();
+        SeekBar slider = main.getWindow().getDecorView().findViewWithTag(Component.LIKE.key);
+        assertTrue(slider.performClick());
+        AlertDialog inputDialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        EditText input = inputDialog.getWindow().getDecorView().findViewWithTag("component.alpha.input");
+        input.setText("200");
+        main.dismiss();
+        ShadowLooper.idleMainLooper();
+        assertFalse(inputDialog.isShowing());
+        assertEquals("83", store.getString(Component.LIKE.key, ""));
+        page.dismiss();
+        activity.finish();
+    }
+
+    @Test public void customAlphaKeyboardEditsKeepFocusForConsecutiveAdjustments() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout host = new FrameLayout(activity);
+        TextView target = new TextView(activity); target.setId(android.R.id.title); host.addView(target);
+        CustomViewLocator locator = CustomViewLocator.capture(host, target);
+        MemoryStore store = new MemoryStore();
+        store.putBoolean(ComponentHideSettings.ENABLED, true);
+        store.putString(CustomViewLocator.SETTINGS_KEY, encodedCustomAlpha(locator, 91));
+        View root = new ComponentHideSettingsPage(activity, store).createView();
+        activity.setContentView(root);
+        root.measure(View.MeasureSpec.makeMeasureSpec(320, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY));
+        root.layout(0, 0, 320, 600);
+        String key = "component.custom.alpha." + locator.identityKey();
+        SeekBar slider = root.findViewWithTag(key);
+        slider.setKeyProgressIncrement(1);
+        assertTrue(slider.requestFocus());
+        assertTrue(slider.hasFocus());
+        assertTrue(slider.onKeyDown(KeyEvent.KEYCODE_DPAD_RIGHT,
+                new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT)));
+        assertEquals(92, storedCustomAlpha(store, locator.identityKey()));
+        assertSame("Saving alpha must keep the focused slider attached", slider, root.findViewWithTag(key));
+        assertTrue(slider.hasFocus());
+        assertTrue(slider.onKeyDown(KeyEvent.KEYCODE_DPAD_RIGHT,
+                new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT)));
+        assertEquals(93, storedCustomAlpha(store, locator.identityKey()));
+        assertTrue(slider.hasFocus());
+        activity.finish();
+    }
+
+    private static String encodedCustomAlpha(CustomViewLocator locator, int alpha) throws Exception {
+        JSONObject root = new JSONObject(CustomViewLocator.serialize(java.util.Collections.singletonList(locator)));
+        root.getJSONArray("items").getJSONObject(0).put("alpha", alpha);
+        return root.toString();
+    }
+
+    private static int storedCustomAlpha(MemoryStore store, String identity) throws Exception {
+        for (CustomViewLocator locator : ComponentHideSettings.readFrom(store).customViews) {
+            if (identity.equals(locator.identityKey())) {
+                JSONObject root = new JSONObject(CustomViewLocator.serialize(java.util.Collections.singletonList(locator)));
+                return root.getJSONArray("items").getJSONObject(0).optInt("alpha", -2);
+            }
+        }
+        throw new AssertionError("Missing custom rule: " + identity);
+    }
+
+    private static boolean visibleControl(View root, String key) {
+        View view = root.findViewWithTag(key);
+        if (view == null) return false;
+        while (view != root) {
+            if (view.getVisibility() != View.VISIBLE || !(view.getParent() instanceof View)) return false;
+            view = (View) view.getParent();
+        }
+        return root.getVisibility() == View.VISIBLE;
+    }
+
+    private static boolean hasGoneAncestor(View view, View root) {
+        while (true) {
+            if (view.getVisibility() == View.GONE) return true;
+            if (view == root || !(view.getParent() instanceof View)) return false;
+            view = (View) view.getParent();
+        }
     }
 
     private static void sendTouch(SeekBar slider, int action, float x) {

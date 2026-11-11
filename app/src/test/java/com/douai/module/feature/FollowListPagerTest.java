@@ -45,17 +45,66 @@ public final class FollowListPagerTest {
             assertEquals("0", queries.get(0).get(field));
         }
         assertEquals("100", queries.get(1).get("max_time"));
-        assertEquals("200", queries.get(1).get("min_time"));
+        assertEquals("0", queries.get(1).get("min_time"));
         assertEquals("20", queries.get(1).get("offset"));
         assertEquals("page-token", queries.get(1).get("store_page"));
         assertEquals("3", queries.get(1).get("vcd_count"));
         assertEquals("90", queries.get(2).get("max_time"));
-        assertEquals("210", queries.get(2).get("min_time"));
+        assertEquals("0", queries.get(2).get("min_time"));
         assertEquals("40", queries.get(2).get("offset"));
         assertEquals("page-token", queries.get(2).get("store_page"));
         assertEquals("5", queries.get(2).get("vcd_count"));
         assertThrows(UnsupportedOperationException.class, () -> result.put("50", "new"));
         assertThrows(UnsupportedOperationException.class, () -> queries.get(0).put("count", "100"));
+    }
+
+    @Test public void sourceTypeOneLoadsOneHundredTwentyFollowingWithoutAReverseTimeWindow() throws Exception {
+        List<Map<String, String>> queries = new ArrayList<>();
+        Map<String, String> result = load(FollowListPager.Kind.FOLLOWING, (kind, query) -> {
+            queries.add(query);
+            int offset = Integer.parseInt(query.get("offset"));
+            // Source type 1 advances max_time only; a reverse boundary closes this fixture's window.
+            if (!"0".equals(query.get("min_time"))) return page(false, 0, 0, offset);
+            List<User> users = new ArrayList<>();
+            for (int index = offset + 1; index <= offset + 20; index++) {
+                users.add(user(Integer.toString(index), "Following " + index, 1, 0));
+            }
+            return new Page(offset < 100, 1000 - offset, 2000 + offset, offset + 20, users);
+        });
+        assertEquals(120, result.size());
+        assertEquals("Following 120", result.get("120"));
+        assertEquals(6, queries.size());
+        assertEquals("1000", queries.get(1).get("max_time"));
+        assertEquals("920", queries.get(5).get("max_time"));
+        for (Map<String, String> query : queries) {
+            assertEquals("1", query.get("source_type"));
+            assertEquals("0", query.get("min_time"));
+        }
+    }
+
+    @Test public void sourceTypeOneDoesNotRequireTheUnusedResponseMaxTime() throws Exception {
+        Page first = page(true, 100, 200, 20, user("10", "First", 1, 0));
+        first.maxTime = null;
+        AtomicInteger calls = new AtomicInteger();
+        Map<String, String> result = load(FollowListPager.Kind.FOLLOWING, (kind, query) ->
+                calls.getAndIncrement() == 0 ? first : page(false, 0, 0, 20, user("20", "Last", 1, 0)));
+        assertEquals(2, result.size());
+        assertEquals(2, calls.get());
+    }
+
+    @Test public void pageTraceDistinguishesRawAcceptedAndUniqueCountsWithoutProfileData() throws Exception {
+        List<String> trace = new ArrayList<>();
+        AtomicInteger calls = new AtomicInteger();
+        FollowListPager.Fetcher fetcher = (kind, query) -> calls.getAndIncrement() == 0
+                ? page(true, 100, 200, 20, user("10", "private-name", 1, 0),
+                        user("10", "private-name", 1, 0), user("99", "recommended-name", 0, 0))
+                : page(false, 0, 0, 20, user("20", "other-name", 2, 1));
+        Map<String, ProfileListEntry> result = FollowListPager.loadDetails(FollowListPager.Kind.FOLLOWING,
+                "4242", "private-token", fetcher, () -> true, trace::add);
+        assertEquals(2, result.size());
+        assertEquals(Arrays.asList(
+                "kind=FOLLOWING;page=1;raw_rows=3;accepted_rows=2;unique_total=1;has_more=true",
+                "kind=FOLLOWING;page=2;raw_rows=1;accepted_rows=1;unique_total=2;has_more=false"), trace);
     }
 
     @Test public void followersIncludeFollowerAndMutualButExcludeFollowingOnlyAndRecommendations() throws Exception {
@@ -83,6 +132,39 @@ public final class FollowListPagerTest {
         Map<String, String> getters = load(FollowListPager.Kind.FOLLOWERS,
                 (kind, query) -> new GetterResponse());
         assertEquals(Collections.singletonMap("20", "getter"), getters);
+    }
+
+    @Test public void relationshipDetailsKeepRealNicknameAvatarAndPublicDouyinId() throws Exception {
+        User alice = user("10", "真实昵称", 1, 0);
+        alice.remarkName = "我的备注";
+        alice.uniqueId = " alice.id ";
+        alice.shortId = "11111";
+        alice.avatarThumb = new ProfileListEntryTest.Avatar();
+        User bob = user("20", "Bob", 1, 0);
+        bob.shortId = "22222";
+        User unknown = user("30", "Unknown", 1, 0);
+        Map<String, ProfileListEntry> result = FollowListPager.loadDetails(FollowListPager.Kind.FOLLOWING,
+                "42", "sec-42", (kind, query) -> page(false, 0, 0, 0, alice, bob, unknown), () -> true);
+        assertEquals("真实昵称", result.get("10").name);
+        assertEquals("https://p3.douyinpic.com/avatar.jpg", result.get("10").avatarUrl);
+        assertEquals("alice.id", result.get("10").douyinId);
+        assertEquals("22222", result.get("20").douyinId);
+        assertEquals("", result.get("30").douyinId);
+        assertEquals("30", result.get("30").selectionKey);
+    }
+
+    @Test public void duplicateRowsFillMissingProfileFieldsWithoutLosingEarlierDetails() throws Exception {
+        User first = user("10", "Alice", 1, 0);
+        User later = user("10", "", 1, 0);
+        later.uniqueId = "alice.id";
+        later.avatarThumb = new ProfileListEntryTest.Avatar();
+        AtomicInteger calls = new AtomicInteger();
+        Map<String, ProfileListEntry> result = FollowListPager.loadDetails(FollowListPager.Kind.FOLLOWING,
+                "42", "sec-42", (kind, query) -> calls.getAndIncrement() == 0
+                        ? page(true, 100, 200, 20, first) : page(false, 0, 0, 20, later), () -> true);
+        assertEquals("Alice", result.get("10").name);
+        assertEquals("alice.id", result.get("10").douyinId);
+        assertEquals("https://p3.douyinpic.com/avatar.jpg", result.get("10").avatarUrl);
     }
 
     @Test public void successRequiresExplicitStatusAndHasMore() {
@@ -160,10 +242,9 @@ public final class FollowListPagerTest {
     }
 
     @Test public void incompleteCursorFieldsAndInvalidOffsetsFail() {
-        for (String field : Arrays.asList("minTime", "maxTime", "offset")) {
+        for (String field : Arrays.asList("minTime", "offset")) {
             Page page = page(true, 100, 200, 20, user("10", "member", 1, 0));
             if ("minTime".equals(field)) page.minTime = null;
-            if ("maxTime".equals(field)) page.maxTime = null;
             if ("offset".equals(field)) page.offset = null;
             assertFails(page);
         }
@@ -292,6 +373,10 @@ public final class FollowListPagerTest {
         final String nickname;
         final Integer followStatus;
         final Integer followerStatus;
+        String remarkName = "";
+        String uniqueId = "";
+        String shortId = "";
+        @SerializedName("avatar_thumb") Object avatarThumb;
         User(String uid, String nickname, Integer follow, Integer follower) {
             this.uid = uid; this.nickname = nickname; this.followStatus = follow; this.followerStatus = follower;
         }

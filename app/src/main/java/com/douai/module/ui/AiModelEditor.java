@@ -332,14 +332,11 @@ final class AiModelEditor implements AutoCloseable {
         EditText contextRounds = formInput(form, "上下文轮数（0–50）", Integer.toString(original.contextRounds), false);
         EditText timeout = formInput(form, "超时秒数（5–120）", Integer.toString(original.timeoutSeconds), false);
         CheckBox temperatureEnabled = checkField(form, "设置温度", original.temperatureEnabled);
-        EditText temperature = formInput(form, "温度", Double.toString(original.temperature), false);
-        bindOptionalInput(temperatureEnabled, temperature);
+        EditText temperature = optionalInput(form, temperatureEnabled, "温度", Double.toString(original.temperature));
         CheckBox maxTokensEnabled = checkField(form, "限制最大输出 Token", original.maxTokensEnabled);
-        EditText maxTokens = formInput(form, "最大输出 Token", Integer.toString(original.maxTokens), false);
-        bindOptionalInput(maxTokensEnabled, maxTokens);
+        EditText maxTokens = optionalInput(form, maxTokensEnabled, "最大输出 Token", Integer.toString(original.maxTokens));
         CheckBox topPEnabled = checkField(form, "设置 Top P", original.topPEnabled);
-        EditText topP = formInput(form, "Top P", Double.toString(original.topP), false);
-        bindOptionalInput(topPEnabled, topP);
+        EditText topP = optionalInput(form, topPEnabled, "Top P", Double.toString(original.topP));
         EditText headers = formInput(form, "自定义请求头 JSON", original.customHeaders, false);
         EditText parameters = formInput(form, "自定义参数 JSON", original.customParameters, false);
         TextView status = text("", 12, MUTED, false);
@@ -534,9 +531,18 @@ final class AiModelEditor implements AutoCloseable {
         return values.toArray(new String[0]);
     }
 
-    private static void bindOptionalInput(CheckBox toggle, EditText input) {
+    private EditText optionalInput(LinearLayout parent, CheckBox toggle, String label, String value) {
+        LinearLayout fields = new LinearLayout(context);
+        fields.setOrientation(LinearLayout.VERTICAL);
+        parent.addView(fields, matchWrap());
+        EditText input = formInput(fields, label, value, false);
+        fields.setVisibility(toggle.isChecked() ? View.VISIBLE : View.GONE);
         input.setEnabled(toggle.isChecked());
-        toggle.setOnCheckedChangeListener((button, enabled) -> input.setEnabled(enabled));
+        toggle.setOnCheckedChangeListener((button, enabled) -> {
+            fields.setVisibility(enabled ? View.VISIBLE : View.GONE);
+            input.setEnabled(enabled);
+        });
+        return input;
     }
 
     private AiModelConfig buildAiConfig(AiModelConfig original, EditText name, Spinner provider, Spinner protocol,

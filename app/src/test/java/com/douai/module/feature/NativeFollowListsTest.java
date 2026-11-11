@@ -73,6 +73,74 @@ public final class NativeFollowListsTest {
         assertTrue(NativeFollowLists.statusText().contains("1 人"));
     }
 
+    @Test public void pickerRefreshForcesBothNativeListsEvenWhenTheirCompleteCachesAreFresh() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        AtomicReference<String> user = new AtomicReference<>("100");
+        service(new LocalOptions(Collections.emptyMap()),
+                (kind, query) -> new Page(new User(user.get(), "Cached user", 1, 1)), timer);
+        service.refreshNow(true);
+        assertEquals(2, requests.size());
+        android.app.Activity activity = org.robolectric.Robolectric.buildActivity(android.app.Activity.class).setup().get();
+        com.douai.module.ui.MemberListView list = new com.douai.module.ui.MemberListView(activity, false,
+                new ArrayList<>(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING).values()),
+                Collections.singleton("100"), true, true);
+        try {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            user.set("200");
+            list.refreshUsers();
+            timer.advance(0);
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals("One refresh must bypass both fresh native relationship caches", 4, requests.size());
+            assertEquals(Collections.singleton("200"), FollowListSnapshot.current().following);
+            assertEquals(Collections.singleton("200"), FollowListSnapshot.current().followers);
+            assertEquals(Collections.singleton("100"), list.selected());
+        } finally { list.close(); activity.finish(); }
+    }
+
+    @Test public void pickerRefreshKeepsSuccessfulKindsButDoesNotTreatFailedCachedFollowingAsFresh() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        java.util.concurrent.atomic.AtomicBoolean failing = new java.util.concurrent.atomic.AtomicBoolean();
+        service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+            if (failing.get() && kind == FollowListPager.Kind.FOLLOWING) throw new IllegalStateException("offline");
+            return new Page(new User(failing.get() ? "200" : "100", "Listed user", 1, 1));
+        }, timer);
+        service.refreshNow(true);
+        android.app.Activity activity = org.robolectric.Robolectric.buildActivity(android.app.Activity.class).setup().get();
+        com.douai.module.ui.MemberListView list = new com.douai.module.ui.MemberListView(activity, false,
+                Collections.singletonList(new ProfileListEntry("303", "Local user", "")),
+                Collections.singleton("303"), true, true);
+        try {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            android.widget.Spinner filter = list.findViewWithTag("settings.followLists.scope");
+            android.widget.ListView users = list.findViewWithTag("settings.followLists.members");
+            filter.setSelection(1); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals(1, users.getAdapter().getCount());
+            failing.set(true);
+            list.refreshUsers(); timer.advance(0);
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertTrue("Keep the last usable snapshot for existing consumers", FollowListSnapshot.current().followingKnown);
+            assertEquals("A failed forced following refresh cannot prove absence using its previous cache", 0,
+                    users.getAdapter().getCount());
+            filter.setSelection(3); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals("The successfully refreshed follower kind must still be merged", 1, users.getAdapter().getCount());
+            assertEquals("200", ((ProfileListEntry) users.getAdapter().getItem(0)).uid);
+            assertEquals(Collections.singleton("303"), list.selected());
+        } finally { list.close(); activity.finish(); }
+    }
+
+    @Test public void findingOneUserCombinesIdentityFieldsFromBothRelationshipLists() throws Exception {
+        service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+            User user = new User("100", kind == FollowListPager.Kind.FOLLOWING ? "Alice" : "", 2, 1);
+            user.unique_id = kind == FollowListPager.Kind.FOLLOWERS ? "alice.id" : "";
+            return new Page(user);
+        });
+        service.refreshNow(true);
+        ProfileListEntry profile = NativeFollowLists.findMember("100");
+        assertEquals("Alice", profile.name);
+        assertEquals("alice.id", profile.douyinId);
+        assertEquals("100", profile.selectionKey);
+    }
+
     @Test public void failedFollowerFetchDoesNotInvalidateSuccessfullyLoadedFollowing() throws Exception {
         service(options("comment_scope_mode", "whitelist", "comment_scope_relations", "strangers"),
                 (kind, query) -> {
@@ -213,6 +281,203 @@ public final class NativeFollowListsTest {
         assertEquals(Arrays.asList(FollowListPager.Kind.FOLLOWING, FollowListPager.Kind.FOLLOWERS), requests);
     }
 
+    @Test public void pickerLoadsAll120FollowingUsersWithoutAutomationOrFetchingFollowersAndReusesItsTtl() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+            assertEquals(FollowListPager.Kind.FOLLOWING, kind);
+            int offset = Integer.parseInt(query.get("offset"));
+            User[] users = new User[20];
+            for (int index = 0; index < users.length; index++) {
+                users[index] = new User(Integer.toString(1000 + offset + index), "User " + (offset + index), 1, 0);
+            }
+            Page page = new Page(users);
+            page.hasMore = offset + users.length < 120;
+            page.offset = offset + users.length;
+            page.minTime = page.maxTime = page.offset;
+            return page;
+        }, timer);
+        List<Boolean> completed = new ArrayList<>();
+        NativeFollowLists.loadFollowing(completed::add);
+        NativeFollowLists.loadFollowing(completed::add);
+        assertTrue("Picker requests must stay on the background lane", completed.isEmpty());
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(Arrays.asList(true, true), completed);
+        assertEquals(6, requests.size());
+        assertEquals(120, NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING).size());
+        assertFalse(FollowListSnapshot.current().followersKnown);
+
+        NativeFollowLists.loadFollowing(completed::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(6, requests.size());
+        timer.advance(NativeFollowLists.TTL_MS);
+        NativeFollowLists.loadFollowing(completed::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(12, requests.size());
+        assertEquals(Arrays.asList(true, true, true, true), completed);
+    }
+
+    @Test public void pickerLoadsAllFollowersOnDemandAndReusesItsTtlWithoutFetchingFollowing() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+            assertEquals(FollowListPager.Kind.FOLLOWERS, kind);
+            int offset = Integer.parseInt(query.get("offset"));
+            Page page = new Page(new User(Integer.toString(2000 + offset), "Follower " + offset, 0, 1));
+            page.hasMore = offset < 2;
+            page.offset = offset + 1;
+            page.minTime = page.maxTime = page.offset;
+            return page;
+        }, timer);
+        assertTrue(requests.isEmpty());
+        List<Boolean> completed = new ArrayList<>();
+        NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, completed::add);
+        NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, completed::add);
+        assertTrue("Picker requests must stay on the background lane", completed.isEmpty());
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(Arrays.asList(true, true), completed);
+        assertEquals(3, requests.size());
+        assertEquals(3, NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS).size());
+        assertFalse(FollowListSnapshot.current().followingKnown);
+        NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, completed::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(3, requests.size());
+        timer.advance(NativeFollowLists.TTL_MS);
+        NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, completed::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(6, requests.size());
+        assertEquals(Arrays.asList(true, true, true, true), completed);
+    }
+
+    @Test public void mixedPickerKindsCompleteFromTheirOwnSnapshotsWhenFollowersFail() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+            if (kind == FollowListPager.Kind.FOLLOWERS) throw new IllegalStateException("Followers unavailable");
+            return new Page(new User("100", "Following", 1, 0));
+        }, timer);
+        List<Boolean> following = new ArrayList<>(), followers = new ArrayList<>();
+        NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, followers::add);
+        NativeFollowLists.loadFollowing(following::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList(true), following);
+        assertEquals(Collections.singletonList(false), followers);
+        assertEquals(2, requests.size());
+        assertTrue(FollowListSnapshot.current().followingKnown);
+        assertFalse(FollowListSnapshot.current().followersKnown);
+    }
+
+    @Test public void requestsForAnotherKindArrivingDuringFetchAreNotLostOrCompletedByTheFirstKind() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        List<Boolean> following = new ArrayList<>(), followers = new ArrayList<>();
+        service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+            if (kind == FollowListPager.Kind.FOLLOWING) {
+                NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, followers::add);
+                assertTrue("The second kind cannot complete before its fetch", followers.isEmpty());
+            }
+            return new Page(new User(kind == FollowListPager.Kind.FOLLOWING ? "100" : "200", "User", 1, 1));
+        }, timer);
+        NativeFollowLists.loadFollowing(following::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(Arrays.asList(FollowListPager.Kind.FOLLOWING, FollowListPager.Kind.FOLLOWERS), requests);
+        assertEquals(Collections.singletonList(true), following);
+        assertEquals(Collections.singletonList(true), followers);
+        assertEquals(Collections.singleton("200"), FollowListSnapshot.current().followers);
+    }
+
+    @Test public void cancellingOneKindDoesNotFetchItOrCancelTheOtherKind() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        service(new LocalOptions(Collections.emptyMap()),
+                (kind, query) -> new Page(new User("100", "Following", 1, 0)), timer);
+        List<Boolean> following = new ArrayList<>(), followers = new ArrayList<>();
+        NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, followers::add).close();
+        NativeFollowLists.loadFollowing(following::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList(FollowListPager.Kind.FOLLOWING), requests);
+        assertEquals(Collections.singletonList(true), following);
+        assertTrue(followers.isEmpty());
+        assertFalse(FollowListSnapshot.current().followersKnown);
+    }
+
+    @Test public void cancelledFollowersConsumerStopsPagingWithoutPublishingAPartialList() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        AutoCloseable[] request = new AutoCloseable[1];
+        service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+            request[0].close();
+            Page page = new Page(new User("200", "Follower", 0, 1));
+            page.hasMore = true; page.offset = 1; page.minTime = 1;
+            return page;
+        }, timer);
+        List<Boolean> completed = new ArrayList<>();
+        request[0] = NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, completed::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList(FollowListPager.Kind.FOLLOWERS), requests);
+        assertTrue(completed.isEmpty());
+        assertFalse(FollowListSnapshot.current().followersKnown);
+        assertTrue(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS).isEmpty());
+    }
+
+    @Test public void followersPickerRejectsAccountAbaBeforeWorkDuringFetchAndBeforeMainDelivery() throws Exception {
+        for (String stage : Arrays.asList("queued", "running", "main_callback")) {
+            if (service != null) service.close();
+            account.set(new NativeFollowLists.Account("42", "sec42"));
+            ManualTimer timer = new ManualTimer();
+            Runnable switchAwayAndBack = () -> {
+                account.set(new NativeFollowLists.Account("43", "sec43")); NativeFollowLists.ensureAccount("43");
+                account.set(new NativeFollowLists.Account("42", "sec42")); NativeFollowLists.ensureAccount("42");
+            };
+            service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+                if (stage.equals("running")) switchAwayAndBack.run();
+                return new Page(new User("200", "Old follower", 0, 1));
+            }, timer);
+            List<Boolean> completed = new ArrayList<>();
+            NativeFollowLists.load(FollowListSnapshot.Kind.FOLLOWERS, completed::add);
+            if (stage.equals("queued")) switchAwayAndBack.run();
+            timer.advance(0);
+            if (stage.equals("main_callback")) switchAwayAndBack.run();
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals(stage, Collections.singletonList(false), completed);
+            assertTrue(stage, NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS).isEmpty());
+        }
+    }
+
+    @Test public void cancelledFollowingConsumerDoesNotFetchOrReceiveWhileOtherConsumersStillComplete() throws Exception {
+        ManualTimer timer = new ManualTimer();
+        service(new LocalOptions(Collections.emptyMap()),
+                (kind, query) -> new Page(new User("100", "Alice", 1, 0)), timer);
+        List<Boolean> completed = new ArrayList<>();
+        NativeFollowLists.loadFollowing(completed::add).close();
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertTrue(requests.isEmpty()); assertTrue(completed.isEmpty());
+
+        NativeFollowLists.loadFollowing(completed::add).close();
+        NativeFollowLists.loadFollowing(completed::add);
+        timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList(true), completed);
+        assertEquals(Collections.singletonList(FollowListPager.Kind.FOLLOWING), requests);
+    }
+
+    @Test public void followingPickerRejectsAccountAbaBeforeWorkDuringFetchAndBeforeMainDelivery() throws Exception {
+        for (String stage : Arrays.asList("queued", "running", "main_callback")) {
+            if (service != null) service.close();
+            account.set(new NativeFollowLists.Account("42", "sec42"));
+            ManualTimer timer = new ManualTimer();
+            Runnable switchAwayAndBack = () -> {
+                account.set(new NativeFollowLists.Account("43", "sec43")); NativeFollowLists.ensureAccount("43");
+                account.set(new NativeFollowLists.Account("42", "sec42")); NativeFollowLists.ensureAccount("42");
+            };
+            service(new LocalOptions(Collections.emptyMap()), (kind, query) -> {
+                if (stage.equals("running")) switchAwayAndBack.run();
+                return new Page(new User("100", "Old session", 1, 0));
+            }, timer);
+            List<Boolean> completed = new ArrayList<>();
+            NativeFollowLists.loadFollowing(completed::add);
+            if (stage.equals("queued")) switchAwayAndBack.run();
+            timer.advance(0);
+            if (stage.equals("main_callback")) switchAwayAndBack.run();
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals(stage, Collections.singletonList(false), completed);
+            assertTrue(stage, NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING).isEmpty());
+        }
+    }
+
     @Test public void closeCoordinatesWithAnInFlightScheduleAndLateAccountReadsCannotReactivateIt() throws Exception {
         java.util.concurrent.CountDownLatch scheduling = new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
@@ -331,6 +596,8 @@ public final class NativeFollowListsTest {
         public int status_code;
         public int error_code;
         public boolean hasMore;
+        public long minTime, maxTime;
+        public int offset;
         public List<User> items;
         Page(User... users) { items = Arrays.asList(users); }
     }
@@ -338,6 +605,7 @@ public final class NativeFollowListsTest {
     static final class User {
         public String uid;
         public String nickname;
+        public String unique_id;
         public int followStatus;
         public int followerStatus;
         User(String uid, String name, int follow, int follower) {
