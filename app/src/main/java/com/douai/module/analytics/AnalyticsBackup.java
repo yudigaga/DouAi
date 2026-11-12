@@ -40,11 +40,14 @@ public final class AnalyticsBackup {
             new Table("work_days", "day,work_hash", 100_000, 0, 1),
             new Table("ranks", "day,kind,item_key,label,count", 150_000, 0, 1, 2),
             new Table("recent", "id,ts,label,kind", 30, 0),
-            new Table("meta", "key,value", 3, 0),
-            new Table("visits", "token,work_hash,type,day,hour,source,started,visible_ms,ended,end_reason", 20_000, 0),
+            new Table("meta", "key,value", 4, 0),
+            new Table("visits", "token,work_hash,type,day,hour,source,started,visible_ms,ended,end_reason,author_hash,duration_band,image_band,is_ad", 20_000, 0),
             new Table("visit_topics", "token,topic", 200_000, 0, 1),
             new Table("actions", "id,day,token,feature,source,stage,ts", 30_000, 0),
-            new Table("collection_boundaries", "id,ts,enabled", 100_000, 0));
+            new Table("collection_boundaries", "id,ts,enabled", 100_000, 0),
+            new Table("flow_events", "id,operation_id,token,kind,stage,task,day,ts,seq", 30_000, 0),
+            new Table("source_coverage", "source,status,since,trimmed_before", 16, 0),
+            new Table("queue_gaps","day,source", 365*12, 0,1));
 
     /** Detached validated payload; no mutable JSON from the importing caller is retained. */
     public static final class Snapshot {
@@ -52,11 +55,12 @@ public final class AnalyticsBackup {
         public final String summary;
         private final Map<String, List<Object[]>> tables;
         private final LocalPortraitContext.State context;
-        private final long capturedAt;
+        final long capturedAt;
+        final int version;
         private Snapshot(Map<String, List<Object[]>> tables, LocalPortraitContext.State context,
-                         long capturedAt, int rowCount, String summary) {
+                         long capturedAt, int rowCount, String summary, int version) {
             this.tables = tables; this.context = context; this.capturedAt = capturedAt;
-            this.rowCount = rowCount; this.summary = summary;
+            this.rowCount = rowCount; this.summary = summary; this.version = version;
         }
     }
 
@@ -110,7 +114,7 @@ public final class AnalyticsBackup {
             exact(payload, "version", "capturedAt", "tables", "context");
             reason = BackupValidationException.Reason.ANALYTICS_VERSION;
             field = "version";
-            if (integer(payload.get("version"), 1, 1) != 1) throw invalid();
+            int version = (int) integer(payload.get("version"), 1, 3);
             reason = BackupValidationException.Reason.CAPTURED_AT_RANGE;
             field = "capturedAt";
             long captured = integer(payload.get("capturedAt"), 0, System.currentTimeMillis() + 300_000);
@@ -118,7 +122,7 @@ public final class AnalyticsBackup {
             reason = BackupValidationException.Reason.ANALYTICS_CELL;
             field = "tables";
             JSONObject tables = payload.getJSONObject("tables");
-            if (tables.length() != TABLES.size()) throw invalid();
+            if (tables.length() != TABLES.size() - (version == 1 ? 3 : version == 2 ? 1 : 0)) throw invalid();
             field = "context";
             JSONObject self = payload.getJSONObject("context"); exact(self, "purpose", "feedback");
             field = "context.purpose";
@@ -129,18 +133,24 @@ public final class AnalyticsBackup {
             LocalPortraitContext.State state = LocalPortraitContext.backupState(purpose, feedback);
             Map<String, List<Object[]>> result = new LinkedHashMap<>(); int rows = 0;
             Set<String> visits = new HashSet<>();
+            Set<String> flowKeys = new HashSet<>(), flowSeq = new HashSet<>();
+            Map<String,List<Object>> flowOrigins = new LinkedHashMap<>();
             long views = 0, features = 0; String first = "", last = "";
             for (Table table : TABLES) {
                 field = table.name;
+                if ((version < 3 && table.name.equals("queue_gaps")) || (version == 1 && (table.name.equals("flow_events") || table.name.equals("source_coverage")))) {
+                    result.put(table.name, new ArrayList<>()); continue;
+                }
                 JSONArray incoming = tables.getJSONArray(table.name);
                 if (incoming.length() > table.maxRows || incoming.length() > MAX_ROWS - rows) throw invalid();
                 List<Object[]> values = new ArrayList<>(); Set<List<Object>> keys = new HashSet<>();
                 for (int index = 0; index < incoming.length(); index++) {
                     field = table.name;
                     JSONArray row = incoming.getJSONArray(index);
-                    if (row.length() != table.columns.length) throw invalid();
-                    Object[] cells = new Object[row.length()];
-                    for (int column = 0; column < cells.length; column++) {
+                    int expected = table.columns.length - (version == 1 && table.name.equals("visits") ? 4 : version == 2 && table.name.equals("flow_events") ? 1 : 0);
+                    if (row.length() != expected) throw invalid();
+                    Object[] cells = new Object[table.columns.length];
+                    for (int column = 0; column < row.length(); column++) {
                         field = table.name + "." + table.columns[column];
                         cells[column] = validateCell(table.name, table.columns[column], row.get(column), captured, lastDay);
                     }
@@ -159,13 +169,21 @@ public final class AnalyticsBackup {
                         if (last.isEmpty() || day.compareTo(last) > 0) last = day;
                     }
                     if (table.name.equals("visits")) visits.add((String) cells[0]);
+                    if (table.name.equals("flow_events")) {
+                        if (!flowKeys.add(cells[1] + ":" + cells[4] + ":" + cells[5])) throw invalid();
+                        if (cells[8] != null && (!"ai".equals(cells[3]) || !flowSeq.add(cells[1]+":"+cells[8]))) throw invalid();
+                        if ((version < 3 || !"ai".equals(cells[3])) && (Long)cells[5] > 10000) throw invalid();
+                        List<Object> origin = java.util.Arrays.asList(cells[2],cells[3],cells[8] != null);
+                        List<Object> before = flowOrigins.putIfAbsent((String)cells[1],origin);
+                        if (before != null && !before.equals(origin)) throw invalid();
+                    }
                     if (table.name.equals("visit_topics")) {
                         field = "visit_topics.token";
                         if (!visits.contains(cells[0])) throw invalid();
                     }
                     if (table.name.equals("meta")) {
                         field = "meta.key";
-                        if (!List.of("first_seen", "collection_start", "queue_dropped").contains(cells[0])) throw invalid();
+                        if (!List.of("first_seen", "collection_start", "queue_dropped").contains(cells[0]) && !(version >= 3 && "legacy_drop_through".equals(cells[0]))) throw invalid();
                         field = "meta.value";
                         if (!cells[0].equals("queue_dropped") && (Long) cells[1] > captured) throw invalid();
                         if (cells[0].equals("queue_dropped") && (Long) cells[1] > MAX_COUNT) throw invalid();
@@ -174,11 +192,12 @@ public final class AnalyticsBackup {
                 }
                 result.put(table.name, values); rows += values.size();
             }
+            if (result.get("actions").size() + result.get("flow_events").size() > 30_000) throw invalid();
             String dates = first.isEmpty() ? "无浏览日期" : first + " — " + last;
             String summary = dates + "；" + views + " 次浏览，" + features + " 次功能使用，"
                     + result.get("visits").size() + " 条可见片段，" + rows + " 条记录"
                     + ((!state.purpose.isEmpty() || !state.feedback.isEmpty()) ? "；含侧写自述/反馈" : "；无侧写自述/反馈");
-            return new Snapshot(result, state, captured, rows, summary);
+            return new Snapshot(result, state, captured, rows, summary, version);
         } catch (Exception failure) {
             throw BackupValidationException.wrap(BackupValidationException.Section.ANALYTICS, reason, field, failure);
         }
@@ -259,7 +278,7 @@ public final class AnalyticsBackup {
                 }
                 tables.put(table.name, values);
             }
-            return new JSONObject().put("version", 1).put("capturedAt", capturedAt).put("tables", tables);
+            return new JSONObject().put("version", 3).put("capturedAt", capturedAt).put("tables", tables);
         } catch (RuntimeException failure) { throw failure; }
         catch (Exception failure) { throw invalid(); }
     }
@@ -267,7 +286,7 @@ public final class AnalyticsBackup {
     static void replaceTables(SQLiteDatabase db, Snapshot snapshot) {
         for (Table table : TABLES) db.delete(table.name, null, null);
         // A logical replacement also replaces owned auto-increment high-water marks.
-        db.delete("sqlite_sequence", "name IN (?,?,?)", new String[]{"recent", "actions", "collection_boundaries"});
+        db.delete("sqlite_sequence", "name IN (?,?,?,?)", new String[]{"recent", "actions", "collection_boundaries", "flow_events"});
         for (Table table : TABLES) for (Object[] row : snapshot.tables.get(table.name)) {
             ContentValues values = new ContentValues();
             for (int column = 0; column < row.length; column++) {
@@ -278,12 +297,26 @@ public final class AnalyticsBackup {
             }
             db.insertOrThrow(table.name, null, values);
         }
+        if (snapshot.version<3) LocalAnalytics.markLegacyDrops(db,snapshot.capturedAt);
         // Imported live segments cannot be resumed by this process.
         ContentValues ended = new ContentValues(); ended.put("ended", 1); ended.put("end_reason", "backup_restore");
         db.update("visits", ended, "ended=0", null);
     }
 
     private static Object validateCell(String table, String column, Object value, long captured, LocalDate lastDay) {
+        if (List.of("author_hash", "duration_band", "image_band", "is_ad", "trimmed_before").contains(column) && value == JSONObject.NULL) return null;
+        if (column.equals("author_hash")) { String hash = text(value,64,false); if (!hash.matches("[a-f0-9]{64}")) throw invalid(); return hash; }
+        if (column.equals("duration_band")) return enumeration(value,"under_15s","15_59s","1_5m","5m_plus");
+        if (column.equals("image_band")) return enumeration(value,"1","2_5","6_10","11_plus");
+        if (column.equals("is_ad")) return integer(value,0,1);
+        if (column.equals("seq")) return value == JSONObject.NULL ? null : integer(value,1,MAX_COUNT);
+        if (column.equals("task")) return integer(value,0,Integer.MAX_VALUE);
+        if (table.equals("queue_gaps") && column.equals("source")) return enumeration(value,"summary","history","visit_history","visits","events","dwell","ai","download","playback","speed","backward");
+        if (column.equals("since") || column.equals("trimmed_before")) return integer(value,0,captured);
+        if (column.equals("status")) return enumeration(value,"available","unavailable","unknown");
+        if (table.equals("source_coverage") && column.equals("source")) return enumeration(value,"metadata","download","ai","gesture","playback","events","visits");
+        if (table.equals("flow_events") && column.equals("kind")) return enumeration(value,"download","ai","playback","speed","backward");
+        if (table.equals("flow_events") && column.equals("stage")) return enumeration(value,"entry","request","accepted","task_end","output_closed","cancelled","failure","generated","dispatched","visible","followup_click","more_click","video_click","route_dispatched","manual_select","restore","inherited","requested","readback","playing","paused","ended","confirmed");
         if (column.equals("day")) {
             String day = text(value, 10, false);
             LocalDate parsed = LocalDate.parse(day);
@@ -301,8 +334,8 @@ public final class AnalyticsBackup {
         if (column.equals("work_hash")) {
             String hash = text(value, 64, false); if (!hash.matches("[a-f0-9]{64}")) throw invalid(); return hash;
         }
-        if (column.equals("token")) {
-            if (table.equals("actions") && value == JSONObject.NULL) return null;
+        if (column.equals("token") || column.equals("operation_id")) {
+            if ((table.equals("actions") || table.equals("flow_events")) && column.equals("token") && value == JSONObject.NULL) return null;
             String token = text(value, 36, false);
             if (!token.matches("[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}")) throw invalid(); return token;
         }

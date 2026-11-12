@@ -844,6 +844,24 @@ public final class FeedGestureToolsHookTest {
         }
     }
 
+    @Test public void speedRecordsManualChoiceOnceWhileKeepingInheritedRequestsSeparate() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
+            com.douai.module.analytics.LocalAnalytics store = com.douai.module.analytics.LocalAnalytics.get(org.robolectric.RuntimeEnvironment.getApplication());
+            store.clear();store.setEnabled(true);
+            try {
+                f.select();f.longPress(2,2);
+                org.robolectric.shadow.api.Shadow.<ShadowLooper>extract(Looper.getMainLooper()).idleFor(Duration.ofSeconds(2));
+                store.snapshot(0);
+                java.io.File file = new java.io.File(org.robolectric.RuntimeEnvironment.getApplication().getNoBackupFilesDir(),"douai-analytics/usage.db");
+                try(android.database.sqlite.SQLiteDatabase db=android.database.sqlite.SQLiteDatabase.openDatabase(file.getPath(),null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY);
+                    android.database.Cursor c=db.rawQuery("SELECT stage,COUNT(*) FROM flow_events WHERE kind='speed' GROUP BY stage",null)) {
+                    int manual=0, requested=0;while(c.moveToNext()) {if(c.getString(0).equals("manual_select"))manual=c.getInt(1);if(c.getString(0).equals("requested"))requested=c.getInt(1);}
+                    assertEquals(1,manual);assertTrue(requested>=1);
+                }
+            } finally { store.setEnabled(false);store.clear(); }
+        }
+    }
+
     @Test public void bottomRightLongPressImmediatelyAppliesTheConfiguredNumericSpeed() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "3"))) {
             f.select();

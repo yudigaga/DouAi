@@ -32,6 +32,8 @@ final class DownloadTransfer {
     private long lastProgress;
     volatile DouAiLog.Operation operation;
     volatile int savedEvidenceCount;
+    volatile com.douai.module.analytics.LocalAnalytics.FlowOperation analytics;
+    volatile int analyticsTask;
     volatile boolean transportTimedOut;
     private String loggedPhase;
 
@@ -41,6 +43,7 @@ final class DownloadTransfer {
     }
     void saved(String destination, String identifier, long count) {
         savedEvidenceCount++;
+        if (analytics != null && !"download_manager_status_successful".equals(destination)) analytics.stage("output_closed", analyticsTask);
         evidence("output_committed", "destination=" + destination + "; output_ref=" + DouAiLog.reference(identifier)
                 + "; bytes=" + count + "; streams_closed=true; read_back_verified=false");
     }

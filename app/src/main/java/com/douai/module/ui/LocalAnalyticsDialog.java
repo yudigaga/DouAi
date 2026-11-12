@@ -109,6 +109,10 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     private final Dialog dialog;
     private final LinearLayout root;
     private final LinearLayout report;
+    private final LinearLayout cover, management;
+    private final Button manage;
+    private final Map<String, ReportSection> analysisOwners = new LinkedHashMap<>();
+    private boolean managementOpen, allStatsOpen;
     private final Source source;
     private final Executor worker;
     private final AnalysisService analysisService;
@@ -254,7 +258,12 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         scroll.addView(body, new ScrollView.LayoutParams(-1, -2));
         root.addView(scroll, matchWrap());
 
-        LinearLayout privacy = card(body);
+        cover = column();
+        cover.setTag("analytics.journal.cover");
+        cover.setVisibility(View.GONE);
+        body.addView(cover, matchWrap());
+        management = column();
+        LinearLayout privacy = card(management);
         recording = this.miuix ? MiuixFormControls.checkbox(context, "开启本地记录", false) : new Switch(context);
         recording.setTag("analytics.recording");
         recording.setText("开启本地记录");
@@ -318,7 +327,15 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         status.setTag("analytics.status");
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setPadding(0, dp(12), 0, dp(4));
-        body.addView(status, matchWrap());
+        manage = button("记录与管理", "analytics.manage", () -> {
+            managementOpen = !managementOpen;
+            showManagement(currentSnapshot != null && currentSnapshot.portrait.evidence.hasStories());
+        });
+        View manageControl = controlView(manage);
+        manageControl.setVisibility(View.GONE);
+        body.addView(manageControl, matchWrap());
+        body.addView(management, matchWrap());
+        management.addView(status, matchWrap());
         LinearLayout actions = new LinearLayout(context);
         refresh = button("刷新", "analytics.refresh", () -> load(null, false));
         clear = button("清空记录", "analytics.clear", this::confirmClear);
@@ -326,7 +343,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(0, dp(52), 1);
         clearParams.leftMargin = dp(8);
         actions.addView(controlView(clear), clearParams);
-        body.addView(actions, matchWrap());
+        management.addView(actions, matchWrap());
         report = column();
         report.setTag("analytics.report");
         body.addView(report, matchWrap());
@@ -398,6 +415,8 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         analysisBody = null;
         chartAnalysisSlots.clear();
         reportSections.clear();
+        analysisOwners.clear();
+        cover.removeAllViews();
         report.removeAllViews();
         Source data = source;
         Handler dispatcher = main;
@@ -450,6 +469,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         recording.setChecked(enabled);
         binding = false;
         if (error || snapshot == null) {
+            showManagement(false);
             status.setText("本地记录读取失败，请点击刷新核对。记录状态以上方开关为准。");
             return;
         }
@@ -550,27 +570,74 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         shown.show();
     }
 
+    private void showManagement(boolean hasStory) {
+        controlView(manage).setVisibility(hasStory ? View.VISIBLE : View.GONE);
+        management.setVisibility(!hasStory || managementOpen ? View.VISIBLE : View.GONE);
+        String state = enabled ? "记录中" : "记录已关闭";
+        manage.setText(managementOpen ? "收起记录设置" : state + "  ·  记录设置与刷新");
+    }
+
     private void render(AnalyticsSnapshot data) {
         currentSnapshot = data;
         report.removeAllViews();
         chartAnalysisSlots.clear();
         reportSections.clear();
-        boolean portrait = !data.portrait.days.isEmpty();
-        PortraitReportViews portraitViews = new PortraitReportViews(context, data.portrait, new PortraitReportViews.Host() {
-            @Override public LinearLayout section(String title) { return LocalAnalyticsDialog.this.section(title); }
+        analysisOwners.clear();
+        cover.removeAllViews();
+        boolean stories = data.portrait.evidence.hasStories();
+        cover.setVisibility(stories ? View.VISIBLE : View.GONE);
+        showManagement(stories);
+        if (stories) {
+            portraitViews(data, report).journal();
+            LinearLayout statistics = column();
+            Button all = button(allStatsOpen ? "收起全部统计" : "查看全部统计", "analytics.story.all", view -> {
+                if (closed || statistics.getParent() != report) return;
+                allStatsOpen = !allStatsOpen;
+                if (allStatsOpen && statistics.getChildCount() == 0) {
+                    buildStatistics(data, statistics);
+                    updateSectionSummaries(data);
+                    ModuleTheme.bind(root);
+                }
+                statistics.setVisibility(allStatsOpen ? View.VISIBLE : View.GONE);
+                ((Button) view).setText(allStatsOpen ? "收起全部统计" : "查看全部统计");
+            });
+            report.addView(controlView(all), matchWrap());
+            report.addView(statistics, matchWrap());
+            statistics.setVisibility(allStatsOpen ? View.VISIBLE : View.GONE);
+            if (allStatsOpen) buildStatistics(data, statistics);
+        } else {
+            buildStatistics(data, report);
+        }
+        LinearLayout analysis = section(report, "AI 图表分析");
+        analysis.setTag("analytics.analysis.card");
+        analysisBody = column();
+        analysis.addView(analysisBody, matchWrap());
+        updateSectionSummaries(data);
+        renderAnalysis();
+    }
+
+    private PortraitReportViews portraitViews(AnalyticsSnapshot data, LinearLayout parent) {
+        PortraitReportViews.Host portraitHost = new PortraitReportViews.Host() {
+            @Override public LinearLayout section(String title) { return LocalAnalyticsDialog.this.section(parent, title); }
             @Override public void analysis(LinearLayout section, String key) { attachAnalysis(section, key); }
             @Override public Button button(Context ignored) {
                 return miuix ? MiuixFormControls.button(context) : new Button(context);
             }
             @Override public View controlView(View control) { return LocalAnalyticsDialog.this.controlView(control); }
-        });
+        };
+        return new PortraitReportViews(context, data.portrait, portraitHost);
+    }
+
+    private void buildStatistics(AnalyticsSnapshot data, LinearLayout parent) {
+        boolean portrait = !data.portrait.days.isEmpty();
+        PortraitReportViews portraitViews = portraitViews(data, parent);
         if (portrait) portraitViews.overview();
-        LinearLayout overview = section("浏览概览");
+        LinearLayout overview = section(parent, "浏览概览");
         metric(overview, "刷到次数", data.totalViews);
         metric(overview, "不同作品", data.uniqueWorks);
         metric(overview, "模块功能使用", data.totalFeatureUses);
         if (data.advertisementViews > 0) metric(overview, "其中广告作品", data.advertisementViews);
-        if (data.totalViews == 0 && data.totalFeatureUses == 0) {
+        if (!hasAnalysisData(data)) {
             TextView empty = text(enabled ? "这个时间范围还没有记录。"
                     : "还没有记录。", 14, MUTED, false);
             empty.setTag("analytics.empty");
@@ -579,9 +646,9 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         attachAnalysis(overview, "overview");
         if (portrait) {
             portraitViews.charts();
-            attachAnalysis(ranking("模块功能排行 Top 10", data.features, "暂无模块功能使用记录"), "features");
+            attachAnalysis(ranking(parent, "模块功能排行 Top 10", data.features, "暂无模块功能使用记录"), "features");
         } else {
-        LinearLayout trend = section("浏览趋势");
+        LinearLayout trend = section(parent, "浏览趋势");
         TextView trendValue = text("点击折线上的位置查看具体次数", 13, ACCENT, true);
         trendValue.setTag("analytics.trend.selection");
         trend.addView(trendValue, matchWrap());
@@ -601,7 +668,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         }
         attachAnalysis(trend, "trend");
 
-        LinearLayout types = section("作品类型占比");
+        LinearLayout types = section(parent, "作品类型占比");
         long typeTotal = total(data.types);
         if (typeTotal > 0) {
             DonutChart donut = new DonutChart(context, data.types);
@@ -624,11 +691,11 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
             }
         } else caption(types, "暂无作品类型数据");
         attachAnalysis(types, "types");
-        attachAnalysis(ranking("作者排行 Top 10", data.authors, "暂无作者记录"), "authors");
-        attachAnalysis(ranking("话题排行 Top 10", data.topics, "暂无话题记录"), "topics");
-        attachAnalysis(ranking("模块功能排行 Top 10", data.features, "暂无模块功能使用记录"), "features");
+        attachAnalysis(ranking(parent, "作者排行 Top 10", data.authors, "暂无作者记录"), "authors");
+        attachAnalysis(ranking(parent, "话题排行 Top 10", data.topics, "暂无话题记录"), "topics");
+        attachAnalysis(ranking(parent, "模块功能排行 Top 10", data.features, "暂无模块功能使用记录"), "features");
 
-        LinearLayout hours = section("浏览时段分布");
+        LinearLayout hours = section(parent, "浏览时段分布");
         HourChart histogram = new HourChart(context, data.hours);
         histogram.setTag("analytics.hours.chart");
         hours.addView(histogram, new LinearLayout.LayoutParams(-1, dp(180)));
@@ -639,7 +706,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         attachAnalysis(hours, "hours");
         }
 
-        LinearLayout recent = section("最近记录");
+        LinearLayout recent = section(parent, "最近记录");
         if (data.recent.isEmpty()) caption(recent, "暂无最近记录");
         for (Recent event : data.recent) {
             TextView label = text(event.label, 14, TEXT, false);
@@ -652,17 +719,11 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
             recent.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
         }
 
-        LinearLayout history = section("使用历程");
+        LinearLayout history = section(parent, "使用历程");
         metric(history, "活跃天数", data.activeDays);
         metric(history, "连续活跃天数", data.currentStreak);
         TextView first = text("首次记录  " + (data.firstSeen == 0 ? "暂无" : formatDate(data.firstSeen, "yyyy/MM/dd")), 14, TEXT, true);
         history.addView(first, matchWrap());
-        LinearLayout analysis = section("AI 图表分析");
-        analysis.setTag("analytics.analysis.card");
-        analysisBody = column();
-        analysis.addView(analysisBody, matchWrap());
-        updateSectionSummaries(data);
-        renderAnalysis();
     }
 
     private void renderAnalysis() {
@@ -680,7 +741,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
             analysisBody.addView(result, matchWrap());
             Button expand = button("展开各区块的 AI 解读", "analytics.analysis.expand", () -> {
                 for (Map.Entry<String, LinearLayout> entry : chartAnalysisSlots.entrySet()) {
-                    ReportSection section = reportSections.get(entry.getKey());
+                    ReportSection section = analysisOwners.get(entry.getKey());
                     if (section != null && entry.getValue().getChildCount() > 0) section.setExpanded(true);
                 }
             });
@@ -716,7 +777,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
                     analysisBody.addView(error, matchWrap());
                 }
                 boolean hasData = currentSnapshot != null
-                        && (currentSnapshot.totalViews > 0 || currentSnapshot.totalFeatureUses > 0);
+                        && hasAnalysisData(currentSnapshot);
                 if (!configured) caption(analysisBody, "请选择可用的 AI 模型配置；跟随全局时需先选择全局默认模型。");
                 else if (!hasData) caption(analysisBody, "当前范围暂无可分析数据，产生记录后即可分析。");
                 Button request = button(analysisError == null ? "请求 AI 分析" : "重新请求 AI 分析",
@@ -828,11 +889,13 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     }
 
     private void attachAnalysis(LinearLayout chartCard, String key) {
+        if (chartAnalysisSlots.containsKey(key)) return;
         chartCard.setTag("analytics.chartcard." + key);
         LinearLayout slot = column();
         slot.setTag("analytics.analysis.section." + key);
         chartCard.addView(slot, matchWrap());
         chartAnalysisSlots.put(key, slot);
+        if (chartCard instanceof ReportSection) analysisOwners.put(key, (ReportSection) chartCard);
         renderChartAnalysis(key, slot);
     }
 
@@ -863,7 +926,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         result.setTextIsSelectable(true);
         result.setLineSpacing(dp(4), 1);
         slot.addView(result, matchWrap());
-        ReportSection section = reportSections.get(key);
+        ReportSection section = analysisOwners.get(key);
         if (section != null) section.setHasAnalysis(true);
     }
 
@@ -878,9 +941,14 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         scroll.post(() -> { if (!closed) scroll.scrollTo(0, previousScroll); });
     }
 
+    private static boolean hasAnalysisData(AnalyticsSnapshot snapshot) {
+        return snapshot != null && (snapshot.totalViews > 0 || snapshot.totalFeatureUses > 0
+                || !snapshot.portrait.evidence.observations.isEmpty());
+    }
+
     private void requestAnalysis() {
         if (closed || analysisOperation != null || analysisResult != null || currentSnapshot == null
-                || currentSnapshot.totalViews == 0 && currentSnapshot.totalFeatureUses == 0) return;
+                || !hasAnalysisData(currentSnapshot)) return;
         cancelImageExport();
         AnalysisService.Request request;
         try {
@@ -1108,8 +1176,8 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         }
     }
 
-    private LinearLayout ranking(String title, List<Rank> entries, String empty) {
-        LinearLayout card = section(title);
+    private LinearLayout ranking(LinearLayout parent, String title, List<Rank> entries, String empty) {
+        LinearLayout card = section(parent, title);
         if (entries.isEmpty()) { caption(card, empty); return card; }
         long max = 1;
         for (Rank item : entries) max = Math.max(max, item.count);
@@ -1143,12 +1211,17 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         parent.addView(row, matchWrap());
     }
 
-    private LinearLayout section(String title) {
+    private LinearLayout section(LinearLayout parent, String title) {
         String key = sectionKey(title);
-        ReportSection section = new ReportSection(title, key, "overview".equals(key) || "analysis".equals(key));
+        ReportSection section = new ReportSection(title, key, "overview".equals(key) || "analysis".equals(key) || "story".equals(key));
         decorateCard(section);
         reportSections.put(key, section);
-        report.addView(section, cardParams());
+        if ("story".equals(key)) {
+            section.header.setVisibility(View.GONE);
+            section.setPadding(0, 0, 0, 0);
+            section.details.setPadding(0, 0, 0, 0);
+            cover.addView(section, matchWrap());
+        } else parent.addView(section, cardParams());
         return section;
     }
 
@@ -1172,6 +1245,14 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
 
     private static String sectionKey(String title) {
         switch (title) {
+            case "你的内容版图": return "story.topics";
+            case "一天里的节奏": return "story.rhythm";
+            case "刷到之后，你做了什么": return "story.actions";
+            case "最近为什么变了": return "story.changes";
+            case "这段时间的发现": return "story";
+            case "遇见了什么": return "story.topics";
+            case "什么让我动手": return "story.actions";
+            case "与上期相比": return "story.changes";
             case "这段时间的你": return "portrait";
             case "浏览概览": return "overview";
             case "浏览趋势": case "浏览足迹 · 日期热力图": return "trend";
@@ -1185,7 +1266,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
             case "最近记录": return "recent";
             case "使用历程": return "history";
             case "AI 图表分析": return "analysis";
-            default: throw new IllegalArgumentException("Unknown report section");
+            default: return "story.extra." + title;
         }
     }
 
@@ -1193,6 +1274,10 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         for (Map.Entry<String, ReportSection> item : reportSections.entrySet()) {
             String summary;
             switch (item.getKey()) {
+                case "story.topics": summary = number(data.portrait.topicCount) + " 个话题 · " + number(data.portrait.authorCount) + " 位已识别作者"; break;
+                case "story.rhythm": summary = number(data.portrait.browseDays) + " 个浏览日 · 按本地时间"; break;
+                case "story.actions": summary = "查看保留片段中的主动操作与实际路径"; break;
+                case "story.changes": summary = "比较前后两期的接触和操作记录"; break;
                 case "portrait": summary = data.portrait.evidenceLevel + " · " + number(data.portrait.authorCount)
                         + " 位作者 · " + number(data.portrait.topicCount) + " 个话题"; break;
                 case "trend": summary = number(data.totalViews) + " 次浏览 · " + number(data.activeDays) + " 天有记录"; break;
@@ -1272,7 +1357,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
             super.addView(header, -1, matchWrap());
             super.addView(summary, -1, matchWrap());
             super.addView(details, -1, matchWrap());
-            setExpanded(alwaysOpen || Boolean.TRUE.equals(expandedSections.get(key)));
+            setExpanded(alwaysOpen || expandedSections.getOrDefault(key, key.startsWith("story.")));
         }
 
         @Override public void addView(View child, int index, ViewGroup.LayoutParams params) {
@@ -1320,6 +1405,10 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     }
 
     private Button button(String label, String tag, Runnable action) {
+        return button(label, tag, view -> action.run());
+    }
+
+    private Button button(String label, String tag, View.OnClickListener action) {
         Button button = miuix ? MiuixFormControls.button(context) : new Button(context);
         button.setTag(tag);
         button.setText(label);
@@ -1334,7 +1423,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         GradientDrawable surface = rounded(0xFFE7F5F2, 12);
         surface.setStroke(dp(1), 0xFFC9E5DF);
         button.setBackground(surface);
-        button.setOnClickListener(view -> action.run());
+        button.setOnClickListener(action);
         return button;
     }
 

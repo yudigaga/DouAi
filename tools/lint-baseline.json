@@ -7,32 +7,11 @@
   ],
   "warnings": [
     {
-      "id": "AndroidGradlePluginVersion",
-      "file": "gradle/wrapper/gradle-wrapper.properties",
-      "message": "A newer version of Gradle than 9.3.1 is available: 9.8.2",
-      "count": 1,
-      "reason": "Toolchain upgrade notice; retain the verified Gradle/AGP combination until a separate compatibility and signed-artifact regression run."
-    },
-    {
       "id": "ApplySharedPref",
       "file": "app/src/main/java/com/douai/module/ui/AdaptationAcknowledgment.java",
       "message": "Consider using `apply()` instead; `commit` writes its data to persistent storage immediately, whereas `apply` will handle it in the background",
       "count": 2,
       "reason": "Synchronous commit is required for acknowledgement durability and failed-commit rollback; replacing it with apply would remove the completion result and alter this boundary. Send ledgers likewise keep their synchronous pre-submission commits."
-    },
-    {
-      "id": "ClickableViewAccessibility",
-      "file": "app/src/main/java/com/douai/module/feature/ViewFinderOverlay.java",
-      "message": "Custom view ``FrameLayout`` has `setOnTouchListener` called on it but does not override `performClick`",
-      "count": 1,
-      "reason": "Existing touch overlay and Miuix compatibility click bridges. Accessibility behavior requires a separate control-level change with touch and accessibility verification; no broad event-dispatch change in this optimization batch."
-    },
-    {
-      "id": "ClickableViewAccessibility",
-      "file": "app/src/main/java/com/douai/module/feature/ViewFinderOverlay.java",
-      "message": "Custom view ``LinearLayout`` has `setOnTouchListener` called on it but does not override `performClick`",
-      "count": 2,
-      "reason": "Existing touch overlay and Miuix compatibility click bridges. Accessibility behavior requires a separate control-level change with touch and accessibility verification; no broad event-dispatch change in this optimization batch."
     },
     {
       "id": "ClickableViewAccessibility",
@@ -56,6 +35,13 @@
       "reason": "Retain the current backup policy; Android 12+ migration/cloud-backup rules require a separate data-boundary review."
     },
     {
+      "id": "DrawAllocation",
+      "file": "app/src/main/java/com/douai/module/ui/JournalComparisons.java",
+      "message": "Avoid object allocations during draw/layout operations (preallocate and reuse instead)",
+      "count": 1,
+      "reason": "The frozen report chart has a bounded two-by-24-point dataset and no animation or continuous invalidation. Its five fixed integer tick labels are allocated during drawing; Paint and Path are reused. Preallocating those ticks is deferred as a small report-only optimization."
+    },
+    {
       "id": "ExifInterface",
       "file": "app/src/main/java/com/douai/module/feature/ChatImageLoader.java",
       "message": "Avoid using `android.media.ExifInterface`; use `androidx.exifinterface.media.ExifInterface` instead",
@@ -72,16 +58,16 @@
     {
       "id": "NewerVersionAvailable",
       "file": "app/build.gradle.kts",
-      "message": "A newer version of com.google.code.gson:gson than 2.10.1 is available: 2.14.0",
+      "message": "A newer version of com.google.code.gson:gson than 2.10.1 is available: 2.15.0",
       "count": 1,
-      "reason": "Dependency upgrade notice. Retain the verified test dependencies until an explicit upgrade validates Robolectric, mock server behavior and the complete regression suite."
+      "reason": "Reviewed 0.2.64 journal report additions; dependency upgrade notices remain informational while the verified toolchain is retained."
     },
     {
       "id": "NewerVersionAvailable",
       "file": "app/build.gradle.kts",
-      "message": "A newer version of com.squareup.okhttp3:mockwebserver than 4.12.0 is available: 5.5.0",
+      "message": "A newer version of com.squareup.okhttp3:mockwebserver than 4.12.0 is available: 5.5.1",
       "count": 1,
-      "reason": "Dependency upgrade notice. Retain the verified test dependencies until an explicit upgrade validates Robolectric, mock server behavior and the complete regression suite."
+      "reason": "Reviewed 0.2.64 journal report additions; dependency upgrade notices remain informational while the verified toolchain is retained."
     },
     {
       "id": "NewerVersionAvailable",
@@ -197,13 +183,6 @@
     },
     {
       "id": "SetTextI18n",
-      "file": "app/src/main/java/com/douai/module/ui/DownloadTasksDialog.java",
-      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
-      "count": 1,
-      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
-    },
-    {
-      "id": "SetTextI18n",
       "file": "app/src/main/java/com/douai/module/ui/HostSettingsEntry.java",
       "message": "String literal in `setText` can not be translated. Use Android resources instead.",
       "count": 1,
@@ -232,24 +211,10 @@
     },
     {
       "id": "SetTextI18n",
-      "file": "app/src/main/java/com/douai/module/ui/MemberListView.java",
+      "file": "app/src/main/java/com/douai/module/ui/PortraitStoryViews.java",
       "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
-      "count": 1,
-      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
-    },
-    {
-      "id": "SetTextI18n",
-      "file": "app/src/main/java/com/douai/module/ui/MemberListView.java",
-      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
-      "count": 1,
-      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
-    },
-    {
-      "id": "SetTextI18n",
-      "file": "app/src/main/java/com/douai/module/ui/SpeechSettingsDialog.java",
-      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
-      "count": 1,
-      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+      "count": 2,
+      "reason": "Chinese-only report pagination combines page/count values with next/collapse labels. Resource localization remains a separate UI task; the current journal text and numeric units are preserved."
     },
     {
       "id": "UnusedResources",
@@ -299,6 +264,13 @@
       "message": "Use `@RequiresApi(29) instead of `@TargetApi` to propagate the requirement to callers of `createBundleRow`",
       "count": 1,
       "reason": "Existing API-29 helper annotation cleanup; current guarded callers remain under media-save tests."
+    },
+    {
+      "id": "ViewConstructor",
+      "file": "app/src/main/java/com/douai/module/ui/JournalSeriesChart.java",
+      "message": "Custom view `JournalSeriesChart` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`",
+      "count": 1,
+      "reason": "This package-private final chart is created programmatically with required topic, dates, and color data by PortraitStoryViews; no XML inflates it. A Context-only preview constructor cannot supply that snapshot."
     },
     {
       "id": "ViewConstructor",

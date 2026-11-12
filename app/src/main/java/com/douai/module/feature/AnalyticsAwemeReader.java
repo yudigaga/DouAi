@@ -22,8 +22,11 @@ final class AnalyticsAwemeReader {
         // These are recommendation/merchant cards rather than browsed works.
         if (kind == 145 || kind == 140) return null;
         Object author = value(work, "getAuthor", "author");
-        boolean advertisement = yes(value(work, "getIsAdAweme", "isAdAweme", "is_ads"))
-                || yes(value(author, "isAdFake", "isAdFake"));
+        Object ad = value(work, "getIsAdAweme", "isAdAweme", "is_ads");
+        Object fakeAd = value(author, "isAdFake", "isAdFake");
+        Boolean advertisement = null;
+        if (yes(ad) || yes(fakeAd)) advertisement = Boolean.TRUE;
+        else if (ad instanceof Boolean || ad instanceof Number || fakeAd instanceof Boolean || fakeAd instanceof Number) advertisement = Boolean.FALSE;
         Object video = value(work, "getVideo", "video");
         long duration = number(value(work, "getDuration", "duration"));
         if (duration <= 0) duration = number(value(video, "getDuration", "videoLength", "duration"));
@@ -51,7 +54,7 @@ final class AnalyticsAwemeReader {
                 "getChallengeName", "challengeName", "cha_name");
         return new Metadata(id, type, text(value(author, "getUid", "uid"), 160),
                 text(value(author, "getNickname", "nickname"), 160), new ArrayList<>(topics),
-                advertisement, duration);
+                advertisement, duration, images instanceof List<?> ? ((List<?>) images).size() : null);
     }
 
     private static void addTopics(Set<String> output, Object entries, String getter, String... fields) {
@@ -97,11 +100,13 @@ final class AnalyticsAwemeReader {
         final String authorId;
         final String authorName;
         final List<String> topics;
-        final boolean advertisement;
+        final Boolean advertisement;
+        final Integer imageCount;
         final long duration;
 
         Metadata(String id, String type, String authorId, String authorName, List<String> topics,
-                 boolean advertisement, long duration) {
+                 Boolean advertisement, long duration, Integer imageCount) {
+            this.imageCount = imageCount;
             this.id = id;
             this.type = type;
             this.authorId = authorId;

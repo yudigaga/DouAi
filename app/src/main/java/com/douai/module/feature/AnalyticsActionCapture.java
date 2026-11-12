@@ -29,6 +29,11 @@ final class AnalyticsActionCapture {
         catch (RuntimeException ignored) { return NONE; }
     }
 
+    com.douai.module.analytics.LocalAnalytics.FlowOperation operation(String kind) {
+        if (store == null || generation != store.generation()) return null;
+        return store.beginOperation(generation, visitToken, kind);
+    }
+
     void manual(String key, String label, String stage) {
         if (store == null) return;
         try { store.recordAction(generation, visitToken, workId, key, label, "manual", stage); }

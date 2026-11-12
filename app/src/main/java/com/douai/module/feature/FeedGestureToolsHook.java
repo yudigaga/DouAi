@@ -1451,6 +1451,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private void submitPersistentSpeed(View root, Object holder, Object player, String aid,
                                        float currentSpeed, float requested, DouAiLog.Operation operation,
                                        boolean announce) {
+        com.douai.module.analytics.LocalAnalytics.FlowOperation speedFlow = com.douai.module.analytics.LocalAnalytics.get(root.getContext()).beginOperation(aid, "speed");
+        if (speedFlow != null) speedFlow.stage(announce ? (sameSpeed(requested,1f) ? "restore" : "manual_select") : "inherited");
         boolean newSession = speedOverride == null;
         if (newSession) speedOverride = new GestureSpeedOverride();
         if (ownedSpeedPlayer.get() != player || !sameManualTarget(holder, aid, player)) {
@@ -1472,6 +1474,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         try {
             speedOverride.registerGlobal();
             speedOverride.apply(requested, () -> setSpeed.invoke(player, requested));
+            if (speedFlow != null) speedFlow.stage("requested");
             if (announce) {
                 com.douai.module.analytics.LocalAnalytics.action(aid, "gesture_speed", "手势切换倍速", "manual", "request");
             }
@@ -1479,7 +1482,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             manualSpeedAid = aid;
             safeLog("Gesture speed submitted=" + requested + "; player=" + player.getClass().getName());
             operation.stage("speed_submitted", "requested=" + requested + ";readback_pending=true");
-            scheduleSpeedReadback(holder, root, player, requested, speedRevision, 0, operation);
+            scheduleSpeedReadback(holder, root, player, requested, speedRevision, 0, operation, speedFlow);
             if (announce) toast(root.getContext(), manualSpeedEnabled ? "倍速锁定目标：" + speedLabel(requested) + "x"
                     : "已选择正常播放：1x");
         } catch (ReflectiveOperationException | RuntimeException failure) {
@@ -1531,7 +1534,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private DouAiLog.Operation speedOperation;
 
     private void scheduleSpeedReadback(Object holder, View root, Object player,
-                                       float requested, long revision, int attempt, DouAiLog.Operation operation) {
+                                       float requested, long revision, int attempt, DouAiLog.Operation operation, com.douai.module.analytics.LocalAnalytics.FlowOperation speedFlow) {
         WeakReference<Object> expectedHolder = new WeakReference<>(holder);
         WeakReference<View> expectedRoot = new WeakReference<>(root);
         WeakReference<Object> expectedPlayer = new WeakReference<>(player);
@@ -1564,6 +1567,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                 }
                 if (sameSpeed(reported, requested)) {
                     speedReadbackConfirmed = true;
+                    if (speedFlow != null) speedFlow.stage("readback");
                     operation.finish(DouAiLog.Outcome.SUCCESS, "speed_getter_readback",
                             "requested=" + requested + ";reported=" + reported + ";result_scope=effective_engine_speed;later_playback=unobserved");
                     if (speedOperation == operation) speedOperation = null;
@@ -1588,7 +1592,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                 }
             }
             if (attempt < 2 && revision == speedRevision) scheduleSpeedReadback(currentHolder, currentRoot, currentPlayer,
-                    requested, revision, attempt + 1, operation);
+                    requested, revision, attempt + 1, operation, speedFlow);
         });
         main.postDelayed(speedReadback, attempt == 0 ? 150L : attempt == 1 ? 350L : 500L);
     }

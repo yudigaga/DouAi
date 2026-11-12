@@ -57,12 +57,16 @@ public final class MediaStoreDownloader {
 
     public static boolean download(Context sourceContext, String url, String fileName,
                                    boolean audio, String tree, Consumer<String> log) {
+        return download(sourceContext,url,fileName,audio,tree,log,null,0);
+    }
+    static boolean download(Context sourceContext,String url,String fileName,boolean audio,String tree,Consumer<String> log,
+            com.douai.module.analytics.LocalAnalytics.FlowOperation flow,int taskIndex) {
         return download(sourceContext, url, fileName,
                 audio ? "audio/mpeg" : "video/mp4",
                 audio ? Environment.DIRECTORY_MUSIC : Environment.DIRECTORY_MOVIES,
                 audio ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
                         : MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                tree, log);
+                tree, log, flow, taskIndex);
     }
 
     public static boolean downloadImage(Context sourceContext, String url, String fileName,
@@ -72,6 +76,10 @@ public final class MediaStoreDownloader {
 
     public static boolean downloadImage(Context sourceContext, String url, String fileName,
                                         String tree, Consumer<String> log) {
+        return downloadImage(sourceContext,url,fileName,tree,log,null,0);
+    }
+    static boolean downloadImage(Context sourceContext,String url,String fileName,String tree,Consumer<String> log,
+            com.douai.module.analytics.LocalAnalytics.FlowOperation flow,int taskIndex) {
         String mimeType = fileName != null && fileName.toLowerCase(java.util.Locale.ROOT).endsWith(".png")
                 ? "image/png" : fileName != null
                 && fileName.toLowerCase(java.util.Locale.ROOT).endsWith(".webp")
@@ -81,12 +89,12 @@ public final class MediaStoreDownloader {
                 && fileName.toLowerCase(java.util.Locale.ROOT).endsWith(".heic")
                 ? "image/heic" : "image/jpeg";
         return download(sourceContext, url, fileName, mimeType, Environment.DIRECTORY_PICTURES,
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, tree, log);
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, tree, log, flow, taskIndex);
     }
 
     private static boolean download(Context sourceContext, String url, String fileName,
                                     String mimeType, String directory, Uri collection,
-                                    String tree, Consumer<String> log) {
+                                    String tree, Consumer<String> log, com.douai.module.analytics.LocalAnalytics.FlowOperation flow, int taskIndex) {
         if (sourceContext == null || fileName == null || fileName.isEmpty()
                 || fileName.contains("/") || fileName.contains("\\") || !isHttpUrl(url)) {
             DouAiLog.begin("media_download", "user_download").finish(DouAiLog.Outcome.SKIPPED,
@@ -102,7 +110,7 @@ public final class MediaStoreDownloader {
             return tree == null || tree.isEmpty()
                     ? save(targetContext, url, fileName, mimeType, directory, collection, transfer)
                     : saveDocument(targetContext, url, fileName, mimeType, tree, transfer);
-        }, log) == null) {
+        }, log, flow, taskIndex) == null) {
             safeLog(log, "Media save request was deduplicated or the queue is full");
             toast(sourceContext, "媒体正在保存或下载队列已满");
             return false;

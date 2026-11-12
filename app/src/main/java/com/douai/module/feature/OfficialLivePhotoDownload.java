@@ -54,6 +54,8 @@ final class OfficialLivePhotoDownload {
         String key = "official-live-photo\n" + plan.imageUrl + '\n' + plan.videoUrl + '\n'
                 + plan.name + '\n' + options.downloadSaveTree();
         Encoder selectedEncoder = encoder;
+        com.douai.module.analytics.LocalAnalytics.FlowOperation flow = AnalyticsActionCapture.capture(source,aweme).operation("download");
+        if (flow != null) { flow.stage("entry"); flow.stage("request"); }
         DownloadTasks.Task task = DownloadTasks.submit(context, key, plan.name, transfer -> {
             try { return save(context, plan, options.downloadSaveTree(), selectedEncoder, transfer); }
             catch (Exception failure) {
@@ -65,7 +67,7 @@ final class OfficialLivePhotoDownload {
                 }
                 throw failure;
             }
-        }, log);
+        }, log, flow, 1);
         if (task == null) {
             toast(context, "媒体正在保存或下载队列已满");
             return false;

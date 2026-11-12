@@ -360,11 +360,21 @@ class MiuixHostSettingsTest {
             compose.runOnIdle {
                 assertNull("Refreshing the real page must replace its empty state", report.window!!.decorView
                     .findViewWithTag<View>("analytics.empty"))
+                assertNull(report.window!!.decorView.findViewWithTag<View>("analytics.portrait.types.chart"))
+                val headline = report.window!!.decorView.findViewWithTag<android.widget.TextView>("analytics.story.headline")
+                assertNotNull("The report opens with its local story discovery", headline)
+                assertTrue(headline.text.isNotBlank())
+                assertTrue("Headline must be visible on its dark cover", android.graphics.Color.luminance(headline.currentTextColor) > 0.7f)
+                assertNotNull("The cover comes before the recording controls", (report.window!!.decorView.findViewWithTag<android.view.ViewGroup>("analytics.body").getChildAt(0)).findViewWithTag<View>("analytics.story.headline"))
+                assertEquals(View.GONE, report.window!!.decorView.findViewWithTag<View>("analytics.section.body.settings").visibility)
+                assertNull(report.window!!.decorView.findViewWithTag<View>("analytics.section.body.topics"))
+            }
+            scrollAnalyticsViewIntoView(report, "analytics.story.all")
+            compose.onNodeWithTag("analytics.story.all").assertIsDisplayed().performClick()
+            compose.waitForIdle()
+            compose.runOnIdle {
                 assertNotNull(report.window!!.decorView.findViewWithTag<View>("analytics.portrait.types.chart"))
-                for (section in listOf("types", "topics", "settings")) {
-                    assertEquals("Long report details initially stay collapsed", View.GONE,
-                        report.window!!.decorView.findViewWithTag<View>("analytics.section.body.$section").visibility)
-                }
+                assertEquals(View.GONE, report.window!!.decorView.findViewWithTag<View>("analytics.section.body.types").visibility)
             }
             expandAnalyticsSection(report, "types")
             scrollAnalyticsViewIntoView(report, "analytics.portrait.types.selection")
@@ -372,6 +382,9 @@ class MiuixHostSettingsTest {
             expandAnalyticsSection(report, "topics")
             scrollAnalyticsViewIntoView(report, "analytics.portrait.topics.selection")
             saveDialogPreview("host-local-analytics-topics-$theme")
+            scrollAnalyticsViewIntoView(report, "analytics.manage")
+            compose.onNodeWithTag("analytics.manage").assertIsDisplayed().performClick()
+            compose.waitForIdle()
             expandAnalyticsSection(report, "settings")
             scrollAnalyticsViewIntoView(report, "analytics.purpose")
             compose.onNodeWithTag("analytics.purpose").assertIsDisplayed().performClick()
@@ -399,6 +412,8 @@ class MiuixHostSettingsTest {
             compose.onNodeWithTag("settings.option.本地数据分析").assertIsDisplayed().performClick()
             val reopened = ShadowDialog.getLatestDialog()
             waitForAnalyticsLoad(reopened, "正在本地记录")
+            scrollAnalyticsViewIntoView(reopened, "analytics.manage")
+            compose.onNodeWithTag("analytics.manage").performClick()
             compose.onNodeWithTag("analytics.recording").assertIsOn()
             compose.runOnUiThread {
                 screen.close()
@@ -444,7 +459,16 @@ class MiuixHostSettingsTest {
     private fun expandAnalyticsSection(dialog: Dialog, key: String) {
         val tag = "analytics.section.toggle.$key"
         scrollAnalyticsViewIntoView(dialog, tag)
-        compose.onNodeWithTag(tag).assertIsDisplayed().performClick()
+        try {
+            compose.onNodeWithTag(tag).assertIsDisplayed().performClick()
+        } catch (failure: AssertionError) {
+            val v = dialog.window!!.decorView.findViewWithTag<View>(tag)
+            val rect = android.graphics.Rect()
+            val scroll = dialog.window!!.decorView.findViewWithTag<android.widget.ScrollView>("analytics.scroll")
+            val bounds = android.graphics.Rect(0, 0, v.width, v.height)
+            scroll.offsetDescendantRectToMyCoords(v, bounds)
+            throw AssertionError("$tag shown=${v.isShown}, global=${v.getGlobalVisibleRect(rect)}:$rect, scrollY=${scroll.scrollY}, target=$bounds, viewport=${scroll.width}x${scroll.height}", failure)
+        }
         compose.runOnIdle {
             assertEquals(View.VISIBLE, dialog.window!!.decorView
                 .findViewWithTag<View>("analytics.section.body.$key").visibility)

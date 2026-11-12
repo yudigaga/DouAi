@@ -21,6 +21,51 @@ import static org.junit.Assert.*;
 @Config(sdk = 35, qualifiers = "notnight")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class PortraitReportViewsTest {
+    @Test @Config(qualifiers="notnight-mdpi")
+    public void theSameTwoTopicsKeepTheirHuesAndBothTiedEndpointsAcrossScreenAndPaper() throws Exception {
+        Context c=RuntimeEnvironment.getApplication();
+        var snapshot=com.douai.module.analytics.JournalExample.twoWeeks(
+                java.nio.file.Files.createTempDirectory(c.getCacheDir().toPath(),"ink").toFile());
+        var data=snapshot.portrait;
+        var colors=new JournalTopicColors(data.evidence,data.topicTiles,data.comparison);
+        for(String surface : List.of("light","dark","paper")) {
+            boolean paper=surface.equals("paper"),dark=surface.equals("dark");
+            RuntimeEnvironment.setQualifiers(dark?"night-mdpi":"notnight-mdpi");
+            var root=new android.widget.LinearLayout(c);
+            var host=new PortraitReportViews.Host() {
+                public android.widget.LinearLayout section(String title) {return root;}
+                public void analysis(android.widget.LinearLayout section,String key) {}
+            };
+            if(paper)PortraitReportViews.appendPaper(c,data,host);else new PortraitReportViews(c,data,host).journal();
+            android.widget.TextView title=root.findViewWithTag("analytics.story.headline");
+            var spans=(android.text.Spanned)title.getText();
+            Bitmap tiles=render(root.findViewWithTag("analytics.portrait.journal.topics.chart"),400,175);
+            Bitmap ranks=render(root.findViewWithTag("analytics.journal.rank-lines"),400,122);
+            try {
+                for(int i=0;i<2;i++) {
+                    String name=data.topicTiles.get(i).label;
+                    int label=spans.toString().indexOf(name), expected=colors.color(name,dark);
+                    assertTrue(label>=0);
+                    assertEquals(colors.color(name,!paper),spans.getSpans(label,label+1,
+                            android.text.style.ForegroundColorSpan.class)[0].getForegroundColor());
+                    assertEquals("tile: "+name,expected,tiles.getPixel(100+i*200,12));
+                    int wide=0;
+                    // Only the two tied markers should span five adjacent pixels on this rank.
+                    for(int x=346;x<=375;x++) {
+                        boolean inside=true;
+                        for(int dx=-2;dx<=2;dx++)inside &= ranks.getPixel(x+dx,20)==expected
+                                && ranks.getPixel(x+dx,19)==expected;
+                        if(inside)wide++;
+                    }
+                    assertTrue("missing visible #1 marker for "+name+" on "+surface,wide>0);
+                }
+                assertEquals("The newcomer must sit beyond the connected line end",
+                        colors.color("赛事",dark),ranks.getPixel(368,20));
+                assertEquals(colors.color("摄影",dark),ranks.getPixel(356,20));
+            } finally {tiles.recycle();ranks.recycle();}
+        }
+    }
+
     @Test public void repeatedFramesKeepGeometryAndRenderTheSamePixels() throws Exception {
         View chart = rhythm(new ArrayList<>());
         Bitmap first = render(chart, 600, 220);

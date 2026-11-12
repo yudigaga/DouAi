@@ -624,6 +624,38 @@ public final class AnalyticsAiAnalysisTest {
         }
     }
 
+    @Test public void versionedStoriesUseFrozenEvidenceAndOnlyOneRequest() throws Exception {
+        java.io.File directory = FilesForPortrait.temporary();
+        final java.time.Instant[] now = {java.time.Instant.now().minus(java.time.Duration.ofDays(2))};
+        java.time.Clock clock = new java.time.Clock() {
+            public java.time.ZoneId getZone() { return java.time.ZoneId.systemDefault(); }
+            public java.time.Clock withZone(java.time.ZoneId zone) { return this; }
+            public java.time.Instant instant() { return now[0]; }
+        };
+        try (LocalAnalytics analytics = new LocalAnalytics(directory, clock); MockWebServer server = new MockWebServer()) {
+            analytics.setEnabled(true);
+            for (int day = 0; day < 3; day++) {
+                for (int i = 0; i < 5; i++) analytics.recordView("story-"+day+"-"+i, "image", "author", "作者", List.of("摄影"), false, 0);
+                if (day < 2) now[0] = now[0].plus(java.time.Duration.ofDays(1));
+            }
+            AnalyticsSnapshot data = analytics.snapshot(7);
+            assertFalse(data.portrait.evidence.observations.isEmpty());
+            String id = data.portrait.evidence.observations.get(0).id;
+            JSONObject discovery = new JSONObject().put("evidenceId",id).put("explanation","主题接触分散在多个日期。")
+                .put("alternative","推荐内容也可能影响分布。请求的目的需要由本人补充。")
+                .put("question","这与你本周想做的事情有关吗？");
+            server.start(); server.enqueue(rawReply(new JSONObject().put("version",2).put("discoveries",new JSONArray().put(discovery)).toString()));
+            AnalyticsAiAnalysis.AnalysisRequest request = AnalyticsAiAnalysis.prepare(settings(server),data,7);
+            assertEquals(0,server.getRequestCount());
+            String shared = AnalyticsAiAnalysis.parseResult(request.run()).shareText();
+            assertTrue(shared.contains("分散在多个日期"));
+            assertEquals(1,server.getRequestCount());
+            JSONObject payload = document(body(server).getJSONArray("messages").getJSONObject(1).getString("content"));
+            assertEquals(id,payload.getJSONArray("selectedEvidence").getJSONObject(0).getString("id"));
+            assertFalse(payload.toString().contains("story-0-0"));
+        } finally { deleteFixture(directory); }
+    }
+
     private static final class FilesForPortrait {
         static java.io.File temporary() throws Exception {
             return java.nio.file.Files.createTempDirectory("douai-portrait-test-").toFile();

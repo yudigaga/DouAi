@@ -81,6 +81,8 @@ public final class ThirdPartyDownload {
         String key = config.getTemplate + '\n' + link + '\n' + tree;
         AnalyticsActionCapture analytics = AnalyticsActionCapture.capture(source, aweme);
         analytics.manual("download_request", "下载任务请求", "request");
+        com.douai.module.analytics.LocalAnalytics.FlowOperation flow = analytics.operation("download");
+        if (flow != null) { flow.stage("entry"); flow.stage("request"); }
         boolean accepted = DownloadTasks.submit(context, "third-party\n" + key, "第三方作品", transfer -> {
                 transfer.phase("正在解析作品");
                 String body = new ThirdPartyGetClient.Request(transfer, MediaStoreDownloader.connections).fetch(config, link);
@@ -90,7 +92,7 @@ public final class ThirdPartyDownload {
                 MediaStoreDownloader.saveThirdPartyBundle(context, plan, tree, transfer);
                 return "已保存 " + plan.assets.size() + " 个文件和作品信息到 "
                         + (tree.isEmpty() ? "Download/DouAi" : "所选目录");
-        }, log) != null;
+        }, log, flow, 1) != null;
         if (accepted) analytics.manual("download_queued", "下载任务已加入", "accepted");
         toast(context, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该作品正在下载或队列已满");
     }
@@ -101,6 +103,7 @@ public final class ThirdPartyDownload {
         private final ThirdPartyDownloadSettings config;
         private final String link, tree;
         private final AnalyticsActionCapture analytics;
+        private final com.douai.module.analytics.LocalAnalytics.FlowOperation flow;
         private final DouAiLog.Operation operation = DouAiLog.begin("third_party_selection", "user_download_picker");
         private Consumer<String> log;
         private BooleanSupplier valid;
@@ -118,6 +121,8 @@ public final class ThirdPartyDownload {
             application = activity.getApplication();
             this.config = config; this.link = link; this.tree = tree; this.log = log; this.valid = valid;
             this.analytics = analytics;
+            flow = analytics.operation("download");
+            if (flow != null) flow.stage("entry");
             operation.stage("ready", "template_configured=" + !config.getTemplate.isEmpty() + "; tree_selected=" + !tree.isEmpty());
         }
 
@@ -206,11 +211,12 @@ public final class ThirdPartyDownload {
                     + "; evidence=user_selected_assets; media_save_result=pending");
             close();
             analytics.manual("download_request", "下载任务请求", "request");
+            if (flow != null) flow.stage("request");
             boolean accepted = DownloadTasks.submit(target, selectedKey.toString(), plan.baseName, transfer -> {
                 MediaStoreDownloader.saveThirdPartyBundle(target, plan, capturedTree, transfer);
                 return "已保存 " + plan.assets.size() + " 个文件和作品信息到 "
                         + (capturedTree.isEmpty() ? "Download/DouAi" : "所选目录");
-            }, logger) != null;
+            }, logger, flow, 1) != null;
             if (accepted) analytics.manual("download_queued", "下载任务已加入", "accepted");
             toast(target, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该选择正在下载或队列已满");
         }

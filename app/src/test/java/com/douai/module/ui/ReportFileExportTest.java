@@ -18,6 +18,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
@@ -115,7 +116,7 @@ public final class ReportFileExportTest {
     @Test public void pdfBreaksBeforeAHeadingWhoseChartOrFirstBodyLinesWouldBeOrphaned() throws Exception {
         LinearLayout chartReport = new LinearLayout(context); chartReport.setOrientation(LinearLayout.VERTICAL);
         chartReport.addView(new View(context), new LinearLayout.LayoutParams(-1, 400));
-        LinearLayout heading = new LinearLayout(context); heading.setTag("report.keepTogether");
+        LinearLayout heading = new LinearLayout(context); heading.setTag("report.keepWithNext");
         chartReport.addView(heading, new LinearLayout.LayoutParams(-1, 50));
         android.widget.TextView caption = new android.widget.TextView(context); caption.setText("Chart caption"); caption.setTextSize(12);
         chartReport.addView(caption, new LinearLayout.LayoutParams(-1, 20));
@@ -137,6 +138,46 @@ public final class ReportFileExportTest {
         assertEquals(Integer.valueOf(withText.contentHeight()), breaks.get(breaks.size() - 1));
         assertTrue("A long paragraph must remain splittable rather than being locked or lost",
                 breaks.stream().anyMatch(cut -> cut > body.getTop() && cut < withText.contentHeight()));
+    }
+
+    @Test public void aPageCanBreakBetweenTwoConsecutiveFigures() throws Exception {
+        LinearLayout report = new LinearLayout(context); report.setOrientation(LinearLayout.VERTICAL);
+        report.addView(new View(context), -1, 130);
+        for (int i = 0; i < 2; i++) {
+            LinearLayout figure = new LinearLayout(context); figure.setOrientation(LinearLayout.VERTICAL);
+            figure.setTag("report.keepTogether");
+            figure.addView(new android.widget.TextView(context), -1, 20);
+            figure.addView(new View(context), -1, 200);
+            report.addView(figure, -1, -2);
+        }
+        ReportImageExport.Document doc = ReportImageExport.capture(report, "test", false, 360, 900, 360);
+        assertEquals("A complete figure fits below the preceding paragraph", Integer.valueOf(350), cuts(doc).get(1));
+        assertEquals(2, doc.pdfPageCount());
+    }
+
+    @Test public void theJournalFixtureHasNeitherAnAlmostEmptyMiddlePageNorAnOrphanedFamiliarityTitle() throws Exception {
+        var sample=com.douai.module.analytics.JournalExample.twoWeeks(
+                java.nio.file.Files.createTempDirectory(context.getCacheDir().toPath(),"page-breaks").toFile());
+        LinearLayout paper=ReportPresentation.build(context,sample,"最近 7 天",0,null,"","",0);
+        ReportImageExport.Document doc=ReportImageExport.capture(paper,"最近 7 天",false,1080,4096,ReportPresentation.LOGICAL_WIDTH);
+        List<Integer> breaks=cuts(doc);
+        int longest=0;
+        for(int i=1;i<breaks.size();i++)longest=Math.max(longest,breaks.get(i)-breaks.get(i-1));
+        for(int i=2;i+1<breaks.size();i++)assertTrue("Nearly empty interior page: "+i+" "+breaks,
+                breaks.get(i)-breaks.get(i-1)>longest/3);
+        // Require the chapter label and the first actual sample row below it on the same page.
+        int title=textTop(paper,0,"再次遇见，停留有何不同");
+        int row=textTop(paper,0,"近 28 天遇见过");
+        assertTrue(title>=0 && row>title);
+        for(int cut:breaks)assertFalse("Orphaned familiarity title on a sheet boundary",cut>title && cut<=row);
+    }
+    private static int textTop(View v,int top,String prefix) {
+        if(v instanceof android.widget.TextView && ((android.widget.TextView)v).getText().toString().startsWith(prefix))return top;
+        if(v instanceof android.view.ViewGroup g)for(int i=0;i<g.getChildCount();i++) {
+            View child=g.getChildAt(i);
+            int found=textTop(child,top+child.getTop(),prefix);if(found>=0)return found;
+        }
+        return -1;
     }
 
     @Test public void legacyPdfDestinationCreatesOnePortableDocumentWithThePdfMimeType() {

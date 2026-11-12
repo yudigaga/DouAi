@@ -308,15 +308,16 @@ public final class AnalyticsAiAnalysis {
             AiModelSettings settings = new AiModelSettings(Collections.singletonList(config), config.id);
             String secondaryPrompt = AnalyticsAiSettings.secondaryPrompt(store);
             String document = aggregate(snapshot, days, purpose, sink);
+            JSONArray stories = PortraitAiStories.evidence(snapshot.portrait.evidence);
             operation.stage("prepared", "days=" + days + "; document_chars=" + document.length()
                     + "; model_ref=" + DouAiLog.reference(config.id) + "; network_started=false");
-            return new Request(settings, label(config), secondaryPrompt, document, sink, operation);
+            return new Request(settings, label(config), secondaryPrompt, document, stories, sink, operation);
         } catch (AnalysisFailure failure) {
             operation.error("prepare", failure);
             operation.finish(DouAiLog.Outcome.FAILED, failure.kind().name().toLowerCase(java.util.Locale.ROOT), "network_started=false");
             diagnostic(sink, "failed", failure.kind(), failure.httpStatus(), 0);
             throw failure;
-        } catch (RuntimeException failure) {
+        } catch (Exception failure) {
             operation.error("prepare", failure);
             operation.finish(DouAiLog.Outcome.FAILED, "configuration_or_aggregation_failed", "network_started=false");
             diagnostic(sink, "failed", AnalysisFailure.Kind.PREPARE, 0, 0);
@@ -364,6 +365,7 @@ public final class AnalyticsAiAnalysis {
             for (int hour = 0; hour < 24; hour++) hours.put(hour < data.hours.length ? positive(data.hours[hour]) : 0);
             root.put("viewsByLocalHour", hours);
             root.put("selfReport", clean(purpose, 240));
+            root.put("selectedEvidence", PortraitAiStories.evidence(data.portrait.evidence));
             root.put("portraitEvidence", portraitEvidence(data.portrait));
             root.put("definitions", "浏览次数为可见作品切换次数；功能次数按标签区分入口、请求、提交和成功；"
                     + "时间分布仅表示浏览发生时段，不表示观看时长；话题可一作多个；排行榜仅 Top10；"
@@ -506,6 +508,7 @@ public final class AnalyticsAiAnalysis {
         private final String label;
         private final String secondaryPrompt;
         private final String document;
+        private final JSONArray stories;
         private final ChatCompletionClient client;
         private final Consumer<String> diagnostics;
         private final DouAiLog.Operation operation;
@@ -514,12 +517,13 @@ public final class AnalyticsAiAnalysis {
         private boolean finished;
         private Thread running;
 
-        Request(AiModelSettings settings, String label, String secondaryPrompt, String document,
+        Request(AiModelSettings settings, String label, String secondaryPrompt, String document, JSONArray stories,
                 Consumer<String> diagnostics, DouAiLog.Operation operation) {
             this.settings = settings;
             this.label = label;
             this.secondaryPrompt = secondaryPrompt;
             this.document = document;
+            this.stories = stories;
             this.diagnostics = diagnostics;
             this.operation = operation;
             this.client = new ChatCompletionClient(null, diagnostics);
@@ -562,7 +566,7 @@ public final class AnalyticsAiAnalysis {
                 requestDiagnostic(diagnostics, "start", null, 0, 0, startedAt);
                 operation.stage("request_started", "business_result=pending");
                 // Custom instructions use the task field, outside the incoming-message character limit.
-                String task = REPORT_CONTRACT;
+                String task = stories.length() > 0 ? PortraitAiStories.CONTRACT : REPORT_CONTRACT;
                 if (!AnalyticsAiSettings.DEFAULT_SECONDARY_PROMPT.equals(secondaryPrompt)) {
                     task += "\n\n【本地分析二级提示词】\n" + secondaryPrompt;
                 }
@@ -573,7 +577,11 @@ public final class AnalyticsAiAnalysis {
                 synchronized (lock) {
                     ensureActive();
                     if (result == null || result.trim().isEmpty()) throw new AnalysisFailure(AnalysisFailure.Kind.EMPTY);
-                    Result parsed = parseResult(result);
+                    Result parsed;
+                    if (stories.length() > 0) {
+                        try { parsed = parseResult(PortraitAiStories.normalize(result, stories)); }
+                        catch (Exception invalid) { throw new InvalidAnalysis(FormatReason.INVALID_JSON); }
+                    } else parsed = parseResult(result);
                     if (!parsed.hasPortrait()) throw new InvalidAnalysis(FormatReason.MISSING_PORTRAIT);
                     finished = true;
                     running = null;

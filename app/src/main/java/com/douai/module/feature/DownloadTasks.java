@@ -75,10 +75,15 @@ public final class DownloadTasks {
         if (task != null) task.cancel();
     }
     static Task submit(Context source, String key, String name, Work work, Consumer<String> log) {
+        return submit(source,key,name,work,log,null,0);
+    }
+    static Task submit(Context source, String key, String name, Work work, Consumer<String> log,
+            com.douai.module.analytics.LocalAnalytics.FlowOperation flow, int taskIndex) {
         Context application = source.getApplicationContext();
         Task task = new Task(application == null ? source : application, key, name, log,
                 key.startsWith("third-party\n") ? "第三方下载失败，请重试" : "媒体保存失败，请重试");
         synchronized (TASKS) { TASKS.put(task.id, task); }
+        task.transfer.analytics = flow; task.transfer.analyticsTask = taskIndex;
         task.operation.stage("queue_requested", "business_result=pending");
         BoundedMediaQueue.Handle handle = QUEUE.submit(key, task.operation.wrap(() -> task.run(work)),
                 task.operation.wrap(task::released));
@@ -87,6 +92,7 @@ public final class DownloadTasks {
             synchronized (TASKS) { TASKS.remove(task.id); }
             return null;
         }
+        if (flow != null) flow.stage("accepted", taskIndex);
         synchronized (task) { if (!task.terminal) task.handle = handle; }
         if (task.transfer.isCancelled()) handle.cancel();
         changed();
@@ -220,8 +226,9 @@ public final class DownloadTasks {
                     : transfer.transportTimedOut ? "transport_timeout" : status,
                     "completedFiles=" + transfer.completedFiles + "; totalFiles=" + transfer.totalFiles
                             + "; saveEvidence=" + transfer.savedEvidenceCount + "; bytes=" + transfer.bytes);
+            if (transfer.analytics != null) transfer.analytics.stage("completed".equals(status) ? "task_end" : "cancelled".equals(status) ? "cancelled" : "failure", transfer.analyticsTask);
             if ("completed".equals(status) && analytics != null) {
-                analytics.manual("download_completed", "下载任务完成", "success");
+                analytics.manual("download_completed", "下载任务完成", "confirmed");
             }
             trim(); changed();
             MAIN.post(() -> {

@@ -69,6 +69,9 @@ public final class LocalAnalytics implements AutoCloseable {
     private LocalDate lastWorkDay;
     private SQLiteDatabase database;
     private LocalDate lastPrunedDay;
+    // Guarded by stateLock; bounded by distinct retained dates and finite source names.
+    private Map<LocalDate,Set<String>> pendingGaps = new HashMap<>();
+    private List<long[]> pendingBoundaries = new ArrayList<>();
     private final AtomicLong queueDropped = new AtomicLong();
     private final AtomicLong writeTransactions = new AtomicLong();
     private boolean trimVisitsPending, trimActionsPending;
@@ -113,6 +116,77 @@ public final class LocalAnalytics implements AutoCloseable {
     public static void action(String workId, String key, String label, String source, String stage) {
         LocalAnalytics instance = active;
         if (instance != null) instance.recordAction(instance.generation, workId, key, label, source, stage);
+    }
+
+    /** Immutable local attribution; carries no raw work identifiers or content. */
+    public static final class FlowOperation {
+        private final LocalAnalytics owner;
+        private final long generation;
+        private final String id = UUID.randomUUID().toString(), token, kind;
+        private int nextClick;
+        private long sequence;
+        private final Set<String> aiMarkers = new HashSet<>();
+        private FlowOperation(LocalAnalytics owner, long generation, String token, String kind) {
+            this.owner = owner; this.generation = generation; this.token = token; this.kind = kind;
+        }
+        public void stage(String stage) { stage(stage, 0); }
+        public void stage(String stage, int task) {
+            synchronized (owner.stateLock) {
+                if (kind.equals("ai") && !aiMarkers.add(stage)) return;
+                owner.recordFlow(this, stage, task);
+            }
+        }
+        /** One identity per UI click. Only its own successful route callback reuses it. */
+        public Click click(String stage) {
+            synchronized (owner.stateLock) {
+                if (!kind.equals("ai") || !List.of("video_click","more_click","followup_click").contains(stage)) return null;
+                int id = ++nextClick;
+                owner.recordFlow(this, stage, id);
+                return new Click(this, id);
+            }
+        }
+    }
+    public static final class Click {
+        private final FlowOperation operation;
+        private final int id;
+        private boolean routed;
+        private Click(FlowOperation operation, int id) { this.operation=operation; this.id=id; }
+        public void dispatched() {
+            synchronized (operation.owner.stateLock) {
+                if (!routed) { routed=true; operation.owner.recordFlow(operation, "route_dispatched", id); }
+            }
+        }
+    }
+    public FlowOperation beginOperation(String workId, String kind) {
+        if (!List.of("download", "ai", "playback", "speed", "backward").contains(kind)) return null;
+        synchronized (stateLock) {
+            if (!isEnabled()) return null;
+            return new FlowOperation(this, generation, currentVisitToken(workId), kind);
+        }
+    }
+    /** Deferred UI captures pass the already verified original local token and generation. */
+    public FlowOperation beginOperation(long expectedGeneration, String capturedVisit, String kind) {
+        if (!List.of("download", "ai", "playback", "speed", "backward").contains(kind)) return null;
+        synchronized (stateLock) {
+            if (!isEnabled() || generation != expectedGeneration) return null;
+            return new FlowOperation(this, generation, capturedVisit, kind);
+        }
+    }
+    private void recordFlow(FlowOperation op, String stage, int task) {
+        if (task < 0 || (!op.kind.equals("ai") && task > 10000) || !List.of("entry","request","accepted","task_end","output_closed","cancelled","failure","generated","dispatched","visible","followup_click","more_click","video_click","route_dispatched","manual_select","restore","inherited","requested","readback","playing","paused","ended","confirmed").contains(stage)) return;
+        synchronized (stateLock) {
+            if (!isEnabled() || generation != op.generation) return;
+            long timestamp = clock.millis();
+            LocalDate day = Instant.ofEpochMilli(timestamp).atZone(zone.get()).toLocalDate();
+            Long seq = op.kind.equals("ai") ? ++op.sequence : null;
+            enqueueWrite(op.generation, day, op.kind, db -> {
+                db.execSQL("INSERT OR IGNORE INTO flow_events(operation_id,token,kind,stage,task,day,ts,seq) VALUES (?,?,?,?,?,?,?,?)",
+                        new Object[]{op.id, op.token, op.kind, stage, task, day.toString(), timestamp, seq});
+                markAvailable(db, op.kind.equals("speed") || op.kind.equals("backward") ? "gesture" : op.kind, timestamp);
+                markAvailable(db, "events", timestamp);
+                trimActionsPending = true;
+            });
+        }
     }
 
     /** Call only when a module operation actually runs; merely enabling a setting is not usage. */
@@ -161,7 +235,11 @@ public final class LocalAnalytics implements AutoCloseable {
                 enabled = value;
                 long token = storageEpoch;
                 long timestamp = clock.millis();
-                enqueue(() -> recordCollectionBoundary(token, timestamp, value));
+                pendingBoundaries.add(new long[]{timestamp, value ? 1 : 0});
+                enqueue(() -> { synchronized (databaseLock) {
+                    if (closed || storageEpoch != token) return;
+                    try { flushPending(openDatabase()); } catch (Exception failure) { failClosed(); }
+                }});
                 operation.finish(DouAiLog.Outcome.SUCCESS, "collection_flag_persisted", "enabled=" + enabled
                         + "; generation=" + generation + "; boundary_write=pending");
             } catch (Exception ignored) {
@@ -185,17 +263,23 @@ public final class LocalAnalytics implements AutoCloseable {
     public void recordView(long expectedGeneration, String workId, String type, String authorId,
             String authorName, List<String> topics, boolean advertisement, long durationMillis) {
         recordViewInternal(expectedGeneration, workId, type, authorId, authorName, topics, advertisement,
-                durationMillis, null);
+                durationMillis, null, null);
     }
 
     public String beginVisit(long expectedGeneration, String workId, String type, String authorId,
             String authorName, List<String> topics, boolean advertisement, long contentDuration, String source) {
         return recordViewInternal(expectedGeneration, workId, type, authorId, authorName, topics,
-                advertisement, contentDuration, normalizeSource(source));
+                advertisement, contentDuration, normalizeSource(source), null);
+    }
+
+    public String beginVisit(long expectedGeneration, String workId, String type, String authorId,
+            String authorName, List<String> topics, Boolean advertisement, long contentDuration, String source, Integer imageCount) {
+        return recordViewInternal(expectedGeneration, workId, type, authorId, authorName, topics,
+                advertisement, contentDuration, normalizeSource(source), imageCount);
     }
 
     private String recordViewInternal(long expectedGeneration, String workId, String type, String authorId,
-            String authorName, List<String> topics, boolean advertisement, long durationMillis, String source) {
+            String authorName, List<String> topics, Boolean advertisement, long durationMillis, String source, Integer imageCount) {
         if (!isEnabled() || workId == null || workId.trim().isEmpty()) {
             DouAiLog.event("local_analytics", "observation_skipped", "disabled_or_missing_work", "enabled=" + isEnabled());
             return null;
@@ -217,6 +301,7 @@ public final class LocalAnalytics implements AutoCloseable {
                 }
             }
             final String finalAuthorLabel = authorLabel;
+            final String segmentAuthorHash = authorId == null || authorId.trim().isEmpty() ? null : hash("id:" + authorId.trim());
             synchronized (stateLock) {
                 if (!isEnabled() || generation != expectedGeneration) {
                     DouAiLog.event("local_analytics", "observation_skipped", "stale_generation_or_disabled", "enabled=" + isEnabled()); return null;
@@ -232,15 +317,17 @@ public final class LocalAnalytics implements AutoCloseable {
                 }
                 boolean countView = !workHash.equals(lastWorkHash) || !local.toLocalDate().equals(lastWorkDay);
                 String visitToken = source == null ? null : UUID.randomUUID().toString();
-                boolean queued = enqueueWrite(token, local.toLocalDate(), db -> {
+                boolean queued = enqueueWrite(token, local.toLocalDate(), visitToken == null ? "history" : countView ? "visit_history" : "visits", db -> {
                     if (visitToken != null) {
-                        db.execSQL("INSERT INTO visits(token,work_hash,type,day,hour,source,started,visible_ms,ended,end_reason) VALUES (?,?,?,?,?,?,?,0,0,'')",
-                                new Object[]{visitToken, workHash, typeKey, local.toLocalDate().toString(), local.getHour(), source, timestamp});
+                        db.execSQL("INSERT INTO visits(token,work_hash,type,day,hour,source,started,visible_ms,ended,end_reason,author_hash,duration_band,image_band,is_ad) VALUES (?,?,?,?,?,?,?,0,0,'',?,?,?,?)",
+                                new Object[]{visitToken, workHash, typeKey, local.toLocalDate().toString(), local.getHour(), source, timestamp, segmentAuthorHash, durationBand(durationMillis), imageBand(imageCount), advertisement == null ? null : advertisement ? 1 : 0});
                         for (String topic : uniqueTopics) db.execSQL("INSERT OR IGNORE INTO visit_topics(token,topic) VALUES (?,?)", new Object[]{visitToken, topic});
+                        markAvailable(db, "metadata", timestamp);
+                        markAvailable(db, "visits", timestamp);
                         trimVisitsPending = true;
                     }
                     if (!countView) return;
-                    addDaily(db, local.toLocalDate(), 1, 0, advertisement ? 1 : 0,
+                    addDaily(db, local.toLocalDate(), 1, 0, Boolean.TRUE.equals(advertisement) ? 1 : 0,
                             Math.max(0, durationMillis));
                     String day = local.toLocalDate().toString();
                     db.execSQL("INSERT OR IGNORE INTO work_days(day, work_hash) VALUES (?, ?)",
@@ -280,7 +367,7 @@ public final class LocalAnalytics implements AutoCloseable {
             visit.visibleMillis = Math.max(visit.visibleMillis, observed);
             if (endReason == null && visit.visibleMillis - visit.persistedMillis < 3_000) return;
             long total = visit.visibleMillis;
-            boolean queued = enqueueWrite(visit.generation, today(), db -> db.execSQL(
+            boolean queued = enqueueWrite(visit.generation, Instant.ofEpochMilli(visit.started).atZone(zone.get()).toLocalDate(), "dwell", db -> db.execSQL(
                     "UPDATE visits SET visible_ms=MAX(visible_ms,?),ended=?,end_reason=? WHERE token=?",
                     new Object[]{total, endReason == null ? 0 : 1, endReason == null ? "" : endReason, token}));
             if (queued) visit.persistedMillis = total;
@@ -314,10 +401,14 @@ public final class LocalAnalytics implements AutoCloseable {
             final String visitToken = expectedVisit != null && expectedVisit.equals(linked) ? linked : null;
             long timestamp = clock.millis();
             LocalDate day = Instant.ofEpochMilli(timestamp).atZone(zone.get()).toLocalDate();
-            enqueueWrite(expectedGeneration, day, db -> {
+            LocalDate sampleDay = visitToken == null ? day : Instant.ofEpochMilli(currentVisit.started).atZone(zone.get()).toLocalDate();
+            boolean linkedMetric = visitToken != null && "manual".equals(actionSource) &&
+                    (("save_media".equals(featureKey) && "entry".equals(actionStage)) || ("copy_text".equals(featureKey) && "success".equals(actionStage)));
+            enqueueWrite(expectedGeneration, sampleDay, linkedMetric ? "events" : "summary", db -> {
                 addFeature(db, day, timestamp, featureKey, featureLabel, actionSource);
                 db.execSQL("INSERT INTO actions(day,token,feature,source,stage,ts) VALUES (?,?,?,?,?,?)",
                         new Object[]{day.toString(), visitToken, featureKey, actionSource, actionStage, timestamp});
+                markAvailable(db, "events", timestamp);
                 trimActionsPending = true;
             });
         }
@@ -384,11 +475,12 @@ public final class LocalAnalytics implements AutoCloseable {
                 if (closed) throw new IllegalStateException("本地分析存储已关闭");
                 SQLiteDatabase db = database == null && !new File(directory, "usage.db").exists()
                         ? null : openDatabase();
-                if (db == null) return AnalyticsBackup.capture(null, clock.millis(), queueDropped.get());
+                if (db == null) return AnalyticsBackup.capture(null, clock.millis(), 0);
+                flushPending(db);
                 db.beginTransaction();
                 try {
                     prune(db, today());
-                    org.json.JSONObject snapshot = AnalyticsBackup.capture(db, clock.millis(), queueDropped.get());
+                    org.json.JSONObject snapshot = AnalyticsBackup.capture(db, clock.millis(), 0);
                     db.setTransactionSuccessful(); return snapshot;
                 } finally { db.endTransaction(); }
             }
@@ -412,6 +504,7 @@ public final class LocalAnalytics implements AutoCloseable {
             try {
                 if (closed) throw new IllegalStateException("本地分析存储已关闭");
                 SQLiteDatabase db = openDatabase();
+                flushPending(db);
                 db.beginTransaction();
                 try {
                     AnalyticsBackup.replaceTables(db, snapshot);
@@ -422,13 +515,16 @@ public final class LocalAnalytics implements AutoCloseable {
                         // The short continuation boundary also fences observations collected while
                         // replacement was being prepared. Later switch changes retain this epoch.
                         fenceBackup();
+                        resetPending();
+                        long restoredAt = clock.millis();
+                        db.execSQL("INSERT INTO collection_boundaries(ts,enabled) VALUES (?,0)",
+                                new Object[]{Math.min(snapshot.capturedAt, restoredAt)});
                         db.execSQL("INSERT INTO collection_boundaries(ts,enabled) VALUES (?,?)",
-                                new Object[]{clock.millis(), enabled ? 1 : 0});
+                                new Object[]{restoredAt, enabled ? 1 : 0});
                         db.setTransactionSuccessful();
                     }
                 } finally { db.endTransaction(); }
                 committed = true;
-                queueDropped.set(0);
             } finally {
                 // Reject every observation accepted before or while replacement was in progress.
                 // The local collection flag is deliberately neither read from nor changed by a backup.
@@ -455,7 +551,7 @@ public final class LocalAnalytics implements AutoCloseable {
             lastWorkHash = null;
             lastWorkDay = null;
             currentVisit = null;
-            queueDropped.set(0);
+            resetPending();
             cancelAutomaticAdvance();
         }
         synchronized (databaseLock) {
@@ -494,7 +590,7 @@ public final class LocalAnalytics implements AutoCloseable {
                     lastWorkHash = null;
                     lastWorkDay = null;
                     currentVisit = null;
-                    queueDropped.set(0);
+                    resetPending();
                 }
             }
         }
@@ -525,7 +621,7 @@ public final class LocalAnalytics implements AutoCloseable {
         DouAiLog.Operation parent = DouAiLog.current();
         try { writer.execute(runnable instanceof WriteTask || parent == null ? runnable : parent.wrap(runnable)); return true; }
         catch (RejectedExecutionException ignored) {
-            if (!closed) queueDropped.incrementAndGet();
+
             DouAiLog.event("local_analytics", "write_dropped", closed ? "store_closed" : "queue_full",
                     "dropped_total=" + queueDropped.get() + "; capacity=" + QUEUE_CAPACITY);
             return false;
@@ -535,7 +631,18 @@ public final class LocalAnalytics implements AutoCloseable {
     private interface Mutation { void run(SQLiteDatabase db); }
 
     private boolean enqueueWrite(long token, LocalDate day, Mutation mutation) {
-        return enqueue(new WriteTask(token, day, mutation, DouAiLog.current()));
+        return enqueueWrite(token, day, "summary", mutation);
+    }
+
+    private boolean enqueueWrite(long token, LocalDate day, String source, Mutation mutation) {
+        if (enqueue(new WriteTask(token, day, mutation, DouAiLog.current()))) return true;
+        synchronized (stateLock) {
+            if (!closed && generation == token) {
+                queueDropped.incrementAndGet();
+                pendingGaps.computeIfAbsent(day, k -> new HashSet<>()).add(source);
+            }
+        }
+        return false;
     }
 
     long writeTransactionCount() { return writeTransactions.get(); }
@@ -574,13 +681,20 @@ public final class LocalAnalytics implements AutoCloseable {
                             : generation != task.token ? "stale_generation" : "outside_retention", "transaction_started=false");
                 } else accepted.add(task);
             }
-            if (accepted.isEmpty()) return;
+            if (accepted.isEmpty()) {
+                synchronized (stateLock) { if (closed || (pendingBoundaries.isEmpty() && queueDropped.get()==0)) return; }
+                try { flushPending(openDatabase()); } catch (Exception failure) { failClosed(); }
+                return;
+            }
             try {
                 SQLiteDatabase db = openDatabase();
+                flushPending(db);
                 db.beginTransaction();
                 trimVisitsPending = false; trimActionsPending = false;
                 try {
                     prune(db, today);
+                    // clear() stays file-free; the first accepted normal write establishes its new origin.
+                    db.execSQL("INSERT INTO collection_boundaries(ts,enabled) SELECT ?,1 WHERE NOT EXISTS (SELECT 1 FROM collection_boundaries)",new Object[]{clock.millis()});
                     for (WriteTask task : accepted) {
                         if (closed || !enabled || generation != task.token) {
                             task.skipped = true;
@@ -591,7 +705,7 @@ public final class LocalAnalytics implements AutoCloseable {
                         task.inContext(() -> task.mutation.run(db));
                     }
                     if (trimVisitsPending) trimVisits(db);
-                    if (trimActionsPending) db.execSQL("DELETE FROM actions WHERE id < COALESCE((SELECT id FROM actions ORDER BY id DESC LIMIT 1 OFFSET 29999),-1)");
+                    if (trimActionsPending) trimEvents(db);
                     db.setTransactionSuccessful();
                 } finally { db.endTransaction(); trimVisitsPending = false; trimActionsPending = false; }
                 writeTransactions.incrementAndGet();
@@ -622,7 +736,7 @@ public final class LocalAnalytics implements AutoCloseable {
                 if (!secureDelete.moveToFirst() || secureDelete.getInt(0) != 1)
                     throw new IllegalStateException("Local storage cannot securely clear records");
             }
-            if (opened.getVersion() > 2) throw new IllegalStateException("Unsupported analytics schema");
+            if (opened.getVersion() > 4) throw new IllegalStateException("Unsupported analytics schema");
             opened.beginTransaction();
             try {
             opened.execSQL("CREATE TABLE IF NOT EXISTS daily(day TEXT PRIMARY KEY, views INTEGER NOT NULL, features INTEGER NOT NULL, ads INTEGER NOT NULL, content_duration INTEGER NOT NULL)");
@@ -636,14 +750,43 @@ public final class LocalAnalytics implements AutoCloseable {
             opened.execSQL("CREATE INDEX IF NOT EXISTS visit_started ON visits(started DESC)");
             opened.execSQL("CREATE TABLE IF NOT EXISTS visit_topics(token TEXT NOT NULL,topic TEXT NOT NULL,PRIMARY KEY(token,topic))");
             opened.execSQL("CREATE TABLE IF NOT EXISTS actions(id INTEGER PRIMARY KEY AUTOINCREMENT,day TEXT NOT NULL,token TEXT,feature TEXT NOT NULL,source TEXT NOT NULL,stage TEXT NOT NULL,ts INTEGER NOT NULL)");
+            opened.execSQL("CREATE INDEX IF NOT EXISTS work_history ON work_days(work_hash,day)");
+            opened.execSQL("CREATE INDEX IF NOT EXISTS ranks_kind_day ON ranks(kind,day,item_key,label,count)");
+            opened.execSQL("CREATE INDEX IF NOT EXISTS action_token ON actions(token,source,feature,stage)");
             opened.execSQL("CREATE INDEX IF NOT EXISTS action_day ON actions(day)");
             opened.execSQL("CREATE TABLE IF NOT EXISTS collection_boundaries(id INTEGER PRIMARY KEY AUTOINCREMENT,ts INTEGER NOT NULL,enabled INTEGER NOT NULL)");
-            opened.setVersion(2);
+            opened.execSQL("CREATE INDEX IF NOT EXISTS boundary_time ON collection_boundaries(ts,id,enabled)");
+            if (opened.getVersion() < 3) {
+                opened.execSQL("ALTER TABLE visits ADD COLUMN author_hash TEXT");
+                opened.execSQL("ALTER TABLE visits ADD COLUMN duration_band TEXT");
+                opened.execSQL("ALTER TABLE visits ADD COLUMN image_band TEXT");
+                opened.execSQL("ALTER TABLE visits ADD COLUMN is_ad INTEGER");
+            }
+            opened.execSQL("CREATE TABLE IF NOT EXISTS flow_events(id INTEGER PRIMARY KEY AUTOINCREMENT,operation_id TEXT NOT NULL,token TEXT,kind TEXT NOT NULL,stage TEXT NOT NULL,task INTEGER NOT NULL,day TEXT NOT NULL,ts INTEGER NOT NULL,UNIQUE(operation_id,stage,task))");
+            opened.execSQL("CREATE INDEX IF NOT EXISTS flow_operation ON flow_events(operation_id,ts)");
+            opened.execSQL("CREATE INDEX IF NOT EXISTS flow_day ON flow_events(day)");
+            opened.execSQL("CREATE TABLE IF NOT EXISTS source_coverage(source TEXT PRIMARY KEY,status TEXT NOT NULL,since INTEGER NOT NULL,trimmed_before INTEGER)");
+            opened.execSQL("CREATE TABLE IF NOT EXISTS queue_gaps(day TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(day,source))");
+            if (opened.getVersion() < 4) {
+                opened.execSQL("ALTER TABLE flow_events ADD COLUMN seq INTEGER");
+                markLegacyDrops(opened, clock.millis());
+            }
+            opened.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS flow_seq ON flow_events(operation_id,seq)");
+            opened.setVersion(4);
             opened.setTransactionSuccessful();
             } finally { opened.endTransaction(); }
             database = opened;
             return opened;
         } catch (RuntimeException failure) { opened.close(); throw failure; }
+    }
+
+    // Old counters have no dates. Their entire prior window remains uncertain.
+    static void markLegacyDrops(SQLiteDatabase db, long through) {
+        db.execSQL("INSERT OR REPLACE INTO meta(key,value) SELECT 'legacy_drop_through',? WHERE EXISTS (SELECT 1 FROM meta WHERE key='queue_dropped' AND value>0)",new Object[]{through});
+    }
+    private static void markAvailable(SQLiteDatabase db, String source, long observedAt) {
+        db.execSQL("INSERT OR IGNORE INTO source_coverage VALUES (?,'available',?,NULL)",new Object[]{source,observedAt});
+        db.execSQL("UPDATE source_coverage SET status='available',since=? WHERE source=? AND status='unknown'",new Object[]{observedAt,source});
     }
 
     private void addDaily(SQLiteDatabase db, LocalDate day, long views, long features, long ads, long duration) {
@@ -667,7 +810,7 @@ public final class LocalAnalytics implements AutoCloseable {
     private void prune(SQLiteDatabase db, LocalDate today) {
         if (today.equals(lastPrunedDay)) return;
         String cutoff = today.minusDays(RETENTION_DAYS - 1L).toString();
-        for (String table : new String[]{"daily", "hours", "work_days", "ranks"})
+        for (String table : new String[]{"daily", "hours", "work_days", "ranks", "queue_gaps"})
             db.delete(table, "day < ?", new String[]{cutoff});
         long cutoffTime = LocalDate.parse(cutoff).atStartOfDay(zone.get()).toInstant().toEpochMilli();
         db.delete("recent", "ts < ?", new String[]{Long.toString(cutoffTime)});
@@ -675,23 +818,81 @@ public final class LocalAnalytics implements AutoCloseable {
         String visitCutoff = today.minusDays(VISIT_RETENTION_DAYS - 1L).toString();
         db.delete("visits", "day < ?", new String[]{visitCutoff});
         db.delete("actions", "day < ?", new String[]{visitCutoff});
+        db.delete("flow_events", "day < ?", new String[]{visitCutoff});
         db.execSQL("DELETE FROM visit_topics WHERE token NOT IN (SELECT token FROM visits)");
         lastPrunedDay = today;
     }
 
+    static String durationBand(long duration) {
+        return duration <= 0 ? null : duration < 15000 ? "under_15s" : duration < 60000 ? "15_59s" : duration < 300000 ? "1_5m" : "5m_plus";
+    }
+    static String imageBand(Integer count) {
+        return count == null || count <= 0 ? null : count == 1 ? "1" : count <= 5 ? "2_5" : count <= 10 ? "6_10" : "11_plus";
+    }
+
+    private static void trimEvents(SQLiteDatabase db) {
+        long count = scalar(db,"SELECT (SELECT COUNT(*) FROM actions)+(SELECT COUNT(*) FROM flow_events)",null);
+        if (count <= 30000) return;
+        long excess=count-30000;
+        db.execSQL("CREATE TEMP TABLE IF NOT EXISTS discarded_events(kind INTEGER,id INTEGER,ts INTEGER,PRIMARY KEY(kind,id))");
+        db.execSQL("DELETE FROM discarded_events");
+        db.execSQL("INSERT INTO discarded_events SELECT kind,id,ts FROM (SELECT 0 AS kind,id,ts FROM actions UNION ALL SELECT 1 AS kind,id,ts FROM flow_events) ORDER BY ts,kind,id LIMIT " + excess);
+        db.execSQL("INSERT OR IGNORE INTO source_coverage VALUES ('events','unknown',0,NULL)");
+        db.execSQL("UPDATE source_coverage SET trimmed_before=MAX(COALESCE(trimmed_before,0),(SELECT MAX(ts) FROM discarded_events)) WHERE source='events'");
+        db.execSQL("DELETE FROM actions WHERE id IN (SELECT id FROM discarded_events WHERE kind=0)");
+        db.execSQL("DELETE FROM flow_events WHERE id IN (SELECT id FROM discarded_events WHERE kind=1)");
+        db.execSQL("DELETE FROM discarded_events");
+    }
+
     private static void trimVisits(SQLiteDatabase db) {
+        db.execSQL("INSERT OR IGNORE INTO source_coverage VALUES ('visits','unknown',0,NULL)");
+        db.execSQL("UPDATE source_coverage SET trimmed_before=MAX(COALESCE(trimmed_before,0),COALESCE((SELECT MAX(started) FROM visits WHERE token NOT IN (SELECT token FROM visits ORDER BY started DESC,rowid DESC LIMIT " + MAX_VISITS + ")),0)) WHERE source='visits' AND EXISTS (SELECT 1 FROM visits WHERE token NOT IN (SELECT token FROM visits ORDER BY started DESC,rowid DESC LIMIT " + MAX_VISITS + "))");
         db.execSQL("DELETE FROM visits WHERE token NOT IN (SELECT token FROM visits ORDER BY started DESC,rowid DESC LIMIT " + MAX_VISITS + ")");
         db.execSQL("DELETE FROM visit_topics WHERE token NOT IN (SELECT token FROM visits)");
     }
 
-    private void recordCollectionBoundary(long token, long timestamp, boolean value) {
-        synchronized (databaseLock) {
-            if (closed || storageEpoch != token) return;
+    private void resetPending() {
+        pendingGaps.clear();
+        pendingBoundaries.clear();
+        queueDropped.set(0);
+    }
+
+    /** Called with databaseLock. Readers and exports see loss even if no later mutation succeeded. */
+    private void flushPending(SQLiteDatabase db) {
+        Map<LocalDate,Set<String>> gaps;
+        List<long[]> boundaries;
+        long count, epoch;
+        synchronized (stateLock) {
+            if (pendingBoundaries.isEmpty() && queueDropped.get()==0) return;
+            gaps=pendingGaps; pendingGaps=new HashMap<>();
+            boundaries=pendingBoundaries; pendingBoundaries=new ArrayList<>();
+            count=queueDropped.getAndSet(0); epoch=storageEpoch;
+        }
+        try {
+            db.beginTransaction();
             try {
-                SQLiteDatabase db = openDatabase();
-                db.execSQL("INSERT OR IGNORE INTO meta(key,value) VALUES ('collection_start',?)", new Object[]{timestamp});
-                db.execSQL("INSERT INTO collection_boundaries(ts,enabled) VALUES (?,?)", new Object[]{timestamp, value ? 1 : 0});
-            } catch (Exception ignored) { failClosed(); }
+                for (long[] boundary : boundaries) {
+                    db.execSQL("INSERT OR IGNORE INTO meta(key,value) VALUES ('collection_start',?)",new Object[]{boundary[0]});
+                    db.execSQL("INSERT INTO collection_boundaries(ts,enabled) VALUES (?,?)",new Object[]{boundary[0],boundary[1]});
+                }
+                if (count>0) {
+                    db.execSQL("INSERT OR IGNORE INTO meta VALUES ('queue_dropped',0)");
+                    db.execSQL("UPDATE meta SET value=value+? WHERE key='queue_dropped'",new Object[]{count});
+                    LocalDate cutoff=today().minusDays(RETENTION_DAYS-1L);
+                    for (var day:gaps.entrySet()) if (!day.getKey().isBefore(cutoff)) for (String source:day.getValue())
+                        db.execSQL("INSERT OR IGNORE INTO queue_gaps VALUES (?,?)",new Object[]{day.getKey().toString(),source});
+                }
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+        } catch (RuntimeException failure) {
+            synchronized (stateLock) {
+                if (storageEpoch==epoch) {
+                    queueDropped.addAndGet(count);
+                    for (var day:gaps.entrySet()) pendingGaps.computeIfAbsent(day.getKey(), k->new HashSet<>()).addAll(day.getValue());
+                    pendingBoundaries.addAll(0,boundaries);
+                }
+            }
+            throw failure;
         }
     }
 
@@ -701,6 +902,7 @@ public final class LocalAnalytics implements AutoCloseable {
                 return AnalyticsSnapshot.empty();
             try {
                 SQLiteDatabase db = openDatabase();
+                flushPending(db);
                 LocalDate end = today();
                 prune(db, end);
                 LocalDate start = end.minusDays(days <= 0 ? RETENTION_DAYS - 1L
@@ -719,7 +921,14 @@ public final class LocalAnalytics implements AutoCloseable {
                         ads += cursor.getLong(3);
                     }
                 }
-                long unique = scalar(db, "SELECT COUNT(DISTINCT work_hash) FROM work_days WHERE day BETWEEN ? AND ?", range);
+                // For long windows group directly in work order; short windows keep the day index.
+                String workSource = ChronoUnit.DAYS.between(start, end) >= 90
+                        ? "work_days INDEXED BY work_history" : "work_days";
+                long unique, repeated;
+                try (Cursor c = db.rawQuery("SELECT COUNT(*),COALESCE(SUM(n>1),0) FROM (SELECT COUNT(*) AS n FROM "
+                        + workSource + " WHERE day BETWEEN ? AND ? GROUP BY work_hash)", range)) {
+                    c.moveToFirst(); unique = c.getLong(0); repeated = c.getLong(1);
+                }
                 long first = scalar(db, "SELECT value FROM meta WHERE key='first_seen'", null);
                 long[] hours = new long[24];
                 try (Cursor cursor = db.rawQuery("SELECT hour,SUM(count) FROM hours WHERE day BETWEEN ? AND ? GROUP BY hour", range)) {
@@ -738,11 +947,15 @@ public final class LocalAnalytics implements AutoCloseable {
                 int streak = 0;
                 LocalDate streakDay = activeDates.contains(end) ? end : end.minusDays(1);
                 while (activeDates.contains(streakDay)) { streak++; streakDay = streakDay.minusDays(1); }
-                if (days <= 0 && !activeDates.isEmpty()) start = Collections.min(activeDates);
+                if (days <= 0) {
+                    try (Cursor c = db.rawQuery("SELECT MIN(day) FROM (SELECT MIN(day) day FROM daily WHERE day BETWEEN ?1 AND ?2 UNION ALL SELECT MIN(day) FROM flow_events WHERE day BETWEEN ?1 AND ?2 UNION ALL SELECT MIN(day) FROM visits WHERE day BETWEEN ?1 AND ?2 UNION ALL SELECT MIN(day) FROM actions WHERE day BETWEEN ?1 AND ?2)", range)) {
+                        if (c.moveToFirst() && !c.isNull(0)) start = LocalDate.parse(c.getString(0));
+                    }
+                }
                 return new AnalyticsSnapshot(views, features, unique, ads, activeDates.size(), streak, first,
                         trend(start, end, dailyViews), ranks(db, range, "type"), ranks(db, range, "author"),
                         ranks(db, range, "topic"), ranks(db, range, "feature"), hours, recent,
-                        readPortrait(db, start, end, views, features, unique, first));
+                        readPortrait(db, start, end, views, features, unique, repeated, first));
             } catch (Exception ignored) {
                 failClosed();
                 throw new IllegalStateException("无法读取本地统计数据");
@@ -751,7 +964,7 @@ public final class LocalAnalytics implements AutoCloseable {
     }
 
     private PortraitSnapshot readPortrait(SQLiteDatabase db, LocalDate start, LocalDate end,
-            long views, long features, long unique, long firstSeen) {
+            long views, long features, long unique, long repeated, long firstSeen) {
         String[] range = {start.toString(), end.toString()};
         List<AnalyticsSnapshot.Rank> allAuthors = allRanks(db, range, "author");
         allAuthors.removeIf(rank -> "未识别作者".equals(rank.label));
@@ -803,14 +1016,10 @@ public final class LocalAnalytics implements AutoCloseable {
                 if (weekday >= 5) weekend += count;
             }
         }
-        long repeated = scalar(db, "SELECT COUNT(*) FROM (SELECT work_hash FROM work_days WHERE day BETWEEN ? AND ? GROUP BY work_hash HAVING COUNT(*)>1)", range);
         long captured = scalar(db, "SELECT COUNT(*) FROM visits WHERE day BETWEEN ? AND ?", range);
         long finished = scalar(db, "SELECT COUNT(*) FROM visits WHERE day BETWEEN ? AND ? AND ended=1", range);
         long visible = scalar(db, "SELECT COALESCE(SUM(visible_ms),0) FROM visits WHERE day BETWEEN ? AND ?", range);
-        long persistedDropped = scalar(db, "SELECT value FROM meta WHERE key='queue_dropped'", null);
-        long newDropped = queueDropped.getAndSet(0);
-        long dropped = persistedDropped + newDropped;
-        if (newDropped > 0) db.execSQL("INSERT OR REPLACE INTO meta(key,value) VALUES ('queue_dropped',?)", new Object[]{dropped});
+        long dropped = scalar(db, "SELECT value FROM meta WHERE key='queue_dropped'", null);
         long collectionStart = scalar(db, "SELECT value FROM meta WHERE key='collection_start'", null);
         long earliest = firstSeen > 0 && collectionStart > 0 ? Math.min(firstSeen, collectionStart) : Math.max(firstSeen, collectionStart);
         PortraitSnapshot.Comparison comparison = comparison(db, start, end, earliest);
@@ -845,7 +1054,7 @@ public final class LocalAnalytics implements AutoCloseable {
                 PortraitMetrics.ratio(repeated, unique), PortraitMetrics.ratio(night, views), PortraitMetrics.ratio(weekend, views),
                 comparison, week, month, PortraitMetrics.insights(views, features, unique, browseDays, allAuthors,
                         allTopics, allTypes, sources, repeated, PortraitMetrics.ratio(night, views), PortraitMetrics.ratio(weekend, views), captured, visible, comparison),
-                topicHours, typeActions, coverage, evidenceLevel);
+                topicHours, typeActions, coverage, evidenceLevel, PortraitEvidenceQuery.read(db, start, end, today()));
     }
 
     private PortraitSnapshot.Comparison comparison(SQLiteDatabase db, LocalDate start, LocalDate end, long first) {

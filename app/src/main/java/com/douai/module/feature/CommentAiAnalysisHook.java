@@ -301,6 +301,7 @@ public final class CommentAiAnalysisHook implements AutoCloseable {
             session = new Session(manager, owner, owner.generation.incrementAndGet(),
                     new CommentAiNativeStream(claimedConversationId, rank, query, "douai_comment_" + UUID.randomUUID()),
                     claimedConversationId, rank, requestEpoch);
+            session.analytics = com.douai.module.analytics.LocalAnalytics.get(applicationContext).beginOperation(source, "ai");
             owner.round = session;
             host.receive.invoke(manager, host.start.newInstance(claimedConversationId, rank, parameter));
             host.frame(manager, claimedConversationId, rank, session.stream.firstFrame());
@@ -448,6 +449,7 @@ public final class CommentAiAnalysisHook implements AutoCloseable {
                 safeLog("comment_ai_followup_plan_fallback; error=" + unavailable.getClass().getSimpleName());
             }
             ensureRecommending(session);
+            flow(session, "generated");
             CommentAiRecommendationPlan completedPlan = plan;
             onMain(() -> publishRecommendations(session, completedPlan));
             // Reuse results already fetched by the answer; only an empty set needs one extra search.
@@ -494,11 +496,13 @@ public final class CommentAiAnalysisHook implements AutoCloseable {
                     if (active == null || !belongs(active)) return;
                     Object target = active.manager.get();
                     if (target == null) return;
+                    if (active.analytics != null) active.analytics.click("followup_click");
                     try { suggestionRows.ask(target, question); }
                     catch (Exception failure) {
                         safeLog("comment_ai_followup_click_failed; error=" + failure.getClass().getSimpleName());
                     }
                 });
+                if (session.suggestions != null) flow(session, "dispatched");
                 safeLog("comment_ai_followups_dispatched; questions=" + (session.suggestions == null ? 0 : plan.questions.size())
                         + "; ui_result=unconfirmed");
             } catch (Exception failure) {
@@ -595,6 +599,7 @@ public final class CommentAiAnalysisHook implements AutoCloseable {
             int inserted = first ? videoCards.insert(session.manager.get(), session.conversationId, session.rank, batch)
                     : videoCards.append(session.manager.get(), session.conversationId, session.rank, batch);
             for (int index = 0; index < batch.size() && !session.pendingVideos.isEmpty(); index++) session.pendingVideos.removeFirst();
+            if (inserted > 0) flow(session, "dispatched");
             return inserted;
         }
     }
@@ -829,7 +834,11 @@ public final class CommentAiAnalysisHook implements AutoCloseable {
         volatile Session round;
         Conversation(String source, String modelId) { this.source = source; this.modelId = modelId; }
     }
+    private static void flow(Session session, String stage) {
+        if (session.analytics != null) session.analytics.stage(stage);
+    }
     private static final class Session {
+        com.douai.module.analytics.LocalAnalytics.FlowOperation analytics;
         final WeakReference<Object> manager;
         final Conversation owner;
         final long generation;

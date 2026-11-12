@@ -15,7 +15,7 @@ import static org.junit.Assert.*;
 @Config(manifest = Config.NONE, sdk = 35)
 public final class AnalyticsBackupTest {
     @Test public void versionAndCaptureFailuresIdentifyOnlyTheirFixedHeaderFields() throws Exception {
-        JSONObject version = payload(); version.put("version", 2);
+        JSONObject version = payload(); version.put("version", 4);
         assertDiagnostic(version, BackupValidationException.Reason.ANALYTICS_VERSION, "version");
 
         JSONObject future = payload();

@@ -28,8 +28,8 @@ import java.util.function.Consumer;
 /** All geometry and summaries are local; AI text is attached by the owning dialog. */
 final class PortraitReportViews {
     private static final int TEXT = 0xFF1F272D, MUTED = 0xFF69737A, ACCENT = 0xFF008579;
-    private static final int[] COLORS = {0xFF1683EE, 0xFF54B76A, 0xFF9869D8,
-            0xFFF5A33C, 0xFFE66C9B, 0xFF89959F, 0xFF1FA8AA, 0xFFB48B56, 0xFF65758C};
+    private static final int[] COLORS = {0xFF254763, 0xFFA74429, 0xFF5F5180, 0xFF286361,
+            0xFF85522C, 0xFF435B78, 0xFF87405E, 0xFF58603F, 0xFF586168};
     interface Host {
         LinearLayout section(String title);
         void analysis(LinearLayout section, String key);
@@ -40,16 +40,22 @@ final class PortraitReportViews {
     private final PortraitSnapshot data;
     private final Host host;
     private final boolean paper;
+    private final JournalTopicColors topicColors;
     PortraitReportViews(Context context, PortraitSnapshot data, Host host) {
         this(context, data, host, false);
     }
     private PortraitReportViews(Context context, PortraitSnapshot data, Host host, boolean paper) {
         this.context = context; this.data = data; this.host = host;
         this.paper = paper;
+        topicColors = new JournalTopicColors(data.evidence, data.topicTiles, data.comparison);
     }
     /** A fresh, noninteractive report tree; never shares a View with the dialog. */
     static void appendPaper(Context context, PortraitSnapshot data, Host host) {
         PortraitReportViews report = new PortraitReportViews(context, data, host, true);
+        if (data.evidence != null && data.evidence.hasStories()) {
+            report.journal();
+            return;
+        }
         report.overview();
         if (!data.days.isEmpty()) { report.calendar(); report.typeBands(); }
         if (!data.topicTiles.isEmpty() || data.topicCount > 0) report.topics();
@@ -60,6 +66,24 @@ final class PortraitReportViews {
         if (data.comparison != null && !data.comparison.currentStart.isEmpty()) report.comparison();
         if (!data.featureSources.isEmpty() || !data.topicHours.isEmpty() || !data.typeActions.isEmpty()
                 || data.capturedVisits > 0 || data.finishedVisits > 0 || data.visibleMillis > 0) report.associations();
+    }
+
+    /** Keep chapter order and measured series identical on the phone and on paper. */
+    void journal() {
+        PortraitStoryViews stories = new PortraitStoryViews(context, data.evidence, host, paper, topicColors);
+        stories.overview();
+        LinearLayout content = host.section("你的内容版图");
+        if (!data.topicTiles.isEmpty()) { heading(content, "话题面积 · 标签出现次数"); topics(content, true); }
+        if (!data.authorPareto.isEmpty()) { heading(content, "接触来源 · 作者累计占比"); authors(content, true); }
+        stories.content(content);
+        LinearLayout clock = host.section("一天里的节奏");
+        rhythm(clock, true);
+        JournalComparisons.rhythm(context, clock, data.weekdayHours, paper);
+        LinearLayout actions = host.section("刷到之后，你做了什么");
+        stories.actions(actions);
+        LinearLayout changes = host.section("最近为什么变了");
+        JournalComparisons.ranks(context, changes, data.comparison, paper, topicColors);
+        stories.changes(changes);
     }
 
     void overview() {
@@ -125,32 +149,38 @@ final class PortraitReportViews {
     }
 
     private void topics() {
-        LinearLayout card = host.section(paper ? "话题排行 · 你的内容地图" : "你的内容世界 · 话题地图");
+        topics(host.section(paper ? "话题排行 · 你的内容地图" : "你的内容世界 · 话题地图"), false);
+    }
+    private void topics(LinearLayout card, boolean journal) {
         if (data.topicTiles.isEmpty()) add(card, "暂无可识别话题，不能据此判断兴趣是否广泛。", 14, MUTED, false);
         else {
-            TextView selected = add(card, paper ? "面积代表话题出现次数，完整名称与次数列于图下" : "面积代表话题出现次数，点选色块查看完整名称", 13, MUTED, false);
-            selected.setTag("analytics.portrait.topics.selection");
-            chart(card, new TopicChart(context, data.topicTiles, value -> select(selected, value)), "topics", 230);
+            LinearLayout figure = paperFigure(card);
+            TextView selected = add(figure, paper ? "面积代表话题出现次数，完整名称与次数列于图下" : "面积代表话题出现次数，点选色块查看完整名称", 13, MUTED, false);
+            selected.setTag(journal ? "analytics.journal.topics.selection" : "analytics.portrait.topics.selection");
+            chart(figure, new TopicChart(context, data.topicTiles, topicColors, value -> select(selected, value)), journal ? "journal.topics" : "topics", 175);
             for (int index = 0; index < data.topicTiles.size(); index++) {
                 Rank rank = data.topicTiles.get(index);
-                legend(card, rank.label + " · " + number(rank.count) + " 次", COLORS[index % COLORS.length]);
+                legend(index == 0 ? figure : card, rank.label + " · " + number(rank.count) + " 次", topicColors.color(rank.label, !paper && ModuleTheme.isDark(context)));
             }
         }
         add(card, "识别到 " + number(data.topicCount) + " 个话题，共 " + number(data.topicOccurrences)
                 + " 次标签出现。一个作品可能有多个话题；标签不是独立作品，也不是使用者自述兴趣。", 13, MUTED, false);
-        host.analysis(card, "topics");
+        if (!journal) host.analysis(card, "topics");
     }
 
     private void authors() {
-        LinearLayout card = host.section(paper ? "作者排行 · 接触来源曲线" : "接触来源 · 作者集中曲线");
+        authors(host.section(paper ? "作者排行 · 接触来源曲线" : "接触来源 · 作者集中曲线"), false);
+    }
+    private void authors(LinearLayout card, boolean journal) {
         if (data.authorPareto.isEmpty()) add(card, "暂无可识别作者，暂不能描述接触来源。", 14, MUTED, false);
         else {
-            TextView selected = add(card, "按出现次数排序，曲线表示累计占比", 13, MUTED, false);
-            selected.setTag("analytics.portrait.authors.selection");
-            chart(card, new AuthorChart(context, data.authorPareto, value -> select(selected, value)), "authors", 185);
+            LinearLayout figure = paperFigure(card);
+            TextView selected = add(figure, "按出现次数排序，曲线表示累计占比", 13, MUTED, false);
+            selected.setTag(journal ? "analytics.journal.authors.selection" : "analytics.portrait.authors.selection");
+            chart(figure, new AuthorChart(context, data.authorPareto, value -> select(selected, value)), journal ? "journal.authors" : "authors", 165);
             for (int index = 0; index < data.authorPareto.size(); index++) {
                 Rank rank = data.authorPareto.get(index);
-                add(card, (index + 1) + "  " + rank.label + " · " + number(rank.count) + " 次", 13, MUTED, false);
+                add(index == 0 ? figure : card, (index + 1) + "  " + rank.label + " · " + number(rank.count) + " 次", 13, MUTED, false);
             }
         }
         add(card, "共接触 " + number(data.authorCount) + " 位可识别作者。跨日再次遇见的作品占比 "
@@ -159,10 +189,12 @@ final class PortraitReportViews {
     }
 
     private void rhythm() {
-        LinearLayout card = host.section("一周节奏 · 星期 × 小时");
+        rhythm(host.section("一周节奏 · 星期 × 小时"), false);
+    }
+    private void rhythm(LinearLayout card, boolean journal) {
         TextView selected = add(card, paper ? "颜色深浅表示各星期、小时的记录次数" : "点选格子查看次数；辅助功能点击可依次查看", 13, MUTED, false);
-        selected.setTag("analytics.portrait.rhythm.selection");
-        chart(card, new RhythmChart(context, data.weekdayHours, value -> select(selected, value)), "rhythm", 220);
+        selected.setTag(journal ? "analytics.journal.rhythm.selection" : "analytics.portrait.rhythm.selection");
+        chart(card, new RhythmChart(context, data.weekdayHours, value -> select(selected, value)), journal ? "journal.rhythm" : "rhythm", 220);
         add(card, "按事件发生时的本地时间统计。夜间（0—5 时）占 " + pct(data.nightShare)
                 + "，周末占 " + pct(data.weekendShare)
                 + "。所选范围的工作日和周末天数可能不同；不代表睡眠或生活作息。", 13, MUTED, false);
@@ -266,6 +298,11 @@ final class PortraitReportViews {
         }
     }
 
+    private LinearLayout paperFigure(LinearLayout card) {
+        if (!paper) return card;
+        LinearLayout figure = new LinearLayout(context); figure.setOrientation(LinearLayout.VERTICAL);
+        figure.setTag("report.keepTogether"); card.addView(figure, -1, -2); return figure;
+    }
     private void legend(LinearLayout card, String text, int color) {
         LinearLayout row = new LinearLayout(context);
         row.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -496,7 +533,8 @@ final class PortraitReportViews {
 
     private static final class TopicChart extends Chart {
         final List<Rank> ranks;
-        TopicChart(Context context, List<Rank> ranks, Consumer<String> selection) { super(context, selection); this.ranks = ranks; }
+        final JournalTopicColors colors;
+        TopicChart(Context context, List<Rank> ranks, JournalTopicColors colors, Consumer<String> selection) { super(context, selection); this.ranks = ranks; this.colors = colors; }
         @Override void drawChart(Canvas canvas) {
             hits.clear(); long remaining = total(ranks); RectF available = new RectF(0, d(6), getWidth(), getHeight() - d(6));
             for (int index = 0; index < ranks.size(); index++) {
@@ -505,13 +543,15 @@ final class PortraitReportViews {
                 if (available.width() >= available.height()) { tile.right = tile.left + available.width() * fraction; available.left = tile.right; }
                 else { tile.bottom = tile.top + available.height() * fraction; available.top = tile.bottom; }
                 remaining -= rank.count; RectF paintBounds = new RectF(tile); paintBounds.inset(d(1.5f), d(1.5f));
-                if (paintBounds.width() > 0 && paintBounds.height() > 0) box(canvas, paintBounds, COLORS[index % COLORS.length]);
+                boolean dark = !paper && ModuleTheme.isDark(getContext());
+                int tileInk = dark ? 0xFF14243B : Color.WHITE;
+                if (paintBounds.width() > 0 && paintBounds.height() > 0) box(canvas, paintBounds, colors.color(rank.label, dark));
                 canvas.save(); canvas.clipRect(tile);
                 paint.setTextSize(11 * getResources().getDisplayMetrics().scaledDensity);
                 String label = rank.label; while (label.length() > 1 && paint.measureText(label) > tile.width() - d(10)) label = label.substring(0, label.length() - 1);
                 if (!label.equals(rank.label) && label.length() > 1) label = label.substring(0, label.length() - 1) + "…";
-                if (tile.width() > d(28) && tile.height() > d(24)) label(canvas, label, tile.centerX(), tile.centerY(), Color.WHITE, 11, Paint.Align.CENTER);
-                if (tile.height() > d(46) && tile.width() > d(34)) label(canvas, number(rank.count), tile.centerX(), tile.centerY() + d(16), Color.WHITE, 11, Paint.Align.CENTER);
+                if (tile.width() > d(28) && tile.height() > d(24)) label(canvas, label, tile.centerX(), tile.centerY(), tileInk, 11, Paint.Align.CENTER);
+                if (tile.height() > d(46) && tile.width() > d(34)) label(canvas, number(rank.count), tile.centerX(), tile.centerY() + d(16), tileInk, 11, Paint.Align.CENTER);
                 canvas.restore(); hit(tile, rank.label + " · " + number(rank.count) + " 次标签出现");
             }
             describe("话题矩形树图");
@@ -533,7 +573,7 @@ final class PortraitReportViews {
                 Rank rank = ranks.get(index); accumulated += rank.count;
                 float x = left + width * (index + 1) / Math.max(1, ranks.size()), y = bottom - (bottom - top) * accumulated / Math.max(1, total);
                 paint.setColor(COLORS[0]); paint.setStrokeWidth(d(2.5f)); canvas.drawLine(lastX, lastY, x, y, paint); canvas.drawCircle(x, y, d(4), paint);
-                label(canvas, String.valueOf(index + 1), x, bottom + d(18), MUTED, 10, Paint.Align.CENTER);
+                label(canvas, (index == 8 && rank.label.startsWith("其他（")) ? "其余" : String.valueOf(index + 1), x, bottom + d(18), MUTED, 10, Paint.Align.CENTER);
                 hit(new RectF(x - d(10), top, x + d(10), bottom), rank.label + " · " + number(rank.count) + " 次 · 累计 " + pct(accumulated / (double) Math.max(1, total)));
                 lastX = x; lastY = y;
             }

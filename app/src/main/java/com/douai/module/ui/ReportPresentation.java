@@ -36,17 +36,17 @@ final class ReportPresentation {
         configuration.densityDpi = 160; configuration.fontScale = 1f;
         configuration.uiMode = (configuration.uiMode & ~Configuration.UI_MODE_NIGHT_MASK) | Configuration.UI_MODE_NIGHT_NO;
         ReportPresentation report = new ReportPresentation(owner.createConfigurationContext(configuration));
-        report.cover(range, generatedAt);
+        boolean journal = data.portrait.evidence.hasStories();
+        if (!journal) report.cover(range, generatedAt);
+        if (journal) report.small(report.paper, range + "  ·  生成于 " + date(generatedAt, "yyyy-MM-dd HH:mm"));
+        if (journal) report.portrait(data);
         report.metrics(data);
-        LinearLayout scope = report.section("记录概览", "本地统计 · 已记录事件");
-        report.body(scope, "浏览次数表示已接入的内容接触，独立作品按本地标识去重；功能次数表示触发，不等于请求成功。");
+        LinearLayout scope = report.section("记录概览", "已记录事件");
+        report.body(scope, "刷到次数包括再次遇见同一作品；独立作品按标识去重。模块功能次数按已接入的触发统计。");
         if (data.advertisementViews > 0) report.body(scope, "其中广告接触 " + number(data.advertisementViews) + " 次。");
-        if (data.totalViews == 0 && data.totalFeatureUses == 0) report.body(scope, "当前范围暂无保留记录。空白不代表没有使用。");
-        PortraitReportViews.appendPaper(report.context, data.portrait, new PortraitReportViews.Host() {
-                @Override public LinearLayout section(String title) { return report.section(title, "本地统计 · 图表与依据"); }
-                @Override public void analysis(LinearLayout section, String key) { /* One complete AI section follows. */ }
-        });
-        if (data.portrait.days.isEmpty()) {
+        if (!journal && data.totalViews == 0 && data.totalFeatureUses == 0) report.body(scope, "当前范围暂无保留记录。空白不代表没有使用。");
+        if (!journal) report.portrait(data);
+        if (!journal && data.portrait.days.isEmpty()) {
             LinearLayout trend = report.section("浏览趋势", "本地统计 · 按日期汇总");
             if (data.trend.isEmpty()) report.body(trend, "暂无趋势记录。");
             else {
@@ -82,6 +82,20 @@ final class ReportPresentation {
         report.small(boundary, "分享前请核对作者、话题、最近记录和 AI 文字；AI 可能引用已提供的使用目的或自述。报告不附加数据库、接口配置或密钥。");
         report.small(report.paper, "DOUAI  /  LOCAL REPORT     ·     " + range);
         return report.paper;
+    }
+
+    private void portrait(AnalyticsSnapshot data) {
+        PortraitReportViews.appendPaper(context, data.portrait, new PortraitReportViews.Host() {
+            @Override public LinearLayout section(String title) {
+                if ("这段时间的发现".equals(title)) {
+                    LinearLayout cover = column();
+                    paper.addView(cover, wrap());
+                    return cover;
+                }
+                return ReportPresentation.this.section(title, "本地数据");
+            }
+            @Override public void analysis(LinearLayout section, String key) { /* Render once in the AI chapter. */ }
+        });
     }
 
     private ReportPresentation(Context context) {
@@ -122,7 +136,7 @@ final class ReportPresentation {
     private LinearLayout section(String title, String source) {
         LinearLayout block = column(); LinearLayout.LayoutParams params = wrap(); params.topMargin = 25;
         paper.addView(block, params);
-        LinearLayout heading = column(); heading.setTag("report.keepTogether");
+        LinearLayout heading = column(); heading.setTag("report.keepWithNext");
         TextView index = text(String.format(Locale.ROOT, "%02d  /  %s", ++sectionNumber, source), 10, TEAL, true);
         index.setLetterSpacing(.04f); heading.addView(index, wrap());
         TextView name = text(title, 20, INK, true); name.setPadding(0, 5, 0, 10); heading.addView(name, wrap());

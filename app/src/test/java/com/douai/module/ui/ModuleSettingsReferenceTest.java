@@ -23,7 +23,6 @@ import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.feature.FollowListPager;
-import com.douai.module.feature.DownloadTasks;
 import com.douai.module.feature.FollowListSnapshot;
 import com.douai.module.feature.NativeFollowLists;
 import com.douai.module.feature.NativeMessagingHooks;
@@ -2274,9 +2273,14 @@ public final class ModuleSettingsReferenceTest {
         assertFalse(automation.isShowing());
     }
 
-    @Test public void downloadTasksNavigationClosesWithItsParentAndDoesNotChangeSettings() {
+    @Test public void downloadTasksNavigationClosesWithItsParentAndDoesNotChangeSettings() throws Exception {
+        // Full-suite download fixtures retain up to 50 terminal tasks; this case owns an empty-history fixture.
+        assertFalse(com.douai.module.feature.DownloadTasks.snapshots().stream().anyMatch(t -> t.cancellable));
+        java.lang.reflect.Field tasksField = com.douai.module.feature.DownloadTasks.class.getDeclaredField("TASKS");
+        tasksField.setAccessible(true);
+        Map<?, ?> retainedTasks = (Map<?, ?>) tasksField.get(null);
+        synchronized (retainedTasks) { retainedTasks.clear(); }
         Map<String, Object> original = new HashMap<>(store.values);
-        List<DownloadTasks.Snapshot> downloads = DownloadTasks.snapshots();
         View page = openCategory("DOWNLOAD");
         Dialog category = ShadowDialog.getLatestDialog();
         option(page, "下载任务").performClick();
@@ -2291,17 +2295,10 @@ public final class ModuleSettingsReferenceTest {
         tasksRoot.layout(0, 0, tasksRoot.getMeasuredWidth(), tasksRoot.getMeasuredHeight());
         ListView tasksList = tasksRoot.findViewWithTag("download.tasks");
         assertNotNull(tasksList);
-        assertEquals(Math.max(1, downloads.size()), tasksList.getAdapter().getCount());
-        if (downloads.isEmpty()) {
-            assertNull(tasksList.getAdapter().getItem(0));
-            assertNotNull(tasksList.findViewWithTag("download.tasks.empty"));
-            assertTrue(containsText(tasksRoot, "暂无下载任务"));
-        } else {
-            for (int index = 0; index < downloads.size(); index++) {
-                DownloadTasks.Snapshot shown = (DownloadTasks.Snapshot) tasksList.getAdapter().getItem(index);
-                assertEquals(downloads.get(index).id, shown.id);
-            }
-        }
+        assertEquals(1, tasksList.getAdapter().getCount());
+        assertNull(tasksList.getAdapter().getItem(0));
+        assertNotNull(tasksList.findViewWithTag("download.tasks.empty"));
+        assertTrue(containsText(tasksRoot, "暂无下载任务"));
         category.dismiss();
         ShadowLooper.idleMainLooper();
         assertFalse(tasks.isShowing());

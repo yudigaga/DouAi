@@ -55,6 +55,14 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     private volatile LocalOptions options;
     private volatile long generation;
     private volatile boolean closed;
+    private com.douai.module.analytics.LocalAnalytics.FlowOperation playbackFlow;
+    private String playbackState;
+    private int playbackSequence;
+    private com.douai.module.analytics.LocalAnalytics.FlowOperation backwardFlow;
+    private WeakReference<Object> backwardPager = new WeakReference<>(null);
+    private int backwardStart = -1;
+    private long backwardUntil;
+    private boolean backwardArmed;
     private volatile String selectedAid;
     private volatile boolean paused;
     private boolean attempted;
@@ -190,6 +198,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             for (Method target : new Method[]{playing, playerPause}) {
                 boolean isPause = target == playerPause;
                 hook.group.add(framework, target, chain -> {
+                    com.douai.module.analytics.LocalAnalytics.FlowOperation observedFlow = installed.playbackFlow;
                     Object result = chain.proceed();
                     String aid = (String) chain.getArg(0);
                     installed.onMain(() -> {
@@ -199,6 +208,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                             if (aid.equals(installed.selectedAid)) installed.releaseTransitionAfterPlayback(aid);
                         }
                         if (aid != null && aid.equals(installed.selectedAid)) {
+                            if (observedFlow == installed.playbackFlow) installed.observePlayback(isPause ? "paused" : "playing");
                             installed.paused = isPause;
                             if (isPause) {
                                 installed.generation++;
@@ -278,7 +288,17 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             selectedHolder = new WeakReference<>(holder);
             selectedRoot = new WeakReference<>(root);
             selectedAid = aid;
-            if (!sameSelection) paused = false;
+            if (!sameSelection) {
+                paused = false;
+                playbackFlow = com.douai.module.analytics.LocalAnalytics.get(application).beginOperation(aid,"playback");
+                playbackState = null; playbackSequence = 0;
+                Object gesturePager = backwardPager.get();
+                Object index = gesturePager == null ? null : HostTargets.invoke(gesturePager,"getCurrentItem");
+                if (backwardArmed && backwardFlow != null && gesturePager == pagerField.get(panel)
+                        && android.os.SystemClock.elapsedRealtime() <= backwardUntil
+                        && index instanceof Number && ((Number)index).intValue() == backwardStart - 1) backwardFlow.stage("confirmed");
+                backwardArmed = false;
+            }
             if (aid.equals(transitionPlayingAid)) releaseTransitionAfterPlayback(aid);
             if (root.hasWindowFocus()) resumed = new WeakReference<>(activity);
         } catch (ReflectiveOperationException | RuntimeException failure) { fail(failure); }
@@ -411,6 +431,11 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                 dismissTransitionFrame(false);
                 Object panel = panel();
                 if (panel == null || pagerField.get(panel) != pager || activeRoot() == null) return;
+                backwardArmed = false;
+                Object startIndex = HostTargets.invoke(pager,"getCurrentItem");
+                backwardStart = startIndex instanceof Number ? ((Number)startIndex).intValue() : -1;
+                backwardPager = new WeakReference<>(pager);
+                backwardFlow = com.douai.module.analytics.LocalAnalytics.get(application).beginOperation(selectedAid,"backward");
                 touching = true;
                 multiTouch = false;
                 touchPager = new WeakReference<>(pager);
@@ -424,6 +449,8 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                         int slop = ViewConfiguration.get(((View) pager).getContext()).getScaledTouchSlop();
                         int swipe = manualDirection(downX, downY, event.getRawX(), event.getRawY(), slop);
                         if (swipe != 0) {
+                            backwardArmed = swipe < 0 && backwardStart > 0;
+                            backwardUntil = android.os.SystemClock.elapsedRealtime() + 1500;
                             direction = swipe;
                             safeLog("DouAi auto-slide manual direction=" + (swipe > 0 ? "UP" : "DOWN"));
                         }
@@ -445,7 +472,15 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         return dy < 0 ? 1 : -1;
     }
 
+    private void observePlayback(String state) {
+        if (!state.equals(playbackState)) {
+            playbackState = state;
+            if (playbackFlow != null) playbackFlow.stage(state, ++playbackSequence);
+        }
+    }
+
     private void complete(String aid, long token) {
+        if (token == generation && aid != null && aid.equals(selectedAid)) observePlayback("ended");
         ExtendedSettings current = settings;
         View root = activeRoot();
         if (closed || !group.isActive() || current == null || !current.autoPlay) {
@@ -669,6 +704,8 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     }
 
     private void clearSelection() {
+        backwardArmed = false; backwardFlow = null; backwardPager.clear();
+        playbackFlow = null; playbackState = null;
         generation++;
         pendingAdvance = false;
         dismissTransitionFrame(false);

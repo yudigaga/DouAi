@@ -98,9 +98,9 @@ final class ReportImageExport {
 
     private static void collectBlocks(View view, int top, int maxHeight, List<int[]> blocks) {
         if (view.getVisibility() != View.VISIBLE) return;
-        if (isHeading(view) && view.getHeight() <= maxHeight) {
+        if (("report.keepTogether".equals(view.getTag()) || isHeading(view)) && view.getHeight() <= maxHeight) {
             blocks.add(new int[]{top, top + view.getHeight()});
-            int end = headingContentEnd(view, top, maxHeight);
+            int end = isHeading(view) ? headingContentEnd(view, top, maxHeight) : top + view.getHeight();
             if (end > top + view.getHeight() && end - top <= maxHeight) blocks.add(new int[]{top, end});
         }
         if (view instanceof TextView && ((TextView) view).getLayout() != null) {
@@ -122,7 +122,7 @@ final class ReportImageExport {
     }
 
     private static boolean isHeading(View view) {
-        return "report.keepTogether".equals(view.getTag()) || "report.keepWithNext".equals(view.getTag());
+        return "report.keepWithNext".equals(view.getTag());
     }
 
     /** Keep a heading with two real text lines, or with its short captions and first fitting chart. */

@@ -94,8 +94,11 @@ final class AiSearchVideoCards implements AutoCloseable {
     }
 
     Group group(List<DouyinSearch.Result> results, DouyinSearch bridge) {
+        return group(results,bridge,com.douai.module.analytics.LocalAnalytics.get(context).beginOperation(null,"ai"));
+    }
+    Group group(List<DouyinSearch.Result> results, DouyinSearch bridge, com.douai.module.analytics.LocalAnalytics.FlowOperation analytics) {
         if (closed) return null;
-        Group group = new Group(snapshot(results), bridge);
+        Group group = new Group(snapshot(results), bridge, analytics);
         if (group.items.isEmpty()) return null;
         groups.add(group);
         return group;
@@ -105,17 +108,19 @@ final class AiSearchVideoCards implements AutoCloseable {
         container.removeAllViews();
         container.setVisibility(group == null || group.closed || group.items.isEmpty() ? View.GONE : View.VISIBLE);
         if (group == null || group.closed) return;
-        for (int index = 0; index < Math.min(2, group.items.size()); index++) container.addView(card(group.items.get(index)));
+        flow(group.analytics,"dispatched");
+        for (int index = 0; index < Math.min(2, group.items.size()); index++) container.addView(card(group.items.get(index), group.analytics));
         TextView more = text("更多视频", 14, 0xFF00776C);
         more.setTag("ai.chat.videos.more");
         more.setMinHeight(dp(44));
         more.setGravity(Gravity.CENTER_VERTICAL);
-        more.setOnClickListener(view -> group.show());
+        more.setOnClickListener(view -> { if(closed || group.closed)return; if(group.analytics!=null)group.analytics.click("more_click"); group.show(); });
         container.addView(more);
     }
 
     final class Group implements AutoCloseable {
         private final List<DouyinSearch.Item> items = new ArrayList<>();
+        private final com.douai.module.analytics.LocalAnalytics.FlowOperation analytics;
         private final List<Page> sources = new ArrayList<>();
         private final Set<String> seen = new HashSet<>();
         private final DouyinSearch bridge;
@@ -127,8 +132,10 @@ final class AiSearchVideoCards implements AutoCloseable {
         private boolean loading;
         private volatile boolean closed;
         private volatile int generation;
-        Group(List<DouyinSearch.Result> results, DouyinSearch bridge) {
+        Group(List<DouyinSearch.Result> results, DouyinSearch bridge, com.douai.module.analytics.LocalAnalytics.FlowOperation frozenAnalytics) {
             this.bridge = bridge;
+            analytics = frozenAnalytics;
+            // Group creation can restore cached results, so it is not generation evidence.
             for (DouyinSearch.Result result : results) {
                 sources.add(new Page(result));
                 add(result.items);
@@ -163,13 +170,13 @@ final class AiSearchVideoCards implements AutoCloseable {
             footer = text("", 14, 0xFF69737A);
             footer.setGravity(Gravity.CENTER);
             footer.setMinHeight(dp(48));
-            footer.setOnClickListener(view -> loadMore());
+            footer.setOnClickListener(view -> { if(closed || AiSearchVideoCards.this.closed)return; if(analytics!=null)analytics.click("more_click"); loadMore(); });
             list.addFooterView(footer);
             adapter = new BaseAdapter() {
                 @Override public int getCount() { return items.size(); }
                 @Override public Object getItem(int position) { return items.get(position); }
                 @Override public long getItemId(int position) { return position; }
-                @Override public View getView(int position, View recycled, ViewGroup parent) { return card(items.get(position)); }
+                @Override public View getView(int position, View recycled, ViewGroup parent) { return card(items.get(position), analytics); }
             };
             list.setAdapter(adapter);
             list.setOnScrollListener(new AbsListView.OnScrollListener() {
@@ -274,7 +281,7 @@ final class AiSearchVideoCards implements AutoCloseable {
         }
     }
 
-    private View card(DouyinSearch.Item item) {
+    private View card(DouyinSearch.Item item, com.douai.module.analytics.LocalAnalytics.FlowOperation analytics) {
         LinearLayout row = new LinearLayout(context);
         row.setTag("ai.chat.video.card");
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -299,14 +306,15 @@ final class AiSearchVideoCards implements AutoCloseable {
         params.setMarginStart(dp(10));
         row.addView(detail, params);
         if (numericId(item.awemeId) || !share(item.shareUrl).isEmpty()) {
-            row.setOnClickListener(view -> open(item));
+            row.setOnClickListener(view -> { if(closed)return; open(item,analytics==null?null:analytics.click("video_click")); });
             row.setFocusable(true);
             row.setContentDescription((item.title.isEmpty() ? "视频" : item.title) + "，点击播放");
         }
         return row;
     }
 
-    private void open(DouyinSearch.Item item) {
+    private static void flow(com.douai.module.analytics.LocalAnalytics.FlowOperation operation,String stage) { if(operation!=null)operation.stage(stage); }
+    private void open(DouyinSearch.Item item, com.douai.module.analytics.LocalAnalytics.Click click) {
         if (closed) return;
         try {
             if (numericId(item.awemeId)) {
@@ -317,6 +325,7 @@ final class AiSearchVideoCards implements AutoCloseable {
                     Object route = router.getMethod("buildRoute", Context.class, String.class)
                             .invoke(null, context, "aweme://aweme/detail/" + item.awemeId);
                     route.getClass().getMethod("open").invoke(route);
+                    if (click != null) click.dispatched();
                     return;
                 } catch (ReflectiveOperationException | LinkageError unavailable) { }
             }
@@ -325,6 +334,7 @@ final class AiSearchVideoCards implements AutoCloseable {
             Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             context.startActivity(intent);
+            if (click != null) click.dispatched();
         } catch (RuntimeException failure) {
             Toast.makeText(context, "暂时无法打开视频，请稍后重试", Toast.LENGTH_SHORT).show();
         }

@@ -115,7 +115,7 @@ public final class ConfigTransferDiagnosticsTest {
     }
 
     @Test public void analyticsVersionIdentifiesTheAnalyticsVersionField() throws Exception {
-        JSONObject bundle = bundle(); bundle.getJSONObject("analytics").put("version", 2);
+        JSONObject bundle = bundle(); bundle.getJSONObject("analytics").put("version", 4);
         inspect(bundle.toString());
         assertDiagnostic("ANALYTICS", "ANALYTICS_VERSION", "version");
         assertSafe();

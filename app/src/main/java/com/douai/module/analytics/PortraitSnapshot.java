@@ -24,6 +24,7 @@ public final class PortraitSnapshot {
     public final List<Joint> topicHours, typeActions;
     public final List<String> coverage;
     public final String evidenceLevel;
+    public final PortraitEvidence evidence;
 
     public PortraitSnapshot(String startDate, String endDate, List<Day> days, long[][] weekdayHours,
             List<AnalyticsSnapshot.Rank> topicTiles, List<AnalyticsSnapshot.Rank> authorPareto,
@@ -34,6 +35,18 @@ public final class PortraitSnapshot {
             double weekendShare, Comparison comparison, Comparison weekComparison, Comparison monthComparison,
             List<Insight> insights, List<Joint> topicHours, List<Joint> typeActions, List<String> coverage,
             String evidenceLevel) {
+        this(startDate, endDate, days, weekdayHours, topicTiles, authorPareto, featureSources, browseDays, authorCount, topicCount, topicOccurrences, repeatedWorks, capturedVisits, finishedVisits, visibleMillis, queueDropped, authorDiversity, topicDiversity, topAuthorShare, topTopicShare, crossDayRepeatShare, nightShare, weekendShare, comparison, weekComparison, monthComparison, insights, topicHours, typeActions, coverage, evidenceLevel, PortraitEvidence.empty(startDate, endDate));
+    }
+
+    public PortraitSnapshot(String startDate, String endDate, List<Day> days, long[][] weekdayHours,
+            List<AnalyticsSnapshot.Rank> topicTiles, List<AnalyticsSnapshot.Rank> authorPareto,
+            List<AnalyticsSnapshot.Rank> featureSources, int browseDays, int authorCount, int topicCount,
+            long topicOccurrences, long repeatedWorks, long capturedVisits, long finishedVisits,
+            long visibleMillis, long queueDropped, double authorDiversity, double topicDiversity,
+            double topAuthorShare, double topTopicShare, double crossDayRepeatShare, double nightShare,
+            double weekendShare, Comparison comparison, Comparison weekComparison, Comparison monthComparison,
+            List<Insight> insights, List<Joint> topicHours, List<Joint> typeActions, List<String> coverage,
+            String evidenceLevel, PortraitEvidence evidence) {
         this.startDate = startDate; this.endDate = endDate; this.days = immutable(days);
         this.weekdayHours = new long[7][24];
         for (int d = 0; d < Math.min(7, weekdayHours.length); d++)
@@ -49,6 +62,7 @@ public final class PortraitSnapshot {
         this.comparison = comparison; this.weekComparison = weekComparison; this.monthComparison = monthComparison;
         this.insights = immutable(insights); this.topicHours = immutable(topicHours); this.typeActions = immutable(typeActions);
         this.coverage = immutable(coverage); this.evidenceLevel = evidenceLevel;
+        this.evidence = evidence;
     }
 
     public static PortraitSnapshot empty() {

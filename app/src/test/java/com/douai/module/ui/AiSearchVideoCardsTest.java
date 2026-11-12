@@ -23,7 +23,17 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class AiSearchVideoCardsTest {
-    @Test public void aReboundFailedCoverStillOffersManualRetryAndCanRecover() {
+    @Test public void explicitNullAttributionNeverCapturesTheCurrentGeneration() throws Exception {
+        Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
+        com.douai.module.analytics.LocalAnalytics store=com.douai.module.analytics.LocalAnalytics.get(activity);
+        boolean before=store.isEnabled();store.setEnabled(true);
+        ManualExecutor worker=new ManualExecutor();AiSearchVideoCards cards=new AiSearchVideoCards(activity,worker,worker);
+        try {
+            AiSearchVideoCards.Group group=cards.group(List.of(new DouyinSearch.Result("q",List.of(item("1","video")))),null,null);
+            java.lang.reflect.Field attribution=group.getClass().getDeclaredField("analytics");attribution.setAccessible(true);
+            assertNull(attribution.get(group));
+        } finally {cards.close();store.setEnabled(before);activity.finish();}
+    }    @Test public void aReboundFailedCoverStillOffersManualRetryAndCanRecover() {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         ManualExecutor worker = new ManualExecutor();
         boolean[] available = {false};

@@ -166,7 +166,7 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
             discardCandidate();
             String token = analytics.beginVisit(recordingGeneration, metadata.id, metadata.type, metadata.authorId,
                     metadata.authorName, metadata.topics, metadata.advertisement, metadata.duration,
-                    resumedSegment ? "unknown" : LocalAnalytics.consumeAdvanceSource());
+                    resumedSegment ? "unknown" : LocalAnalytics.consumeAdvanceSource(), metadata.imageCount);
             if (token == null) return;
             currentVisit = new Visit(analytics, recordingGeneration, token, expectedId, holder, rootField, aweme);
             currentVisit.operation.stage("visible_visit", "work_ref=" + DouAiLog.reference(expectedId)

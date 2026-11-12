@@ -679,7 +679,7 @@ final class AiTestChatDialog extends Dialog {
         int ticket = ++generation;
         Session active = session;
         Future<?> clearBarrier = historyClear;
-        RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, selected, answer);
+        RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, selected, answer, com.douai.module.analytics.LocalAnalytics.get(getContext()).beginOperation(null,"ai"));
         pending = turn;
         busy = true;
         state.setText(answer.text);
@@ -850,7 +850,7 @@ final class AiTestChatDialog extends Dialog {
         if (failure == null) {
             answer.text = reply;
             answer.color = TEXT;
-            answer.videos = turn.stopRequested ? null : searchVideoCards.group(turn.searchResults, turn.searchBridge);
+            answer.videos = turn.stopRequested ? null : searchVideoCards.group(turn.searchResults, turn.searchBridge, turn.analytics);
             state.setText("");
         } else {
             answer.text = turn.stopRequested ? "已停止" : turn.reading
@@ -1331,6 +1331,7 @@ final class AiTestChatDialog extends Dialog {
 
     private static final class RequestTurn {
         final DouAiLog.Operation trace = DouAiLog.begin("ai_chat", "send_or_retry");
+        final com.douai.module.analytics.LocalAnalytics.FlowOperation analytics;
         final int ticket;
         final String prompt;
         final List<ChatImage> images;
@@ -1348,7 +1349,8 @@ final class AiTestChatDialog extends Dialog {
         DouyinSearch searchBridge;
 
         RequestTurn(int ticket, String prompt, List<ChatImage> images, List<Document> documents,
-                    List<PendingAttachment> attachments, ChatMessage answer) {
+                    List<PendingAttachment> attachments, ChatMessage answer, com.douai.module.analytics.LocalAnalytics.FlowOperation analytics) {
+            this.analytics=analytics;
             this.ticket = ticket;
             this.prompt = prompt;
             this.images = images;

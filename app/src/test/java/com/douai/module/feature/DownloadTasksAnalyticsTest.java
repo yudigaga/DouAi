@@ -79,6 +79,24 @@ public final class DownloadTasksAnalyticsTest {
         assertEquals("a bundle is one task, not five feature actions", 1, store.snapshot(0).totalFeatureUses);
     }
 
+    @Test public void outputEvidenceRequiresClosedWriteAndFreezesOriginalOperation() {
+        String original = store.beginVisit(store.generation(), "original", "image", null, "", List.of(), false, 0, "unknown");
+        LocalAnalytics.FlowOperation flow = store.beginOperation("original", "download");
+        DownloadTasks.Task first = task("media\nflow1"); first.transfer.analytics = flow; first.transfer.analyticsTask = 1;
+        DownloadTasks.Task second = task("media\nflow2"); second.transfer.analytics = flow; second.transfer.analyticsTask = 2;
+        store.beginVisit(store.generation(), "later", "image", null, "", List.of(), false, 0, "unknown");
+        first.run(t -> { t.saved("fixture","private-path",10); t.saved("fixture","other-path",10);return "saved"; }); first.released();
+        second.run(t -> "completed without write");second.released();
+        store.snapshot(0);
+        java.io.File file = new java.io.File(RuntimeEnvironment.getApplication().getNoBackupFilesDir(),"douai-analytics/usage.db");
+        try(android.database.sqlite.SQLiteDatabase db=android.database.sqlite.SQLiteDatabase.openDatabase(file.getPath(),null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY);
+            android.database.Cursor c=db.rawQuery("SELECT token,stage,task FROM flow_events ORDER BY id",null)) {
+            int outputs=0, ends=0;
+            while(c.moveToNext()) { assertEquals(original,c.getString(0)); if(c.getString(1).equals("output_closed")) { outputs++;assertEquals(1,c.getInt(2)); } if(c.getString(1).equals("task_end")) ends++; }
+            assertEquals(1,outputs);assertEquals(2,ends);
+        }
+    }
+
     private static DownloadTasks.Task task(String key) {
         return new DownloadTasks.Task(RuntimeEnvironment.getApplication(), key, "fixture", null, "失败");
     }

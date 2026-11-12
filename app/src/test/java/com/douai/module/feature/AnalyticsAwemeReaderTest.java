@@ -55,7 +55,10 @@ public final class AnalyticsAwemeReaderTest {
         assertNull(AnalyticsAwemeReader.read(Map.of("duration", 1)));
         assertNull(AnalyticsAwemeReader.read(null));
         assertTrue(read(Map.of("author", Map.of("isAdFake", true))).advertisement);
-        assertFalse(read(Map.of()).advertisement);
+        assertNull(read(Map.of()).advertisement);
+        assertFalse(read(Map.of("author",Map.of("isAdFake",false))).advertisement);
+        assertFalse(read(Map.of("is_ads", false)).advertisement);
+        assertEquals(Integer.valueOf(3), read(Map.of("images",List.of(Map.of(),Map.of(),Map.of()))).imageCount);
     }
 
     private static AnalyticsAwemeReader.Metadata read(Map<String, Object> attributes) {

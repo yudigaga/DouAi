@@ -247,7 +247,7 @@ public class PortraitAnalyticsTest {
         assertEquals("来源未知", report.portrait.featureSources.get(0).label);
         assertEquals(3, report.portrait.featureSources.get(0).count);
         try (SQLiteDatabase db = SQLiteDatabase.openDatabase(new File(directory, "usage.db").getPath(), null, SQLiteDatabase.OPEN_READONLY)) {
-            assertEquals(2, db.getVersion());
+            assertEquals(4, db.getVersion());
         }
     }
 

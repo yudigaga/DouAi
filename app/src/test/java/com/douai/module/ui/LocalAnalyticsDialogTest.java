@@ -16,6 +16,7 @@ import com.douai.module.analytics.AnalyticsSnapshot;
 import com.douai.module.analytics.AnalyticsSnapshot.Bucket;
 import com.douai.module.analytics.AnalyticsSnapshot.Rank;
 import com.douai.module.analytics.AnalyticsSnapshot.Recent;
+import com.douai.module.analytics.JournalExample;
 import com.douai.module.analytics.PortraitSnapshot;
 import com.douai.module.analytics.AnalyticsAiAnalysis;
 import com.douai.module.config.AiModelConfig;
@@ -107,6 +108,126 @@ public final class LocalAnalyticsDialogTest {
         ShadowLooper.idleMainLooper();
         assertFalse(shown.isShowing());
         assertTrue(worker.isShutdown());
+    }
+
+    @Test public void flowOnlyEvidenceOpensSameStoryOnScreenAndPaper() {
+        com.douai.module.analytics.PortraitEvidence e = new com.douai.module.analytics.PortraitEvidence("2026-11-01","2026-11-07",0,
+            List.of(),List.of(),com.douai.module.analytics.PortraitEvidence.Decomposition.empty("无可比浏览"),
+            List.of(new com.douai.module.analytics.PortraitEvidence.Observation("exploration","exploration","主动追问记录","记录到2个会话。","会话计数","会话","2026-11-01","2026-11-07",2L,null,null,"flow","sample",List.of("路由不代表播放"))),List.of("仅有AI操作记录"),
+            List.of(new com.douai.module.analytics.PortraitEvidence.StageCount("followup_click",2)),List.of(),List.of());
+        PortraitSnapshot b = PortraitSnapshot.empty();
+        PortraitSnapshot p = new PortraitSnapshot(e.startDate,e.endDate,b.days,b.weekdayHours,b.topicTiles,b.authorPareto,b.featureSources,
+            b.browseDays,b.authorCount,b.topicCount,b.topicOccurrences,b.repeatedWorks,b.capturedVisits,b.finishedVisits,b.visibleMillis,b.queueDropped,
+            b.authorDiversity,b.topicDiversity,b.topAuthorShare,b.topTopicShare,b.crossDayRepeatShare,b.nightShare,b.weekendShare,
+            b.comparison,b.weekComparison,b.monthComparison,b.insights,b.topicHours,b.typeActions,b.coverage,b.evidenceLevel,e);
+        source.data = new AnalyticsSnapshot(0,0,0,0,0,0,0,List.of(),List.of(),List.of(),List.of(),List.of(),new long[24],List.of(),p);
+        drain();
+        assertNotNull(find("analytics.story.headline"));
+        View paper = ReportPresentation.build(activity,source.data,"7天",0,null,"","",0);
+        assertNotNull(paper.findViewWithTag("analytics.story.headline"));
+        assertFalse("A report containing two AI sessions cannot say it has no retained records", paperText(paper).contains("当前范围暂无保留记录"));
+        ViewGroup body = find("analytics.body");
+        assertNotNull("the first report surface is the discovery, not the recording settings", body.getChildAt(0).findViewWithTag("analytics.story.headline"));
+        assertNotNull(find("analytics.story.all"));
+        assertTrue(find("analytics.analysis.request").isEnabled());
+    }
+
+    @Test public void personalJournalKeepsExactNumbersAcrossFourChaptersAndExport() throws Exception {
+        java.io.File directory = java.nio.file.Files.createTempDirectory(activity.getCacheDir().toPath(), "journal-example").toFile();
+        source.data = com.douai.module.analytics.JournalExample.twoWeeks(directory);
+        drain();
+        assertEquals(24, source.data.totalViews); assertEquals(7, source.data.portrait.browseDays);
+        for(String key : List.of("story.topics","story.rhythm","story.actions","story.changes")) expandSection(key);
+        View phone = find("analytics.body");
+        View actionsChapter=find("analytics.section.body.story.actions");
+        assertNotNull(actionsChapter.findViewWithTag("analytics.analysis.section.features"));
+        assertNull(find("analytics.section.body.features"));
+        View paper = ReportPresentation.build(activity,source.data,"最近 7 天",0,null,"","",0);
+        String exportedText = paperText(paper);
+        for (String label : List.of("模块功能排行", "最近记录", source.data.recent.get(0).label, "使用历程")) {
+            assertTrue("Collapsed statistics still export " + label, exportedText.contains(label));
+        }
+        for(View tree : List.of(phone,paper)) {
+            String text=paperText(tree);
+            assertTrue(text, text.contains("10/10 次（100.0%）"));
+            assertTrue(text, text.contains("12/14 次（85.7%）"));
+            assertTrue(text, text.contains("摄影   #2（7 次）  →  #1（12 次）"));
+            assertNotNull(tree.findViewWithTag("analytics.journal.hour-profiles"));
+            assertNotNull(tree.findViewWithTag("analytics.journal.rank-lines"));
+            assertNotNull(tree.findViewWithTag("analytics.portrait.journal.topics.chart"));
+            assertNotNull(tree.findViewWithTag("analytics.portrait.journal.authors.chart"));
+        }
+        View screen=find("analytics.root");
+        screen.measure(View.MeasureSpec.makeMeasureSpec(360,View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(740,View.MeasureSpec.EXACTLY));
+        screen.layout(0,0,360,740);
+        java.io.File previewDir=new java.io.File("build/reports/portrait-preview");
+        assertTrue(previewDir.isDirectory() || previewDir.mkdirs());
+        Bitmap preview=Bitmap.createBitmap(360,740,Bitmap.Config.ARGB_8888);
+        try(java.io.FileOutputStream output=new java.io.FileOutputStream(new java.io.File(previewDir,"journal-dialog-360.png"))) {
+            Canvas canvas=new Canvas(preview);canvas.drawColor(android.graphics.Color.WHITE);screen.draw(canvas);
+            assertTrue(preview.compress(Bitmap.CompressFormat.PNG,100,output));
+        } finally { preview.recycle(); }
+        ReportImageExport.Document doc=page.captureReportImage(1080,4096);
+        assertNotNull(doc); assertTrue(doc.pdfPageCount()>1); writeReportFiles(doc,"personal-journal-synthetic");
+        assertEquals(0,analysis.requests.size());
+    }
+
+    @Test public void journalBuildsStatisticsOncePerSnapshotOnlyWhenExpanded() throws Exception {
+        File cache = activity.getCacheDir();
+        source.data = JournalExample.twoWeeks(java.nio.file.Files.createTempDirectory(cache.toPath(), "week").toFile());
+        drain();
+        ViewGroup body = find("analytics.body");
+        int initialNodes = nodeCount(body);
+        System.out.println("Journal opening view nodes (Android Views, 7 days): " + initialNodes);
+        assertNotNull(find("analytics.story.headline"));
+        for (String tag : List.of("analytics.portrait.types.chart", "analytics.section.body.authors",
+                "analytics.section.body.features", "analytics.section.body.recent")) assertNull(tag, find(tag));
+        find("analytics.story.all").performClick();
+        View chart = find("analytics.portrait.types.chart");
+        assertNotNull(chart);
+        int expandedNodes = nodeCount(body);
+        assertTrue(expandedNodes > initialNodes);
+        System.out.println("Journal expanded view nodes (Android Views, 7 days): " + expandedNodes);
+        assertEquals("24 次浏览 · 7 天有记录", text("analytics.section.summary.trend"));
+        assertTrue(paperText(find("analytics.section.body.recent")).contains(source.data.recent.get(0).label));
+        assertNotNull(find("analytics.section.body.story.actions").findViewWithTag("analytics.analysis.section.features"));
+        assertNull(find("analytics.section.body.features").findViewWithTag("analytics.analysis.section.features"));
+        expandSection("types");
+        find("analytics.story.all").performClick();
+        assertFalse(chart.isShown());
+        find("analytics.story.all").performClick();
+        assertSame(chart, find("analytics.portrait.types.chart"));
+        assertEquals(expandedNodes, nodeCount(body));
+        assertEquals("Toggling statistics reads no additional snapshots", 1, source.reads);
+
+        source.data = JournalExample.twoWeeks(java.nio.file.Files.createTempDirectory(cache.toPath(), "month").toFile(), 30);
+        find("analytics.range.30").performClick();
+        drain();
+        assertEquals(30, source.lastDays);
+        assertEquals("45 次浏览 · 14 天有记录", text("analytics.section.summary.trend"));
+        assertNotSame(chart, find("analytics.portrait.types.chart"));
+        assertTrue(find("analytics.section.body.types").isShown());
+        find("analytics.story.all").performClick();
+        find("analytics.refresh").performClick();
+        drain();
+        assertNull("Refreshing a collapsed report defers statistics again", find("analytics.portrait.types.chart"));
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        assertEquals(AI_TEXTS[5], text("analytics.analysis.text.features"));
+        assertNull(find("analytics.analysis.section.overview"));
+        find("analytics.story.all").performClick();
+        assertEquals(AI_TEXTS[0], text("analytics.analysis.text.overview"));
+        assertNull("The story keeps ownership of its AI text after opening statistics",
+                find("analytics.section.body.features").findViewWithTag("analytics.analysis.text.features"));
+        assertEquals(1, analysis.requests.size());
+    }
+
+    private static int nodeCount(View view) {
+        int count = 1;
+        if (view instanceof ViewGroup group)
+            for (int i = 0; i < group.getChildCount(); i++) count += nodeCount(group.getChildAt(i));
+        return count;
     }
 
     @Test public void reportUsesSettingsTypographyAndCompactUnoutlinedCards() {

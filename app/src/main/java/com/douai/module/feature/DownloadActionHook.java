@@ -440,11 +440,15 @@ public final class DownloadActionHook implements AutoCloseable {
     private void saveAssets(Context context, List<MediaAsset> assets, Object work) {
         AnalyticsActionCapture analytics = AnalyticsActionCapture.capture(context, work);
         if (!assets.isEmpty()) analytics.manual("download_request", "下载任务请求", "request");
+        com.douai.module.analytics.LocalAnalytics.FlowOperation flow = analytics.operation("download");
+        if (flow != null) { flow.stage("entry"); flow.stage("request"); }
+        int taskIndex = 0;
         boolean anyAccepted = false;
         for (MediaAsset asset : assets) {
+            taskIndex++;
             boolean accepted = asset.image
-                    ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, options.downloadSaveTree(), this::safeLog)
-                    : MediaStoreDownloader.download(context, asset.url, asset.name, false, options.downloadSaveTree(), this::safeLog);
+                    ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, options.downloadSaveTree(), this::safeLog, flow, taskIndex)
+                    : MediaStoreDownloader.download(context, asset.url, asset.name, false, options.downloadSaveTree(), this::safeLog, flow, taskIndex);
             if (!accepted) showToast(context, "下载地址无效");
             anyAccepted |= accepted;
         }
@@ -570,8 +574,10 @@ public final class DownloadActionHook implements AutoCloseable {
     private void enqueueDownload(Context context, String url, String fileName, boolean audio, Object work) {
         AnalyticsActionCapture analytics = AnalyticsActionCapture.capture(context, work);
         analytics.manual("download_request", "下载任务请求", "request");
+        com.douai.module.analytics.LocalAnalytics.FlowOperation flow = analytics.operation("download");
+        if (flow != null) { flow.stage("entry"); flow.stage("request"); }
         if (!MediaStoreDownloader.download(context, url, fileName, audio,
-                options.downloadSaveTree(), message -> safeLog(message))) {
+                options.downloadSaveTree(), message -> safeLog(message), flow, 1)) {
             showToast(context, "下载地址无效");
         } else {
             analytics.manual("download_queued", "下载任务已加入", "accepted");

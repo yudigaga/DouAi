@@ -507,6 +507,18 @@ public final class AutoPlayHookTest {
         }
     }
 
+    @Test public void queuedPauseThenPlayingStillClearsNativePausedState() throws Throwable {
+        try(Fixture f=new Fixture(Collections.emptyMap())) {
+            java.util.concurrent.atomic.AtomicReference<Throwable> failure=new java.util.concurrent.atomic.AtomicReference<>();
+            Thread worker=new Thread(()->{try {
+                f.harness.invoke(Dispatcher.class.getMethod("paused",String.class),f.dispatcher,"one");
+                f.harness.invoke(Dispatcher.class.getMethod("playing",String.class),f.dispatcher,"one");
+            } catch(Throwable error) {failure.set(error);} });
+            worker.start();worker.join();assertNull(failure.get());idle();
+            assertEquals(Boolean.FALSE,f.hook.pauseStateFor("one"));
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         final FeedRoot root = new FeedRoot(activity);

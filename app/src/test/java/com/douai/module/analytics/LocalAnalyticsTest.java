@@ -45,6 +45,48 @@ public final class LocalAnalyticsTest {
 
     @After public void tearDown() { analytics.close(); }
 
+    @Test public void allIncludesFlowDayBeforeTheFirstDailySummary() {
+        analytics.setEnabled(true);
+        analytics.beginOperation(null,"ai").stage("generated");
+        clock.set("2026-10-20T04:00:00Z");
+        view("daily");
+        assertEquals(1,analytics.snapshot(7).portrait.evidence.flowStages.size());
+        PortraitEvidence all=analytics.snapshot(0).portrait.evidence;
+        assertEquals("2026-10-18",all.startDate);
+        assertEquals(1,all.flowStages.size());
+    }
+
+    @Test public void rejectedWriteKeepsVisitDayAcrossRestoreAndClearAndReadBarrierIsNotLoss() throws Exception {
+        analytics.setEnabled(true);
+        String token=analytics.beginVisit(analytics.generation(),"linked","image",null,"",List.of(),false,1000,"manual");
+        analytics.recordAction(analytics.generation(),"linked","save_media","保存","manual","entry");
+        analytics.snapshot(1);
+        clock.set("2026-10-19T04:00:00Z"); // rejection on the following day still affects the original segment
+        CountDownLatch release=blockWriter();
+        try {
+            for(int i=0;i<256;i++)analytics.recordFeature("f","功能");
+            analytics.recordAction(analytics.generation(),token,"linked","copy_text","复制","manual","success");
+            assertEquals(1,analytics.snapshot(7).portrait.queueDropped);
+        } finally {release.countDown();}
+        Field field=LocalAnalytics.class.getDeclaredField("writer");field.setAccessible(true);
+        ThreadPoolExecutor writer=(ThreadPoolExecutor)field.get(analytics);
+        while(writer.getQueue().remainingCapacity()==0)Thread.yield();
+        org.json.JSONObject backup=analytics.exportBackup().put("context",new org.json.JSONObject().put("purpose","").put("feedback",""));
+        org.json.JSONObject tables=backup.getJSONObject("tables");
+        org.json.JSONArray gaps=tables.getJSONArray("queue_gaps");
+        assertEquals(1,gaps.length());assertEquals("2026-10-18",gaps.getJSONArray(0).getString(0));assertEquals("events",gaps.getJSONArray(0).getString(1));
+        for(int i=0;i<tables.getJSONArray("source_coverage").length();i++)assertEquals("available",tables.getJSONArray("source_coverage").getJSONArray(i).getString(1));
+        var stale=analytics.beginOperation("linked","ai");
+        analytics.replaceBackup(AnalyticsBackup.inspect(backup),()->{});
+        stale.click("more_click");
+        analytics.beginOperation(null,"ai").click("more_click");
+        var restored=analytics.exportBackup().getJSONObject("tables");
+        assertEquals(1,restored.getJSONArray("queue_gaps").length());assertEquals(1,restored.getJSONArray("flow_events").length());
+        analytics.clear();analytics.recordFeature("after","继续");
+        assertEquals(0,analytics.exportBackup().getJSONObject("tables").getJSONArray("queue_gaps").length());
+        assertEquals(0,analytics.snapshot(7).portrait.queueDropped);
+    }
+
     @Test public void queuedBurstUsesFourTransactionsWithoutLosingAnyOfItsSixtyFourEvents() throws Exception {
         analytics.setEnabled(true);
         CountDownLatch release = blockWriter();
