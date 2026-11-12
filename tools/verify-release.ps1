@@ -21,7 +21,8 @@ $buildTools = Get-ChildItem -LiteralPath $buildToolsRoot -Directory |
 if (-not $buildTools) { throw "Android build-tools not found in $buildToolsRoot" }
 $aapt = Join-Path $buildTools.FullName 'aapt.exe'
 $apksigner = Join-Path $buildTools.FullName 'apksigner.bat'
-foreach ($toolPath in @($aapt, $apksigner)) {
+$zipalign = Join-Path $buildTools.FullName 'zipalign.exe'
+foreach ($toolPath in @($aapt, $apksigner, $zipalign)) {
     if (-not (Test-Path -LiteralPath $toolPath -PathType Leaf)) { throw "Missing Android tool: $toolPath" }
 }
 Get-Command $Python -ErrorAction Stop | Out-Null
@@ -107,6 +108,10 @@ try {
     $signatureOutput = & $apksigner verify --verbose --print-certs $archive
     if ($LASTEXITCODE -ne 0) { throw 'Final APK signature verification failed.' }
     $signatureOutput | Set-Content -LiteralPath (Join-Path $runDir 'apk-signature.txt') -Encoding UTF8
+    Invoke-Checked $zipalign @('-c', '-P', '16', '-v', '4', $archive) (Join-Path $runDir 'apk-alignment.txt')
+    @{ command = @('zipalign', '-c', '-P', '16', '-v', '4');
+       apkSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash;
+       exitCode = 0 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'apk-alignment.json') -Encoding UTF8
     Invoke-Checked $Python @('-B', $verifier, 'seal', '--root', $projectRoot, '--run-dir', $runDir, '--apk', $archive, '--build-apk', $buildApk)
     $env:DOUAI_VERIFY_RELEASE_APK = $archive
     try {

@@ -2823,7 +2823,9 @@ final class SpeechSettingsDialog implements AutoCloseable {
                         catch (RuntimeException error) {
                             trace.error("player_start", error);
                             finishPreview(trace, DouAiLog.Outcome.FAILED, "player_start_failed", "playback_completed=false");
-                            throw error;
+                            stopPreview();
+                            status.setText("试听播放失败");
+                            return;
                         }
                         trace.stage("playing", "player_start_returned=true; playback_completed=false");
                         status.setText("正在播放");

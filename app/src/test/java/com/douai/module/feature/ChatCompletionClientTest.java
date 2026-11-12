@@ -30,6 +30,136 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ChatCompletionClientTest {
+    @Test public void jsonSlowDripHonorsWholeRequestDeadline() throws Exception {
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try (GatedJsonServer server = new GatedJsonServer()) {
+            AiModelSettings profile = settings(config(server.endpoint(), AiModelConfig.CHAT, true).toJson()
+                    .put("timeoutSeconds", 5));
+            long started = System.nanoTime();
+            Future<String> pending = worker.submit(() -> new ChatCompletionClient().reply("thread", "ping", profile));
+            assertTrue(server.bodyStarted.await(3, TimeUnit.SECONDS));
+            try { pending.get(7, TimeUnit.SECONDS); fail("Slow JSON must exhaust the whole-request deadline"); }
+            catch (ExecutionException expected) {
+                assertTrue(expected.getCause().toString(), expected.getCause() instanceof java.net.SocketTimeoutException);
+                long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                assertTrue("Five-second deadline must not expire early: " + elapsed, elapsed >= 4500);
+                assertTrue("Dripping bytes must not renew the deadline: " + elapsed, elapsed < 7500);
+            }
+        } finally { worker.shutdownNow(); }
+    }
+
+    @Test public void ordinaryJsonKeepsItsParserWhenServerMislabelsContentType() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(chatReply("json answer").setHeader("Content-Type", "text/event-stream"));
+            assertEquals("json answer", new ChatCompletionClient().reply("thread", "ping",
+                    settings(config(server, AiModelConfig.CHAT, true))));
+            RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(request);
+            assertFalse(new JSONObject(request.getBody().readUtf8()).getBoolean("stream"));
+            String accept = request.getHeader("Accept");
+            assertTrue("Ordinary JSON must not request SSE", accept == null
+                    || !accept.toLowerCase(java.util.Locale.ROOT).contains("text/event-stream"));
+        }
+    }
+
+    @Test public void lateJsonResponseCannotCommitHistoryAfterTimeoutOrCancel() throws Exception {
+        for (boolean cancel : new boolean[]{false, true}) {
+            ExecutorService worker = Executors.newFixedThreadPool(2);
+            try (GatedJsonServer server = new GatedJsonServer()) {
+                AiModelSettings profile = settings(config(server.endpoint(), AiModelConfig.CHAT, true).toJson()
+                        .put("contextRounds", 2).put("timeoutSeconds", 5));
+                TestChatMemory memory = new TestChatMemory(java.nio.file.Files.createTempDirectory("json-deadline-history").toFile(), profile.selected());
+                ChatCompletionClient client = new ChatCompletionClient(memory, null);
+                Future<String> pending = worker.submit(() -> client.reply("thread", "abandoned question", profile));
+                assertTrue(server.bodyStarted.await(3, TimeUnit.SECONDS));
+                if (cancel) worker.submit(client::cancelCurrentRequest).get(1, TimeUnit.SECONDS);
+                try { pending.get(cancel ? 2 : 7, TimeUnit.SECONDS); fail("Abandoned JSON must not deliver success"); }
+                catch (ExecutionException expected) {
+                    assertTrue(expected.getCause().toString(), cancel
+                            ? expected.getCause() instanceof CancellationException
+                            : expected.getCause() instanceof java.net.SocketTimeoutException);
+                }
+                assertTrue(client.savedTurns().isEmpty());
+                server.releaseBody.countDown();
+                assertTrue(server.firstFinished.await(3, TimeUnit.SECONDS));
+                assertEquals("next answer", worker.submit(() -> client.reply("thread", "next question", profile)).get(3, TimeUnit.SECONDS));
+                JSONObject next = new JSONObject(server.nextBody.poll(2, TimeUnit.SECONDS));
+                assertFalse(next.toString().contains("abandoned"));
+                assertFalse(next.optBoolean("stream", true));
+                assertEquals(1, client.savedTurns().size());
+                assertEquals("next question", client.savedTurns().get(0).prompt);
+                assertEquals("next answer", client.savedTurns().get(0).answer);
+            } finally { worker.shutdownNow(); }
+        }
+    }
+
+    /** A real peer drips legal JSON whitespace until the test releases the late answer. */
+    private static final class GatedJsonServer implements AutoCloseable {
+        final java.net.ServerSocket socket = new java.net.ServerSocket(0, 2, java.net.InetAddress.getLoopbackAddress());
+        final CountDownLatch bodyStarted = new CountDownLatch(1);
+        final CountDownLatch releaseBody = new CountDownLatch(1);
+        final CountDownLatch firstFinished = new CountDownLatch(1);
+        final java.util.concurrent.BlockingQueue<String> nextBody = new java.util.concurrent.LinkedBlockingQueue<>();
+        final ExecutorService server = Executors.newSingleThreadExecutor();
+        volatile java.net.Socket active;
+
+        GatedJsonServer() throws Exception {
+            server.submit(() -> {
+                for (int request = 0; request < 2; request++) {
+                    try (java.net.Socket peer = socket.accept()) {
+                        active = peer;
+                        peer.setSoTimeout(3000);
+                        java.io.BufferedInputStream input = new java.io.BufferedInputStream(peer.getInputStream());
+                        String line;
+                        int length = 0;
+                        while (!(line = readLine(input)).isEmpty()) {
+                            if (line.toLowerCase(java.util.Locale.ROOT).startsWith("content-length:"))
+                                length = Integer.parseInt(line.substring(line.indexOf(':') + 1).trim());
+                        }
+                        byte[] body = new byte[length];
+                        new java.io.DataInputStream(input).readFully(body);
+                        if (request == 1) nextBody.add(new String(body, java.nio.charset.StandardCharsets.UTF_8));
+                        java.io.OutputStream output = peer.getOutputStream();
+                        output.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                        output.flush();
+                        if (request == 0) {
+                            bodyStarted.countDown();
+                            while (!releaseBody.await(100, TimeUnit.MILLISECONDS)) {
+                                output.write(' ');
+                                output.flush();
+                            }
+                        }
+                        String answer = request == 0 ? "abandoned answer" : "next answer";
+                        output.write(("{\"choices\":[{\"message\":{\"content\":\"" + answer + "\"}}]}").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        output.flush();
+                    } catch (Exception closedOrCancelled) {
+                        if (socket.isClosed()) return;
+                    } finally { if (request == 0) firstFinished.countDown(); }
+                }
+            });
+        }
+
+        String endpoint() { return "http://localhost:" + socket.getLocalPort() + "/v1"; }
+
+        private static String readLine(java.io.InputStream input) throws java.io.IOException {
+            StringBuilder line = new StringBuilder();
+            int value;
+            while ((value = input.read()) != -1 && value != '\n') if (value != '\r') line.append((char) value);
+            if (value == -1) throw new java.io.EOFException();
+            return line.toString();
+        }
+
+        @Override public void close() throws Exception {
+            releaseBody.countDown();
+            socket.close();
+            java.net.Socket peer = active;
+            if (peer != null) peer.close();
+            server.shutdownNow();
+            server.awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
     @Test public void structuredWrapperAllowanceDoesNotRaiseTheOrdinaryChatReplyLimit() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.start();

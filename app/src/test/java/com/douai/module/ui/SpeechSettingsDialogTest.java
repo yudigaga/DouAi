@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.app.Dialog;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.media.MediaPlayer;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.Spinner;
@@ -29,6 +30,9 @@ import com.douai.module.config.SettingsStore;
 import com.douai.module.config.SpeechSettings;
 import com.douai.module.config.ThirdPartyRequestTemplate;
 import com.douai.module.feature.SpeechHttpClient;
+import com.douai.module.feature.SpeechSynthesis;
+import com.douai.module.feature.LocalSpeechSynthesis;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.feature.VoiceCatalog;
 import com.douai.module.feature.VoiceCatalogLabels;
 import com.douai.module.feature.VoiceNameTranslationCache;
@@ -40,10 +44,13 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.shadow.api.Shadow;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
+import org.robolectric.shadows.ShadowMediaPlayer;
+import org.robolectric.util.ReflectionHelpers;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -55,6 +62,8 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.lang.reflect.Constructor;
+import java.util.function.BiConsumer;
 
 import kotlin.Unit;
 import kotlin.coroutines.EmptyCoroutineContext;
@@ -2841,6 +2850,156 @@ public final class SpeechSettingsDialogTest {
             ShadowLooper.idleMainLooper();
             assertEquals("正在生成语音", status.getText().toString());
             assertFalse(form.findViewWithTag("speech.preview.start").isEnabled());
+        }
+    }
+
+    @Test public void preparedStartFailureIsContainedAndPreviewResourcesAreReleased() throws Exception {
+        List<String> records = java.util.Collections.synchronizedList(new ArrayList<>());
+        assertTrue(DouAiLog.awaitIdle(3000));
+        DouAiLog.setFrameworkSink((priority, json) -> records.add(json));
+        ShadowMediaPlayer.setMediaInfoProvider(source -> new ShadowMediaPlayer.MediaInfo(10_000, 10_000));
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.start();
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/tts").toString());
+            open(true);
+            AlertDialog previewDialog = option("试听");
+            View form = previewDialog.getWindow().getDecorView();
+            form.findViewWithTag("speech.preview.start").performClick();
+            SpeechSynthesis synthesis = ReflectionHelpers.getField(page, "preview");
+            assertNotNull(synthesis);
+            @SuppressWarnings("unchecked")
+            BiConsumer<LocalSpeechSynthesis.Result, String> callback = ReflectionHelpers.getField(synthesis, "callback");
+            synthesis.close();
+            File audio = File.createTempFile("speech-preview-start-", ".mp3", activity.getCacheDir());
+            java.nio.file.Files.write(audio.toPath(), new byte[]{1, 2, 3});
+            Constructor<LocalSpeechSynthesis.Result> resultConstructor =
+                    LocalSpeechSynthesis.Result.class.getDeclaredConstructor(File.class, long.class);
+            resultConstructor.setAccessible(true);
+            callback.accept(resultConstructor.newInstance(audio, 10_000L), null);
+            MediaPlayer player = ReflectionHelpers.getField(page, "player");
+            assertNotNull("the actual synthesis callback must register a player", player);
+            ShadowMediaPlayer shadow = Shadow.extract(player);
+            assertNotNull(shadow.getOnPreparedListener());
+            shadow.setState(ShadowMediaPlayer.State.END);
+            shadow.setInvalidStateBehavior(ShadowMediaPlayer.InvalidStateBehavior.EMULATE);
+
+            shadow.getOnPreparedListener().onPrepared(player);
+
+            assertEquals("试听播放失败", ((TextView) form.findViewWithTag("speech.preview.status")).getText().toString());
+            assertNull(ReflectionHelpers.getField(page, "player"));
+            assertNull(ReflectionHelpers.getField(page, "previewFile"));
+            assertFalse(audio.exists());
+            assertEquals(ShadowMediaPlayer.State.END, shadow.getState());
+            assertTrue(DouAiLog.awaitIdle(3000));
+            assertEquals(1, records.stream().filter(line -> line.contains("\"feature_id\":\"speech_preview\""))
+                    .filter(line -> line.contains("\"event\":\"operation_finished\""))
+                    .filter(line -> line.contains("player_start_failed")).count());
+        } finally {
+            ShadowMediaPlayer.resetStaticState();
+            DouAiLog.awaitIdle(3000);
+            DouAiLog.setFrameworkSink(null);
+        }
+    }
+
+    @Test public void closingPreviewIgnoresLatePreparedAndErrorCallbacks() throws Exception {
+        ShadowMediaPlayer.setMediaInfoProvider(source -> new ShadowMediaPlayer.MediaInfo(10_000, 10_000));
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.start();
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/tts").toString());
+            open(true);
+            AlertDialog dialog = option("试听");
+            PreparedPreview old = preparedPreview(dialog);
+            dialog.dismiss();
+            ShadowLooper.idleMainLooper();
+            assertFalse(old.audio.exists());
+            String closedStatus = old.status.getText().toString();
+
+            old.shadow.getOnPreparedListener().onPrepared(old.player);
+            old.shadow.invokeErrorListener(1, 2);
+
+            assertEquals(closedStatus, old.status.getText().toString());
+            assertNull(ReflectionHelpers.getField(page, "player"));
+            assertNull(ReflectionHelpers.getField(page, "previewFile"));
+        } finally { ShadowMediaPlayer.resetStaticState(); }
+    }
+
+    @Test public void replacedPreviewIgnoresLatePreparedAndErrorCallbacks() throws Exception {
+        ShadowMediaPlayer.setMediaInfoProvider(source -> new ShadowMediaPlayer.MediaInfo(10_000, 10_000));
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.start();
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/tts").toString());
+            open(true);
+            AlertDialog dialog = option("试听");
+            PreparedPreview old = preparedPreview(dialog);
+            PreparedPreview current = preparedPreview(dialog);
+            assertFalse(old.audio.exists());
+            assertEquals("正在准备播放", current.status.getText().toString());
+
+            old.shadow.getOnPreparedListener().onPrepared(old.player);
+            old.shadow.invokeErrorListener(1, 2);
+
+            assertSame(current.player, ReflectionHelpers.getField(page, "player"));
+            assertEquals("正在准备播放", current.status.getText().toString());
+            assertTrue(current.audio.exists());
+        } finally { ShadowMediaPlayer.resetStaticState(); }
+    }
+
+    @Test public void completedPreviewReleasesPlayerAndAudio() throws Exception {
+        ShadowMediaPlayer.setMediaInfoProvider(source -> new ShadowMediaPlayer.MediaInfo(10_000, 10_000));
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.start();
+            store.putString(SpeechSettings.GET_TEMPLATE, server.url("/tts").toString());
+            open(true);
+            PreparedPreview ready = preparedPreview(option("试听"));
+
+            ready.shadow.invokePreparedListener();
+            assertEquals("正在播放", ready.status.getText().toString());
+            ready.shadow.invokeCompletionListener();
+
+            assertEquals("试听完成", ready.status.getText().toString());
+            assertNull(ReflectionHelpers.getField(page, "player"));
+            assertNull(ReflectionHelpers.getField(page, "previewFile"));
+            assertFalse(ready.audio.exists());
+        } finally { ShadowMediaPlayer.resetStaticState(); }
+    }
+
+    private PreparedPreview preparedPreview(AlertDialog dialog) throws Exception {
+        View form = dialog.getWindow().getDecorView();
+        form.findViewWithTag("speech.preview.start").performClick();
+        SpeechSynthesis synthesis = ReflectionHelpers.getField(page, "preview");
+        assertNotNull(synthesis);
+        @SuppressWarnings("unchecked")
+        BiConsumer<LocalSpeechSynthesis.Result, String> callback = ReflectionHelpers.getField(synthesis, "callback");
+        synthesis.close();
+        File audio = File.createTempFile("speech-preview-", ".mp3", activity.getCacheDir());
+        java.nio.file.Files.write(audio.toPath(), new byte[]{1, 2, 3});
+        Constructor<LocalSpeechSynthesis.Result> resultConstructor =
+                LocalSpeechSynthesis.Result.class.getDeclaredConstructor(File.class, long.class);
+        resultConstructor.setAccessible(true);
+        callback.accept(resultConstructor.newInstance(audio, 10_000L), null);
+        MediaPlayer player = ReflectionHelpers.getField(page, "player");
+        assertNotNull(player);
+        ShadowMediaPlayer shadow = Shadow.extract(player);
+        assertNotNull(shadow.getOnPreparedListener());
+        return new PreparedPreview(player, shadow, audio, form.findViewWithTag("speech.preview.status"));
+    }
+
+    private static final class PreparedPreview {
+        final MediaPlayer player;
+        final ShadowMediaPlayer shadow;
+        final File audio;
+        final TextView status;
+
+        PreparedPreview(MediaPlayer player, ShadowMediaPlayer shadow, File audio, TextView status) {
+            this.player = player;
+            this.shadow = shadow;
+            this.audio = audio;
+            this.status = status;
         }
     }
 

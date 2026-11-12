@@ -1,0 +1,109 @@
+{
+  "baseline_commit": "897c231e7e7da8663c50870709c43324f875b2bb",
+  "fixture_rows": {
+    "daily": 365,
+    "work_days": 243333,
+    "visits": 20000,
+    "visit_topics": 26680,
+    "actions": 24000,
+    "flow_events": 6000
+  },
+  "fixture_sha256": "160efabaf0791aaa7d433061091bb37dc102eda01109669173bd0a2878ac2780",
+  "baseline": {
+    "sqlite_plans": [],
+    "samples_ms_peakMiB_deltaMiB": [
+      [
+        615.595,
+        72.36,
+        6.5
+      ],
+      [
+        622.521,
+        72.39,
+        6.49
+      ],
+      [
+        594.939,
+        72.39,
+        6.49
+      ],
+      [
+        594.191,
+        72.39,
+        6.16
+      ],
+      [
+        646.354,
+        72.4,
+        6.49
+      ]
+    ],
+    "medians": [
+      615.595,
+      72.39,
+      6.49
+    ],
+    "max_peak_MiB": 72.4,
+    "queue_before_after": 0,
+    "queue_dropped": 0
+  },
+  "current": {
+    "sqlite_plans": [
+      "SQLITE 3.44.3",
+      "PLAN SELECT v.hour,t.topic,COUNT(*) AS n FROM visits v JOIN visit_topics t ON v.token=t.token WHERE v.day BETWEEN ? AND ? GROUP BY v.hour,t.topic ORDER BY n DESC,t.topic ASC,v.hour ASC LIMIT 48",
+      "STEP SEARCH v USING INDEX visit_day (day>? AND day<?)",
+      "STEP SEARCH t USING COVERING INDEX sqlite_autoindex_visit_topics_1 (token=?)",
+      "STEP USE TEMP B-TREE FOR GROUP BY",
+      "STEP USE TEMP B-TREE FOR ORDER BY",
+      "PLAN SELECT v.type,a.feature,a.source,a.stage,COUNT(*) AS n FROM actions a JOIN visits v ON a.token=v.token WHERE a.day BETWEEN ? AND ? GROUP BY v.type,a.feature,a.source,a.stage ORDER BY n DESC,a.feature ASC LIMIT 48",
+      "STEP SEARCH a USING INDEX action_day (day>? AND day<?)",
+      "STEP SEARCH v USING INDEX sqlite_autoindex_visits_1 (token=?)",
+      "STEP USE TEMP B-TREE FOR GROUP BY",
+      "STEP USE TEMP B-TREE FOR ORDER BY",
+      "PLAN SELECT a.token,a.feature FROM visits v JOIN actions a ON a.token=v.token WHERE v.day BETWEEN ? AND ? AND a.source='manual' AND ((a.feature='save_media' AND a.stage='entry') OR (a.feature='copy_text' AND a.stage='success'))",
+      "STEP SEARCH v USING INDEX visit_day (day>? AND day<?)",
+      "STEP SEARCH a USING COVERING INDEX action_token (token=? AND source=?)",
+      "PLAN SELECT t.topic,t.token FROM visits v JOIN visit_topics t ON t.token=v.token WHERE v.day BETWEEN ? AND ? AND t.topic<>'' GROUP BY t.topic,t.token",
+      "STEP SEARCH v USING INDEX visit_day (day>? AND day<?)",
+      "STEP SEARCH t USING COVERING INDEX sqlite_autoindex_visit_topics_1 (token=?)",
+      "STEP USE TEMP B-TREE FOR GROUP BY"
+    ],
+    "samples_ms_peakMiB_deltaMiB": [
+      [
+        639.976,
+        100.08,
+        34.0
+      ],
+      [
+        627.628,
+        100.08,
+        34.0
+      ],
+      [
+        645.605,
+        100.08,
+        33.67
+      ],
+      [
+        609.872,
+        100.59,
+        34.5
+      ],
+      [
+        637.906,
+        100.09,
+        34.0
+      ]
+    ],
+    "medians": [
+      637.906,
+      100.08,
+      34.0
+    ],
+    "max_peak_MiB": 100.59,
+    "queue_before_after": 0,
+    "queue_dropped": 0
+  },
+  "median_change_percent": 3.6,
+  "query_source_sha256": "d46b9610d84d57b1ea0d931948f7ed7596372edf8af58e1daaff4f2ab2b62b62"
+}

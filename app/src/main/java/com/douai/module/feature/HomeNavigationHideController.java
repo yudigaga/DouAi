@@ -142,9 +142,31 @@ public final class HomeNavigationHideController implements Application.ActivityL
         }
     }
 
+    private final class Targets {
+        View top;
+        View bottom;
+        int topCount;
+        int bottomCount;
+        void find(View view, boolean searchTop, boolean searchBottom) {
+            boolean topMatch = false, bottomMatch = false;
+            for (Class<?> type = view.getClass(); type != null; type = type.getSuperclass()) {
+                topMatch |= searchTop && TOP_CLASS.equals(type.getName());
+                bottomMatch |= searchBottom && bottomClassName.equals(type.getName());
+            }
+            if (topMatch) { top = ++topCount == 1 ? view : null; searchTop = false; }
+            if (bottomMatch) { bottom = ++bottomCount == 1 ? view : null; searchBottom = false; }
+            // Keep each target's original subtree boundary while discovering both in one walk.
+            if ((searchTop || searchBottom) && view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount(); i++) find(group.getChildAt(i), searchTop, searchBottom);
+            }
+        }
+    }
+
     private final class Monitor implements ViewTreeObserver.OnPreDrawListener {
         private final WeakReference<View> root;
         private ViewTreeObserver observer;
+        private String lastDecision;
         private final Map<View, Original> originals = new WeakHashMap<>();
         Monitor(View root) { this.root = new WeakReference<>(root); }
         void attach() {
@@ -166,15 +188,19 @@ public final class HomeNavigationHideController implements Application.ActivityL
                 View view = root.get();
                 if (view == null || current == null || !current.configured || !current.enabled
                         || temporarilyShown) {
-                    DouAiLog.event("home_navigation", "decision", temporarilyShown ? "temporarily_shown" : "disabled_or_not_ready",
-                            "restore_requested=true");
+                    detach();
+                    decision(temporarilyShown ? "temporarily_shown" : "disabled_or_not_ready", "restore_requested=true");
                     restore();
                     return;
                 }
-                View top = uniqueTarget(view, TOP_CLASS);
-                View bottom = uniqueTarget(view, bottomClassName);
-                if (top == null || bottom == null) DouAiLog.event("home_navigation", "decision", "navigation_target_not_unique_or_missing",
+                attach();
+                Targets targets = new Targets();
+                targets.find(view, true, true);
+                View top = targets.top;
+                View bottom = targets.bottom;
+                if (top == null || bottom == null) decision("navigation_target_not_unique_or_missing",
                         "top_unique=" + (top != null) + ";bottom_unique=" + (bottom != null));
+                else lastDecision = null;
                 for (View old : new ArrayList<>(originals.keySet())) {
                     if (old != top && old != bottom) {
                         Original original = originals.remove(old);
@@ -188,6 +214,12 @@ public final class HomeNavigationHideController implements Application.ActivityL
                 try { log.accept("Home navigation opacity failed: " + failure.getMessage()); }
                 catch (Throwable ignored) { }
             }
+        }
+        private void decision(String reason, String evidence) {
+            String state = reason + ";" + evidence;
+            if (state.equals(lastDecision)) return;
+            lastDecision = state;
+            DouAiLog.event("home_navigation", "decision", reason, evidence);
         }
         private void apply(View view, int alpha) {
             if (view == null) return;
@@ -209,25 +241,34 @@ public final class HomeNavigationHideController implements Application.ActivityL
             }
             originals.clear();
         }
-        void close() {
+        private void detach() {
             if (observer != null && observer.isAlive()) observer.removeOnPreDrawListener(this);
             observer = null;
+        }
+        void close() {
+            detach();
             restore();
         }
     }
 
     static final class Original {
-        private final int visibility;
-        private final float alpha;
-        private final boolean clickable;
-        private final boolean focusable;
+        private int visibility;
+        private float alpha;
+        private boolean clickable;
+        private boolean focusable;
+        private int appliedVisibility;
+        private float appliedAlpha;
+        private boolean appliedClickable;
+        private boolean appliedFocusable;
         Original(View view) {
             visibility = view.getVisibility();
             alpha = view.getAlpha();
             clickable = view.isClickable();
             focusable = view.isFocusable();
+            recordApplied(view);
         }
         void apply(View view, int value) {
+            observeHostState(view);
             int nextVisibility = visibility == View.VISIBLE && value < 0
                     ? (value == -2 ? View.GONE : View.INVISIBLE) : visibility;
             float nextAlpha = value < 0 ? alpha : alpha * value / 255f;
@@ -239,13 +280,29 @@ public final class HomeNavigationHideController implements Application.ActivityL
             if (Math.abs(view.getAlpha() - nextAlpha) > 0.001f) view.setAlpha(nextAlpha);
             if (view.isClickable() != nextClickable) view.setClickable(nextClickable);
             if (view.isFocusable() != nextFocusable) view.setFocusable(nextFocusable);
+            recordApplied(view);
             if (changed) observeApplied(view, nextVisibility, nextAlpha);
         }
         void restore(View view) {
+            observeHostState(view);
             if (view.getVisibility() != visibility) view.setVisibility(visibility);
             if (Math.abs(view.getAlpha() - alpha) > 0.001f) view.setAlpha(alpha);
             if (view.isClickable() != clickable) view.setClickable(clickable);
             if (view.isFocusable() != focusable) view.setFocusable(focusable);
+            recordApplied(view);
+        }
+        private void observeHostState(View view) {
+            // Comments and screen recovery can change the host's baseline after our first draw.
+            if (view.getVisibility() != appliedVisibility) visibility = view.getVisibility();
+            if (Math.abs(view.getAlpha() - appliedAlpha) > 0.001f) alpha = view.getAlpha();
+            if (view.isClickable() != appliedClickable) clickable = view.isClickable();
+            if (view.isFocusable() != appliedFocusable) focusable = view.isFocusable();
+        }
+        private void recordApplied(View view) {
+            appliedVisibility = view.getVisibility();
+            appliedAlpha = view.getAlpha();
+            appliedClickable = view.isClickable();
+            appliedFocusable = view.isFocusable();
         }
         private static void observeApplied(View view, int visibility, float alpha) {
             try {

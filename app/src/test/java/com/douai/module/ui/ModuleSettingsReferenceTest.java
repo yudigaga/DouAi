@@ -1813,19 +1813,25 @@ public final class ModuleSettingsReferenceTest {
         View root = chat.getWindow().getDecorView();
         EditText input = root.findViewWithTag("ai.chat.input");
         input.setText(question);
-        assertTrue(root.findViewWithTag("ai.chat.send").performClick());
+        View send = root.findViewWithTag("ai.chat.send");
+        assertEquals("Test chat must be ready to send", "发送", send.getContentDescription());
+        assertTrue("Test chat must enable sending the question", send.isEnabled());
+        assertTrue(send.performClick());
         RecordedRequest request = server.takeRequest(10, TimeUnit.SECONDS);
         assertNotNull("Test chat must issue an actual HTTP request", request);
         assertEquals("/v1/chat/completions", request.getPath());
         JSONObject body = new JSONObject(request.getBody().readUtf8());
         assertEquals("test-model", body.getString("model"));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (!containsText(root, expectedAnswer) && System.nanoTime() < deadline) {
+        // A partial may already contain the final text while the button still stops the request.
+        while ((!containsText(root, expectedAnswer) || !"发送".contentEquals(send.getContentDescription()))
+                && System.nanoTime() < deadline) {
             ShadowLooper.idleMainLooper();
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
         }
         ShadowLooper.idleMainLooper();
         assertTrue("Test chat must render the completed reply", containsText(root, expectedAnswer));
+        assertEquals("Test chat must finish the request before the next turn", "发送", send.getContentDescription());
         return body.getJSONArray("messages");
     }
 

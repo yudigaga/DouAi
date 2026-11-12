@@ -58,6 +58,7 @@ jobs:
           python3 -B tools/release_verification.py host-summary --summary app/build/reports/host-contracts.md
 
       - name: Run Release Lint
+        if: ${{ !cancelled() }}
         id: release_lint
         run: ./gradlew :app:lintRelease --console=plain
 

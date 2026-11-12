@@ -204,14 +204,8 @@ public final class ChatCompletionClient {
         IntConsumer sent = requestSent == null ? ignored -> { } : requestSent;
         List<ChatImage> fixedAttachments = Collections.unmodifiableList(attachments);
         config.validate(true);
-        if (config.streaming()) {
-            return sendBoundedStream(config, conversationValue, promptValue, fixedAttachments, secondary,
-                     remember, documentValue, sent, maximumReplyChars, onPartial);
-        }
-        ActiveRequest request = new ActiveRequest();
-        request.onPartial = onPartial;
-        return send(config, conversationValue, promptValue, fixedAttachments, secondary, remember, documentValue,
-                sent, maximumReplyChars, request, null);
+        return sendBoundedStream(config, conversationValue, promptValue, fixedAttachments, secondary,
+                remember, documentValue, sent, maximumReplyChars, onPartial);
     }
 
     /** The caller's deadline never waits for a platform socket read or its potentially blocking close. */
@@ -691,7 +685,7 @@ public final class ChatCompletionClient {
                         else rememberTurn(new HistoryTurn(historyKey, prompt, document, images, result), rounds);
                     }
                 };
-                // Only the waiting caller can publish a streamed turn, after its deadline/cancel check.
+                // Only the waiting caller can publish an asynchronous turn, after its deadline/cancel check.
                 if (request.asynchronous) request.commitHistory = commit;
                 else commit.run();
                 if (!request.asynchronous && activeRequest == request) activeRequest = null;
@@ -721,8 +715,9 @@ public final class ChatCompletionClient {
         synchronized (requestLock) { request.input = input; }
         deadline.beforeIo(request, connection);
         String contentType = connection.getContentType();
-        boolean sse = contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).startsWith("text/event-stream");
-        streamDiagnostic(request, deadline, "transport=" + (sse ? "stream" : "json") + " stage=stream_headers status=" + status);
+        boolean sse = config.streaming() && contentType != null
+                && contentType.toLowerCase(java.util.Locale.ROOT).startsWith("text/event-stream");
+        if (config.streaming()) streamDiagnostic(request, deadline, "transport=" + (sse ? "stream" : "json") + " stage=stream_headers status=" + status);
         InputStream guarded = new FilterInputStream(input) {
             @Override public int read() throws IOException {
                 deadline.beforeIo(request, connection); int value = in.read();

@@ -44,6 +44,12 @@ def require(condition, message):
         raise VerificationError(message)
 
 
+def schema_version(record, label):
+    version = record.get("schemaVersion")
+    require(type(version) is int and version in (1, 2), f"Unsupported {label} schema version")
+    return version
+
+
 def sha256(path):
     require(path.is_file(), f"Missing input: {path}")
     digest = hashlib.sha256()
@@ -377,6 +383,23 @@ def parse_signature(text):
     return {"certificateSha256": digests[0].upper(), "signedV3": True}
 
 
+def validate_alignment(run_dir, apk_sha256):
+    evidence = read_json(run_dir / "apk-alignment.json")
+    require(evidence.get("command") == ["zipalign", "-c", "-P", "16", "-v", "4"],
+            "Wrong APK alignment check command")
+    require(evidence.get("apkSha256") == apk_sha256, "APK alignment evidence targets a different archive")
+    require(evidence.get("exitCode") == 0, "APK alignment check failed")
+    output = run_dir / "apk-alignment.txt"
+    require(output.is_file(), "Missing APK alignment output")
+    raw = output.read_bytes()
+    try:
+        text = raw.decode("utf-16") if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise VerificationError("Invalid APK alignment output encoding") from error
+    require(re.search(r"^Verification successful\s*$", text, re.M),
+            "APK alignment output does not confirm success")
+
+
 def prepare(root, host_apk, run_dir):
     validate_apk(host_apk)
     lint_budget.baseline_entries(root / "tools/lint-baseline.json")
@@ -385,7 +408,7 @@ def prepare(root, host_apk, run_dir):
                 f"Missing local-smali evidence: {relative}")
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root))
-    inputs = {"schemaVersion": 1, "startedAtUtc": utc_now(), "root": str(root),
+    inputs = {"schemaVersion": 2, "startedAtUtc": utc_now(), "root": str(root),
               "source": {"commit": commit, "dirty": dirty, "files": source_snapshot(root)},
               "identity": source_identity(root), "inventory": test_inventory(root),
               "hostApk": {"path": str(host_apk), "sha256": sha256(host_apk)},
@@ -409,8 +432,11 @@ def verified_host_identities(host_source):
 
 def seal(root, run_dir, apk, build_apk):
     inputs = read_json(run_dir / "inputs.json")
+    version = schema_version(inputs, "inputs")
     validate_apk(apk)
     require(sha256(apk) == sha256(build_apk), "Archived APK differs from final build output")
+    if version == 2:
+        validate_alignment(run_dir, sha256(apk))
     metadata = read_json(build_apk.parent / "output-metadata.json")
     elements = metadata.get("elements", [])
     require(len(elements) == 1 and elements[0].get("outputFile") == build_apk.name,
@@ -426,17 +452,26 @@ def seal(root, run_dir, apk, build_apk):
             "Host APK is not a verified source profile")
     signature = parse_signature((run_dir / "apk-signature.txt").read_text(encoding="utf-8-sig"))
     write_json(run_dir / "output-metadata.json", metadata)
-    write_json(run_dir / "artifact-seal.json", {**identity, **signature, "fileName": apk.name,
+    evidence_names = ("apk-badging.txt", "apk-signature.txt", "host-badging.txt", "output-metadata.json")
+    if version == 2:
+        evidence_names += ("apk-alignment.txt", "apk-alignment.json")
+    write_json(run_dir / "artifact-seal.json", {**identity, **signature,
+               **({"schemaVersion": 2} if version == 2 else {}), "fileName": apk.name,
                "sha256": sha256(apk), "bytes": apk.stat().st_size, "hostIdentity": host_identity,
-               "sealedEvidenceSha256": {name: sha256(run_dir / name) for name in
-                    ("apk-badging.txt", "apk-signature.txt", "host-badging.txt", "output-metadata.json")}})
+               "sealedEvidenceSha256": {name: sha256(run_dir / name) for name in evidence_names}})
 
 
 def finish(root, run_dir):
     inputs = read_json(run_dir / "inputs.json")
+    version = schema_version(inputs, "inputs")
     artifact = read_json(run_dir / "artifact-seal.json")
+    require(artifact.get("schemaVersion", 1) == version, "Artifact seal schema differs from inputs")
     apk = run_dir / artifact["fileName"]
     require(sha256(apk) == artifact["sha256"], "Final archive was changed after sealing")
+    if version == 2:
+        require({"apk-alignment.txt", "apk-alignment.json"} <= set(artifact["sealedEvidenceSha256"]),
+                "Missing sealed APK alignment evidence")
+        validate_alignment(run_dir, artifact["sha256"])
     require(sha256(Path(inputs["hostApk"]["path"])) == inputs["hostApk"]["sha256"], "Host APK changed during verification")
     for relative, expected in inputs["localSmaliSha256"].items():
         require(sha256(root / "douyin-40.6.0/apktool-no-res" / relative) == expected,
@@ -472,7 +507,7 @@ def finish(root, run_dir):
     summary, bad = host_summary(inputs["inventory"], reports, True)
     require(not bad, "Host-contract summary failed")
     (run_dir / "host-contracts.md").write_text(summary, encoding="utf-8")
-    manifest = {"schemaVersion": 1, "status": "verified-local", "published": False,
+    manifest = {"schemaVersion": version, "status": "verified-local", "published": False,
                 "finishedAtUtc": utc_now(), "source": inputs["source"], "artifact": artifact,
                 "hostApk": inputs["hostApk"], "tests": totals, "testProfile": inputs["testProfile"],
                 "localSmaliSha256": inputs["localSmaliSha256"],
@@ -488,14 +523,21 @@ def finish(root, run_dir):
 
 def check_integrity(run_dir):
     manifest = read_json(run_dir / "manifest.json")
+    version = schema_version(manifest, "manifest")
     require(manifest.get("status") == "verified-local", "Manifest is not a completed local verification")
     require(manifest.get("evidenceSha256"), "Missing evidence hash inventory")
+    if version == 2:
+        require({"apk-alignment.txt", "apk-alignment.json"} <= set(manifest["evidenceSha256"]),
+                "Missing APK alignment evidence from manifest")
     for relative, expected in manifest["evidenceSha256"].items():
         path = (run_dir / relative).resolve()
         require(run_dir.resolve() in path.parents, "Evidence path escapes verification directory")
         require(sha256(path) == expected, f"Evidence was changed: {relative}")
     artifact = manifest["artifact"]
+    require(artifact.get("schemaVersion", 1) == version, "Artifact schema differs from manifest")
     require(sha256(run_dir / artifact["fileName"]) == artifact["sha256"], "APK digest differs from manifest")
+    if version == 2:
+        validate_alignment(run_dir, artifact["sha256"])
     return manifest
 
 

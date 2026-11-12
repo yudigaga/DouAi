@@ -37,6 +37,7 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -48,6 +49,7 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
     static final String LIST_MANAGER = "com.ss.android.ugc.aweme.im.sdk.module.session.rips.list.MessageListRvLinearLayoutManager";
     static final String CONTACTS_TAG = "DouAi.MessageContacts";
     private static final String FRAGMENT_PACKAGE = "com.ss.android.ugc.aweme.im.sdk.module.session.rips.";
+    private static final HostReflectionCache ACCESSORS = new HostReflectionCache();
     private final Application application;
     private final SettingsStore store;
     private final ContactOpener opener;
@@ -163,6 +165,7 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
         private List<AiModelConfig> cachedContacts = Collections.emptyList();
         private boolean pending;
         private boolean active = true;
+        private final Map<String, String> observations = new HashMap<>();
         private final Runnable refreshTask = () -> { pending = false; if (active) refresh(); };
 
         Monitor(Activity activity) { owner = new WeakReference<>(activity); }
@@ -195,28 +198,29 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
                     cachedSettings = serialized;
                 }
                 List<AiModelConfig> contacts = cachedContacts;
-                if (contacts.isEmpty()) { DouAiLog.event("ai_contacts", "eligibility", "no_enabled_contacts", "configured_count=0"); restore(); return; }
-                View list = uniqueMessageList(activity, detail -> DouAiLog.event("ai_contacts", "discovery",
+                if (contacts.isEmpty()) { observe("eligibility", "no_enabled_contacts", "configured_count=0"); restore(); return; }
+                View list = uniqueMessageList(activity, detail -> observe("discovery",
                         "message_list_inspected", detail));
                 if (insertion != null && (insertion.list != list || !insertion.isIntact())) restore();
-                if (list == null) { DouAiLog.event("ai_contacts", "eligibility", "message_list_not_unique_or_missing", ""); return; }
+                if (list == null) { observe("eligibility", "message_list_not_unique_or_missing", ""); return; }
                 if (insertion == null) {
                     insertion = InlineContacts.attach(activity, list);
                     appliedSettings = null;
                 }
                 if (insertion == null) {
-                    DouAiLog.event("ai_contacts", "eligibility", "message_list_container_unsupported",
+                    observe("eligibility", "message_list_container_unsupported",
                             "parent_class=" + (list.getParent() == null ? "none" : list.getParent().getClass().getName())
                                     + ";layout_class=" + (list.getLayoutParams() == null ? "none" : list.getLayoutParams().getClass().getName())
                                     + ";layout_height=" + (list.getLayoutParams() == null ? 0 : list.getLayoutParams().height));
                     return;
                 }
+                observations.remove("eligibility");
                 if (!serialized.equals(appliedSettings)) {
                     insertion.bind(contacts, id -> openConversation(activity, id));
                     appliedSettings = serialized;
                 }
                 insertion.resize();
-                DouAiLog.event("ai_contacts", "view_applied", "insertion_readback", "intact=" + insertion.isIntact()
+                observe("view_applied", "insertion_readback", "intact=" + insertion.isIntact()
                         + ";contact_count=" + contacts.size() + ";attached=" + insertion.wrapper.isAttachedToWindow()
                         + ";shown=" + insertion.wrapper.isShown() + ";width=" + insertion.wrapper.getWidth()
                         + ";height=" + insertion.wrapper.getHeight() + ";sibling_z=" + insertion.highestSiblingZ
@@ -233,10 +237,17 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
             }
         }
 
+        private void observe(String event, String reason, String evidence) {
+            String state = reason + ";" + evidence;
+            if (state.equals(observations.put(event, state))) return;
+            DouAiLog.event("ai_contacts", event, reason, evidence);
+        }
+
         void restore() {
             if (insertion != null) insertion.restore();
             insertion = null;
             appliedSettings = null;
+            observations.remove("view_applied");
         }
 
         void close() {
@@ -261,9 +272,8 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
     }
 
     static View uniqueMessageList(Activity activity, Consumer<String> diagnostic) throws ReflectiveOperationException {
-        Method getter;
-        try { getter = activity.getClass().getMethod("getSupportFragmentManager"); }
-        catch (NoSuchMethodException absent) { diagnostic.accept("fragment_manager_getter=false"); return null; }
+        Method getter = ACCESSORS.publicNoArgMethod(activity.getClass(), "getSupportFragmentManager");
+        if (getter == null) { diagnostic.accept("fragment_manager_getter=false"); return null; }
         Object manager = getter.invoke(activity);
         List<View> matches = new ArrayList<>();
         int[] messageFragments = {0};
@@ -277,24 +287,30 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
     private static void collectMessageLists(Object manager, List<View> matches, Set<Object> visited,
                                              int[] messageFragments, int depth) throws ReflectiveOperationException {
         if (manager == null || depth > 12 || !visited.add(manager)) return;
-        Object fragments = manager.getClass().getMethod("getFragments").invoke(manager);
+        Object fragments = invoke(manager, "getFragments");
         if (!(fragments instanceof List<?>)) return;
         for (Object fragment : (List<?>) fragments) {
             if (fragment == null) continue;
-            boolean hidden = Boolean.TRUE.equals(fragment.getClass().getMethod("isHidden").invoke(fragment));
+            boolean hidden = Boolean.TRUE.equals(invoke(fragment, "isHidden"));
             if (hidden) continue;
             if (isMessageFragment(fragment.getClass())) {
-                Object view = fragment.getClass().getMethod("getView").invoke(fragment);
+                Object view = invoke(fragment, "getView");
                 if (view instanceof View && ((View) view).isShown()) {
                     messageFragments[0]++;
                     collectSessionLists((View) view, matches);
                 }
                 // Children of an identified message fragment are already covered by its view tree.
             } else {
-                Object children = fragment.getClass().getMethod("getChildFragmentManager").invoke(fragment);
+                Object children = invoke(fragment, "getChildFragmentManager");
                 collectMessageLists(children, matches, visited, messageFragments, depth + 1);
             }
         }
+    }
+
+    private static Object invoke(Object owner, String name) throws ReflectiveOperationException {
+        Method method = ACCESSORS.publicNoArgMethod(owner.getClass(), name);
+        if (method == null) throw new NoSuchMethodException(owner.getClass().getName() + "." + name);
+        return method.invoke(owner);
     }
 
     static boolean isMessageFragment(Class<?> type) {
@@ -322,7 +338,7 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
         }
         if (!recycler) return false;
         try {
-            Object manager = view.getClass().getMethod("getLayoutManager").invoke(view);
+            Object manager = invoke(view, "getLayoutManager");
             return manager != null && LIST_MANAGER.equals(manager.getClass().getName());
         } catch (ReflectiveOperationException | RuntimeException absent) { return false; }
     }

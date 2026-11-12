@@ -38,11 +38,17 @@ class ReleaseGateTest(unittest.TestCase):
         self.write(self.run / "apk-badging.txt", "package: name='io.github.yudigaga.douai' versionCode='100' versionName='0.1.99'\n")
         self.write(self.run / "host-badging.txt", "package: name='com.ss.android.ugc.aweme' versionCode='400601' versionName='40.6.0'\n")
         self.write(self.run / "apk-signature.txt", "Verified using v3 scheme (APK Signature Scheme v3): true\nSigner #1 certificate SHA-256 digest: " + gate.CERTIFICATE_SHA256 + "\n")
+        self.write(self.run / "apk-alignment.txt", "Verification successful\n")
+        gate.write_json(self.run / "apk-alignment.json", {
+            "command": ["zipalign", "-c", "-P", "16", "-v", "4"],
+            "apkSha256": gate.sha256(self.apk), "exitCode": 0,
+        })
         gate.write_json(self.build_apk.parent / "output-metadata.json", {
             "applicationId": self.identity["packageName"],
             "elements": [{"outputFile": self.build_apk.name, "versionName": "0.1.99", "versionCode": 100}]})
         self.profile = dict(gradleHeapMiB=768, testHeap="1g", maxParallelForks=1, forkEvery=20)
         self.inputs = {"identity": self.identity, "inventory": self.inventory,
+                       "schemaVersion": 2,
                        "source": {"commit": "test", "dirty": False, "files": gate.source_snapshot(self.root)},
                        "hostApk": {"path": str(self.host), "sha256": gate.sha256(self.host)},
                        "localSmaliSha256": {}, "testProfile": self.profile}
@@ -109,6 +115,7 @@ class ReleaseGateTest(unittest.TestCase):
 
     def test_success_records_local_scope_and_binds_saved_evidence(self):
         manifest = self.finish()
+        self.assertEqual(2, manifest["schemaVersion"])
         self.assertEqual(2, manifest["tests"]["tests"])
         self.assertEqual("not-run", manifest["deviceValidation"])
         self.assertFalse(manifest["published"])
@@ -176,6 +183,84 @@ class ReleaseGateTest(unittest.TestCase):
                 self.write(self.run / "apk-signature.txt", text)
                 with self.assertRaises(gate.VerificationError):
                     self.seal()
+
+    def test_alignment_evidence_is_required_for_seal(self):
+        (self.run / "apk-alignment.txt").unlink()
+        with self.assertRaises(gate.VerificationError):
+            self.seal()
+
+    def test_legacy_schema_preserves_original_seal_finish_and_integrity_contract(self):
+        self.inputs["schemaVersion"] = 1
+        gate.write_json(self.run / "inputs.json", self.inputs)
+        (self.run / "apk-alignment.txt").unlink()
+        (self.run / "apk-alignment.json").unlink()
+        self.seal()
+        manifest = gate.finish(self.root, self.run)
+        self.assertEqual(1, manifest["schemaVersion"])
+        self.assertEqual(manifest, gate.check_integrity(self.run))
+        self.write(self.run / "apk-signature.txt", "tampered")
+        with self.assertRaises(gate.VerificationError):
+            gate.check_integrity(self.run)
+
+    def test_alignment_accepts_windows_powershell_utf16_output(self):
+        (self.run / "apk-alignment.txt").write_bytes("Verification successful\r\n".encode("utf-16"))
+        self.assertEqual(2, self.finish()["schemaVersion"])
+
+    def test_new_schema_rejects_missing_and_malformed_alignment_inventory(self):
+        self.finish()
+        manifest = gate.read_json(self.run / "manifest.json")
+        del manifest["evidenceSha256"]["apk-alignment.txt"]
+        gate.write_json(self.run / "manifest.json", manifest)
+        with self.assertRaises(gate.VerificationError):
+            gate.check_integrity(self.run)
+        manifest["evidenceSha256"]["apk-alignment.txt"] = gate.sha256(self.run / "apk-alignment.txt")
+        manifest["schemaVersion"] = 3
+        gate.write_json(self.run / "manifest.json", manifest)
+        with self.assertRaisesRegex(gate.VerificationError, "schema version"):
+            gate.check_integrity(self.run)
+
+    def test_failed_or_unbound_alignment_cannot_seal(self):
+        for change in ("exitCode", "apkSha256", "command", "output"):
+            with self.subTest(change=change):
+                case = ReleaseGateTest()
+                case.setUp()
+                try:
+                    evidence = gate.read_json(case.run / "apk-alignment.json")
+                    if change == "exitCode":
+                        evidence["exitCode"] = 1
+                    elif change == "apkSha256":
+                        evidence["apkSha256"] = "0" * 64
+                    elif change == "command":
+                        evidence["command"] = ["zipalign", "-c", "4"]
+                    else:
+                        case.write(case.run / "apk-alignment.txt", "Verification failed\n")
+                    gate.write_json(case.run / "apk-alignment.json", evidence)
+                    with self.assertRaises(gate.VerificationError):
+                        case.seal()
+                finally:
+                    case.doCleanups()
+
+    def test_alignment_evidence_tampering_blocks_finish(self):
+        for change in ("missing", "failed", "tampered"):
+            with self.subTest(change=change):
+                case = ReleaseGateTest()
+                case.setUp()
+                try:
+                    case.seal()
+                    output = case.run / "apk-alignment.txt"
+                    if change == "missing":
+                        output.unlink()
+                    elif change == "failed":
+                        case.write(output, "Verification failed\n")
+                    else:
+                        evidence = gate.read_json(case.run / "apk-alignment.json")
+                        evidence["apkSha256"] = "0" * 64
+                        gate.write_json(case.run / "apk-alignment.json", evidence)
+                    with self.assertRaises(gate.VerificationError):
+                        gate.finish(case.root, case.run)
+                    self.assertFalse((case.run / "manifest.json").exists())
+                finally:
+                    case.doCleanups()
 
     def test_any_skip_failure_or_error_blocks_strict_gate(self):
         for status in ("skipped", "failure", "error"):

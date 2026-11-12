@@ -995,9 +995,11 @@ public final class LocalAnalytics implements AutoCloseable {
             while (cursor.moveToNext()) dayTypes.computeIfAbsent(cursor.getString(0), ignored -> new LinkedHashMap<>()).put(cursor.getString(1), cursor.getLong(2));
         }
         List<PortraitSnapshot.Day> days = new ArrayList<>();
+        Map<String, Integer> weekdays = new HashMap<>();
         int browseDays = 0;
         for (LocalDate day = start; !day.isAfter(end); day = day.plusDays(1)) {
             String date = day.toString();
+            weekdays.put(date, day.getDayOfWeek().getValue() - 1);
             long[] total = totals.getOrDefault(date, new long[2]);
             if (total[0] > 0) browseDays++;
             days.add(new PortraitSnapshot.Day(date, total[0], total[1], dayUnique.getOrDefault(date, 0L),
@@ -1007,7 +1009,7 @@ public final class LocalAnalytics implements AutoCloseable {
         long night = 0, weekend = 0;
         try (Cursor cursor = db.rawQuery("SELECT day,hour,count FROM hours WHERE day BETWEEN ? AND ?", range)) {
             while (cursor.moveToNext()) {
-                int weekday = LocalDate.parse(cursor.getString(0)).getDayOfWeek().getValue() - 1;
+                int weekday = weekdays.get(cursor.getString(0));
                 int hour = cursor.getInt(1);
                 if (hour < 0 || hour >= 24) continue;
                 long count = cursor.getLong(2);

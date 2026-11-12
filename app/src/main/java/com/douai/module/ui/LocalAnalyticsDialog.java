@@ -133,6 +133,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     private AlertDialog clearConfirmation;
     private volatile boolean closed;
     private int generation;
+    private PendingRead pendingRead;
     private int days = 7;
     private boolean binding;
     private boolean enabled;
@@ -421,7 +422,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         Source data = source;
         Handler dispatcher = main;
         WeakReference<LocalAnalyticsDialog> target = new WeakReference<>(this);
-        worker.execute(() -> {
+        Runnable read = () -> {
             AnalyticsSnapshot snapshot = null;
             boolean recordingEnabled = false;
             boolean failed = false;
@@ -451,7 +452,45 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
                     page.loaded(result, state, error, resultContext);
                 }
             });
-        });
+        };
+        if (nextEnabled != null || erase || contextChange != null) {
+            cancelPendingRead();
+            worker.execute(read);
+        } else if (pendingRead == null || !pendingRead.replace(read)) {
+            // A feedback boundary keeps its earlier read, until a newer range supersedes it.
+            cancelPendingRead();
+            pendingRead = new PendingRead(read);
+            worker.execute(pendingRead);
+        }
+    }
+
+    private void cancelPendingRead() {
+        if (pendingRead != null) pendingRead.cancel();
+        pendingRead = null;
+    }
+
+    /** Only unstarted reads are replaceable; confirmed mutations remain on the worker's FIFO. */
+    private static final class PendingRead implements Runnable {
+        private Runnable read;
+        private boolean started;
+        private boolean sealed;
+        PendingRead(Runnable read) { this.read = read; }
+        synchronized boolean replace(Runnable next) {
+            if (started || sealed) return false;
+            read = next;
+            return true;
+        }
+        synchronized void cancel() { if (!started) read = null; }
+        synchronized void seal() { sealed = true; }
+        @Override public void run() {
+            Runnable action;
+            synchronized (this) {
+                started = true;
+                action = read;
+                read = null;
+            }
+            if (action != null) action.run();
+        }
     }
 
     private void loaded(AnalyticsSnapshot snapshot, boolean state, boolean error,
@@ -529,6 +568,8 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     /** Rating describes the already displayed result; it must not invalidate that result. */
     private void saveFeedback(String value) {
         if (closed) return;
+        // Retain an outstanding range read, but never replace it across this mutation.
+        if (pendingRead != null) pendingRead.seal();
         int request = generation;
         feedbackButton.setEnabled(false);
         Source data = source;
@@ -1470,6 +1511,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        cancelPendingRead();
         cancelImageExport();
         resetAnalysis();
         generation++;

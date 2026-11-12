@@ -1,0 +1,11 @@
+allprojects {
+    if (path == ':app') {
+        tasks.register('portraitBenchClasspath') {
+            dependsOn 'compileDebugUnitTestJavaWithJavac', 'bundleDebugClassesToRuntimeJar'
+            doLast {
+                file(System.getenv('PORTRAIT_BENCH_CP')).text =
+                    tasks.named('testDebugUnitTest').get().classpath.asPath
+            }
+        }
+    }
+}
