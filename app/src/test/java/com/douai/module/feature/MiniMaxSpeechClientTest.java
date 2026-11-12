@@ -445,7 +445,8 @@ public final class MiniMaxSpeechClientTest {
             assertNotNull(server.takeRequest(2, TimeUnit.SECONDS)); assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
             request.cancel();
             ExecutionException failure = assertThrows(ExecutionException.class, () -> future.get(3, TimeUnit.SECONDS));
-            assertTrue(failure.getCause() instanceof CancellationException);
+            assertTrue("Expected cancellation but received " + failure.getCause(),
+                    failure.getCause() instanceof CancellationException);
         } finally { worker.shutdownNow(); }
     }
 
