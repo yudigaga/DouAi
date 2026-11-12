@@ -1,20 +1,31 @@
-# DouAi 构建与当前状态
+# DouAi 构建与发布
 
-源码仓库：https://github.com/yudigaga/DouAi
-
-下载入口：https://github.com/yudigaga/DouAi/releases
-
-LSPosed 模块仓库：https://github.com/Xposed-Modules-Repo/io.github.yudigaga.douai
+[文档索引](README.md) · [源码仓库](https://github.com/yudigaga/DouAi) · [正式版下载](https://github.com/yudigaga/DouAi/releases) · [LSPosed 仓库](https://github.com/Xposed-Modules-Repo/io.github.yudigaga.douai)
 
 正式包名：`io.github.yudigaga.douai`。Java namespace 保持 `com.douai.module`，Xposed 入口使用完整 Java 类名。
 
 ## 当前状态
 
+当前正式版为 **0.2.64 / 165**。本页说明构建与发布方式，使用说明见[文档索引](README.md)。
+
+| 项目 | 当前记录 |
+| --- | --- |
+| 发布标签 | GitHub `v0.2.64`、LSPosed `165-0.2.64` |
+| 正式包 | `DouAi-0.2.64.apk`，两端使用同一长期签名 APK |
+| 发布源码 | `8d74c8e066ff38f307ee7574859c532e51887ee3` |
+| 签名与对齐 | 长期证书 v3，16 KiB ZIP 对齐通过 |
+| 源码 CI | 主分支与发布标签均通过：构建、完整单元测试与 APK 合同、Release Lint、警告预算 |
+| 验证边界 | 本地全量汇总及 22 项兼容合同见发布记录；真机、真实服务与实际 LSPosed 回调未验 |
+
+下载、SHA-256、本地与 CI 的 Lint 差异及数据库升级边界统一见 [0.2.64 发布记录](release-0.2.64.md)。历史版本保留各自当时的验证范围；后续纯文档整理不会改变本版签名 APK 或其已验证的源码提交。
+
+<details>
+<summary>历史版本状态与本地验收记录</summary>
+
 本文是当前版本、验证范围与发布状态的统一入口，历史版本记录保留各自当时的证据。
 
 | 范围 | 版本 | 状态与证据 |
 | --- | --- | --- |
-| 当前正式发布 | **0.2.64 / 165** | GitHub `v0.2.64`、LSPosed `165-0.2.64` 每端仅附同一 `DouAi-0.2.64.apk`。个人内容年志整合本期发现、内容与节奏、操作和两期变化；修正探索路径、记录缺口、分享数字、图形与 PDF 分页，旧统计按需展开。SQLite v4、分析备份 v3 可导入旧 v1/v2 备份，旧程序不可直接打开新版数据库。构建汇总 302 套件/3,342 项（3,315 通过、27 条件跳过、0 失败/错误）；本次未逐项复核被覆盖的全量 JUnit，最终 22 项合同 JUnit 全通过。Lint 0 错误/54 警告，构建冻结 666 输入；长期证书 v3、16 KiB 对齐与归档摘要通过。真机/真实模型未验，CI 结果单独核对，见 [0.2.64](release-0.2.64.md) |
 | 既有正式发布 | **0.2.61 / 162** | GitHub `v0.2.61`、LSPosed `162-0.2.61` 每端仅附同一 APK。名单扩展视口、回车搜索、标题筛选、滚动续页、底部刷新及昵称后备注；功能介绍集中帮助，修复头像候选并细分资料缺项。66 套件 / 875 项专项、三版原宿主各 10 项静态合同及最终 APK 5 项通过；完整 Release Lint 0 错误/51 警告/0 新增未审，长期证书 v3、16 KiB 对齐和 673 个输入快照通过。本地未跑完整测试集，真机/真实服务未验；发布不等待 CI，CI 结果单独核对，见 [0.2.61](release-0.2.61.md) |
 | 既有正式发布 | **0.2.60 / 161** | GitHub `v0.2.60`、LSPosed `161-0.2.60` 每端仅附同一 APK。累计统一用户资料、聚合目录与原生搜索，整理名单范围、保存及设置依赖，增加自定义组件透明度、数值输入和暂停恢复。本版 18 项原生页面回归、5 项最终 APK 合同及完整 Release Lint 通过（0 错误/52 警告/0 新增未审）；长期证书 v3、16 KiB 对齐和 672 个输入快照通过。未跑全量，真机/真实服务未验，不等待 CI，见 [0.2.60](release-0.2.60.md) |
 | 既有正式发布 | **0.2.54 / 155** | GitHub `v0.2.54`、LSPosed `155-0.2.54` 每端仅附同一 APK。模块设置新增默认关闭的“锁定最高画质”，自动选择原生支持最高档、播放器状态读回及有限纠偏；仅适配已核实的 41.0.0。长期证书 v3、16 KiB 对齐、版本/哈希、653 个输入快照及构建 vital Lint 通过；按要求未运行测试、完整 Lint 或 APK 合同，真机与真实服务未验，不等待 CI，见 [0.2.54](release-0.2.54.md) |
@@ -57,7 +68,6 @@ LSPosed 模块仓库：https://github.com/Xposed-Modules-Repo/io.github.yudigaga
 | 既有已验收本地基线 | **0.2.6 / 107** | 安全校验自动移除旁路修复；修复前 12 项/5 失败保留，最终签名包 186 套件/1993 次执行零失败/错误/跳过，229 条规则唯一匹配、34 工具及 3 平台合同通过；Lint 0 错误/57 警告/0 新增，签名、16 KiB 对齐与完整性通过，见 [0.2.6 本地记录](release-0.2.6.md) |
 | 已验收本地基线 | **0.2.5 / 106** | 发送账本核对、后台持久化、头像加载、配置目录与 21 项设置搜索、Android 平台烟测已实现；最终签名包 185 套件/1971 次执行零失败/错误/跳过，另 34 项工具检查与 3 项平台合同通过；Lint 0 错误/57 警告/0 新增，签名、16 KiB 对齐与完整性通过，见 [0.2.5 本地记录](release-0.2.5.md) |
 | 既有正式版 | **0.2.4 / 105** | GitHub `v0.2.4`、LSPosed `105-0.2.4`，原验证与产物见 [0.2.4 发布记录](release-0.2.4.md) |
-| 当前正式发布标签 | **0.2.64 / 165** | GitHub `v0.2.64`、LSPosed `165-0.2.64`，两端仅附同一长期签名 APK |
 | 既有 Android 平台烟测 | Android 15 / API 35 x86_64 模拟器 | 0.2.6 Debug/测试 APK 重新构建后，三项模块平台合同通过、本地与实际安装摘要相等；本轮单次指标见 [0.2.6 平台记录](release-0.2.6.md#平台模拟器证据)，不代表隐藏场景通过。0.2.5 记录独立保留 |
 | 手机宿主与真实服务 | 0.2.41 未执行 | 抖音 41.0.0 手势修复、实际 LSPosed Hook 与真实服务尚未设备验收；旧版功能继续保留各自设备与服务边界 |
 
@@ -99,13 +109,15 @@ LSPosed 模块仓库：https://github.com/Xposed-Modules-Repo/io.github.yudigaga
 
 0.2.7 当时的本地封存入口为 `artifacts/release-verification/20261021T050149Z-8a1c5172/manifest.json`，保留验收当时的 `verified-local`、`published=false`；该版封存、canonical 与当次构建 APK 摘要一致。同一 APK 的 40.6 原宿主 61 项复验已通过，兼容清单为 `artifacts/host-compatibility/0.2.7-20261021T050149Z-8a1c5172-406/compatibility.json`。其源码及证据属于当时的 0.2.7，不能作为当前构建的验收结果。`artifacts/`、`work/`、宿主 APK 和原始日志为本地材料，不随公共源码分发。
 
-0.2.6 最终封存入口为 [manifest.json](../artifacts/release-verification/20261021T033649Z-d32fbaa1/manifest.json)，状态 `verified-local`、`published=false`；canonical APK 为 [`DouAi-0.2.6-release.apk`](../artifacts/DouAi-0.2.6-release.apk)，4,665,659 字节。19 个案例原始证据已绑定清单；APK 摘要、原证书及边界见 [0.2.6 最终归档](release-0.2.6.md#最终本地归档)。
+0.2.6 最终封存入口为 manifest.json（本地归档：`../artifacts/release-verification/20261021T033649Z-d32fbaa1/manifest.json`），状态 `verified-local`、`published=false`；canonical APK 为 `DouAi-0.2.6-release.apk`（本地归档：`../artifacts/DouAi-0.2.6-release.apk`），4,665,659 字节。19 个案例原始证据已绑定清单；APK 摘要、原证书及边界见 [0.2.6 最终归档](release-0.2.6.md#最终本地归档)。
 
-0.2.5 最终封存入口为 [`20261021T024248Z-5a07a8a2/manifest.json`](../artifacts/release-verification/20261021T024248Z-5a07a8a2/manifest.json)，状态 `verified-local`、`published=false`；canonical APK 为 [`DouAi-0.2.5-release.apk`](../artifacts/DouAi-0.2.5-release.apk)，4,665,556 字节。摘要、原证书及平台 APK 对应关系见 [0.2.5 本地签名归档](release-0.2.5.md#本地签名归档)。
+0.2.5 最终封存入口为 `20261021T024248Z-5a07a8a2/manifest.json`（本地归档：`../artifacts/release-verification/20261021T024248Z-5a07a8a2/manifest.json`），状态 `verified-local`、`published=false`；canonical APK 为 `DouAi-0.2.5-release.apk`（本地归档：`../artifacts/DouAi-0.2.5-release.apk`），4,665,556 字节。摘要、原证书及平台 APK 对应关系见 [0.2.5 本地签名归档](release-0.2.5.md#本地签名归档)。
 
 当前沿用正式包名、长期签名、libxposed API 102、抖音 `40.6.0 / 400601`、`40.8.0 / 400801` 与 `41.0.0 / 410001` 独立适配与既有黑边回退结果。41.0 必须为真实 APK 内部构建 `41009900`；40.8 必须为 `40809900`，旧 `40809985` 与缺少构建号的同名版本不加载适配。新交付按下述进位规则递增 versionName，并独立递增 versionCode；同一批修复的重复验证不重复递增。
 
 语音按用户最终要求在评论入口保留生成原文件，超过30秒仍继续尝试提交，不截断正文或音频。0.2.8新增MiniMax实验AAC选项，直接向接口请求而不做本地转换；不调整既有重试/回退策略，也不把较长音频视为必然失败。
+
+</details>
 
 ## 既有版本证据
 
