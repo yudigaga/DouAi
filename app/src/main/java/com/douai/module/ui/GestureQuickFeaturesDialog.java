@@ -32,11 +32,11 @@ public final class GestureQuickFeaturesDialog {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
 
         MiuixSettingsViews.Toggle autoComment = new MiuixSettingsViews.Toggle(activity, "自动评论",
-                "对匹配的推荐内容自动评论。", store.getBoolean("native_auto_comment", false), true,
+                null, store.getBoolean("native_auto_comment", false), true,
                 enabled -> setEnabled(updates, "comment", enabled, onError));
         content.addView(autoComment.getView(), row);
         MiuixSettingsViews.Toggle autoReply = new MiuixSettingsViews.Toggle(activity, "自动回复",
-                "对符合当前接收范围的私信自动回复。", store.getBoolean("native_auto_reply", false), true,
+                null, store.getBoolean("native_auto_reply", false), true,
                 enabled -> setEnabled(updates, "reply", enabled, onError));
         content.addView(autoReply.getView(), row);
 

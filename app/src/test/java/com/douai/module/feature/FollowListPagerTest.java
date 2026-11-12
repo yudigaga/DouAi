@@ -146,6 +146,7 @@ public final class FollowListPagerTest {
         Map<String, ProfileListEntry> result = FollowListPager.loadDetails(FollowListPager.Kind.FOLLOWING,
                 "42", "sec-42", (kind, query) -> page(false, 0, 0, 0, alice, bob, unknown), () -> true);
         assertEquals("真实昵称", result.get("10").name);
+        assertEquals("我的备注", ProfileListEntryTest.remark(result.get("10")));
         assertEquals("https://p3.douyinpic.com/avatar.jpg", result.get("10").avatarUrl);
         assertEquals("alice.id", result.get("10").douyinId);
         assertEquals("22222", result.get("20").douyinId);

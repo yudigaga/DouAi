@@ -174,12 +174,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
                         }).setNegativeButton("取消", null).create(), null));
         if (SpeechSettings.RANDOM_ALL.equals(random)) {
             option("来源范围", randomSourceSummary(speech), this::selectRandomSources);
-            option("音色列表管理", "查看并刷新已选来源", this::showRandomCatalog);
-        }
-        if (!SpeechSettings.RANDOM_OFF.equals(random)) {
-            hint(content, "speech.random.hint", SpeechSettings.RANDOM_ALL.equals(random)
-                    ? "大随机仅在勾选且可用的来源中选择；可在音色列表管理中刷新。系统引擎仅使用当前语言的离线音色。"
-                    : "小随机仅当前来源；先刷新音色列表。系统引擎仅使用当前语言的离线音色。");
+            option("音色列表管理", null, this::showRandomCatalog);
         }
         if (speech.fish) {
             FishSpeechSettings fish = speech.fishSettings;
@@ -187,7 +182,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
             option("音色", voiceLabel(), () -> section(FISH_VOICE));
             option("接口设置", fish.apiKey.isEmpty() ? "待填写 API Key" : "API Key 已设置", () -> section("接口设置"));
             option("朗读设置", readingSummary(speech), () -> section("朗读设置"));
-            option(FISH_ADVANCED, "音频、生成与发音", () -> section(FISH_ADVANCED));
+            option(FISH_ADVANCED, null, () -> section(FISH_ADVANCED));
         } else if (speech.breeze) {
             BreezeSpeechSettings breeze = speech.breezeSettings;
             option("语音模型", BreezeSpeechSettings.AUTO_MODEL.equals(breeze.model) ? "自动按语言选择" : breeze.model, this::selectBreezeModel);
@@ -196,28 +191,28 @@ final class SpeechSettingsDialog implements AutoCloseable {
             option("音色", voice, this::selectVoice);
             option("接口设置", breeze.apiKey.isEmpty() ? "待填写 API Key" : "API Key 已设置", () -> section("接口设置"));
             option("朗读设置", readingSummary(speech), () -> section("朗读设置"));
-            option(BREEZE_ADVANCED, "音频、语言与语音指令", () -> section(BREEZE_ADVANCED));
+            option(BREEZE_ADVANCED, null, () -> section(BREEZE_ADVANCED));
         } else if (speech.minimax) {
             option("模型", speech.minimaxModel, this::selectMiniMaxModel);
             if (!MiniMaxSpeechModelCatalog.builtInModels().contains(speech.minimaxModel)) {
                 TextView capability = new TextView(context);
                 capability.setTag("speech.model.capability");
-                capability.setText("当前模型的高级参数能力未验证，请先试听。");
+                capability.setText("高级参数能力未验证");
                 content.addView(capability, matchWrap());
             }
             option("音色", voiceLabel(), this::selectVoice);
             option("接口设置", speech.minimaxApiKey.isEmpty() ? "待填写 API Key" : "API Key 已设置", () -> section("接口设置"));
             option("朗读设置", readingSummary(speech), () -> section("朗读设置"));
-            option("MiniMax 高级设置", "音频、语言、混音与效果", () -> section("MiniMax 高级设置"));
+            option("MiniMax 高级设置", null, () -> section("MiniMax 高级设置"));
         } else if (!third) {
-            option("接口设置", "系统引擎与语言", () -> section("接口设置"));
+            option("接口设置", null, () -> section("接口设置"));
             option("朗读设置", readingSummary(speech), () -> section("朗读设置"));
         } else {
             editable("合成 GET", SpeechSettings.GET_TEMPLATE, SpeechSettings.DEFAULT_GET_TEMPLATE, false);
             option("合成参数", parameterNames(settings().getTemplate), this::parameters);
-            option("接口设置", "请求头、响应与音频字段", () -> section("接口设置"));
+            option("接口设置", null, () -> section("接口设置"));
             option("音色", voiceLabel(), this::selectVoice);
-            option("音色高级设置", "列表接口、字段与样本", this::advanced);
+            option("音色高级设置", null, this::advanced);
         }
         option("试听", null, this::testSpeech);
         if (advancedContent != null) renderAdvanced(advancedContent);
@@ -266,7 +261,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
         RandomCatalogSession session = new RandomCatalogSession(settings().randomSources);
         randomCatalog = session;
         LinearLayout body = form();
-        hint(body, "speech.random.catalog.hint", "仅刷新已选网络来源。Fish Audio 和 Breeze Blue 使用已设置的筛选条件，只读取首屏 20 项；更多音色可在各来源的音色选择器中加载。系统引擎使用离线音色，无需联网刷新。");
         for (String source : session.sources) {
             if (!SpeechSettings.PROVIDERS.contains(source)) continue;
             TextView view = new TextView(context);
@@ -532,12 +526,10 @@ final class SpeechSettingsDialog implements AutoCloseable {
                 editable(form, "语速", FishSpeechSettings.SPEED, FishSpeechSettings.defaultValue(FishSpeechSettings.SPEED), false);
                 editable(form, "音量（dB）", FishSpeechSettings.VOLUME_DB, FishSpeechSettings.defaultValue(FishSpeechSettings.VOLUME_DB), false);
                 if (!"s1".equals(speech.fishSettings.engine)) fishBoolean(form, "响度归一化", FishSpeechSettings.NORMALIZE_LOUDNESS);
-                else hint(form, "speech.fish.loudness.inactive", "S1 不使用响度归一化，原开关值已保留。");
-                hint(form, "speech.fish.volume.hint", "音量以 dB 调整，0 表示不增减；与其它来源的音量倍率不同。");
+                else hint(form, "speech.fish.loudness.inactive", "响度归一化：不适用");
             } else if (speech.breeze) {
                 editable(form, "语速", BreezeSpeechSettings.SPEED, BreezeSpeechSettings.defaultValue(BreezeSpeechSettings.SPEED), false);
                 editable(form, "音量", BreezeSpeechSettings.VOLUME, BreezeSpeechSettings.defaultValue(BreezeSpeechSettings.VOLUME), false);
-                hint(form, "speech.breeze.pitch.hint", "Breeze Blue 当前接口不提供独立音调参数。");
             } else if (speech.minimax) {
                 editable(form, "语速", SpeechSettings.MINIMAX_SPEED, "1", false);
                 editable(form, "音量", SpeechSettings.MINIMAX_VOLUME, "1", false);
@@ -549,17 +541,16 @@ final class SpeechSettingsDialog implements AutoCloseable {
             return;
         }
         if (title.startsWith("Fish Audio ")) {
-            if (!speech.fish) { hint(form, "speech.fish.inactive", "切换至 Fish Audio 后可设置。"); return; }
+            if (!speech.fish) { hint(form, "speech.fish.inactive", "当前来源已变化"); return; }
             renderFishSection(title, form, speech.fishSettings);
             return;
         }
         if (title.startsWith("Breeze Blue ")) {
-            if (!speech.breeze) { hint(form, "speech.breeze.inactive", "切换至 Breeze Blue 后可设置。"); return; }
+            if (!speech.breeze) { hint(form, "speech.breeze.inactive", "当前来源已变化"); return; }
             if (BREEZE_ADVANCED.equals(title)) {
                 option(form, "音频输出", speech.breezeSettings.outputFormat, () -> section(BREEZE_AUDIO));
-                option(form, "语言与表达", "语言、语音指令与指导强度", () -> section(BREEZE_VOICE));
-                option(form, "音色列表", "范围、名称与语言筛选", () -> section(BREEZE_VOICES));
-                hint(form, "speech.breeze.capabilities", "音调、混音、声音效果和 URL/Hex 选项仅适用于 MiniMax。");
+                option(form, "语言与表达", null, () -> section(BREEZE_VOICE));
+                option(form, "音色列表", null, () -> section(BREEZE_VOICES));
             } else if (BREEZE_AUDIO.equals(title)) {
                 renderBreezeAudio(form);
             } else if (BREEZE_VOICE.equals(title)) {
@@ -575,14 +566,11 @@ final class SpeechSettingsDialog implements AutoCloseable {
                 breezeChoice(form, "语言代码", BreezeSpeechSettings.LANGUAGE_CODE, languageCodes, languages);
                 if (!speech.breezeSettings.effectiveSpeakerBoost()) {
                     editable(form, "指导强度", BreezeSpeechSettings.GUIDANCE_SCALE, BreezeSpeechSettings.defaultValue(BreezeSpeechSettings.GUIDANCE_SCALE), false);
-                } else hint(form, "speech.breeze.guidance.inactive", "说话人增强生效时，指导强度按 1 应用；原指导强度值已保留。");
+                } else hint(form, "speech.breeze.guidance.inactive", "有效指导强度：1");
                 if (speech.breezeSettings.instructions.isEmpty() || speech.breezeSettings.guidanceScale <= 1) {
                     breezeChoice(form, "说话人增强", BreezeSpeechSettings.SPEAKER_BOOST,
                             new String[]{"true", "false"}, new String[]{"开启", "关闭"});
-                } else hint(form, "speech.breeze.boost.inactive", "当前语音指令和指导强度会覆盖说话人增强，原开关值已保留。");
-                hint(form, "speech.breeze.language.hint", "breeze-tts-2".equals(speech.breezeSettings.model)
-                        ? "当前基础模型仅支持中文和英语，其它语言请先选择多语言模型。" : "语言代码需要所选模型支持。");
-                hint(form, "speech.breeze.boost.hint", "有语音指令且指导强度大于 1 时，接口忽略说话人增强；否则开启增强时，指导强度按 1 应用。");
+                } else hint(form, "speech.breeze.boost.inactive", "说话人增强：当前配置不生效");
             } else if (BREEZE_VOICES.equals(title)) {
                 breezeChoice(form, "音色范围", BreezeSpeechSettings.VOICE_TYPE,
                         new String[]{"all", "default", "personal"}, new String[]{"全部音色", "系统音色", "个人音色"});
@@ -611,7 +599,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
                 breezeChoice(form, "排序方向", BreezeSpeechSettings.VOICE_SORT_DIRECTION, BreezeSpeechSettings.VOICE_SORT_DIRECTIONS, new String[]{"升序", "降序"});
                 option(form, "自定义标签", String.join("、", speech.breezeSettings.voiceTags), () -> editCatalogTags(false));
                 option(form, "刷新音色", null, this::refreshVoices);
-                hint(form, "speech.breeze.voice.filters", "先缩小范围再刷新。性别、年龄、语气可多选；自定义标签最多 5 个。仅无口音标记不能与指定口音组合；趋势排序只用于系统音色，请先换排序再切换其它范围。默认中文，每页 20 项、最多加载 200 项；筛选不改变合成语言或当前音色。");
                 if (breezeCatalog != null && breezeCatalog.matches(speech)) {
                     hint(form, "speech.breeze.catalog.status", breezeCatalog.status());
                 }
@@ -619,7 +606,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
             return;
         }
         if (!speech.minimax) {
-            hint(form, "speech.minimax.inactive", "切换至 MiniMax 后可设置。");
+            hint(form, "speech.minimax.inactive", "当前来源已变化");
             return;
         }
         if ("MiniMax 高级设置".equals(title)) renderMiniMaxAdvanced(form);
@@ -641,10 +628,8 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private void renderFishSection(String title, LinearLayout form, FishSpeechSettings fish) {
         if (FISH_ADVANCED.equals(title)) {
             option(form, "音频输出", fish.format.toUpperCase(java.util.Locale.ROOT), () -> section(FISH_AUDIO));
-            option(form, "生成参数", "采样、分段与延迟", () -> section(FISH_GENERATION));
-            option(form, "语言与发音", "文本归一化与发音字典", () -> section(FISH_LANGUAGE));
-            option(form, "文本标签说明", "情绪、表达与说话人", this::showFishTextTags);
-            hint(form, "speech.fish.capabilities", "语音引擎与音色分别选择。所有音频完整生成后再试听或发送。");
+            option(form, "生成参数", null, () -> section(FISH_GENERATION));
+            option(form, "语言与发音", null, () -> section(FISH_LANGUAGE));
         } else if (FISH_AUDIO.equals(title)) {
             fishChoice(form, "生成音频格式（API）", FishSpeechSettings.FORMAT, FishSpeechSettings.FORMATS,
                     new String[]{"MP3", "WAV", "Ogg / Opus"});
@@ -664,7 +649,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
                         java.util.Arrays.stream(FishSpeechSettings.OPUS_BITRATES)
                                 .map(value -> "-1000".equals(value) ? "接口自动" : Integer.parseInt(value) / 1000 + " kbps").toArray(String[]::new));
             }
-            hint(form, "speech.fish.audio.hint", "返回方式：同步完整音频。音频保留接口原文件，不做本地转码；裸 PCM 请改选 WAV。");
         } else if (FISH_GENERATION.equals(title)) {
             editable(form, "温度", FishSpeechSettings.TEMPERATURE, FishSpeechSettings.defaultValue(FishSpeechSettings.TEMPERATURE), false);
             editable(form, "Top P", FishSpeechSettings.TOP_P, FishSpeechSettings.defaultValue(FishSpeechSettings.TOP_P), false);
@@ -680,11 +664,9 @@ final class SpeechSettingsDialog implements AutoCloseable {
         } else if (FISH_LANGUAGE.equals(title)) {
             fishBoolean(form, "文本归一化", FishSpeechSettings.NORMALIZE);
             if (fish.normalize) editable(form, "归一化语言", FishSpeechSettings.LANGUAGE, FishSpeechSettings.defaultValue(FishSpeechSettings.LANGUAGE), false);
-            else hint(form, "speech.fish.normalization.inactive", "文本归一化已关闭，原语言配置已保留。");
+            else hint(form, "speech.fish.normalization.inactive", "文本归一化：关闭");
             editable(form, "发音字典（JSON）", FishSpeechSettings.PRONUNCIATION_DICTIONARY,
                     FishSpeechSettings.defaultValue(FishSpeechSettings.PRONUNCIATION_DICTIONARY), false);
-            hint(form, "speech.fish.language.hint", "语言只影响文本归一化，不改变语音模型、口音或输出语言。发音字典使用 JSON 数组，最多 3 项。");
-            hint(form, "speech.fish.expression.hint", "S2 系列可使用文本中的 [风格描述] 控制表达；本页不自动改写待合成文本。");
         } else if (FISH_VOICES.equals(title)) {
             fishChoice(form, "音色范围", FishSpeechSettings.VOICE_SCOPE, FishSpeechSettings.VOICE_SCOPES,
                     new String[]{"我的音色", "公开音色"});
@@ -692,16 +674,15 @@ final class SpeechSettingsDialog implements AutoCloseable {
             String[] commonLanguages = {"zh", "en", "ja", "ko", "fr", "de", "es", "ru", "pt", "it", "ar", "th", "vi", "id", "hi"};
             catalogMultipleChoice(form, "音色语言", true, FishSpeechSettings.VOICE_LANGUAGE, commonLanguages, catalogLanguageLabels(commonLanguages));
             option(form, "自定义音色语言", String.join("、", fish.voiceLanguages), () -> editCatalogLines(true, FishSpeechSettings.VOICE_LANGUAGE,
-                    "音色语言（每行一个）", "填写 Fish 音色目录使用的语言标识，每行一个，可多选。例如 zh、en。保存会替换当前音色语言列表；留空表示不限。"));
+                    "音色语言（每行一个）"));
             catalogMultipleChoice(form, "标题语言", true, FishSpeechSettings.VOICE_TITLE_LANGUAGE, commonLanguages, catalogLanguageLabels(commonLanguages));
             option(form, "自定义标题语言", String.join("、", fish.voiceTitleLanguages), () -> editCatalogLines(true, FishSpeechSettings.VOICE_TITLE_LANGUAGE,
-                    "标题语言（每行一个）", "按 Fish 音色标题的语言筛选，每行一个语言标识。与音色语言分别保存，留空表示不限。"));
+                    "标题语言（每行一个）"));
             option(form, "自定义标签", String.join("、", fish.voiceTags), () -> editCatalogTags(true));
             editable(form, "作者 ID", FishSpeechSettings.VOICE_AUTHOR_ID, "", false);
             fishChoice(form, "仅许可标记音色", FishSpeechSettings.VOICE_LICENSED, new String[]{"", "true"}, new String[]{"关闭", "开启"});
             fishChoice(form, "音色排序", FishSpeechSettings.VOICE_SORT, FishSpeechSettings.VOICE_SORTS, new String[]{"相关度", "使用任务数", "创建时间"});
             option(form, "刷新音色", null, this::refreshVoices);
-            hint(form, "speech.fish.voices.hint", "音色语言与标题语言均可多选，也可逐行填写 Fish 使用的其它语言标识；标签最多 5 个。先筛选再刷新，默认中文，每页 20 项、最多加载 200 项。公开音色可直接浏览；我的音色需要 API Key。许可标记关闭表示不限，不代表无授权。音色 ID 留空可使用接口默认音色。");
             if (fishCatalog != null && fishCatalog.matches(settings())) {
                 hint(form, "speech.fish.catalog.status", fishCatalog.status());
             }
@@ -736,25 +717,10 @@ final class SpeechSettingsDialog implements AutoCloseable {
             option(form, "参考音频样本", groups + " 个说话人分组", this::editFishReferences);
         } else option(form, "单音色", singleFishVoiceLabel(fish), this::selectVoice);
         option(form, "音色库", "public".equals(fish.voiceScope) ? "公开音色" : "我的音色", () -> section(FISH_VOICES));
-        option(form, "文本标签说明", "说话人编号与表达方式", this::showFishTextTags);
     }
 
     private String singleFishVoiceLabel(FishSpeechSettings fish) {
         return fish.referenceId.isEmpty() ? "接口默认音色" : translatedVoiceLabel(fish.referenceId, fish.referenceName);
-    }
-
-    private void showFishTextTags() {
-        if (!canUseFish()) return;
-        String engine = settings().fishSettings.engine;
-        String expression = "s1".equals(engine)
-                ? "S1 使用固定的圆括号标签，例如 (happy)你好。"
-                : "drama-3".equals(engine)
-                ? "Drama 3 支持正文中的自然语言指示、声音、停顿及成对标签；请按对应引擎文档撰写。"
-                : "S2 系列可在正文中写自然语言方括号提示，例如 [softly]你好。";
-        show(builder("文本标签说明").setMessage(expression
-                + "\n\n多说话人使用编号标签，例如 <|speaker:0|>你好。<|speaker:1|>你好呀。编号对应音色列表或参考音频分组，从 0 开始。"
-                + "\n\n这些标签由你写在原始正文中；模块不会向自动回复或自动评论自动插入标签。")
-                .setPositiveButton("知道了", null).create(), null);
     }
 
     private void editFishSpeakers() {
@@ -762,7 +728,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
         List<String> ids = new ArrayList<>(settings().fishSettings.referenceIds);
         LinearLayout form = form();
         LinearLayout rows = form(); form.addView(rows, matchWrap());
-        hint(form, "speech.fish.speakers.hint", "按正文中的 speaker:0、speaker:1 顺序配置，最多 8 位（模块编辑预算）。同一音色可用于多个说话人。S1 不支持此模式。");
         AlertDialog editor = builder("多说话人音色").setView(scroll(form)).setNegativeButton("取消", null)
                 .setPositiveButton("保存并使用", null).create();
         Runnable[] refresh = new Runnable[1];
@@ -816,7 +781,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
             selected.accept(entries.get(index).id); choice.dismiss();
         }).setNeutralButton("手动填写", (choice, index) -> main.post(() -> editFishSpeakerId(current, selected)))
                 .setNegativeButton("取消", null);
-        if (entries.isEmpty()) picker.setMessage("暂无缓存音色，可手动填写音色 ID，或先在音色库刷新。");
+        if (entries.isEmpty()) picker.setMessage("暂无缓存音色");
         show(picker.create(), null);
     }
 
@@ -850,7 +815,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
             }
         } catch (RuntimeException ignored) { }
         LinearLayout form = form(); LinearLayout rows = form(); form.addView(rows, matchWrap());
-        hint(form, "speech.fish.references.hint", "导入 WAV、MP3 或 FLAC，并填写样本实际说出的原文。建议清晰的 10–30 秒人声。最多 8 个说话人分组、每组 4 个样本，文件合计 8 MiB（模块预算）。样本不随配置备份导出。使用此模式合成时，会把所选音频和对应原文随 TTS 请求发送给 Fish。");
+        hint(form, "speech.fish.references.hint", "WAV / MP3 / FLAC；最多 8 组、每组 4 个样本，合计 8 MiB");
         session.dialog = builder("参考音频样本").setView(scroll(form)).setNegativeButton("取消", null).setPositiveButton("保存并使用", null).create();
         Runnable[] refresh = new Runnable[1];
         refresh[0] = () -> {
@@ -1196,7 +1161,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
         if (fish ? !canUseFish() : !canUseBreeze()) return;
         List<String> current = fish ? settings().fishSettings.voiceTags : settings().breezeSettings.voiceTags;
         LinearLayout form = form(); EditText tags = input(form, "自定义标签（每行一个）", String.join("\n", current), false);
-        hint(form, "voice.catalog.tags.hint", "每行一个标签，最多 5 个、每个最多 128 字符。标签与语言等条件一起筛选音色；不同标签的含义由对应服务提供。");
         AlertDialog editor = builder("自定义标签").setView(scroll(form)).setNegativeButton("取消", null).setPositiveButton("保存", null).create();
         show(editor, null);
         editor.getButton(Dialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
@@ -1245,12 +1209,11 @@ final class SpeechSettingsDialog implements AutoCloseable {
         return result;
     }
 
-    private void editCatalogLines(boolean fish, String key, String title, String guidance) {
+    private void editCatalogLines(boolean fish, String key, String title) {
         if (fish ? !canUseFish() : !canUseBreeze()) return;
         LinearLayout form = form();
         EditText value = input(form, title, String.join("\n", catalogSavedValues(store.getString(key,
                 fish ? FishSpeechSettings.defaultValue(key) : BreezeSpeechSettings.defaultValue(key)))), false);
-        hint(form, "voice.catalog.lines.hint", guidance);
         AlertDialog editor = builder(title).setView(scroll(form)).setNegativeButton("取消", null).setPositiveButton("保存", null).create();
         show(editor, null);
         editor.getButton(Dialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
@@ -1304,7 +1267,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
         stopEnhancement();
         LinearLayout form = form();
         EditText value = input(form, "语音指令", settings().breezeSettings.instructions, false);
-        hint(form, "speech.breeze.instruction.hint", "描述朗读方式，使用与待合成正文相同的语言。优化接口接受最多 1000 字符的草稿，会把它发送到 Breeze；正文不会发送到优化接口。生成后仍需保存才生效。");
+        hint(form, "speech.breeze.instruction.hint", "优化草稿：1–1000 字符");
         TextView status = new TextView(context); status.setTag("speech.breeze.enhance.status"); form.addView(status, matchWrap());
         android.widget.Button enhance = button(form, "优化指令", "speech.breeze.enhance");
         AlertDialog editor = builder("语音指令").setView(scroll(form)).setNegativeButton("取消", null).setPositiveButton("保存", null).create();
@@ -1400,8 +1363,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
         editable(form, "手动填写输出格式", BreezeSpeechSettings.OUTPUT_FORMAT, BreezeSpeechSettings.DEFAULT_OUTPUT_FORMAT, false);
         breezeChoice(form, "生成返回方式", BreezeSpeechSettings.DELIVERY,
                 new String[]{"sync", "stream", "async"}, new String[]{"同步完整音频", "HTTP 流式接收", "后台生成"});
-        hint(form, "speech.breeze.channel.hint", "声道：单声道（接口固定）\n所有方式都在完整取得音频后再试听或发送；HTTP 流式仅支持 MP3/WAV。");
-        hint(form, "speech.breeze.format.hint", "音频保留接口原文件，不做本地转码。裸 PCM 无法直接试听和发送，请改选 WAV；显式码率需先设置采样率。");
+        hint(form, "speech.breeze.channel.hint", "声道：单声道");
     }
 
     private void breezeOutputChoice(LinearLayout form, String title, int part, String[] choices, String[] labels) {
@@ -1566,9 +1528,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private void renderMiniMaxEffects(LinearLayout form) {
         MiniMaxSpeechOptions current = settings().minimaxOptions;
         editable(form, "混合音色（每行 voice_id/weight）", MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "", false);
-        hint(form, "speech.minimax.mix.hint", current.hasMixedVoices()
-                ? "混音已启用：普通音色 ID 将被忽略，原单音色仍保留。最多 4 个音色，权重为 1 至 100，总和无需为 100；清空恢复单音色。"
-                : "最多 4 个音色，每行 voice_id/weight（权重 1 至 100，总和无需为 100）；留空使用主页面音色。");
         boolean effectsSupported = MiniMaxSpeechOptions.supportsVoiceModify(current.audioFormat);
         if (effectsSupported) {
             editable(form, "音高调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_PITCH, "0", false);
@@ -1576,11 +1535,10 @@ final class SpeechSettingsDialog implements AutoCloseable {
             editable(form, "音色调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_TIMBRE, "0", false);
             miniMaxChoice(form, "声音效果", MiniMaxSpeechOptions.SOUND_EFFECT, MiniMaxSpeechOptions.SOUND_EFFECTS,
                     new String[]{"不使用", "空旷回声", "礼堂回声", "电话音质", "机器人"});
-            hint(form, "speech.minimax.effects.hint", "以上调整独立于“朗读设置”的音调，支持 MP3 / WAV / FLAC。");
         } else {
-            hint(form, "speech.minimax.effects.hint", "当前格式不支持声音效果器。已存参数保留，可重置后使用，或改选 MP3 / WAV / FLAC。");
+            hint(form, "speech.minimax.effects.hint", "声音效果器：当前格式不支持");
         }
-        option(form, "重置音色调整", "恢复原始效果，保留混音", this::resetMiniMaxVoiceModify);
+        option(form, "重置音色调整", null, this::resetMiniMaxVoiceModify);
     }
 
     private void renderMiniMaxLanguage(LinearLayout form) {
@@ -1597,7 +1555,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
         miniMaxChoice(form, "文本归一化", MiniMaxSpeechOptions.TEXT_NORMALIZATION_MODE, MiniMaxSpeechOptions.NORMALIZATION_MODES,
                 new String[]{"不指定", "基础 · basic", "高质量 · quality（仅 2.8 / 2.6）"});
         editable(form, "发音字典（每行 原文/替换内容）", MiniMaxSpeechOptions.PRONUNCIATION_TONE, "", false);
-        hint(form, "speech.minimax.pronunciation.hint", "每行一条，例如 处理/(chu3)(li3)。归一化可改善数字等内容的朗读。");
         miniMaxChoice(form, "LaTeX 朗读", MiniMaxSpeechOptions.LATEX_READ, MiniMaxSpeechOptions.OPTIONAL_BOOLEANS,
                 new String[]{"不指定", "开启（仅中文）", "关闭"});
     }
@@ -1606,14 +1563,10 @@ final class SpeechSettingsDialog implements AutoCloseable {
         MiniMaxSpeechOptions current = settings().minimaxOptions;
         miniMaxChoice(form, "生成音频格式（API）", MiniMaxSpeechOptions.AUDIO_FORMAT, MiniMaxSpeechOptions.FORMATS,
                 new String[]{"MP3", "WAV", "FLAC", "Ogg / Opus", "G.711 μ-law / WAV", "AAC（实验，接口可能拒绝）"});
-        if ("aac".equals(current.audioFormat)) {
-            hint(form, "speech.minimax.aac.hint", "AAC 为实验请求，官方文档未列出，接口可能拒绝。生成的音频原样发送，不在本地转换。");
-        }
         miniMaxChoice(form, "返回方式（传输）", MiniMaxSpeechOptions.OUTPUT_FORMAT, MiniMaxSpeechOptions.OUTPUT_FORMATS,
                 new String[]{"音频 URL · url", "十六进制音频 · hex"});
-        hint(form, "speech.minimax.transport.hint", "URL / Hex 只改变返回方式。Hex 受 2 MiB 文本上限约束，长音频请选择 URL（20 MiB）。");
         if (MiniMaxSpeechOptions.isMuLawFormat(current.audioFormat)) {
-            hint(form, "speech.minimax.mulaw.hint", "μ-law WAV 固定 8000 Hz，保留原文件发送；切换格式后恢复原采样率。");
+            hint(form, "speech.minimax.mulaw.hint", "采样率：8000 Hz");
         } else {
             miniMaxChoice(form, "采样率", MiniMaxSpeechOptions.SAMPLE_RATE, MiniMaxSpeechOptions.SAMPLE_RATES,
                     new String[]{"8000 Hz", "16000 Hz", "22050 Hz", "24000 Hz", "32000 Hz", "44100 Hz"});
@@ -1670,7 +1623,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private void renderAdvanced(LinearLayout form) {
         form.removeAllViews();
         if (!settings().thirdParty) {
-            hint(form, "speech.third.inactive", "切换至第三方来源后可设置音色列表。");
+            hint(form, "speech.third.inactive", "当前来源已变化");
             return;
         }
         editable(form, "音色列表 GET", SpeechSettings.VOICE_GET_TEMPLATE, SpeechSettings.DEFAULT_VOICE_GET_TEMPLATE, false);
@@ -2786,7 +2739,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
                 .setNegativeButton(minimax || breeze || fish ? "关闭" : "取消", null);
         if (minimax || breeze || fish) {
             picker.setPositiveButton("刷新", (choice, index) -> refreshVoices());
-            if (entries.isEmpty() && !fish) picker.setMessage("尚无缓存音色，点击刷新获取当前账户的音色，或手动填写音色 ID。");
+            if (entries.isEmpty() && !fish) picker.setMessage("暂无缓存音色");
         }
         show(picker.create(), null);
     }
@@ -2798,7 +2751,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
         boolean minimax = settings.minimax, breeze = settings.breeze, fish = settings.fish;
         EditText value = input(form, "音色编号", fish ? settings.fishSettings.referenceId : breeze ? settings.breezeSettings.voiceId
                 : minimax ? settings.minimaxVoiceId : settings.selectedVoice, false);
-        if (fish) hint(form, "speech.fish.default.voice", "留空使用接口默认音色；这里填写参考音色 ID，不填写语音引擎名称。");
         AlertDialog editor = builder("音色编号").setView(form).setNegativeButton("取消", null)
                 .setPositiveButton("保存", null).create();
         show(editor, null);

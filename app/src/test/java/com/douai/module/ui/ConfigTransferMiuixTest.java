@@ -138,9 +138,9 @@ public final class ConfigTransferMiuixTest {
         compose.runOnUiThread(() -> {
             View decor = page.dialog().getWindow().getDecorView();
             assertEquals(night, ModuleTheme.isDark(decor.getContext()));
-            TextView note = decor.findViewWithTag("config.backup.note");
+            TextView status = decor.findViewWithTag("config.backup.status");
             assertEquals("Backup text must remain legible in the system theme", night,
-                    Color.luminance(note.getCurrentTextColor()) > 0.35f);
+                    Color.luminance(status.getCurrentTextColor()) > 0.35f);
             CheckBox checkbox = decor.findViewWithTag("config.backup.secrets");
             assertFalse(checkbox.isChecked());
             CheckBox includeAnalytics = decor.findViewWithTag("config.backup.includeAnalytics");

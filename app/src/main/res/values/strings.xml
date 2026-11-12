@@ -9,10 +9,8 @@
     <string name="module_framework_waiting">等待 LSPosed 服务连接以读取抖音进程诊断。</string>
     <string name="module_restart_required">请完全退出并重新打开抖音后生效。</string>
     <string name="module_settings_title">功能设置</string>
-    <string name="module_settings_location">抖音内功能设置独立保存在抖音应用，本页只显示模块应用状态。</string>
     <string name="module_open_host">打开抖音</string>
     <string name="module_host_unavailable">未安装抖音或无法打开应用。</string>
-    <string name="member_directory_intro">输入昵称、抖音号或 UID，点击搜索抖音用户</string>
     <string name="voice_quick_catalog_status">已缓存 %1$d 项 · 匹配 %2$d 项%3$s</string>
     <string name="voice_quick_catalog_empty">\n未找到匹配音色，可清空搜索或到完整设置搜索全部音色。</string>
     <string name="fish_catalog_public_title">单说话人音色 · 公开音色</string>

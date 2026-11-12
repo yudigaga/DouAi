@@ -96,9 +96,15 @@ public final class SpeechSettingsDialogTest {
         store.putString(SpeechSettings.GET_TEMPLATE, "https://example.com/speak?text={text}");
         open(false);
         assertNotNull(root.findViewWithTag("settings.option.接口设置"));
+        assertNull("A settings section must not show a fixed description as though it were its current value",
+                root.findViewWithTag("settings.value.接口设置"));
+        assertEquals("系统引擎", value("语音来源"));
         assertNull(root.findViewWithTag("settings.option.语音引擎"));
         assertNull(root.findViewWithTag("settings.option.合成 GET"));
         chooseProvider(1);
+        assertEquals("第三方", value("语音来源"));
+        assertNull(root.findViewWithTag("settings.value.接口设置"));
+        assertNull(root.findViewWithTag("settings.value.音色高级设置"));
         assertNull(root.findViewWithTag("settings.option.语音引擎"));
         assertNotNull(root.findViewWithTag("settings.option.合成 GET"));
         assertNull(root.findViewWithTag("settings.option.音色列表 GET"));
@@ -123,7 +129,7 @@ public final class SpeechSettingsDialogTest {
         modes.getListView().performItemClick(null, 1, 1);
         assertEquals(SpeechSettings.RANDOM_CURRENT, store.getString(SpeechSettings.RANDOM_MODE, ""));
         assertEquals("小随机（当前来源）", value("随机音色"));
-        assertNotNull(root.findViewWithTag("speech.random.hint"));
+        assertNull(root.findViewWithTag("speech.random.hint"));
         modes = option("随机音色");
         modes.getListView().performItemClick(null, 2, 2);
         assertEquals(SpeechSettings.RANDOM_ALL, store.getString(SpeechSettings.RANDOM_MODE, ""));
@@ -446,7 +452,10 @@ public final class SpeechSettingsDialogTest {
             store.putString(BreezeSpeechSettings.VOICE_LANGUAGE, "zh");
             store.putString(BreezeSpeechSettings.LANGUAGE_CODE, "en");
             store.putString(FishSpeechSettings.REFERENCE_ID, "fish-saved");
-            View library = breezeCatalogForm(); startBreezeCatalogRefresh(library);
+            View library = breezeCatalogForm();
+            assertNull("Static catalog instructions move to Help; live catalog status must remain",
+                    library.findViewWithTag("speech.breeze.voice.filters"));
+            startBreezeCatalogRefresh(library);
             await(() -> store.getString(BreezeSpeechSettings.VOICE_SAMPLE, "").contains("第一页"));
             AlertDialog first = (AlertDialog) ShadowDialog.getLatestDialog();
             assertEquals(1, server.getRequestCount());
@@ -504,6 +513,7 @@ public final class SpeechSettingsDialogTest {
             AlertDialog picker = (AlertDialog) ShadowDialog.getLatestDialog();
             picker.getButton(Dialog.BUTTON_POSITIVE).performClick();
             await(() -> breezeCatalogStatus(library).contains("已加载音色和当前选择已保留"));
+            assertNotNull(library.findViewWithTag("speech.breeze.catalog.status"));
             assertTrue(picker.isShowing()); assertEquals(cached, store.getString(BreezeSpeechSettings.VOICE_SAMPLE, ""));
             assertEquals("saved-voice", store.getString(BreezeSpeechSettings.VOICE_ID, ""));
             assertEquals(1, picker.getListView().getCount());
@@ -1513,8 +1523,9 @@ public final class SpeechSettingsDialogTest {
             open(false);
             AlertDialog modes = option(fishVoiceForm(), "音色来源"); clickLabel(modes, "参考音频");
             AlertDialog samples = (AlertDialog) ShadowDialog.getLatestDialog();
-            assertTrue(((TextView) samples.getWindow().getDecorView().findViewWithTag("speech.fish.references.hint"))
-                    .getText().toString().contains("发送给 Fish"));
+            TextView inputHint = samples.getWindow().getDecorView().findViewWithTag("speech.fish.references.hint");
+            assertTrue("Reference input limits may stay, while its usage explanation moves to Help",
+                    inputHint == null || !inputHint.getText().toString().contains("发送给 Fish"));
             AlertDialog edit = option(samples.getWindow().getDecorView(), "样本 1 · 说话人 0");
             input(edit, "样本原文").setText("  新原文。\n完整保留。  "); save(edit);
             assertEquals(original, store.getString(FishSpeechSettings.REFERENCE_SAMPLES, ""));
@@ -1674,7 +1685,8 @@ public final class SpeechSettingsDialogTest {
         assertEquals("one/20\ntwo/30", store.getString(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, ""));
         assertEquals("saved-single", store.getString(SpeechSettings.MINIMAX_VOICE_ID, ""));
         TextView hint = form.findViewWithTag("speech.minimax.mix.hint");
-        assertTrue(hint.getText().toString().contains("普通音色 ID 将被忽略"));
+        assertTrue(hint == null || !hint.getText().toString().contains("普通音色 ID 将被忽略"));
+        assertTrue("The actual selected mixed-voice preset must remain visible", value("音色").contains("混音预设"));
         form = miniMaxSection("音频输出");
         assertEquals("音频 URL · url", value(form, "返回方式（传输）"));
         pick(form, "返回方式（传输）", 1);
@@ -1701,7 +1713,7 @@ public final class SpeechSettingsDialogTest {
         assertEquals("mp3", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, "mp3"));
         pick(audio, "生成音频格式（API）", 5);
         assertEquals("aac", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, ""));
-        assertNotNull(audio.findViewWithTag("speech.minimax.aac.hint"));
+        assertNull(audio.findViewWithTag("speech.minimax.aac.hint"));
         assertNull(audio.findViewWithTag("settings.option.MP3 码率"));
         assertTrue(value(summary, "音频输出").contains("AAC（实验）"));
         View effects = miniMaxSection("混音与声音效果");
@@ -3389,7 +3401,7 @@ public final class SpeechSettingsDialogTest {
                     assertEquals("aac", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, ""));
                     compose.runOnIdle(() -> {
                         View audio = grouped.getWindow().getDecorView();
-                        assertNotNull(audio.findViewWithTag("speech.minimax.aac.hint"));
+                        assertNull(audio.findViewWithTag("speech.minimax.aac.hint"));
                         assertNull(audio.findViewWithTag("settings.option.MP3 码率"));
                         return Unit.INSTANCE;
                     });

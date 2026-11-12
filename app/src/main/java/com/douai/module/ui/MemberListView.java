@@ -12,6 +12,11 @@ import android.util.LruCache;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.ViewConfiguration;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.BaseAdapter;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -21,6 +26,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.AbsListView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import androidx.compose.ui.platform.AbstractComposeView;
@@ -108,10 +114,9 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
     private final DirectoryBackend directoryBackend;
     private final EditText search;
     private final Spinner scope;
-    private final Button searchAll;
-    private final Button loadMore;
+    private final LinearLayout titleRow;
+    private final TextView titleLabel;
     private final TextView directoryStatus;
-    private final String directoryIntro;
     private final Set<String> remoteUids = new HashSet<>();
     private final Map<FollowListSnapshot.Kind, RelationState> relations = new EnumMap<>(FollowListSnapshot.Kind.class);
     private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -123,7 +128,7 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
     private final Rows rows = new Rows();
     private final TextView count;
     private final TextView profileStatus;
-    private final Button refreshProfiles;
+    private Button refreshProfiles;
     private final android.graphics.drawable.Drawable.ConstantState placeholder;
     private AutoCloseable profileSubscription;
     private boolean forceProfileRefreshPending;
@@ -133,6 +138,11 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
     private int directoryGeneration;
     private int relationGeneration;
     private int directoryScope;
+    private int pagingGestureGeneration = -1;
+    private int listScrollState = AbsListView.OnScrollListener.SCROLL_STATE_IDLE;
+    private float pagingStartY;
+    private boolean pagingTowardEnd;
+    private boolean pagingPointerDown;
     private boolean directoryLoading;
     private boolean hasMore;
     private long cursor;
@@ -184,35 +194,46 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
         for (FollowListSnapshot.Kind kind : FollowListSnapshot.Kind.values()) relations.put(kind, new RelationState());
         Context context = getContext();
         android.graphics.drawable.Drawable icon;
-        String intro = "输入昵称或抖音号，点击搜索抖音用户";
         try {
             android.content.res.Resources resources = context.getResources();
             if (!BuildConfig.APPLICATION_ID.equals(resources.getResourcePackageName(R.drawable.ic_member_placeholder))) {
                 resources = context.createPackageContext(BuildConfig.APPLICATION_ID, Context.CONTEXT_IGNORE_SECURITY).getResources();
             }
             icon = resources.getDrawable(R.drawable.ic_member_placeholder, null);
-            intro = resources.getString(R.string.member_directory_intro);
         } catch (Exception unavailable) { icon = context.getDrawable(android.R.drawable.ic_menu_myplaces); }
-        directoryIntro = intro;
         placeholder = icon.getConstantState();
         all = new ArrayList<>(entries);
         this.selected = new LinkedHashSet<>(selected);
         this.selectable = selectable;
         setOrientation(VERTICAL);
+        titleRow = new LinearLayout(context);
+        titleRow.setOrientation(HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.setBaselineAligned(false);
+        titleRow.setPadding(dp(24), dp(12), dp(12), dp(4));
+        titleLabel = new TextView(context);
+        titleLabel.setTextSize(20);
+        titleLabel.setTextColor(Color.rgb(31, 39, 45));
+        titleLabel.setTypeface(titleLabel.getTypeface(), android.graphics.Typeface.BOLD);
+        titleLabel.setSingleLine(true);
+        titleLabel.setEllipsize(TextUtils.TruncateAt.END);
+        titleLabel.setVisibility(View.GONE);
+        titleRow.addView(titleLabel, new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1));
         // Fill the bounded Compose host to reserve its footer and avoid probing unattached Compose rows.
         if (directoryEnabled) setLayoutParams(new ViewGroup.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
         if (directoryEnabled) {
             scope = miuix ? MiuixFormControls.spinner(context) : new Spinner(context);
             scope.setTag("settings.followLists.scope");
-            scope.setContentDescription("用户范围");
+            scope.setContentDescription("筛选用户");
             ArrayAdapter<String> scopes = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item,
                     new String[]{"全部", "未关注", "我关注", "关注我"});
             scopes.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
             scope.setAdapter(scopes);
-            addView(MiuixFormControls.viewFor(scope), new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+            titleRow.addView(MiuixFormControls.viewFor(scope), new LayoutParams(dp(128), LayoutParams.WRAP_CONTENT));
+            addView(titleRow, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         } else scope = null;
         String searchHint = !all.isEmpty() && all.stream().allMatch(entry -> entry.conversation)
-                ? "搜索群名称或会话 ID" : "搜索昵称、抖音号或 UID";
+                ? "搜索群名称或会话 ID" : "昵称、备注、抖音号或 UID";
         search = miuix ? MiuixFormControls.input(context, searchHint, "", false) : new EditText(context);
         search.setHint(searchHint);
         search.setSingleLine(true);
@@ -220,29 +241,27 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
         search.setTag("settings.followLists.search");
         addView(MiuixFormControls.viewFor(search), new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         if (directoryEnabled) {
-            searchAll = miuix ? MiuixFormControls.button(context) : new Button(context);
-            searchAll.setText("搜索抖音用户");
-            searchAll.setTextSize(14);
-            searchAll.setTag("settings.followLists.searchAll");
-            searchAll.setOnClickListener(ignored -> searchDirectory(false));
-            addView(MiuixFormControls.viewFor(searchAll), new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+            search.setImeOptions(EditorInfo.IME_ACTION_SEARCH | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+            search.setOnEditorActionListener((input, action, event) -> {
+                boolean enter = event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER;
+                if (action != EditorInfo.IME_ACTION_SEARCH && !enter) return false;
+                if (event == null || event.getAction() == KeyEvent.ACTION_UP && event.getRepeatCount() == 0) {
+                    searchDirectory(false);
+                    InputMethodManager keyboard = (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+                    if (keyboard != null) keyboard.hideSoftInputFromWindow(input.getWindowToken(), 0);
+                }
+                return true;
+            });
             directoryStatus = new TextView(context);
             directoryStatus.setTextColor(Color.rgb(105, 115, 122));
             directoryStatus.setTextSize(12);
             directoryStatus.setPadding(dp(8), dp(4), dp(8), dp(4));
             directoryStatus.setTag("settings.followLists.directoryStatus");
             directoryStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-            directoryStatus.setText(directoryIntro);
+            directoryStatus.setVisibility(View.GONE);
             addView(directoryStatus, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-        } else { searchAll = null; directoryStatus = null; }
+        } else directoryStatus = null;
         boolean hasUsers = all.stream().anyMatch(MemberListView::userProfile);
-        refreshProfiles = miuix ? MiuixFormControls.button(context) : new Button(context);
-        refreshProfiles.setText("刷新");
-        refreshProfiles.setTextSize(14);
-        refreshProfiles.setTag("settings.followLists.refreshProfiles");
-        refreshProfiles.setVisibility(directoryEnabled || hasUsers ? View.VISIBLE : View.GONE);
-        refreshProfiles.setOnClickListener(ignored -> refreshUsers());
-        addView(MiuixFormControls.viewFor(refreshProfiles), new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         profileStatus = new TextView(context);
         profileStatus.setTextColor(Color.rgb(105, 115, 122));
         profileStatus.setTextSize(12);
@@ -257,7 +276,14 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
         count.setPadding(dp(8), dp(8), dp(8), dp(8));
         count.setTag("settings.followLists.resultCount");
         addView(count);
-        ListView list = new ListView(context);
+        int touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+        ListView list = new ListView(context) {
+            @Override public boolean dispatchTouchEvent(MotionEvent event) {
+                // Observe before clickable rows/checkboxes can consume DOWN; native dispatch owns the gesture.
+                if (directoryEnabled) observePagingTouch(this, event, touchSlop);
+                return super.dispatchTouchEvent(event);
+            }
+        };
         list.setTag("settings.followLists.members");
         list.setDivider(new ColorDrawable(Color.TRANSPARENT));
         list.setDividerHeight(dp(1));
@@ -270,17 +296,20 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
                     height - (hasUsers ? 320 : 230))))));
         }
         if (directoryEnabled) {
-            loadMore = miuix ? MiuixFormControls.button(context) : new Button(context);
-            loadMore.setText("加载更多用户");
-            loadMore.setTextSize(14);
-            loadMore.setTag("settings.followLists.loadMore");
-            loadMore.setOnClickListener(ignored -> searchDirectory(true));
-            addView(MiuixFormControls.viewFor(loadMore), new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+            list.setOnScrollListener(new AbsListView.OnScrollListener() {
+                @Override public void onScrollStateChanged(AbsListView view, int state) {
+                    listScrollState = state;
+                    if (state == SCROLL_STATE_IDLE && !pagingPointerDown) clearPagingGesture();
+                }
+                @Override public void onScroll(AbsListView view, int first, int visible, int total) {
+                    if (pagingPointerDown || listScrollState == SCROLL_STATE_FLING) maybeLoadNextPage(list);
+                }
+            });
             scope.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
                 @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) { changeScope(position); }
                 @Override public void onNothingSelected(AdapterView<?> parent) { }
             });
-        } else loadMore = null;
+        }
         search.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int n, int after) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int n) {
@@ -289,7 +318,7 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
                     rawQuery = value;
                     cancelDirectory();
                     remoteUids.clear();
-                    searchStatus = value.isEmpty() ? "" : "点击搜索抖音用户，结果将合并到当前列表";
+                    searchStatus = "";
                     updateDirectoryStatus();
                 }
                 filter(value);
@@ -306,6 +335,20 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
     }
 
     public Set<String> selected() { return Collections.unmodifiableSet(new LinkedHashSet<>(selected)); }
+
+    public View createTitleView(String title) {
+        if (titleRow.getParent() instanceof ViewGroup) ((ViewGroup) titleRow.getParent()).removeView(titleRow);
+        titleLabel.setText(title);
+        titleLabel.setVisibility(View.VISIBLE);
+        ModuleTheme.bind(titleRow);
+        return titleRow;
+    }
+
+    public void bindRefreshButton(Button button) {
+        refreshProfiles = button;
+        button.setOnClickListener(ignored -> refreshUsers());
+        updateDirectoryControls();
+    }
 
     /** Reconcile the same UID pool after a refresh without resetting its query or selection. */
     public void refreshUsers() {
@@ -333,16 +376,15 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
     }
 
     private void updateDirectoryControls() {
-        if (searchAll == null) return;
         boolean enabled = !closed && !accountInvalid;
         search.setEnabled(enabled);
+        if (refreshProfiles != null) refreshProfiles.setEnabled(enabled);
+        if (scope == null) return;
         scope.setEnabled(enabled);
-        searchAll.setEnabled(enabled && !rawQuery.isEmpty() && !directoryLoading);
-        loadMore.setVisibility(hasMore ? View.VISIBLE : View.GONE);
-        loadMore.setEnabled(enabled && !directoryLoading && hasMore);
     }
 
     private void cancelDirectory() {
+        clearPagingGesture();
         directoryGeneration++;
         closeSubscription(directorySubscription);
         directorySubscription = null;
@@ -366,6 +408,7 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
 
     private void changeScope(int position) {
         if (position < 0 || position > 3 || closed || accountInvalid || !checkDirectoryAccount() || directoryScope == position) return;
+        clearPagingGesture();
         directoryScope = position;
         filter(query);
         updateDirectoryStatus();
@@ -462,8 +505,52 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
         } else if (following.loading || followers.loading) {
             relationStatus = "正在合并关注与粉丝名单…";
         }
-        directoryStatus.setText(searchStatus.isEmpty() ? (relationStatus.isEmpty() ? directoryIntro : relationStatus)
-                : relationStatus.isEmpty() ? searchStatus : searchStatus + "\n" + relationStatus);
+        String status = searchStatus.isEmpty() ? relationStatus
+                : relationStatus.isEmpty() ? searchStatus : searchStatus + "\n" + relationStatus;
+        directoryStatus.setText(status);
+        directoryStatus.setVisibility(status.isEmpty() ? View.GONE : View.VISIBLE);
+    }
+
+    private void observePagingTouch(ListView list, MotionEvent event, int touchSlop) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                pagingPointerDown = true;
+                pagingStartY = event.getY();
+                pagingTowardEnd = false;
+                pagingGestureGeneration = !closed && !accountInvalid && !directoryLoading && hasMore
+                        ? directoryGeneration : -1;
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (pagingGestureGeneration == directoryGeneration) {
+                    float distance = pagingStartY - event.getY();
+                    if (Math.abs(distance) > touchSlop) pagingTowardEnd = distance > 0;
+                    maybeLoadNextPage(list);
+                }
+                break;
+            case MotionEvent.ACTION_UP:
+                pagingPointerDown = false;
+                maybeLoadNextPage(list);
+                if (listScrollState == AbsListView.OnScrollListener.SCROLL_STATE_IDLE) clearPagingGesture();
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                clearPagingGesture();
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void clearPagingGesture() {
+        pagingGestureGeneration = -1;
+        pagingTowardEnd = false;
+        pagingPointerDown = false;
+    }
+
+    private void maybeLoadNextPage(ListView list) {
+        if (pagingGestureGeneration != directoryGeneration || !pagingTowardEnd
+                || closed || accountInvalid || directoryLoading || !hasMore || list.canScrollVertically(1)) return;
+        // Starting a page advances directoryGeneration, consuming this gesture before callbacks arrive.
+        searchDirectory(true);
     }
 
     private void searchDirectory(boolean more) {
@@ -510,7 +597,7 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
                 hasMore = page.hasMore;
                 filter(query);
                 searchStatus = remoteUids.isEmpty() ? "在线未找到用户，已保留列表中的匹配用户"
-                        : "在线找到 " + remoteUids.size() + " 位用户，已合并到列表" + (hasMore ? "，可加载更多" : "");
+                        : "在线找到 " + remoteUids.size() + " 位用户，已合并到列表" + (hasMore ? "，还有更多" : "");
                 updateDirectoryStatus();
                 updateDirectoryControls();
                 if (added) loadProfiles(false);
@@ -541,7 +628,6 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
             } else all.set(position, all.get(position).withDisplayProfile(entry));
         }
         if (all.stream().anyMatch(MemberListView::userProfile)) {
-            refreshProfiles.setVisibility(View.VISIBLE);
             profileStatus.setVisibility(View.VISIBLE);
         }
         return added;
@@ -556,6 +642,7 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
             total++;
             if (query.isEmpty() || remoteUids.contains(entry.uid) || entry.uid.toLowerCase(Locale.ROOT).contains(query)
                     || entry.name.toLowerCase(Locale.ROOT).contains(query)
+                    || entry.remarkName.toLowerCase(Locale.ROOT).contains(query)
                     || entry.douyinId.toLowerCase(Locale.ROOT).contains(query)) visible.add(entry);
         }
         count.setText(visible.isEmpty() ? "无匹配结果 · 共 " + total + " 项"
@@ -590,10 +677,12 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
         cache.evictAll();
         failed.clear();
         filter(query);
-        refreshProfiles.setEnabled(false);
         String message = error == null || error.isEmpty() ? "登录账号已变化，请重新打开列表" : error;
         profileStatus.setText(message);
-        if (directoryStatus != null) directoryStatus.setText(message);
+        if (directoryStatus != null) {
+            directoryStatus.setText(message);
+            directoryStatus.setVisibility(View.VISIBLE);
+        }
         updateDirectoryControls();
     }
 
@@ -667,7 +756,8 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
             IdentityRow row = recycled instanceof IdentityRow ? (IdentityRow) recycled : new IdentityRow(getContext());
             ProfileListEntry entry = getItem(position);
             row.setTag(entry.uid);
-            row.name.setText(entry.name.isEmpty() ? (entry.conversation ? "群名称未读取" : "昵称未读取") : entry.name);
+            String name = entry.name.isEmpty() ? (entry.conversation ? "群名称未读取" : "昵称未读取") : entry.name;
+            row.name.setText(!entry.conversation && !entry.remarkName.isEmpty() ? name + "（" + entry.remarkName + "）" : name);
             row.uid.setText(entry.conversation ? "会话 ID：" + entry.uid
                     : "抖音号：" + (entry.douyinId.isEmpty() ? "未读取" : entry.douyinId));
             boolean unresolved = !entry.conversation && entry.name.isEmpty() && entry.douyinId.isEmpty() && !entry.uid.isEmpty();
@@ -843,5 +933,6 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
         images.shutdownNow();
         cache.evictAll();
         failed.clear();
+        updateDirectoryControls();
     }
 }

@@ -262,17 +262,10 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         recording.setTextColor(TEXT);
         recording.setMinHeight(dp(48));
         recording.setEnabled(false);
-        recording.setContentDescription("开启本地记录，默认关闭");
+        recording.setContentDescription("开启本地记录");
         privacy.addView(controlView(recording), matchWrap());
-        TextView localNote = text("仅在本机记录 · 可随时关闭或清空", 13, MUTED, false);
-        localNote.setPadding(0, 0, 0, dp(4));
-        privacy.addView(localNote, matchWrap());
-        ReportSection details = new ReportSection("记录说明与自述", "settings", false);
-        details.setSummary("可选：填写用途与反馈，查看记录说明");
+        ReportSection details = new ReportSection("自述与反馈", "settings", false);
         privacy.addView(details, matchWrap());
-        TextView note = text("默认关闭。记录作品、作者、话题和功能使用，仅存本机；默认不纳入配置备份，可在备份中选择包含。汇总保留 365 天，关联明细最多 30 天；主动请求 AI 时才发送摘要。关闭采集保留记录，可随时清空。", 13, MUTED, false);
-        note.setLineSpacing(dp(3), 1);
-        details.addView(note, matchWrap());
         purposeButton = button("我的使用目的 · 可选", "analytics.purpose", this::editPurpose);
         details.addView(controlView(purposeButton), matchWrap());
         feedbackButton = button("最近一次侧写反馈 · 尚未填写", "analytics.feedback", this::editFeedback);
@@ -492,7 +485,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         input.setText(currentContext == null ? "" : currentContext.purpose);
         input.setFilters(new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(240)});
         contextDialog = new MiuixDialogBuilder(context, miuix)
-                .setTitle("我的使用目的").setMessage("这是你的自述，用来区分行为与动机。先保存在本机；主动请求 AI 分析时才一并发送。")
+                .setTitle("我的使用目的")
                 .setView(controlView(input)).setNegativeButton("取消", null)
                 .setPositiveButton("保存", (dialog, which) -> {
                     String value = input.getText().toString().trim();
@@ -577,10 +570,9 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         metric(overview, "不同作品", data.uniqueWorks);
         metric(overview, "模块功能使用", data.totalFeatureUses);
         if (data.advertisementViews > 0) metric(overview, "其中广告作品", data.advertisementViews);
-        caption(overview, "只统计开启记录后实际展示的作品；重复刷到会累加次数，不同作品按作品 ID 去重。功能次数表示已接入统计的实际触发，不代表开关数量。");
         if (data.totalViews == 0 && data.totalFeatureUses == 0) {
-            TextView empty = text(enabled ? "这个时间范围还没有记录。继续刷作品或使用模块功能后，点击刷新查看。"
-                    : "还没有记录。开启上方开关后开始收集；不会补录过去的浏览历史。", 14, MUTED, false);
+            TextView empty = text(enabled ? "这个时间范围还没有记录。"
+                    : "还没有记录。", 14, MUTED, false);
             empty.setTag("analytics.empty");
             overview.addView(empty, matchWrap());
         }
@@ -631,10 +623,9 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
                 types.addView(row, matchWrap());
             }
         } else caption(types, "暂无作品类型数据");
-        caption(types, "Live 指实况照片，含任意实况照片的混合图集计为一次实况图集。长视频为时长 ≥ 5 分钟的视频；无法识别的内容列为未知/其他作品。直播卡片单列，不代表进入直播间或观看时长。");
         attachAnalysis(types, "types");
         attachAnalysis(ranking("作者排行 Top 10", data.authors, "暂无作者记录"), "authors");
-        attachAnalysis(ranking("话题排行 Top 10", data.topics, "暂无话题记录；无话题的作品不计入此排行"), "topics");
+        attachAnalysis(ranking("话题排行 Top 10", data.topics, "暂无话题记录"), "topics");
         attachAnalysis(ranking("模块功能排行 Top 10", data.features, "暂无模块功能使用记录"), "features");
 
         LinearLayout hours = section("浏览时段分布");
@@ -666,7 +657,6 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         metric(history, "连续活跃天数", data.currentStreak);
         TextView first = text("首次记录  " + (data.firstSeen == 0 ? "暂无" : formatDate(data.firstSeen, "yyyy/MM/dd")), 14, TEXT, true);
         history.addView(first, matchWrap());
-        caption(history, "活跃天数与连续天数基于所选范围内保留的记录；空白日期可能是采集关闭或未覆盖。连续活跃允许今天尚未产生记录。首次记录从上次清空后计算，可早于 365 天。 ");
         LinearLayout analysis = section("AI 图表分析");
         analysis.setTag("analytics.analysis.card");
         analysisBody = column();
@@ -681,8 +671,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         renderAnalysisSettings();
         if (analysisResult != null) {
             caption(analysisBody, rangeLabel(analyzedDays) + " · " + analyzedModel + " · "
-                    + formatDate(analyzedAt, "MM-dd HH:mm")
-                    + "\n基于本次图表统计。刷新图表或切换时间范围后需重新分析，不会自动请求 AI。");
+                    + formatDate(analyzedAt, "MM-dd HH:mm"));
             TextView result = text(analysisResult.shareText(), 14, TEXT, false);
             result.setTag("analytics.analysis.result");
             result.setTextIsSelectable(true);
@@ -708,8 +697,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
                 configured = false;
                 model = "未配置模型";
             }
-            caption(analysisBody, "仅在点击下方按钮时，将当前范围图表、前期及 7/30 天对照、侧写指标、关联统计和你填写的使用目的（含作者、话题和模块功能排行）发送给所选模型："
-                    + model + "。日常采集只存本地，不自动请求 AI。结果仅保留在当前页面。\nAI 的判断仅供参考，图表统计不代表实际观看时长。");
+            caption(analysisBody, "当前模型：" + model);
             if (analysisOperation != null) {
                 TextView progress = text("正在请求 AI 分析…", 14, ACCENT, false);
                 progress.setTag("analytics.analysis.progress");
@@ -737,10 +725,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
                 analysisBody.addView(controlView(request), new LinearLayout.LayoutParams(-1, dp(52)));
             }
         }
-        imageShareNote = text("导出一张长图 PNG 或一份 PDF，再由你选择分享目标；包含完整报告、排行、最近记录与已有 AI 结果，不会再次请求 AI。"
-                + (Build.VERSION.SDK_INT >= 29 ? "长图保存到相册 Pictures/DouAi，PDF 保存到下载目录 Downloads/DouAi。"
-                : "请选择报告文件的保存位置。")
-                + "请核对其中可见的作者、话题和自述；长图过长时请选择 PDF。", 13, MUTED, false);
+        imageShareNote = text("", 13, MUTED, false);
         imageShareNote.setTag("analytics.report.share.note");
         analysisBody.addView(imageShareNote, matchWrap());
         imageShare = button("导出/分享报告", "analytics.report.share.image", this::shareReportImage);
@@ -771,7 +756,6 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         });
         reset.setEnabled(canEditAnalysisSettings() && custom);
         analysisBody.addView(controlView(reset), matchWrap());
-        caption(analysisBody, "所选模型和二级提示词单独用于本地数据分析。留空使用默认提示词，报告结构和统计口径保留。");
     }
 
     private String analysisModelPreview() {

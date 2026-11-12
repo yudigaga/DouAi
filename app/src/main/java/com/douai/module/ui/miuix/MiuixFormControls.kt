@@ -9,6 +9,7 @@ import android.database.DataSetObserver
 import android.graphics.drawable.Drawable
 import android.text.InputType
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.Spinner
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -41,6 +43,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
@@ -96,6 +99,7 @@ private class InputState(label: String, initial: String, val secret: Boolean) :
     var label by mutableStateOf(label)
     var value by mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
     var inputType by mutableIntStateOf(InputType.TYPE_CLASS_TEXT)
+    var imeOptions by mutableIntStateOf(EditorInfo.IME_ACTION_UNSPECIFIED)
     var maxLines by mutableIntStateOf(if (secret) 1 else 4)
     var singleLine by mutableStateOf(secret)
     var error by mutableStateOf<String?>(null)
@@ -158,6 +162,11 @@ private class FormInput(context: Context, label: String, initial: String, secret
         state?.singleLine = singleLine
     }
 
+    override fun setImeOptions(imeOptions: Int) {
+        super.setImeOptions(imeOptions)
+        state?.imeOptions = imeOptions
+    }
+
     override fun setMaxLines(maxLines: Int) {
         super.setMaxLines(maxLines)
         state?.maxLines = maxLines.coerceAtLeast(1)
@@ -212,7 +221,14 @@ private class FormInput(context: Context, label: String, initial: String, secret
                 enabled = state.enabled,
                 singleLine = state.singleLine,
                 maxLines = state.maxLines,
-                keyboardOptions = KeyboardOptions(keyboardType = state.inputType.keyboardType(secret)),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = state.inputType.keyboardType(secret),
+                    imeAction = if (state.imeOptions and EditorInfo.IME_MASK_ACTION == EditorInfo.IME_ACTION_SEARCH)
+                        ImeAction.Search else ImeAction.Default,
+                ),
+                keyboardActions = KeyboardActions(onSearch = {
+                    this@FormInput.onEditorAction(EditorInfo.IME_ACTION_SEARCH)
+                }),
                 visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
                 modifier = Modifier.fillMaxWidth().testTag(state.tag),
             )

@@ -157,9 +157,8 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     }
 
     private String commentReplySummary() {
-        String scope = "私聊和群聊名单不适用";
         return repository.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false) && !repository.getBoolean("native_auto_reply", false)
-                ? "已暂停：自动回复未开启\n" + scope : scope;
+                ? "已暂停：自动回复未开启" : "";
     }
 
     private String replyMediaPreview() {
@@ -273,7 +272,6 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             addChoiceOption(panel, "用户范围", "reply_scope_mode", new String[]{"全部", "仅名单内", "排除名单内"},
                     new String[]{"all", "whitelist", "blacklist"}, scope, changed);
             if (!"all".equals(scope)) {
-                scopeNotice(panel, "所选关系或手选用户任一命中即匹配名单；互不关注表示双方均未关注。");
                 addMultiChoiceCsvOption(panel, "关注关系", "reply_scope_relations", new String[]{"我关注", "关注我", "互不关注"},
                         new String[]{AutomationScopePolicy.FOLLOWING, AutomationScopePolicy.FOLLOWERS, AutomationScopePolicy.STRANGERS}, changed);
                 String title = "blacklist".equals(scope) ? "排除用户" : "选择用户";
@@ -292,7 +290,6 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                         value -> { repository.putString("reply_filter_keywords", value); changed.run(); });
                 addMultiChoiceCsvOption(panel, "匹配对象", "reply_filter_fields", new String[]{"发送者", "消息内容"},
                         new String[]{AutomationScopePolicy.AUTHOR, AutomationScopePolicy.CAPTION}, changed);
-                scopeNotice(panel, "消息筛选还需同时满足，不会扩大上面的用户范围。");
             }
         };
         showAutomationPanel("私聊范围", panel, build[0]);
@@ -421,17 +418,7 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         showProfileSelection("选择成员", users, selected, next -> {
                     repository.putString("reply_group_members", String.join(",", next));
                     changed.run();
-                }, () -> showGroupMemberIds(changed), true, false);
-    }
-
-    private void showGroupMemberIds(Runnable changed) {
-        LinearLayout form = form();
-        EditText input = formInput(form, "成员 UID 或昵称", repository.getString("reply_group_members", ""), false);
-        showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle("指定成员").setView(form)
-                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
-                    repository.putString("reply_group_members", String.join(",", GroupReplyPolicy.entries(input.getText().toString())));
-                    changed.run();
-                }).create());
+                }, null, true, false);
     }
 
     private void showProfileSelection(String title, java.util.Map<String, ProfileListEntry> available,
@@ -444,11 +431,14 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         MemberListView list = new MemberListView(useMiuix ? rowContext() : context, useMiuix,
                 new ArrayList<>(entries.values()), selected, true, directoryEnabled);
         MiuixDialogBuilder builder = new MiuixDialogBuilder(context, useMiuix);
-        builder.setTitle(title).setView(list).setNegativeButton("取消", null)
+        builder.setTitle(title).setCustomTitle(list.createTitleView(title)).setView(list).setNegativeButton("取消", null)
                 .setPositiveButton("保存", (dialog, which) -> saved.accept(list.selected()));
-        if (manual != null) builder.setNeutralButton(conversations ? "填写会话 ID" : "填写 UID", (dialog, which) ->
+        if (conversations && manual != null) builder.setNeutralButton("填写会话 ID", (dialog, which) ->
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(manual));
-        showOptionDialog(builder.create(), list::close);
+        else if (!conversations) builder.setNeutralButton("刷新", null);
+        AlertDialog picker = builder.create();
+        showOptionDialog(picker, list::close);
+        if (!conversations && picker.isShowing()) list.bindRefreshButton(picker.getButton(AlertDialog.BUTTON_NEUTRAL));
     }
 
     private void buildAutoCommentControls(LinearLayout panel) {
@@ -461,7 +451,7 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             media[0].setEnabled(ai);
         });
         addOption(panel, "评论内容", "", null, true, this::showCommentContentSettings);
-        addSwitch(panel, "语音评论", "AI 语音评论尽量简洁，最终使用完整正文，不截断音频；实际上传失败仍遵循原回退与防重。",
+        addSwitch(panel, "语音评论", "",
                 repository.getBoolean(LocalOptions.COMMENT_VOICE, false), true,
                 value -> repository.putBoolean(LocalOptions.COMMENT_VOICE, value));
         OptionRow[] scope = new OptionRow[1];
@@ -503,7 +493,6 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             addChoiceOption(panel, "作者范围", "comment_scope_mode", new String[]{"全部", "仅名单内", "排除名单内"},
                     new String[]{"all", "whitelist", "blacklist"}, mode, changed);
             if (!"all".equals(mode)) {
-                scopeNotice(panel, "所选关系或手选作者任一命中即匹配名单；互不关注表示双方均未关注。");
                 addMultiChoiceCsvOption(panel, "关注关系", "comment_scope_relations", new String[]{"我关注", "关注我", "互不关注"},
                         new String[]{AutomationScopePolicy.FOLLOWING, AutomationScopePolicy.FOLLOWERS, AutomationScopePolicy.STRANGERS}, changed);
                 String title = "blacklist".equals(mode) ? "排除作者" : "选择作者";
@@ -522,7 +511,6 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                         false, true, value -> { repository.putString("comment_filter_keywords", value); changed.run(); });
                 addMultiChoiceCsvOption(panel, "匹配对象", "comment_filter_fields", new String[]{"作者", "文案", "标题"},
                         new String[]{AutomationScopePolicy.AUTHOR, AutomationScopePolicy.CAPTION, AutomationScopePolicy.TITLE}, changed);
-                scopeNotice(panel, "作品筛选还需同时满足，不会扩大上面的作者范围。");
             }
         };
         showAutomationPanel("作品范围", panel, build[0]);
@@ -738,14 +726,14 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             progress.dismiss();
             if (success) showSelection.run();
             else showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle("会话名单暂不可用")
-                    .setMessage("读取失败或登录账号已变化，请稍后重新打开。也可以继续填写目标 ID。")
+                    .setMessage("读取失败或登录账号已变化，请稍后重新打开。也可以继续查看已读取的名单。")
                     .setPositiveButton("继续选择", (dialog, which) -> { if (!closed) showSelection.run(); })
                     .setNegativeButton("返回", null).create());
         });
     }
 
     private void showTargetSelection(String title, String key, Runnable changed) {
-        withNativeContacts(false, () -> withFollowing(complete -> showTargetSelectionLoaded(title, key, complete, changed)));
+        withNativeContacts(false, () -> withFollowing(complete -> showTargetSelectionLoaded(title, key, changed)));
     }
 
     private void withFollowing(java.util.function.Consumer<Boolean> showSelection) {
@@ -766,26 +754,13 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         });
     }
 
-    private void showTargetSelectionLoaded(String title, String key, boolean followingComplete, Runnable changed) {
+    private void showTargetSelectionLoaded(String title, String key, Runnable changed) {
         java.util.Map<String, ProfileListEntry> users = availableUsers();
         java.util.Set<String> selected = com.douai.module.feature.ReplyPolicy.targets(repository.getString(key, ""));
         showProfileSelection(title, users, selected, next -> {
                     repository.putString(key, String.join(",", next));
                     changed.run();
-                }, () -> showTargetIds(title, key, followingComplete, changed), true, false);
-    }
-
-    private void showTargetIds(String title, String key, boolean followingComplete, Runnable changed) {
-        LinearLayout form = form();
-        EditText input = formInput(form, "用户 UID，以逗号分隔", repository.getString(key, ""), false);
-        MiuixDialogBuilder builder = new MiuixDialogBuilder(context, useMiuix);
-        builder.setTitle(title).setView(form);
-        if (!followingComplete) builder.setMessage("关注名单未加载完整，仍可填写用户 UID。可稍后重新打开重试。");
-        showOptionDialog(builder
-                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
-                    repository.putString(key, String.join(",", com.douai.module.feature.ReplyPolicy.targets(input.getText().toString())));
-                    changed.run();
-                }).create());
+                }, null, true, false);
     }
 
     private EditText formInput(LinearLayout parent, String label, String value, boolean secret) {

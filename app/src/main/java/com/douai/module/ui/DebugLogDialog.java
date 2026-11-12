@@ -118,8 +118,6 @@ final class DebugLogDialog implements AutoCloseable {
         body.setOrientation(LinearLayout.VERTICAL);
         int padding = dp(16);
         body.setPadding(padding, 0, padding, padding);
-        body.addView(text("全局调试开关同时控制模块日志与 LSPosed：关闭保留功能状态、根操作开始/终态、简要异常与完整性说明；开启增加详细阶段、配置、Hook 类型/耗时和异常栈。按 trace_id 查看原因、进度及结果依据。正文与凭据不记录。开关立即生效，历史明细保留；只看新记录时请先清空再复现。",
-                "debug.logs.note", 14), matchWrap());
         enabled = miuix ? MiuixFormControls.checkbox(context, "全局调试日志", false) : new Switch(context);
         enabled.setText("全局调试日志"); enabled.setTag("debug.logs.enabled");
         enabled.setChecked(store.getBoolean(DebugLog.KEY, false)); enabled.setEnabled(false);
@@ -154,9 +152,6 @@ final class DebugLogDialog implements AutoCloseable {
         summary.setTextColor(0xFF69737A); body.addView(summary, matchWrap());
         status = text("正在读取日志…", "debug.logs.status", 13);
         status.setTextColor(0xFF69737A); body.addView(status, matchWrap());
-        TextView range = text("页面检索最近 128K 字符。筛选与搜索仅影响页面和复制；导出包含保留日志及完整性清单（最多 2 MiB）。请结合结果证据、未闭合操作及丢失说明判断。",
-                "debug.logs.range", 12);
-        range.setTextColor(0xFF69737A); body.addView(range, matchWrap());
         logText = text("", "debug.logs.text", 12);
         logText.setTypeface(Typeface.MONOSPACE); logText.setTextIsSelectable(true);
         body.addView(logText, matchWrap());

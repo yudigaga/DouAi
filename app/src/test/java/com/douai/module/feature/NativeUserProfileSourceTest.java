@@ -44,6 +44,7 @@ public final class NativeUserProfileSourceTest {
         assertTrue(delivered.await(1, TimeUnit.SECONDS));
         assertSame(Unit.INSTANCE, unit.get());
         assertEquals("真实昵称", result.name);
+        assertEquals("账户备注", ProfileListEntryTest.remark(result));
         assertEquals("public.id", result.douyinId);
         assertEquals("https://p3.douyinpic.com/avatar.jpg", result.avatarUrl);
     }
@@ -60,11 +61,18 @@ public final class NativeUserProfileSourceTest {
         assertEquals("return only", source(1000).fetch("100", () -> true).name);
     }
 
-    @Test public void emptyAndMismatchedNativeResultsAreFailures() throws Exception {
-        Repository.action = (param, callback) -> { callback.invoke(null); return null; };
-        assertThrows(IllegalStateException.class, () -> source(1000).fetch("100", () -> true));
+    @Test public void mismatchedImmediateNativeResultsRemainFailures() throws Exception {
         Repository.action = (param, callback) -> new User("999", "wrong user");
         assertThrows(IllegalStateException.class, () -> source(1000).fetch("100", () -> true));
+    }
+
+    @Test public void anExplicitNullCallbackIsANoResultButAWrongUidCallbackStillFails() throws Exception {
+        Repository.action = (param, callback) -> { callback.invoke(null); return null; };
+        assertNull("An explicit empty response must reach the existing unavailable-result branch",
+                source(1000).fetch("100", () -> true));
+        Repository.action = (param, callback) -> { callback.invoke(new User("999", "wrong user")); return null; };
+        assertThrows(IllegalStateException.class, () -> source(1000).fetch("100", () -> true));
+        assertEquals(2, Repository.calls);
     }
 
     @Test public void timeoutDetachesCallbackAndTheNextRequestIsIndependent() throws Exception {
@@ -125,6 +133,7 @@ public final class NativeUserProfileSourceTest {
         assertNull(source.cached("100"));
         Repository.cached = new User("100", "cached");
         assertEquals("cached", source.cached("100").name);
+        assertEquals("账户备注", ProfileListEntryTest.remark(source.cached("100")));
         assertEquals(0, Repository.calls);
     }
 
@@ -188,6 +197,7 @@ public final class NativeUserProfileSourceTest {
     public static final class User {
         final String uid;
         @SerializedName("nickname") final String raw;
+        @SerializedName("remark_name") final String remark = "账户备注";
         @SerializedName("unique_id") final String publicId = "public.id";
         User(String uid, String raw) { this.uid = uid; this.raw = raw; }
         public String getUid() { return uid; }

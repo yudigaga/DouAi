@@ -6,6 +6,7 @@ public final class ProfileListEntry {
     public final String name;
     public final String avatarUrl;
     public final String douyinId;
+    public final String remarkName;
     public final boolean conversation;
     public final String selectionKey;
     final String senderName;
@@ -15,26 +16,31 @@ public final class ProfileListEntry {
     }
 
     public ProfileListEntry(String uid, String name, String avatarUrl, String douyinId) {
-        this(uid, name, avatarUrl, douyinId, uid, false, name);
+        this(uid, name, avatarUrl, douyinId, "");
+    }
+
+    public ProfileListEntry(String uid, String name, String avatarUrl, String douyinId, String remarkName) {
+        this(uid, name, avatarUrl, douyinId, uid, false, name, remarkName);
     }
 
     private ProfileListEntry(String uid, String name, String avatarUrl, String douyinId,
-                             String key, boolean conversation, String senderName) {
+                             String key, boolean conversation, String senderName, String remarkName) {
         this.uid = uid == null ? "" : uid;
         this.name = name == null ? "" : name;
         this.avatarUrl = avatarUrl != null && AutomationImages.isMediaUrl(avatarUrl) ? avatarUrl : "";
         this.douyinId = publicId(douyinId == null ? "" : douyinId.trim());
+        this.remarkName = remarkName == null ? "" : remarkName.trim();
         this.conversation = conversation;
         this.selectionKey = key == null ? "" : key;
         this.senderName = senderName == null ? "" : senderName;
     }
 
     public static ProfileListEntry named(String name) {
-        return new ProfileListEntry("", name, "", "", name, false, name);
+        return new ProfileListEntry("", name, "", "", name, false, name, "");
     }
 
     public static ProfileListEntry conversation(String id, String name, String avatarUrl) {
-        return new ProfileListEntry(id, name, avatarUrl, "", id, true, name);
+        return new ProfileListEntry(id, name, avatarUrl, "", id, true, name, "");
     }
 
     public ProfileListEntry withFallback(ProfileListEntry fallback) {
@@ -43,11 +49,12 @@ public final class ProfileListEntry {
         return new ProfileListEntry(uid, name.isEmpty() ? fallback.name : name,
                 avatarUrl.isEmpty() ? fallback.avatarUrl : avatarUrl,
                 douyinId.isEmpty() ? fallback.douyinId : douyinId, selectionKey, conversation,
-                senderName.isEmpty() ? fallback.senderName : senderName);
+                senderName.isEmpty() ? fallback.senderName : senderName,
+                remarkName.isEmpty() ? fallback.remarkName : remarkName);
     }
 
     ProfileListEntry withSenderName(String value) {
-        return new ProfileListEntry(uid, name, avatarUrl, douyinId, selectionKey, conversation, value);
+        return new ProfileListEntry(uid, name, avatarUrl, douyinId, selectionKey, conversation, value, remarkName);
     }
 
     public ProfileListEntry withDisplayProfile(ProfileListEntry profile) {
@@ -55,14 +62,32 @@ public final class ProfileListEntry {
         return new ProfileListEntry(uid, profile.name.isEmpty() ? name : profile.name,
                 profile.avatarUrl.isEmpty() ? avatarUrl : profile.avatarUrl,
                 profile.douyinId.isEmpty() ? douyinId : profile.douyinId,
-                selectionKey, conversation, senderName);
+                selectionKey, conversation, senderName,
+                profile.remarkName.isEmpty() ? remarkName : profile.remarkName);
     }
 
     static ProfileListEntry fromUser(String uid, Object user, ProfileListEntry fallback) {
         String name = nickname(user);
         String douyinId = publicId(text(user, "unique_id", new String[]{"uniqueId"}, "getUniqueId"));
         if (douyinId.isEmpty()) douyinId = publicId(text(user, "short_id", new String[]{"shortId"}, "getShortId"));
-        return new ProfileListEntry(uid, name, avatar(user), douyinId).withFallback(fallback);
+        return new ProfileListEntry(uid, name, avatar(user), douyinId, remarkName(user)).withFallback(fallback);
+    }
+
+    private static String remarkName(Object user) {
+        if (user == null) return "";
+        try {
+            java.lang.reflect.Field field = DownloadActionHook.findFieldByJsonName(user.getClass(), "remark_name");
+            if (field == null) {
+                try { field = HostTargets.field(user.getClass(), "remarkName"); }
+                catch (NoSuchFieldException absent) { }
+            }
+            if (field != null) {
+                field.setAccessible(true);
+                // A raw empty remark must not turn into a computed nickname through a display getter.
+                return string(field.get(user));
+            }
+        } catch (ReflectiveOperationException | RuntimeException unavailable) { return ""; }
+        return text(user, "remark_name", new String[0], "getRemarkName");
     }
 
     private static String nickname(Object user) {
@@ -107,8 +132,15 @@ public final class ProfileListEntry {
     }
 
     private static String avatarUrl(Object avatar) {
-        String url = DownloadActionHook.firstUrlValue(avatar);
-        if (url == null) url = DownloadActionHook.firstUrlValue(HostTargets.invoke(avatar, "getUrlList"));
-        return url == null ? "" : url;
+        Object urls = avatar instanceof Iterable<?> ? avatar : DownloadActionHook.jsonValue(avatar, "url_list");
+        String selected = firstAvatarUrl(urls);
+        return selected.isEmpty() ? firstAvatarUrl(HostTargets.invoke(avatar, "getUrlList")) : selected;
+    }
+
+    private static String firstAvatarUrl(Object urls) {
+        if (urls instanceof Iterable<?>) for (Object value : (Iterable<?>) urls) {
+            if (value instanceof String && AutomationImages.isMediaUrl((String) value)) return (String) value;
+        }
+        return "";
     }
 }

@@ -202,7 +202,9 @@ public final class LocalAnalyticsDialogTest {
         drain();
         View imageShare = find("analytics.report.share.image");
         assertNotNull("The complete report must be shareable as an image before requesting AI", imageShare);
-        assertTrue(text("analytics.report.share.note").contains("一张长图 PNG 或一份 PDF"));
+        assertEquals("Export guidance belongs in Help; this view is reserved for runtime status",
+                "", text("analytics.report.share.note"));
+        assertTrue(imageShare.isEnabled());
         imageShare.performClick();
         ((AlertDialog) ShadowDialog.getLatestDialog()).dismiss();
         drain();

@@ -61,10 +61,6 @@ final class DownloadTasksDialog implements AutoCloseable {
         LinearLayout content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(12), 0, dp(12), 0);
-        TextView note = text(13);
-        note.setText("仅记录本次打开抖音期间由 DouAi 保存的任务。关闭此页不会停止下载。");
-        note.setPadding(0, 0, 0, dp(8));
-        content.addView(note, matchWrap());
         ListView rows = new ListView(context);
         rows.setTag("download.tasks");
         rows.setDividerHeight(dp(1));

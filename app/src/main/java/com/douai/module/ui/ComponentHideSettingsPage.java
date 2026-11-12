@@ -494,7 +494,6 @@ public final class ComponentHideSettingsPage {
         body.addView(input, matchWrap());
         ModuleTheme.bind(body);
         AlertDialog next = new MiuixDialogBuilder(context, false).setTitle(title)
-                .setMessage("请输入 -2 到 255 的整数")
                 .setView(body).setNegativeButton("取消", null).setPositiveButton("保存", null).create();
         next.setOwnerActivity(activity);
         next.setOnDismissListener(ignored -> { if (alphaInput == next) alphaInput = null; });

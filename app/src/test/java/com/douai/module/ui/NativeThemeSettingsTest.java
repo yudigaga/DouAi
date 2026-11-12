@@ -128,7 +128,7 @@ public final class NativeThemeSettingsTest {
         assertFalse(secrets.isChecked());
         assertFalse(replace.isChecked());
         assertReadable(secrets);
-        assertReadable(form.findViewWithTag("config.backup.note"));
+        assertReadable(form.findViewWithTag("config.backup.status"));
         screenshot(form, "native-backup-dark.png");
     }
 

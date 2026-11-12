@@ -92,8 +92,7 @@ final class SubmissionRecoveryDialog implements AutoCloseable {
                 loadedAccount = selectedAccount; names = labels;
                 // The injected host context does not expose module string resources.
                 summary.setText(String.format(java.util.Locale.getDefault(),
-                        "%1$s当前账号 %2$s\n全部账号已用 %3$d/%4$d，待核对 %5$d，损坏 %6$d，旧记录未归属 %7$d%8$s"
-                                + "\n仅可核对上次进程且已超过两分钟的记录；本次进程请完全重启抖音后核对。清空历史不会解除防重。",
+                        "%1$s当前账号 %2$s\n全部账号已用 %3$d/%4$d，待核对 %5$d，损坏 %6$d，旧记录未归属 %7$d%8$s",
                         outcome.isEmpty() ? "" : outcome + "\n", selectedAccount, state.total, state.capacity,
                         state.uncertain, state.corrupt, state.unassigned,
                         state.storageFailed ? "\n存储不可用，请检查空间并完全重启抖音。" : ""));

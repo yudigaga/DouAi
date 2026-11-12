@@ -273,15 +273,11 @@ final class AiModelEditor implements AutoCloseable {
         responseMode.setTag("ai.response_mode");
         responseMode.setSelection(responseModeIndex(original.responseMode));
         addField(form, "响应方式", responseMode);
-        form.addView(text("同一模型的对话、自动回复、自动评论和本地分析共用此设置；流式接收完成后显示完整结果。",
-                12, MUTED, false), matchWrap());
 
         Spinner reasoningEffort = !useMiuix ? new Spinner(context) : MiuixFormControls.spinner(context);
         reasoningEffort.setTag("ai.reasoning_effort");
         String[][] reasoningValues = {setReasoningChoices(reasoningEffort, original.protocol, original.reasoningEffort)};
         addField(form, "推理强度", reasoningEffort);
-        form.addView(text("选项使用接口实际参数值，是否支持取决于模型；更高强度可能耗时更久、使用更多 Token。“模型默认”不附加强度参数。",
-                12, MUTED, false), matchWrap());
 
         int[] lastProtocolSelection = {protocolIndex(original.protocol)};
         protocol.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {

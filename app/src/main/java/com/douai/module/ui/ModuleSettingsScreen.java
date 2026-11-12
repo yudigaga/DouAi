@@ -210,12 +210,9 @@ public final class ModuleSettingsScreen {
 
         addTitle("DouAi", "抖音 40.6.0 / 40.8.0 / 41.0.0");
         addScanStatus(ScanStatus.pending());
-        if (repository.isInHost()) {
-            addHostSettingsNotice();
-        } else {
+        if (!repository.isInHost()) {
             addFrameworkSyncStatus();
-            addIndependentSettingsNotice();
-            addOption("关于", "DouAi " + com.douai.module.BuildConfig.VERSION_NAME, null, true,
+            addOption("关于", "", "DouAi " + com.douai.module.BuildConfig.VERSION_NAME, true,
                     () -> openCategory(Category.ABOUT));
             ModuleTheme.bind(scroll);
             return scroll;
@@ -588,11 +585,11 @@ public final class ModuleSettingsScreen {
                 addSwitch("首页刷新确认", "",
                         repository.getBoolean("confirm_refresh", false), true,
                         value -> repository.putBoolean("confirm_refresh", value));
-                addDependentSwitch("首页右滑打开侧边栏", "默认关闭，仅适配抖音 41.0.0；开启后替换侧边栏常用功能，关闭恢复原行为",
+                addDependentSwitch("首页右滑打开侧边栏", "",
                         repository.getBoolean(SidebarSettings.ENABLED, false),
                         value -> repository.putBoolean(SidebarSettings.ENABLED, value), () -> {
                             OptionRow[] sidebarItems = new OptionRow[1];
-                            sidebarItems[0] = addOption("侧边栏显示项", "勾选要显示的模块入口；可以全部取消", sidebarSelectionPreview(), true,
+                            sidebarItems[0] = addOption("侧边栏显示项", "", sidebarSelectionPreview(), true,
                                     () -> showSidebarSelection(sidebarItems[0]));
                         });
                 break;
@@ -612,7 +609,7 @@ public final class ModuleSettingsScreen {
                                     value -> repository.putBoolean("smart_swipe", value));
                         });
                 buildPlaybackSpeedControls();
-                addLocalSwitch("锁定最高画质", "默认关闭，仅适配抖音41.0.0；自动保持视频原生支持的最高档位，不支持时沿用原生策略。修改后重启抖音生效。", LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY);
+                addLocalSwitch("锁定最高画质", "", LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY);
                 addOption("互动自动化", "", null, true, this::showAutomationSettings);
                 break;
             case COMMENT:
@@ -624,8 +621,8 @@ public final class ModuleSettingsScreen {
                         value -> repository.putBoolean("comment_voice_replace", value),
                         () -> addAudioPathOption("评论语音文件", "comment_voice_path"));
                 addOption("评论转语音", "", null, true, this::showCommentSpeechSettings);
-                addOption("文本转语音设置", "配置语音来源、接口与音色", null, true, this::showSpeechSettings);
-                addLocalSwitch("#长按发送转语音（全局）", "适用于私信、群聊和评论。输入以 # 开头时长按发送，只发送语音，不发送文字。", "hash_long_press_voice");
+                addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
+                addLocalSwitch("#长按发送转语音（全局）", "", "hash_long_press_voice");
                 addCommentLongPressOption();
                 addDependentSwitch("彩色评论", "", repository.getBoolean("colored_comment", false),
                         value -> repository.putBoolean("colored_comment", value),
@@ -653,7 +650,7 @@ public final class ModuleSettingsScreen {
                                             false, true, false, value -> repository.putString("streak_content", value)));
                             addLocalSwitch("续火花成功弹出Tip", "", "streak_tip");
                             addOption("续火花限制时间", "", null, true, this::showStreakWindow);
-                            addEditableOption("内容Api", "留空使用固定内容；填写后仅使用接口，失败不改发固定内容",
+                            addEditableOption("内容Api", "",
                                     repository.getString("streak_content_api", ""), false, true, false, value -> {
                                         repository.putString("streak_content_api", value);
                                         fixedContent.setVisibility(value.trim().isEmpty() ? View.VISIBLE : View.GONE);
@@ -679,8 +676,8 @@ public final class ModuleSettingsScreen {
                         value -> repository.putBoolean("dm_voice_replace", value),
                         () -> addAudioPathOption("私聊语音文件", "dm_voice_path"));
                 addLocalSwitch("自动文本转语音",
-                        "私信以 # 开头时，单击发送转为语音。", "dm_tts");
-                addOption("文本转语音设置", "配置语音来源、接口与音色", null, true, this::showSpeechSettings);
+                        "", "dm_tts");
+                addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
                 break;
             case SPOOF:
                 addDependentSwitch("个人资料数量伪装", "", repository.getBoolean("spoof_profile", false),
@@ -751,7 +748,7 @@ public final class ModuleSettingsScreen {
         LinearLayout panel = form();
         content = panel;
         try {
-            addLocalSwitch("评论自动文本转语音", "评论以 # 开头时，单击发送转为语音。", "comment_tts");
+            addLocalSwitch("评论自动文本转语音", "", "comment_tts");
         } finally { content = previous; }
         showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("评论转语音")
                 .setView(scrolling(panel)).setPositiveButton("完成", null).create());
@@ -972,8 +969,7 @@ public final class ModuleSettingsScreen {
     }
 
     private void showProfileSelection(String title, java.util.Map<String, ProfileListEntry> available,
-                                      java.util.Set<String> selected, java.util.function.Consumer<java.util.Set<String>> saved,
-                                      Runnable manual) {
+                                      java.util.Set<String> selected, java.util.function.Consumer<java.util.Set<String>> saved) {
         java.util.Map<String, ProfileListEntry> entries = new java.util.LinkedHashMap<>(available);
         for (String uid : selected) if (!entries.containsKey(uid)) {
             entries.put(uid, "选择群成员".equals(title) && !uid.matches("[1-9][0-9]{0,19}")
@@ -982,11 +978,11 @@ public final class ModuleSettingsScreen {
         MemberListView list = new MemberListView(miuixHome != null ? rowContext() : context, miuixHome != null,
                 new ArrayList<>(entries.values()), selected, true, true);
         MiuixDialogBuilder builder = new MiuixDialogBuilder(context, miuixHome != null);
-        builder.setTitle(title).setView(list).setNegativeButton("取消", null)
-                .setPositiveButton("保存", (dialog, which) -> saved.accept(list.selected()));
-        if (manual != null) builder.setNeutralButton("填写 UID", (dialog, which) ->
-                new android.os.Handler(android.os.Looper.getMainLooper()).post(manual));
-        showOptionDialog(builder.create(), list::close);
+        builder.setTitle(title).setCustomTitle(list.createTitleView(title)).setView(list).setNegativeButton("取消", null)
+                .setNeutralButton("刷新", null).setPositiveButton("保存", (dialog, which) -> saved.accept(list.selected()));
+        AlertDialog picker = builder.create();
+        showOptionDialog(picker, list::close);
+        if (picker.isShowing()) list.bindRefreshButton(picker.getButton(AlertDialog.BUTTON_NEUTRAL));
     }
 
     private void addUnavailable(String detail) {
@@ -1037,9 +1033,9 @@ public final class ModuleSettingsScreen {
         Runnable refresh = () -> {
             boolean moduleOnly = repository.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false);
             automatic[0].setEnabled(!moduleOnly);
-            automatic[0].setSummary(moduleOnly ? "仅模块模式下手动切换优先，已保留原设置。" : "");
+            automatic[0].setSummary(moduleOnly ? "仅模块模式优先" : "");
         };
-        addSwitch("仅模块控制倍速", "默认使用 1x，长按在所选倍速与 1x 间切换，切换视频保持选择；官方倍速不接管。",
+        addSwitch("仅模块控制倍速", "",
                 repository.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false), true, value -> {
                     repository.putBoolean(LocalOptions.MODULE_ONLY_SPEED, value);
                     refresh.run();
@@ -1125,7 +1121,7 @@ public final class ModuleSettingsScreen {
             return selected.isEmpty() ? "未启用" : String.join("、", selected);
         };
         OptionRow[] row = new OptionRow[1];
-        row[0] = addOption("长按操作", "选择评论菜单中的工具", selection.get(), true, () -> {
+        row[0] = addOption("长按操作", "", selection.get(), true, () -> {
             boolean[] enabled = new boolean[keys.length];
             for (int index = 0; index < keys.length; index++) {
                 enabled[index] = repository.getBoolean(keys[index], false);
@@ -1157,14 +1153,14 @@ public final class ModuleSettingsScreen {
         content = panel;
         addOption("添加模型配置", "", null, true, this::showAiPresetPicker);
         addOption("测试当前配置", "", null, true, this::showAiChat);
-        addLocalSwitch("接管评论 AI 解析", "在抖音 41.0.0 的评论 AI 解析页使用所选模块模型。", CommentAiSettings.TAKEOVER);
+        addLocalSwitch("接管评论 AI 解析", "", CommentAiSettings.TAKEOVER);
         AiModelSettings commentModels = aiSettings();
         String commentModelId = repository.getString(CommentAiSettings.MODEL_ID, "");
         String commentModelName = commentModelId.isEmpty() ? "跟随全局模型" : "请选择模型";
         for (AiModelConfig model : commentModels.configs) if (model.id.equals(
                 commentModelId.isEmpty() ? commentModels.activeId : commentModelId)) commentModelName = model.name;
         OptionRow[] commentModelRow = new OptionRow[1];
-        commentModelRow[0] = addOption("评论解析模型", "仅用于评论区 AI 解析，不更改自动评论或自动回复模型。",
+        commentModelRow[0] = addOption("评论解析模型", "",
                 commentModelName, true, () -> {
                     AiModelSettings current = aiSettings();
                     String[] names = new String[current.configs.size() + 1];
@@ -1182,7 +1178,7 @@ public final class ModuleSettingsScreen {
                                 }
                             }).setNegativeButton("取消", null).create());
                 });
-        addLocalSwitch("允许 AI 使用抖音搜索", "仅抖音内的手动聊天和评论 AI 解析可用，搜索资料会提供给本次所选模型。",
+        addLocalSwitch("允许 AI 使用抖音搜索", "",
                 CommentAiSettings.SEARCH);
         addSectionLabel("已配置模型");
         AiModelSettings settings = aiSettings();
@@ -1356,14 +1352,14 @@ public final class ModuleSettingsScreen {
             progress.dismiss();
             if (success) showSelection.run();
             else showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("会话名单暂不可用")
-                    .setMessage("读取失败或登录账号已变化，请稍后重新打开。也可以继续填写目标 ID。")
+                    .setMessage("读取失败或登录账号已变化，请稍后重新打开。也可以继续查看已读取的名单。")
                     .setPositiveButton("继续选择", (dialog, which) -> { if (!closed) showSelection.run(); })
                     .setNegativeButton("返回", null).create());
         });
     }
 
     private void showTargetSelection(String title, String key, Runnable onSaved) {
-        withNativeContacts(false, () -> withFollowing(complete -> showTargetSelectionLoaded(title, key, complete, onSaved)));
+        withNativeContacts(false, () -> withFollowing(complete -> showTargetSelectionLoaded(title, key, onSaved)));
     }
 
     private void withFollowing(java.util.function.Consumer<Boolean> showSelection) {
@@ -1384,7 +1380,7 @@ public final class ModuleSettingsScreen {
         });
     }
 
-    private void showTargetSelectionLoaded(String title, String key, boolean followingComplete, Runnable onSaved) {
+    private void showTargetSelectionLoaded(String title, String key, Runnable onSaved) {
         java.util.Map<String, ProfileListEntry> users = new java.util.LinkedHashMap<>(NativeMessagingHooks.availableContactProfiles());
         for (com.douai.module.feature.FollowListSnapshot.Kind kind : com.douai.module.feature.FollowListSnapshot.Kind.values()) {
             NativeFollowLists.memberDetails(kind).forEach((uid, profile) ->
@@ -1394,20 +1390,7 @@ public final class ModuleSettingsScreen {
         showProfileSelection(title, users, selected, next -> {
             repository.putString(key, String.join(",", next));
             onSaved.run();
-        }, () -> showTargetIds(title, key, followingComplete, onSaved));
-    }
-
-    private void showTargetIds(String title, String key, boolean followingComplete, Runnable onSaved) {
-        LinearLayout form = form();
-        EditText input = formInput(form, "用户 UID，以逗号分隔", repository.getString(key, ""), false);
-        MiuixDialogBuilder builder = new MiuixDialogBuilder(context, miuixHome != null);
-        builder.setTitle(title).setView(form);
-        if (!followingComplete) builder.setMessage("关注名单未加载完整，仍可填写用户 UID。可稍后重新打开重试。");
-        showOptionDialog(builder
-                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
-                    repository.putString(key, String.join(",", com.douai.module.feature.ReplyPolicy.targets(input.getText().toString())));
-                    onSaved.run();
-                }).create());
+        });
     }
 
     private void showStreakWindow() {
@@ -1445,7 +1428,7 @@ public final class ModuleSettingsScreen {
 
     private void addAudioPathOption(String title, String key) {
         OptionRow[] row = new OptionRow[1];
-        row[0] = addOption(title, "选择音频文件或填写可读取的路径", repository.getString(key, ""), true,
+        row[0] = addOption(title, "", repository.getString(key, ""), true,
                 () -> showAudioPathEditor(title, key, () -> {
                     String value = repository.getString(key, "");
                     row[0].setValue(value.isEmpty() ? "未设置" : value);
@@ -1868,9 +1851,9 @@ public final class ModuleSettingsScreen {
     public void setFrameworkSyncStatus(boolean connected, String message, String error) {
         if (syncTitle == null) return;
         syncTitle.setText(connected ? "LSPosed 已连接" : "LSPosed 未连接");
-        String detail = "本页设置保存在模块应用；抖音内设置保存在抖音应用，两者互不共享。";
-        if (error != null && !error.isEmpty()) detail += "\n" + error;
+        String detail = error == null ? "" : error;
         syncDetail.setText(detail);
+        syncDetail.setVisibility(detail.isEmpty() ? View.GONE : View.VISIBLE);
         syncMark.setBackground(makeCircle(connected ? Color.rgb(0, 146, 117)
                 : Color.rgb(198, 84, 67)));
     }
@@ -1897,24 +1880,6 @@ public final class ModuleSettingsScreen {
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
         content.addView(header, matchWrap());
-    }
-
-    private void addHostSettingsNotice() {
-        TextView notice = text("设置保存在抖音本地。",
-                13, MUTED, false);
-        LinearLayout.LayoutParams p = matchWrap();
-        p.topMargin = dp(12);
-        content.addView(notice, p);
-    }
-
-    private void addIndependentSettingsNotice() {
-        TextView notice = text("抖音内功能设置独立保存在抖音应用；此处可查看模块状态及调试日志。",
-                14, TEXT, false);
-        notice.setPadding(dp(14), dp(14), dp(14), dp(14));
-        notice.setBackground(makeRounded(Color.WHITE, LINE, dp(7)));
-        LinearLayout.LayoutParams params = matchWrap();
-        params.topMargin = dp(12);
-        content.addView(notice, params);
     }
 
     private void addScanStatus(ScanStatus status) {
@@ -1962,7 +1927,8 @@ public final class ModuleSettingsScreen {
         LinearLayout labels = new LinearLayout(context);
         labels.setOrientation(LinearLayout.VERTICAL);
         syncTitle = text("配置未连接", 14, TEXT, true);
-        syncDetail = text("本地设置保存在此设备。", 12, MUTED, false);
+        syncDetail = text("", 12, MUTED, false);
+        syncDetail.setVisibility(View.GONE);
         labels.addView(syncTitle, matchWrap());
         LinearLayout.LayoutParams detailParams = matchWrap();
         detailParams.topMargin = dp(3);

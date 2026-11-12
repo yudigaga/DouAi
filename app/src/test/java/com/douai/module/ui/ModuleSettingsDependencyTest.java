@@ -204,7 +204,7 @@ public final class ModuleSettingsDependencyTest {
         assertEquals("101", store.getString("streak_targets", ""));
     }
 
-    @Test public void streakTargetSummaryCountsInitialSelectionAndBothWaysOfSaving() throws Exception {
+    @Test public void streakTargetSummaryCountsSavedSelectionsAndRefreshDoesNotCommitTheDraft() throws Exception {
         java.lang.reflect.Field contacts = NativeMessagingHooks.class.getDeclaredField("contacts");
         java.lang.reflect.Field profiles = NativeMessagingHooks.class.getDeclaredField("contactProfiles");
         contacts.setAccessible(true);
@@ -243,16 +243,25 @@ public final class ModuleSettingsDependencyTest {
             assertTrue(page.findViewWithTag("settings.option.选择用户").performClick());
             ShadowLooper.idleMainLooper();
             picker = (AlertDialog) ShadowDialog.getLatestDialog();
+            list = picker.getWindow().getDecorView().findViewWithTag("settings.followLists.members");
+            for (int index = 0; index < list.getAdapter().getCount(); index++) {
+                if ("101".equals(((ProfileListEntry) list.getAdapter().getItem(index)).uid)) {
+                    assertTrue(list.getAdapter().getView(index, null, list).performClick());
+                    break;
+                }
+            }
+            assertEquals("刷新", picker.getButton(Dialog.BUTTON_NEUTRAL).getText().toString());
             picker.getButton(Dialog.BUTTON_NEUTRAL).performClick();
             ShadowLooper.idleMainLooper();
-            AlertDialog manual = (AlertDialog) ShadowDialog.getLatestDialog();
-            EditText input = findInput(manual.getWindow().getDecorView(), "用户 UID，以逗号分隔");
-            assertNotNull(input);
-            input.setText("303,404,505,303");
-            manual.getButton(Dialog.BUTTON_POSITIVE).performClick();
+            assertSame(picker, ShadowDialog.getLatestDialog());
+            assertTrue(picker.isShowing());
+            assertEquals(2, com.douai.module.feature.ReplyPolicy.targets(store.getString("streak_targets", "")).size());
+            assertEquals("已选择 2 人", summary.getText().toString());
+            picker.getButton(Dialog.BUTTON_POSITIVE).performClick();
             ShadowLooper.idleMainLooper();
-            assertEquals(3, com.douai.module.feature.ReplyPolicy.targets(store.getString("streak_targets", "")).size());
-            assertEquals("已选择 3 人", summary.getText().toString());
+            assertEquals(java.util.Collections.singleton("102"),
+                    com.douai.module.feature.ReplyPolicy.targets(store.getString("streak_targets", "")));
+            assertEquals("已选择 1 人", summary.getText().toString());
         } finally {
             contacts.set(null, previousContacts);
             profiles.set(null, previousProfiles);
@@ -384,17 +393,6 @@ public final class ModuleSettingsDependencyTest {
 
     private static void visible(View page, String tag) { assertTrue(tag, hierarchyVisible(page.findViewWithTag(tag))); }
     private static void hidden(View page, String tag) { assertFalse(tag, hierarchyVisible(page.findViewWithTag(tag))); }
-    private static EditText findInput(View root, String description) {
-        if (root instanceof EditText && description.contentEquals(root.getContentDescription())) return (EditText) root;
-        if (root instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) root;
-            for (int index = 0; index < group.getChildCount(); index++) {
-                EditText input = findInput(group.getChildAt(index), description);
-                if (input != null) return input;
-            }
-        }
-        return null;
-    }
     private static boolean hierarchyVisible(View view) {
         if (view == null) return false;
         for (View current = view; current != null; current = current.getParent() instanceof View ? (View) current.getParent() : null) {

@@ -109,7 +109,7 @@ class MiuixHostSettingsTest {
         compose.runOnIdle { assertFalse(store.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false)) }
         compose.onNodeWithTag("settings.toggle.仅模块控制倍速").performClick()
         compose.onNodeWithTag("settings.toggle.自动倍速播放").assertIsNotEnabled()
-        compose.onNodeWithText("仅模块模式下手动切换优先，已保留原设置。").assertExists()
+        compose.onNodeWithText("仅模块模式优先").assertExists()
         compose.runOnIdle {
             assertTrue(store.getBoolean(LocalOptions.MODULE_ONLY_SPEED, false))
             assertTrue(store.getBoolean("auto_speed", false))
@@ -537,6 +537,7 @@ class MiuixHostSettingsTest {
     fun editorSaveUpdatesMiuixPreviewAndComponentWindowClosesWithParent() {
         compose.onNodeWithTag("settings.search").performTextReplacement("下载")
         compose.onNodeWithText("下载相关").performClick()
+        compose.onNodeWithTag("settings.toggle.自定义文件名").performClick()
         compose.onNodeWithTag("settings.option.文件名模板").performClick()
         compose.waitForIdle()
         compose.runOnUiThread {
@@ -566,6 +567,7 @@ class MiuixHostSettingsTest {
     fun composeEditorWindowAllowsImeAndVisibleInputTakesFocus() {
         compose.onNodeWithTag("settings.search").performTextReplacement("下载")
         compose.onNodeWithText("下载相关").performClick()
+        compose.onNodeWithTag("settings.toggle.自定义文件名").performClick()
         compose.onNodeWithTag("settings.option.文件名模板").performClick()
         compose.waitForIdle()
         compose.runOnIdle {
@@ -637,7 +639,10 @@ class MiuixHostSettingsTest {
 
         compose.onNodeWithTag("settings.option.私聊范围").performClick()
         val privateSettings = ShadowDialog.getLatestDialog()
-        compose.onNodeWithTag("settings.option.指定用户").performClick()
+        compose.onNodeWithTag("settings.option.用户范围").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        compose.onNodeWithTag("settings.option.选择用户").performClick()
+        compose.waitForIdle()
         val targets = ShadowDialog.getLatestDialog() as android.app.AlertDialog
         assertNotNull(targets.getButton(Dialog.BUTTON_POSITIVE))
         targets.getButton(Dialog.BUTTON_POSITIVE).performClick()

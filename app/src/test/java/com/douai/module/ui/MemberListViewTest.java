@@ -15,9 +15,14 @@ import android.widget.EditText;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.ListView;
+import android.widget.AbsListView;
 import android.widget.TextView;
 import android.widget.Spinner;
 import android.view.View;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.os.SystemClock;
+import android.view.inputmethod.EditorInfo;
 import com.douai.module.R;
 import com.douai.module.BuildConfig;
 import com.douai.module.feature.ProfileListEntry;
@@ -52,6 +57,96 @@ import static org.junit.Assert.*;
 @Config(sdk = 35, qualifiers = "w320dp-h640dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class MemberListViewTest {
+    @Test public void directoryKeepsLiveLoadingAndErrorsWithoutInlineUsageInstructions() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        DirectoryRequests backend = new DirectoryRequests();
+        MemberListView members = directory(activity, Collections.singletonList(new ProfileListEntry("101", "Alice", "")),
+                new ProfileRequests(), backend);
+        try {
+            backend.relations.get(0).send(true); backend.relations.get(1).send(true);
+            TextView status = members.findViewWithTag("settings.followLists.directoryStatus");
+            assertEquals("Usage instructions belong in Help when there is no live status", "", status.getText().toString());
+            EditText input = members.findViewWithTag("settings.followLists.search");
+            input.setText("Alice");
+            assertEquals("Typing only filters existing users", Collections.singletonList("101"), visibleUids(members));
+            assertEquals("", status.getText().toString());
+            input.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
+            assertTrue(status.getText().toString().contains("正在搜索"));
+            backend.searches.get(0).updated.accept(new NativeUserSearch.Update(null, "搜索服务暂不可用", false));
+            assertEquals("搜索服务暂不可用", status.getText().toString());
+            assertEquals(View.VISIBLE, status.getVisibility());
+        } finally { members.close(); activity.finish(); }
+    }
+
+    @Test public void editorSearchSubmitsTheCurrentQueryOnceAndKeepsBusyEmptyAndClosedGuards() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        DirectoryRequests backend = new DirectoryRequests();
+        MemberListView members = directory(activity, Collections.singletonList(new ProfileListEntry("101", "Alice", "")),
+                new ProfileRequests(), backend);
+        try {
+            EditText input = members.findViewWithTag("settings.followLists.search");
+            input.setText("Alice");
+            assertTrue(backend.searches.isEmpty());
+            input.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
+            assertEquals(1, backend.searches.size());
+            assertEquals("Alice", backend.searches.get(0).query);
+            input.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
+            assertEquals("An unfinished search must not be submitted twice", 1, backend.searches.size());
+            input.setText("");
+            input.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
+            assertEquals(1, backend.searches.size());
+            input.setText("Bob");
+            members.close();
+            input.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
+            assertEquals(1, backend.searches.size());
+        } finally { members.close(); activity.finish(); }
+    }
+
+    @Test public void physicalEnterDownAndUpSubmitOnlyOneUserSearch() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        DirectoryRequests backend = new DirectoryRequests();
+        MemberListView members = directory(activity, Collections.singletonList(new ProfileListEntry("101", "Alice", "")),
+                new ProfileRequests(), backend);
+        try {
+            EditText input = members.findViewWithTag("settings.followLists.search");
+            input.setText("Alice"); input.requestFocus();
+            input.onKeyDown(KeyEvent.KEYCODE_ENTER, new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER));
+            input.onKeyUp(KeyEvent.KEYCODE_ENTER, new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER));
+            assertEquals(1, backend.searches.size());
+            assertEquals("Alice", backend.searches.get(0).query);
+        } finally { members.close(); activity.finish(); }
+    }
+
+    @Test public void directoryDoesNotRenderTheRemovedInlineSearchOrRefreshActions() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        MemberListView members = directory(activity, Collections.singletonList(new ProfileListEntry("101", "Alice", "")),
+                new ProfileRequests(), new DirectoryRequests());
+        try {
+            assertNull(members.findViewWithTag("settings.followLists.searchAll"));
+            assertNull(members.findViewWithTag("settings.followLists.refreshProfiles"));
+        } finally { members.close(); activity.finish(); }
+    }
+
+    @Test public void nicknameThenParenthesizedRemarkRemainSearchableWithoutChangingSelectionKeys() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        java.lang.reflect.Method fromUser = ProfileListEntry.class.getDeclaredMethod("fromUser", String.class,
+                Object.class, ProfileListEntry.class);
+        fromUser.setAccessible(true);
+        ProfileListEntry person = (ProfileListEntry) fromUser.invoke(null, "101", new RemarkedUser(), null);
+        MemberListView members = directory(activity, Collections.singletonList(person), new ProfileRequests(), new DirectoryRequests());
+        try {
+            assertEquals("Alice（小伙伴）", firstName(members));
+            ((EditText) members.findViewWithTag("settings.followLists.search")).setText("小伙");
+            assertEquals(Collections.singletonList("101"), visibleUids(members));
+            assertEquals(Collections.singleton("101"), members.selected());
+        } finally { members.close(); activity.finish(); }
+    }
+
+    public static final class RemarkedUser {
+        public String nickName = "Alice";
+        public String remarkName = "小伙伴";
+    }
+
     @Test public void hostPickerLoadsPlaceholderFromTheInstalledModulePackage() {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         assertEquals(BuildConfig.APPLICATION_ID,
@@ -149,7 +244,7 @@ public final class MemberListViewTest {
         try {
             ListView list = members.findViewWithTag("settings.followLists.members");
             EditText search = members.findViewWithTag("settings.followLists.search");
-            assertEquals("搜索昵称、抖音号或 UID", search.getHint().toString());
+            assertEquals("昵称、备注、抖音号或 UID", search.getHint().toString());
             View row = list.getAdapter().getView(0, null, list);
             assertEquals("抖音号：alice.dy", ((TextView) row.findViewWithTag("member.uid")).getText().toString());
             row.performClick();
@@ -298,7 +393,7 @@ public final class MemberListViewTest {
                 Collections.singletonList(new ProfileListEntry("101", "old", "")), Collections.emptySet(), false,
                 new QueuedExecutor(), (url, request) -> null, profiles);
         try {
-            Button refresh = members.findViewWithTag("settings.followLists.refreshProfiles");
+            Button refresh = refreshButton(members);
             assertNotNull(refresh);
             assertEquals("刷新", refresh.getText().toString());
             refresh.performClick();
@@ -324,7 +419,7 @@ public final class MemberListViewTest {
                 new QueuedExecutor(), (url, request) -> null, profiles);
         try {
             TextView status = members.findViewWithTag("settings.followLists.profileStatus");
-            Button refresh = members.findViewWithTag("settings.followLists.refreshProfiles");
+            Button refresh = refreshButton(members);
             assertNotNull(status);
             assertNotNull(refresh);
             assertEquals(1, profiles.requests.size());
@@ -357,7 +452,7 @@ public final class MemberListViewTest {
             row = list.getAdapter().getView(0, row, list);
             images.runAll();
             assertEquals(1, attempts[0]);
-            View refresh = members.findViewWithTag("settings.followLists.refreshProfiles");
+            Button refresh = refreshButton(members);
             assertNotNull(refresh);
             refresh.performClick();
             row = list.getAdapter().getView(0, row, list);
@@ -389,13 +484,14 @@ public final class MemberListViewTest {
         MemberListView members = directory(activity, Collections.emptyList(), profiles, directory);
         try {
             EditText query = members.findViewWithTag("settings.followLists.search");
-            Button search = members.findViewWithTag("settings.followLists.searchAll");
+            EditText search = members.findViewWithTag("settings.followLists.search");
             assertNotNull(search);
-            assertFalse(search.isEnabled());
+            search.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
+            assertTrue(directory.searches.isEmpty());
             query.setText("别名");
             assertTrue(directory.searches.isEmpty());
             assertTrue(search.isEnabled());
-            search.performClick();
+            search.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
             assertEquals("别名", directory.searches.get(0).query);
             directory.searches.get(0).send(Arrays.asList(
                     new ProfileListEntry("909", "Native fuzzy result", "", "brand.dy")), 7, true, "native-session");
@@ -404,7 +500,7 @@ public final class MemberListViewTest {
             ListView list = members.findViewWithTag("settings.followLists.members");
             list.getAdapter().getView(0, null, list).performClick();
             assertEquals(new LinkedHashSet<>(Arrays.asList("101", "909")), members.selected());
-            View refresh = members.findViewWithTag("settings.followLists.refreshProfiles");
+            Button refresh = refreshButton(members);
             assertEquals(View.VISIBLE, refresh.getVisibility());
             assertEquals(1, profiles.requests.size());
             profiles.requests.get(0).send(new ProfileListEntry("909", "Resolved fuzzy", "", "resolved.dy"), false, "", false);
@@ -469,7 +565,7 @@ public final class MemberListViewTest {
             EditText query = members.findViewWithTag("settings.followLists.search");
             query.setText("alice");
             assertEquals(Collections.singletonList("101"), visibleUids(members));
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             directory.searches.get(0).send(Collections.emptyList(), 0, false, "empty");
             assertEquals(Collections.singletonList("101"), visibleUids(members));
             assertTrue(((TextView) members.findViewWithTag("settings.followLists.directoryStatus"))
@@ -481,29 +577,136 @@ public final class MemberListViewTest {
         } finally { members.close(); activity.finish(); }
     }
 
+    @Test public void oneBottomSwipeLoadsNextPageWithoutAButtonOrProgrammaticChaining() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        DirectoryRequests backend = new DirectoryRequests();
+        MemberListView members = directory(activity, Collections.emptyList(), new ProfileRequests(), backend);
+        try {
+            ((EditText) members.findViewWithTag("settings.followLists.search")).setText("person");
+            submitSearch(members);
+            backend.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "Person One", "")), 7, true, "page-one");
+            assertNull(members.findViewWithTag("settings.followLists.loadMore"));
+            layoutDirectory(members);
+            notifyScrollLayout(members);
+            assertEquals("Layout is not a request for another page", 1, backend.searches.size());
+            swipeTowardEnd(members);
+            assertEquals(2, backend.searches.size());
+            assertEquals(7, backend.searches.get(1).cursor);
+            assertEquals("page-one", backend.searches.get(1).searchId);
+            swipeTowardEnd(members);
+            assertEquals("A busy page must not be submitted twice", 2, backend.searches.size());
+            backend.searches.get(1).send(Collections.singletonList(new ProfileListEntry("808", "Person Two", "")), 14, true, "page-two");
+            layoutDirectory(members); notifyScrollLayout(members); notifyScrollLayout(members);
+            assertEquals("The page callback must not chain through the directory", 2, backend.searches.size());
+            swipeTowardEnd(members);
+            assertEquals(14, backend.searches.get(2).cursor);
+            assertEquals("page-two", backend.searches.get(2).searchId);
+            backend.searches.get(2).send(Collections.emptyList(), 21, false, "last");
+            swipeTowardEnd(members);
+            assertEquals("A terminal page stays terminal", 3, backend.searches.size());
+            assertEquals(Arrays.asList("909", "808"), visibleUids(members));
+        } finally { members.close(); activity.finish(); }
+    }
+
+    @Test public void emptyFilteredPagesContinueAndFailuresNeedAnotherUpwardSwipeToRetry() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        DirectoryRequests backend = new DirectoryRequests();
+        MemberListView members = directory(activity, Collections.emptyList(), new ProfileRequests(), backend);
+        try {
+            backend.relations.get(0).send(true); backend.relations.get(1).send(true);
+            ((Spinner) members.findViewWithTag("settings.followLists.scope")).setSelection(2);
+            ShadowLooper.idleMainLooper();
+            ((EditText) members.findViewWithTag("settings.followLists.search")).setText("person");
+            submitSearch(members);
+            backend.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "Person One", "")), 7, true, "page-one");
+            assertTrue(visibleUids(members).isEmpty());
+            swipeTowardEnd(members);
+            assertEquals("An empty filtered viewport must still accept the user's upward gesture", 2, backend.searches.size());
+            backend.searches.get(1).updated.accept(new NativeUserSearch.Update(null, "下一页读取失败", false));
+            notifyScrollLayout(members); notifyScrollLayout(members);
+            assertEquals("A failure must not retry without a new gesture", 2, backend.searches.size());
+            ((Spinner) members.findViewWithTag("settings.followLists.scope")).setSelection(0);
+            ShadowLooper.idleMainLooper();
+            assertEquals(Collections.singletonList("909"), visibleUids(members));
+            swipeTowardStart(members);
+            assertEquals("Browsing toward the top must not request the next page", 2, backend.searches.size());
+            swipeTowardEnd(members);
+            assertEquals(3, backend.searches.size());
+            assertEquals(7, backend.searches.get(2).cursor);
+            assertEquals("page-one", backend.searches.get(2).searchId);
+            backend.searches.get(2).send(Collections.singletonList(new ProfileListEntry("808", "Person Two", "")), 14, false, "last");
+            assertEquals(Arrays.asList("909", "808"), visibleUids(members));
+            assertEquals(Collections.singleton("101"), members.selected());
+        } finally { members.close(); activity.finish(); }
+    }
+
+    @Test public void aGestureStartedBeforeQueryReplacementCannotLoadItsNewCursor() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        DirectoryRequests backend = new DirectoryRequests();
+        MemberListView members = directory(activity, Collections.emptyList(), new ProfileRequests(), backend);
+        try {
+            EditText search = members.findViewWithTag("settings.followLists.search");
+            search.setText("old"); submitSearch(members);
+            backend.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "Old", "")), 7, true, "old-id");
+            layoutDirectory(members);
+            ListView list = members.findViewWithTag("settings.followLists.members");
+            long down = SystemClock.uptimeMillis();
+            touchList(list, down, down, MotionEvent.ACTION_DOWN, list.getHeight() * .8f);
+            search.setText("new"); submitSearch(members);
+            backend.searches.get(1).send(Collections.singletonList(new ProfileListEntry("808", "New", "")), 20, true, "new-id");
+            touchList(list, down, down + 120, MotionEvent.ACTION_MOVE, list.getHeight() * .2f);
+            touchList(list, down, down + 240, MotionEvent.ACTION_UP, list.getHeight() * .2f);
+            assertEquals("An old pointer gesture cannot advance a replacement query", 2, backend.searches.size());
+            swipeTowardEnd(members);
+            assertEquals(3, backend.searches.size());
+            assertEquals("new", backend.searches.get(2).query);
+            assertEquals(20, backend.searches.get(2).cursor);
+            assertEquals("new-id", backend.searches.get(2).searchId);
+        } finally { members.close(); activity.finish(); }
+    }
+
+    @Test public void bottomSwipesAfterCloseOrAccountChangeCannotStartAnotherPage() {
+        for (boolean accountChange : new boolean[]{false, true}) {
+            Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+            DirectoryRequests backend = new DirectoryRequests();
+            backend.accountState = FollowListSnapshot.activateAccount("11");
+            MemberListView members = directory(activity, Collections.emptyList(), new ProfileRequests(), backend);
+            try {
+                ((EditText) members.findViewWithTag("settings.followLists.search")).setText("person");
+                submitSearch(members);
+                backend.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "Person", "")), 7, true, "id");
+                if (accountChange) backend.accountState = FollowListSnapshot.activateAccount("22");
+                else members.close();
+                swipeTowardEnd(members);
+                assertEquals(1, backend.searches.size());
+                if (accountChange) assertTrue(visibleUids(members).isEmpty());
+            } finally { members.close(); activity.finish(); }
+        }
+    }
+
     @Test public void searchPaginationMergesByUidAndStopsWhenTheNativeCursorDoesNotAdvance() {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         DirectoryRequests directory = new DirectoryRequests();
         MemberListView members = directory(activity, Collections.emptyList(), new ProfileRequests(), directory);
         try {
             ((EditText) members.findViewWithTag("settings.followLists.search")).setText("person");
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             directory.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "First", "")), 7, true, "sid");
-            Button more = members.findViewWithTag("settings.followLists.loadMore");
-            assertNotNull(more);
-            assertEquals(View.VISIBLE, more.getVisibility());
-            more.performClick();
+            assertNull(members.findViewWithTag("settings.followLists.loadMore"));
+            swipeTowardEnd(members);
             SearchRequest next = directory.searches.get(1);
             assertEquals(7, next.cursor);
             assertEquals("sid", next.searchId);
-            assertFalse(more.isEnabled());
+            swipeTowardEnd(members);
+            assertEquals("A pending page cannot be requested twice", 2, directory.searches.size());
             next.send(Arrays.asList(new ProfileListEntry("909", "Updated", ""), new ProfileListEntry("808", "Second", "")),
                     14, true, "sid-2");
             assertEquals(Arrays.asList("909", "808"), visibleUids(members));
             assertEquals("Updated", firstName(members));
-            more.performClick();
+            swipeTowardEnd(members);
             directory.searches.get(2).send(Collections.singletonList(new ProfileListEntry("707", "Stuck", "")), 14, true, "sid-2");
-            assertTrue(more.getVisibility() != View.VISIBLE || !more.isEnabled());
+            swipeTowardEnd(members);
+            assertEquals(3, directory.searches.size());
             assertFalse(((TextView) members.findViewWithTag("settings.followLists.directoryStatus")).getText().toString().isEmpty());
         } finally { members.close(); activity.finish(); }
     }
@@ -515,15 +718,15 @@ public final class MemberListViewTest {
         try {
             EditText query = members.findViewWithTag("settings.followLists.search");
             query.setText("old");
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             query.setText("new");
             assertTrue(directory.searches.get(0).closed);
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             directory.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "old", "")), 7, false, "old");
             assertTrue(visibleUids(members).isEmpty());
             directory.searches.get(1).send(Collections.singletonList(new ProfileListEntry("808", "new", "")), 7, true, "new");
             assertEquals(Collections.singletonList("808"), visibleUids(members));
-            members.findViewWithTag("settings.followLists.loadMore").performClick();
+            swipeTowardEnd(members);
             Spinner scope = members.findViewWithTag("settings.followLists.scope");
             scope.setSelection(2); ShadowLooper.idleMainLooper();
             assertFalse(directory.searches.get(2).closed);
@@ -556,15 +759,14 @@ public final class MemberListViewTest {
             Spinner filter = members.findViewWithTag("settings.followLists.scope");
             filter.setSelection(1); ShadowLooper.idleMainLooper();
             ((EditText) members.findViewWithTag("settings.followLists.search")).setText("alias");
-            Button search = members.findViewWithTag("settings.followLists.searchAll");
+            EditText search = members.findViewWithTag("settings.followLists.search");
             assertEquals(View.VISIBLE, search.getVisibility()); assertTrue(search.isEnabled());
-            search.performClick();
+            search.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
             backend.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "Fuzzy stranger", "")), 7, true, "sid");
             assertEquals(Collections.singletonList("909"), visibleUids(members));
             filter.setSelection(2); ShadowLooper.idleMainLooper();
-            Button more = members.findViewWithTag("settings.followLists.loadMore");
-            assertEquals(View.VISIBLE, more.getVisibility());
-            more.performClick();
+            assertNull(members.findViewWithTag("settings.followLists.loadMore"));
+            swipeTowardEnd(members);
             assertEquals(7, backend.searches.get(1).cursor);
             backend.searches.get(1).send(Arrays.asList(new ProfileListEntry("201", "Fuzzy followed", ""),
                     new ProfileListEntry("303", "Fuzzy follower", "")), 14, false, "sid2");
@@ -592,7 +794,7 @@ public final class MemberListViewTest {
             backend.relations.get(0).send(false);
             assertTrue(visibleUids(members).isEmpty());
             assertTrue(((TextView) members.findViewWithTag("settings.followLists.directoryStatus")).getText().toString().contains("关注"));
-            members.findViewWithTag("settings.followLists.refreshProfiles").performClick();
+            members.refreshUsers();
             assertEquals(4, backend.relations.size());
             backend.members.put(FollowListSnapshot.Kind.FOLLOWING, Collections.singletonList(new ProfileListEntry("101", "Local", "")));
             backend.relations.get(2).send(true);
@@ -638,13 +840,13 @@ public final class MemberListViewTest {
         try {
             EditText query = members.findViewWithTag("settings.followLists.search");
             query.setText("Local");
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             directory.searches.get(0).updated.accept(new NativeUserSearch.Update(null, "登录账号已变化，请重新打开列表", true));
             assertTrue(visibleUids(members).isEmpty());
             assertEquals(Collections.singleton("101"), members.selected());
             assertFalse(query.isEnabled());
             assertFalse(members.findViewWithTag("settings.followLists.scope").isEnabled());
-            assertFalse(members.findViewWithTag("settings.followLists.searchAll").isEnabled());
+            assertFalse(members.findViewWithTag("settings.followLists.search").isEnabled());
             assertTrue(directory.searches.get(0).closed);
             assertTrue(profiles.requests.get(0).closed);
             profiles.requests.get(0).send(new ProfileListEntry("101", "Late profile", ""), false, "", false);
@@ -663,12 +865,12 @@ public final class MemberListViewTest {
             assertNull(groups.findViewWithTag("settings.followLists.scope"));
             assertNull(groups.findViewWithTag("settings.followLists.searchAll"));
             ((EditText) members.findViewWithTag("settings.followLists.search")).setText("person");
-            Button search = members.findViewWithTag("settings.followLists.searchAll");
-            search.performClick();
+            EditText search = members.findViewWithTag("settings.followLists.search");
+            search.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
             directory.searches.get(0).updated.accept(new NativeUserSearch.Update(null, "搜索失败，请重试", false));
             assertTrue(search.isEnabled());
             assertTrue(((TextView) members.findViewWithTag("settings.followLists.directoryStatus")).getText().toString().contains("重试"));
-            search.performClick();
+            search.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
             assertEquals(2, directory.searches.size());
             members.close();
             assertTrue(directory.searches.get(1).closed);
@@ -685,7 +887,7 @@ public final class MemberListViewTest {
             ShadowLooper.idleMainLooper();
             profiles.requests.get(0).send(null, false, "账号已变化", true);
             assertTrue(directory.relations.get(0).closed);
-            assertFalse(members.findViewWithTag("settings.followLists.searchAll").isEnabled());
+            assertFalse(members.findViewWithTag("settings.followLists.search").isEnabled());
             assertFalse(members.findViewWithTag("settings.followLists.scope").isEnabled());
             directory.members.put(FollowListSnapshot.Kind.FOLLOWING,
                     Collections.singletonList(new ProfileListEntry("909", "Late member", "")));
@@ -702,7 +904,7 @@ public final class MemberListViewTest {
         MemberListView members = directory(activity, Collections.singletonList(new ProfileListEntry("101", "Account A user", "")), profiles, directory);
         try {
             ((EditText) members.findViewWithTag("settings.followLists.search")).setText("remote");
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             profiles.onLoad = () -> directory.accountState = FollowListSnapshot.activateAccount("22");
             directory.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "Account A remote", "")), 7, false, "A");
             assertInvalidDirectory(members);
@@ -744,7 +946,7 @@ public final class MemberListViewTest {
         try {
             directory.accountState = FollowListSnapshot.activateAccount("11");
             ((EditText) members.findViewWithTag("settings.followLists.search")).setText("remote");
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             directory.accountState = FollowListSnapshot.activateAccount("22");
             directory.searches.get(0).send(Collections.singletonList(new ProfileListEntry("909", "Old account user", "")), 7, false, "A");
             assertInvalidDirectory(members);
@@ -806,7 +1008,7 @@ public final class MemberListViewTest {
 
     private static void assertInvalidDirectory(MemberListView members) {
         assertTrue(visibleUids(members).isEmpty());
-        for (String tag : Arrays.asList("search", "scope", "searchAll", "refreshProfiles")) {
+        for (String tag : Arrays.asList("search", "scope")) {
             assertFalse("Account change must disable " + tag, members.findViewWithTag("settings.followLists." + tag).isEnabled());
         }
         assertTrue(((TextView) members.findViewWithTag("settings.followLists.directoryStatus")).getText().toString().contains("账号"));
@@ -816,7 +1018,7 @@ public final class MemberListViewTest {
                                              ProfileRequests profiles, DirectoryRequests directory) {
         MemberListView members = new MemberListView(activity, false, initial, Collections.singleton("101"), true, true,
                 new QueuedExecutor(), (url, request) -> null, profiles, directory);
-        for (String tag : Arrays.asList("search", "scope", "searchAll", "directoryStatus", "loadMore", "members")) {
+        for (String tag : Arrays.asList("search", "scope", "directoryStatus", "members")) {
             assertNotNull("Directory control missing: " + tag, members.findViewWithTag("settings.followLists." + tag));
         }
         activity.setContentView(members);
@@ -848,7 +1050,7 @@ public final class MemberListViewTest {
             ListView list = members.findViewWithTag("settings.followLists.members");
             list.getAdapter().getView(0, null, list).performClick();
             assertTrue(members.selected().isEmpty());
-            Button refresh = members.findViewWithTag("settings.followLists.refreshProfiles");
+            Button refresh = refreshButton(members);
             refresh.performClick();
             assertEquals("Refresh must request fresh relationships, not only reuse cached lists", 1, backend.refreshes.size());
             assertEquals("Wait for the force refresh before reading its snapshots", 2, backend.relations.size());
@@ -911,7 +1113,7 @@ public final class MemberListViewTest {
             backend.refreshes.get(0).send(false);
             assertEquals(2, backend.relations.size());
             assertTrue(visibleUids(members).isEmpty());
-            assertTrue(members.findViewWithTag("settings.followLists.refreshProfiles").isEnabled());
+            assertTrue(refreshButton(members).isEnabled());
             assertTrue(((TextView) members.findViewWithTag("settings.followLists.directoryStatus")).getText().toString().contains("重试"));
             members.refreshUsers();
             backend.refreshes.get(1).send(true);
@@ -966,14 +1168,14 @@ public final class MemberListViewTest {
             members.refreshUsers();
             assertTrue(profiles.requests.get(1).force);
             ((EditText) members.findViewWithTag("settings.followLists.search")).setText("101");
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             backend.searches.get(0).send(Collections.singletonList(new ProfileListEntry("202", "Online user", "")), 7, false, "first");
 
             ProfileRequest resumed = profiles.requests.get(profiles.requests.size() - 1);
             resumed.send(new ProfileListEntry("101", resumed.force ? "Fresh Alice" : "Cached Alice", ""), false, "", false);
             assertEquals("An online result must not replace a requested fresh identity with its old cached value",
                     "Fresh Alice", firstName(members));
-            members.findViewWithTag("settings.followLists.searchAll").performClick();
+            submitSearch(members);
             backend.searches.get(1).send(Collections.singletonList(new ProfileListEntry("303", "Another online user", "")), 8, false, "second");
             assertFalse("A later search after completion must not keep forcing every cached identity",
                     profiles.requests.get(profiles.requests.size() - 1).force);
@@ -1039,6 +1241,52 @@ public final class MemberListViewTest {
         RelationRequest(FollowListSnapshot.Kind kind, Consumer<Boolean> loaded) { this.kind = kind; this.loaded = loaded; }
         void send(boolean success) { loaded.accept(success); }
         @Override public void close() { closed = true; }
+    }
+
+    private static void submitSearch(MemberListView members) {
+        ((EditText) members.findViewWithTag("settings.followLists.search")).onEditorAction(EditorInfo.IME_ACTION_SEARCH);
+    }
+
+    private static void layoutDirectory(MemberListView members) {
+        members.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(640, View.MeasureSpec.EXACTLY));
+        members.layout(0, 0, 360, 640);
+    }
+
+    private static void notifyScrollLayout(MemberListView members) {
+        ListView list = members.findViewWithTag("settings.followLists.members");
+        org.robolectric.shadows.ShadowListView shadow = org.robolectric.shadow.api.Shadow.extract(list);
+        AbsListView.OnScrollListener listener = shadow.getOnScrollListener();
+        if (listener != null) listener.onScroll(list, list.getFirstVisiblePosition(), list.getChildCount(), list.getCount());
+    }
+
+    private static void swipeTowardEnd(MemberListView members) { swipeList(members, true); }
+    private static void swipeTowardStart(MemberListView members) { swipeList(members, false); }
+
+    private static void swipeList(MemberListView members, boolean towardEnd) {
+        layoutDirectory(members);
+        ListView list = members.findViewWithTag("settings.followLists.members");
+        assertTrue("The actual user viewport must have height before swiping", list.getHeight() > 0);
+        long now = SystemClock.uptimeMillis();
+        float start = list.getHeight() * (towardEnd ? .8f : .2f);
+        float end = list.getHeight() * (towardEnd ? .2f : .8f);
+        touchList(list, now, now, MotionEvent.ACTION_DOWN, start);
+        touchList(list, now, now + 120, MotionEvent.ACTION_MOVE, end);
+        touchList(list, now, now + 240, MotionEvent.ACTION_UP, end);
+        ShadowLooper.idleMainLooper();
+    }
+
+    private static void touchList(ListView list, long down, long time, int action, float y) {
+        MotionEvent event = MotionEvent.obtain(down, time, action, Math.max(1, list.getWidth() / 2f), y, 0);
+        try { list.dispatchTouchEvent(event); }
+        finally { event.recycle(); }
+    }
+
+    private static Button refreshButton(MemberListView members) {
+        Button button = new Button(members.getContext());
+        button.setText("刷新");
+        members.bindRefreshButton(button);
+        return button;
     }
 
     private static String firstName(MemberListView members) {

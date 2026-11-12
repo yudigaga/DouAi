@@ -311,6 +311,7 @@ public final class NativeMessagingHooksTest {
             timer.advance(0); org.robolectric.shadows.ShadowLooper.idleMainLooper();
             ProfileListEntry profile = NativeMessagingHooks.availableContactProfiles().get("200");
             assertEquals("真实昵称", profile.name);
+            assertEquals("IM账户备注", ProfileListEntryTest.remark(profile));
             assertEquals("alice.id", profile.douyinId);
             assertEquals("https://p3.douyinpic.com/avatar.jpg", profile.avatarUrl);
             assertEquals("会话显示名", profile.senderName);
@@ -383,6 +384,7 @@ public final class NativeMessagingHooksTest {
     public static final class ImProfile {
         public final String uid;
         @com.google.gson.annotations.SerializedName("nickname") public final String nickName;
+        @com.google.gson.annotations.SerializedName("remark_name") public final String remarkName = "IM账户备注";
         public final String uniqueId, shortId;
         ImProfile(String uid, String nickname, String uniqueId, String shortId) {
             this.uid = uid; this.nickName = nickname; this.uniqueId = uniqueId; this.shortId = shortId;

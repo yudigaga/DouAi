@@ -8,6 +8,7 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -103,6 +104,36 @@ class ComponentHideDependencyMiuixTest {
             assertTrue(ComponentHideSettings.readFrom(store).enabled)
             assertEquals(-1, ComponentHideSettings.readFrom(store).individualAlpha(Component.LIKE))
             assertEquals(before, store.values)
+        }
+    }
+
+    @Test fun compactComponentRowsKeepAlphaAndRuleMetadataWithoutTheFixedCardDescription() {
+        store.putBoolean(ComponentHideSettings.ENABLED, true)
+        store.putBoolean(ComponentHideSettings.UNIFORM_ENABLED, false)
+        store.putString(Component.CARD.key, "93")
+        lateinit var locator: CustomViewLocator
+        compose.runOnUiThread {
+            val host = FrameLayout(compose.activity)
+            val target = TextView(compose.activity).apply { id = android.R.id.title }
+            host.addView(target)
+            locator = CustomViewLocator.capture(host, target)!!
+            store.putString(CustomViewLocator.SETTINGS_KEY, CustomViewLocator.serialize(listOf(locator)))
+        }
+        showPage()
+        scrollTo(Component.CARD.key)
+        compose.onNodeWithTag("${Component.CARD.key}.value").assertTextEquals("透明度 93")
+        compose.onNodeWithText("作者昵称头顶的").assertDoesNotExist()
+        scrollTo("component.custom.${locator.identityKey()}")
+        compose.onNodeWithText(locator.viewClassName, substring = true).assertIsDisplayed()
+        compose.onNodeWithText(locator.scopeDescription(), substring = true).assertIsDisplayed()
+        scrollTo(ComponentHideSettings.ENABLED)
+        compose.onNodeWithTag(ComponentHideSettings.ENABLED).performClick()
+        scrollTo("component.custom.${locator.identityKey()}")
+        compose.onNodeWithText(locator.viewClassName, substring = true).assertIsDisplayed()
+        compose.runOnIdle {
+            assertEquals("93", store.getString(Component.CARD.key, ""))
+            assertEquals(1, ComponentHideSettings.readFrom(store).customViews.size)
+            assertFalse(ComponentHideSettings.readFrom(store).enabled)
         }
     }
 

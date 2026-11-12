@@ -213,7 +213,7 @@ class MiuixComponentHidePage(
                         }
                         if (!settings.uniformEnabled) {
                             items(Component.values().toList(), key = { it.key }) { component ->
-                                Alpha(component.title, if (component == Component.CARD) "作者昵称头顶的" else null,
+                                Alpha(component.title, null,
                                     component.key, settings.individualAlpha(component), editor)
                             }
                         }
@@ -386,7 +386,6 @@ class MiuixComponentHidePage(
         var error by remember(input) { mutableStateOf(false) }
         val focus = remember(input) { FocusRequester() }
         OverlayDialog(show = true, title = input.title,
-            summary = "输入 -2～255 的整数；-2 移除视图，-1 隐藏占位，0 全透明，255 不透明。",
             onDismissRequest = { alphaInput = null }) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 TextField(value = value, onValueChange = { value = it; error = false },

@@ -56,7 +56,7 @@ public final class AutomationSettingsDialogTest {
         assertEquals(5, store.saves);
     }
 
-    @Test public void masterExplainsItsScopeAndChildSwitchesKeepCompactLabels() {
+    @Test public void masterAndChildSwitchesKeepCompactLabelsWithoutStaticDescriptions() {
         open();
         for (String title : new String[]{"自动化总开关", "自动点赞", "自动关注"}) {
             android.view.ViewGroup row = (android.view.ViewGroup) toggle(title).getParent();
@@ -65,7 +65,7 @@ public final class AutomationSettingsDialogTest {
             for (int index = 0; index < labels.getChildCount(); index++) {
                 if (labels.getChildAt(index).getVisibility() == View.VISIBLE) visible++;
             }
-            assertEquals(title, "自动化总开关".equals(title) ? 2 : 1, visible);
+            assertEquals(title, 1, visible);
         }
     }
 

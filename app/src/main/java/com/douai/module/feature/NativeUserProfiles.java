@@ -3,6 +3,7 @@ package com.douai.module.feature;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import com.douai.module.diagnostics.DouAiLog;
 import java.util.Collections;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -97,10 +98,11 @@ public final class NativeUserProfiles implements AutoCloseable {
     AutoCloseable request(List<ProfileListEntry> entries, boolean force, Consumer<Update> updated) {
         FollowListSnapshot.State state = accounts.get();
         syncSession(state);
-        Request request = new Request(state, updated);
+        Request request = new Request(state, updated, force);
         Map<String, ProfileListEntry> initial = new LinkedHashMap<>();
         synchronized (lock) {
             if (closed || active != this || !valid(state) || !same(session, state)) {
+                request.finishTrace(DouAiLog.Outcome.FAILED, "profile_account_unavailable");
                 main.execute(() -> { if (!request.cancelled) updated.accept(new Update(Collections.emptyMap(), false,
                         "尚未读取登录账号，请在抖音内重试", false)); });
                 return request;
@@ -109,6 +111,7 @@ public final class NativeUserProfiles implements AutoCloseable {
                 if (entry.conversation || FollowListSnapshot.normalizeUid(entry.uid).isEmpty()) continue;
                 Cached cached = cache.get(entry.uid);
                 ProfileListEntry baseline = cached == null ? entry : cached.profile.withFallback(entry);
+                request.latest.merge(entry.uid, baseline, (known, incoming) -> incoming.withFallback(known));
                 if (cached != null) initial.put(entry.uid, baseline);
                 if (!force && cached != null && complete(cached.profile) && clock.getAsLong() < cached.until) continue;
                 Job job = jobs.get(entry.uid);
@@ -126,6 +129,7 @@ public final class NativeUserProfiles implements AutoCloseable {
             }
             requests.add(request);
         }
+        request.trace.stage("cache_then_fetch", "requested_count=" + request.latest.size() + ";force=" + force);
         deliver(request, initial, true);
         pump();
         return request;
@@ -133,14 +137,17 @@ public final class NativeUserProfiles implements AutoCloseable {
 
     @Override public void close() {
         List<Job> cancel = new ArrayList<>();
+        List<Request> stopped;
         synchronized (lock) {
             if (closed) return;
             closed = true;
             if (active == this) active = null;
+            stopped = new ArrayList<>(requests);
             for (Request request : requests) request.cancelled = true;
             for (Job job : jobs.values()) if (job.task != null) cancel.add(job);
             requests.clear(); jobs.clear(); cache.clear(); running = 0;
         }
+        for (Request request : stopped) request.finishTrace(DouAiLog.Outcome.CANCELLED, "profile_service_closed");
         for (Job job : cancel) cancel(job);
         if (accountListener != null) {
             try { accountListener.close(); }
@@ -200,6 +207,7 @@ public final class NativeUserProfiles implements AutoCloseable {
         main.execute(() -> {
             if (request.cancelled || !current(request.session)) return;
             Update update;
+            boolean terminal;
             synchronized (lock) {
                 if (request.cancelled || closed) return;
                 Map<String, ProfileListEntry> delivered = immutable;
@@ -208,8 +216,11 @@ public final class NativeUserProfiles implements AutoCloseable {
                     for (String uid : request.completed) delivered.remove(uid);
                     delivered = Collections.unmodifiableMap(delivered);
                 }
-                update = new Update(delivered, !request.pending.isEmpty(), request.error, false);
+                terminal = request.pending.isEmpty();
+                update = new Update(delivered, !terminal,
+                        request.completed.isEmpty() && !terminal ? "" : new Summary(request).status(), false);
             }
+            if (terminal) request.finishTrace(null, null);
             request.updated.accept(update);
         });
     }
@@ -232,7 +243,7 @@ public final class NativeUserProfiles implements AutoCloseable {
         }
         for (Job job : start) {
             try { workers.execute(job.task); }
-            catch (RejectedExecutionException unavailable) { finish(job, null, "资料加载已停止，请重新打开列表"); }
+            catch (RejectedExecutionException unavailable) { finish(job, null, Failure.STOPPED); }
         }
     }
 
@@ -240,7 +251,7 @@ public final class NativeUserProfiles implements AutoCloseable {
         if (!current(job)) return;
         ProfileListEntry result;
         synchronized (lock) { result = job.baseline; }
-        String error = "";
+        Failure failure = Failure.NONE;
         try {
             ProfileListEntry local = checked(job.uid, source.cached(job.uid));
             if (!current(job)) return;
@@ -248,24 +259,22 @@ public final class NativeUserProfiles implements AutoCloseable {
             boolean force;
             synchronized (lock) { force = job.force; }
             if (force || !complete(result)) {
-                if (!force && clock.getAsLong() < job.retryAt) error = "部分资料未获取，点击刷新重试";
+                if (!force && clock.getAsLong() < job.retryAt) failure = Failure.RETRY_WAIT;
                 else {
                     job.networkAttempted = true;
                     ProfileListEntry fetched = checked(job.uid, source.fetch(job.uid, () -> current(job)));
                     if (!current(job)) return;
-                    if (fetched == null) error = "部分用户资料未返回，点击刷新重试";
+                    if (fetched == null) failure = Failure.UNRETURNED;
                     else result = fetched.withFallback(result);
                 }
             }
-            if (error.isEmpty() && !complete(result)) error = "部分用户资料不完整，点击刷新重试";
-        } catch (Exception | LinkageError failure) {
-            error = failure instanceof java.util.concurrent.TimeoutException
-                    ? "资料读取超时，点击刷新重试" : "部分用户资料读取失败，点击刷新重试";
+        } catch (Exception | LinkageError unavailable) {
+            failure = unavailable instanceof java.util.concurrent.TimeoutException ? Failure.TIMED_OUT : Failure.FAILED;
         }
-        finish(job, result, error);
+        finish(job, result, failure);
     }
 
-    private void finish(Job job, ProfileListEntry result, String error) {
+    private void finish(Job job, ProfileListEntry result, Failure failure) {
         if (!current(job)) return;
         List<Request> listeners;
         synchronized (lock) {
@@ -274,15 +283,17 @@ public final class NativeUserProfiles implements AutoCloseable {
             running--;
             if (result != null) {
                 long now = clock.getAsLong();
-                long until = !job.networkAttempted && !error.isEmpty() && job.retryAt > now
-                        ? job.retryAt : now + (error.isEmpty() && complete(result) ? TTL : RETRY);
+                long until = !job.networkAttempted && failure != Failure.NONE && job.retryAt > now
+                        ? job.retryAt : now + (failure == Failure.NONE && complete(result) ? TTL : RETRY);
                 cache.put(job.uid, new Cached(result, until));
             }
             listeners = new ArrayList<>(job.consumers);
             for (Request request : listeners) {
                 request.pending.remove(job.uid);
                 request.completed.add(job.uid);
-                if (!error.isEmpty()) request.error = error;
+                if (result != null) request.latest.put(job.uid, result.withFallback(request.latest.get(job.uid)));
+                if (failure == Failure.NONE) request.failures.remove(job.uid);
+                else request.failures.put(job.uid, failure);
             }
         }
         Map<String, ProfileListEntry> patch = result == null ? Collections.emptyMap() : Collections.singletonMap(job.uid, result);
@@ -292,14 +303,82 @@ public final class NativeUserProfiles implements AutoCloseable {
 
     private void cancel(Job job) { job.task.cancel(job.runner != Thread.currentThread()); }
 
+    private enum Failure { NONE, RETRY_WAIT, UNRETURNED, TIMED_OUT, FAILED, STOPPED }
+
+    private static final class Summary {
+        final int total, pending, complete, missingName, missingAvatar, missingId, failed, timedOut, unreturned;
+        final boolean stopped;
+        Summary(Request request) {
+            total = request.latest.size(); pending = request.pending.size();
+            int full = 0, names = 0, avatars = 0, ids = 0, failures = 0, timeouts = 0, absent = 0;
+            boolean unavailable = false;
+            for (ProfileListEntry entry : request.latest.values()) {
+                if (complete(entry)) full++;
+                if (entry.name.isEmpty()) names++;
+                if (entry.avatarUrl.isEmpty()) avatars++;
+                if (entry.douyinId.isEmpty()) ids++;
+            }
+            for (Failure failure : request.failures.values()) {
+                if (failure == Failure.TIMED_OUT) timeouts++;
+                else if (failure == Failure.UNRETURNED) absent++;
+                else if (failure == Failure.FAILED || failure == Failure.STOPPED) failures++;
+                unavailable |= failure == Failure.STOPPED;
+            }
+            complete = full; missingName = names; missingAvatar = avatars; missingId = ids;
+            failed = failures; timedOut = timeouts; unreturned = absent; stopped = unavailable;
+        }
+        String status() {
+            if (complete == total && failed == 0 && timedOut == 0 && unreturned == 0) return "";
+            StringBuilder value = new StringBuilder("已完整 ").append(complete).append('/').append(total);
+            add(value, "待补", total - complete);
+            add(value, "缺昵称", missingName); add(value, "缺头像", missingAvatar); add(value, "缺抖音号", missingId);
+            add(value, "超时", timedOut); add(value, "读取失败", failed); add(value, "未返回", unreturned);
+            if (stopped) value.append(" · 加载已停止，请重新打开列表");
+            else value.append(" · 点击刷新重试");
+            return value.toString();
+        }
+        private static void add(StringBuilder value, String label, int count) {
+            if (count > 0) value.append(" · ").append(label).append(' ').append(count).append('人');
+        }
+        DouAiLog.Outcome outcome() {
+            if (failed > 0 || unreturned > 0) return DouAiLog.Outcome.FAILED;
+            if (timedOut > 0) return DouAiLog.Outcome.TIMED_OUT;
+            return complete == total ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED;
+        }
+        String evidence(boolean force) {
+            return "requested_count=" + total + ";complete_count=" + complete + ";incomplete_count=" + (total - complete)
+                    + ";pending_count=" + pending + ";missing_name_count=" + missingName + ";missing_avatar_count=" + missingAvatar
+                    + ";missing_douyin_id_count=" + missingId + ";fetch_failed_count=" + failed + ";timeout_count=" + timedOut
+                    + ";unreturned_count=" + unreturned + ";force=" + force;
+        }
+    }
+
     private final class Request implements AutoCloseable {
         final FollowListSnapshot.State session;
         final Consumer<Update> updated;
         final Set<String> pending = new LinkedHashSet<>();
         final Set<String> completed = new LinkedHashSet<>();
-        String error = "";
+        final Map<String, ProfileListEntry> latest = new LinkedHashMap<>();
+        final Map<String, Failure> failures = new LinkedHashMap<>();
+        final DouAiLog.Operation trace;
+        final boolean force;
+        boolean traceFinished;
         volatile boolean cancelled;
-        Request(FollowListSnapshot.State session, Consumer<Update> updated) { this.session = session; this.updated = updated; }
+        Request(FollowListSnapshot.State session, Consumer<Update> updated, boolean force) {
+            this.session = session; this.updated = updated; this.force = force;
+            trace = DouAiLog.begin("user_profiles", force ? "picker_refresh" : "picker_load");
+        }
+        void finishTrace(DouAiLog.Outcome outcome, String reason) {
+            Summary summary;
+            synchronized (lock) {
+                if (traceFinished) return;
+                traceFinished = true;
+                summary = new Summary(this);
+            }
+            DouAiLog.Outcome result = outcome == null ? summary.outcome() : outcome;
+            trace.finish(result, reason == null ? (result == DouAiLog.Outcome.SUCCESS ? "profiles_complete" : "profiles_pending_fields_or_read_failures") : reason,
+                    summary.evidence(force));
+        }
         @Override public void close() {
             List<Job> cancel = new ArrayList<>();
             synchronized (lock) {
@@ -317,6 +396,7 @@ public final class NativeUserProfiles implements AutoCloseable {
                 }
                 pending.clear();
             }
+            finishTrace(DouAiLog.Outcome.CANCELLED, "profile_request_closed");
             for (Job job : cancel) cancel(job);
             pump();
         }

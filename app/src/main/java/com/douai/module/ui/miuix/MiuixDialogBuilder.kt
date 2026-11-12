@@ -13,6 +13,7 @@ import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button as AndroidButton
@@ -42,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -701,9 +703,14 @@ private class MiuixAlertDialog(
                 }
             } else {
                 customViewState?.let { form ->
+                    // Capture the caller's height before AndroidView attaches its own layout params.
+                    val fillAvailableHeight = remember(form) {
+                        form.layoutParams?.height == ViewGroup.LayoutParams.MATCH_PARENT
+                    }
                     AndroidView(
                         factory = { form },
-                        modifier = Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 460.dp)
+                        modifier = Modifier.weight(1f, fill = fillAvailableHeight).fillMaxWidth()
+                            .then(if (fillAvailableHeight) Modifier else Modifier.heightIn(max = 460.dp))
                             .clipToBounds()
                             .testTag("miuix.dialog.customView"),
                     )

@@ -50,7 +50,7 @@ class ModuleStatusScreenTest {
         compose.onNodeWithText("组件隐藏").assertDoesNotExist()
         compose.onNodeWithText("推荐流筛选").assertDoesNotExist()
         compose.onNodeWithText("抖音内功能设置独立保存在抖音应用，本页只显示模块应用状态。")
-            .performScrollTo().assertIsDisplayed()
+            .assertDoesNotExist()
         compose.onNodeWithText("打开抖音").performScrollTo().performClick()
         assertEquals("未安装抖音或无法打开应用。", ShadowToast.getTextOfLatestToast())
         savePreview("module-light")

@@ -47,6 +47,7 @@ public final class NativeUserSearchSourceTest {
         assertEquals("dynamic", sent.get("location_access"));
         assertEquals("123", page.entries.get(0).uid);
         assertEquals("服务端模糊结果", page.entries.get(0).name);
+        assertEquals("搜索备注", ProfileListEntryTest.remark(page.entries.get(0)));
         assertEquals("public.id", page.entries.get(0).douyinId);
         assertEquals("https://p3.douyinpic.com/avatar.jpg", page.entries.get(0).avatarUrl);
         assertEquals(30, page.cursor);
@@ -79,11 +80,12 @@ public final class NativeUserSearchSourceTest {
     @Test public void dynamicPatchUsesTheHostGsonToRecoverTheActualUser() throws Exception {
         SearchUser wrapper = new SearchUser(null);
         wrapper.patch = new Patch();
-        wrapper.patch.raw = "{\"user_info\":{\"uid\":\"456\",\"nickname\":\"动态用户\",\"short_id\":\"short456\"}}";
+        wrapper.patch.raw = "{\"user_info\":{\"uid\":\"456\",\"nickname\":\"动态用户\",\"remark_name\":\"动态备注\",\"short_id\":\"short456\"}}";
         response = new Response(wrapper);
         NativeUserSearch.Page page = source().search("anything", 0, "", () -> true);
         assertEquals("456", page.entries.get(0).uid);
         assertEquals("动态用户", page.entries.get(0).name);
+        assertEquals("动态备注", ProfileListEntryTest.remark(page.entries.get(0)));
         assertEquals("short456", page.entries.get(0).douyinId);
     }
 
@@ -228,6 +230,7 @@ public final class NativeUserSearchSourceTest {
     public static final class User {
         @SerializedName("uid") public Object uid;
         @SerializedName("nickname") public String raw;
+        @SerializedName("remark_name") public String remark = "搜索备注";
         @SerializedName("unique_id") public String id;
         @SerializedName("short_id") public String shortId;
         User(String uid, String raw) { this.uid = uid; this.raw = raw; id = "public.id"; }

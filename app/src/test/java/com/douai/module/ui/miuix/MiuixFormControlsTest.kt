@@ -5,6 +5,7 @@ import android.text.Editable
 import android.text.InputFilter
 import android.text.TextWatcher
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -23,12 +24,14 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextInputSelection
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.ImeAction
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
@@ -47,6 +50,29 @@ class MiuixFormControlsTest {
 
     @After fun closeChoices() {
         compose.runOnUiThread { ShadowDialog.getLatestDialog()?.dismiss() }
+    }
+
+    @Test fun searchImeActionOnTheVisibleFieldReachesItsNativeEditorListenerOnce() {
+        lateinit var input: EditText
+        val actions = mutableListOf<Int>()
+        compose.runOnUiThread {
+            input = MiuixFormControls.input(compose.activity, "搜索用户", "", false)
+            input.tag = "form.search"
+            input.setSingleLine(true)
+            input.imeOptions = EditorInfo.IME_ACTION_SEARCH
+            input.setOnEditorActionListener { _, action, _ -> actions.add(action); true }
+            mount(input)
+        }
+        compose.onNodeWithTag("form.search").assert(SemanticsMatcher.expectValue(SemanticsProperties.ImeAction, ImeAction.Search))
+            .performTextReplacement("Alice")
+        compose.runOnIdle { assertTrue("Editing a search field must not execute its search", actions.isEmpty()) }
+        compose.onNodeWithTag("form.search").performImeAction()
+        compose.runOnIdle {
+            assertEquals(listOf(EditorInfo.IME_ACTION_SEARCH), actions)
+            assertEquals("Alice", input.text.toString())
+        }
+        compose.runOnUiThread { input.imeOptions = EditorInfo.IME_ACTION_UNSPECIFIED }
+        compose.onNodeWithTag("form.search").assert(SemanticsMatcher.expectValue(SemanticsProperties.ImeAction, ImeAction.Default))
     }
 
     @Test fun inputUsesNativeFiltersWatchersErrorsAndPreservesAnUnchangedSelection() {

@@ -153,6 +153,7 @@ public final class UserSearchHostContractTest {
         field(USER, "uid", STRING, "uid");
         field(USER, "secUid", STRING, "sec_uid");
         field(USER, "nickname", STRING, "nickname");
+        field(USER, "remarkName", STRING, "remark_name");
         field(USER, "avatarThumb", ROOT + "base/model/UrlModel;", "avatar_thumb");
         field(USER, "uniqueId", STRING, "unique_id");
         field(USER, "shortId", STRING, "short_id");

@@ -233,6 +233,116 @@ public final class NativeUserProfilesTest {
         assertFalse(currentAccount.get(currentAccount.size() - 1).loading);
     }
 
+    @Test public void mixedPartialTimeoutFailureAndNoResultHaveSeparateCountsWithoutDiscardingKnownData() {
+        source.remote.put("100", full("100", "完整用户"));
+        source.remote.put("200", new ProfileListEntry("200", "", "https://p3.douyinpic.com/200.jpg", "account.200"));
+        source.remote.put("300", new ProfileListEntry("300", "缺头像用户", "", "account.300"));
+        source.remote.put("700", new ProfileListEntry("700", "缺抖音号用户", "https://p3.douyinpic.com/700.jpg", ""));
+        source.failures.put("400", new java.util.concurrent.TimeoutException("private-timeout"));
+        source.failures.put("500", new java.io.IOException("private-read-failure"));
+        List<NativeUserProfiles.Update> updates = new ArrayList<>();
+        profiles.request(Arrays.asList(new ProfileListEntry("100", "", ""), new ProfileListEntry("200", "", ""),
+                new ProfileListEntry("300", "", ""), full("400", "超时前资料"), full("500", "失败前资料"),
+                full("600", "未返回前资料"), new ProfileListEntry("700", "", "")), true, updates::add);
+        workers.runAll();
+        NativeUserProfiles.Update end = last(updates);
+        assertFalse(end.loading);
+        assertComplete(end.error, 4, 7);
+        assertCount(end.error, "待补(?:全)?", 3);
+        assertCount(end.error, "昵称", 1); assertCount(end.error, "头像", 1); assertCount(end.error, "抖音号", 1);
+        assertCount(end.error, "超时", 1); assertCount(end.error, "(?:读取|刷新)?失败", 1); assertCount(end.error, "未返回", 1);
+        Map<String, ProfileListEntry> data = combined(updates);
+        assertEquals("超时前资料", data.get("400").name);
+        assertEquals("失败前资料", data.get("500").name);
+        assertEquals("未返回前资料", data.get("600").name);
+        assertEquals("", data.get("200").name);
+        assertEquals("", data.get("300").avatarUrl);
+        assertEquals("", data.get("700").douyinId);
+    }
+
+    @Test public void theLastCompletionDoesNotReplaceTheBatchSummaryOrChangeItsCounts() {
+        source.remote.put("100", full("100", "完整用户"));
+        source.remote.put("200", new ProfileListEntry("200", "缺头像", "", "account.200"));
+        source.failures.put("300", new java.io.IOException("private-read-failure"));
+        String previous = null;
+        for (List<ProfileListEntry> rows : Arrays.asList(
+                Arrays.asList(new ProfileListEntry("100", "", ""), new ProfileListEntry("200", "", ""), full("300", "既有资料")),
+                Arrays.asList(full("300", "既有资料"), new ProfileListEntry("200", "", ""), new ProfileListEntry("100", "", "")))) {
+            QueueExecutor batch = new QueueExecutor();
+            profiles = new NativeUserProfiles(source, FollowListSnapshot::current, now::get, batch, Runnable::run);
+            List<NativeUserProfiles.Update> updates = new ArrayList<>();
+            profiles.request(rows, true, updates::add); batch.runAll();
+            String status = last(updates).error;
+            assertComplete(status, 2, 3); assertCount(status, "待补(?:全)?", 1);
+            assertCount(status, "头像", 1); assertCount(status, "(?:读取|刷新)?失败", 1);
+            if (previous != null) assertEquals("Final summary is independent of the finishing user's result", previous, status);
+            previous = status;
+        }
+    }
+
+    @Test public void aFailedForceRefreshKeepsFullCachedProfilesAndReportsFailureBesideOtherSuccess() {
+        source.remote.put("100", full("100", "缓存姓名"));
+        profiles.request(Collections.singletonList(new ProfileListEntry("100", "", "")), false, ignored -> { });
+        workers.runAll();
+        source.failures.put("100", new java.io.IOException("private-failure"));
+        source.remote.put("200", full("200", "本轮成功"));
+        List<NativeUserProfiles.Update> updates = new ArrayList<>();
+        profiles.request(Arrays.asList(new ProfileListEntry("100", "", ""), new ProfileListEntry("200", "", "")), true, updates::add);
+        workers.runAll();
+        assertComplete(last(updates).error, 2, 2);
+        assertCount(last(updates).error, "(?:读取|刷新)?失败", 1);
+        assertEquals("缓存姓名", combined(updates).get("100").name);
+        assertEquals("本轮成功", combined(updates).get("200").name);
+    }
+
+    @Test public void completeCacheHitsAndDuplicateRowsAreCountedOnceBesideAnIncompleteNewUser() {
+        source.remote.put("100", full("100", "已缓存"));
+        profiles.request(Collections.singletonList(new ProfileListEntry("100", "", "")), false, ignored -> { });
+        workers.runAll();
+        source.remote.put("200", new ProfileListEntry("200", "缺抖音号", "https://p3.douyinpic.com/200.jpg", ""));
+        List<NativeUserProfiles.Update> updates = new ArrayList<>();
+        profiles.request(Arrays.asList(new ProfileListEntry("100", "", ""), new ProfileListEntry("100", "", ""),
+                new ProfileListEntry("200", "", ""), ProfileListEntry.conversation("group", "群聊", "")), false, updates::add);
+        workers.runAll();
+        assertComplete(last(updates).error, 1, 2);
+        assertCount(last(updates).error, "待补(?:全)?", 1); assertCount(last(updates).error, "抖音号", 1);
+        assertEquals(Arrays.asList("100", "200"), source.calls);
+    }
+
+    @Test public void overlappingRequestsKeepTheirOwnIncompleteCountsWhileSharingTheSameLookup() {
+        source.remote.put("100", new ProfileListEntry("100", "缺头像", "", "account.100"));
+        source.remote.put("200", full("200", "完整用户"));
+        source.remote.put("300", new ProfileListEntry("300", "缺抖音号", "https://p3.douyinpic.com/300.jpg", ""));
+        List<NativeUserProfiles.Update> first = new ArrayList<>(), second = new ArrayList<>();
+        profiles.request(Arrays.asList(new ProfileListEntry("100", "", ""), new ProfileListEntry("200", "", "")), false, first::add);
+        profiles.request(Arrays.asList(new ProfileListEntry("100", "", ""), new ProfileListEntry("300", "", "")), false, second::add);
+        workers.runAll();
+        assertComplete(last(first).error, 1, 2); assertCount(last(first).error, "待补(?:全)?", 1); assertCount(last(first).error, "头像", 1);
+        assertComplete(last(second).error, 0, 2); assertCount(last(second).error, "待补(?:全)?", 2);
+        assertCount(last(second).error, "头像", 1); assertCount(last(second).error, "抖音号", 1);
+        assertEquals(Arrays.asList("100", "200", "300"), source.calls);
+    }
+
+    @Test public void anOptionalEmptyRemarkDoesNotCreateAnErrorForACompleteUser() {
+        source.remote.put("100", full("100", "无备注用户"));
+        List<NativeUserProfiles.Update> updates = new ArrayList<>();
+        profiles.request(Collections.singletonList(new ProfileListEntry("100", "", "")), false, updates::add);
+        workers.runAll();
+        assertEquals("", combined(updates).get("100").remarkName);
+        assertEquals("", last(updates).error);
+        assertFalse(last(updates).loading);
+    }
+
+    private static NativeUserProfiles.Update last(List<NativeUserProfiles.Update> updates) { return updates.get(updates.size() - 1); }
+    private static void assertComplete(String text, int complete, int total) {
+        assertTrue("Batch status must identify the actual complete count: " + text,
+                java.util.regex.Pattern.compile("(?:已完整|资料完整)\\s*" + complete + "\\s*/\\s*" + total + "(?!\\d)").matcher(text).find());
+    }
+    private static void assertCount(String text, String label, int count) {
+        assertTrue("Batch status must identify " + label + "=" + count + ": " + text,
+                java.util.regex.Pattern.compile(label + "\\s*" + count + "(?!\\d)").matcher(text).find());
+    }
+
     private static ProfileListEntry full(String uid, String name) {
         return new ProfileListEntry(uid, name, "https://p3.douyinpic.com/" + uid + ".jpg", "account." + uid);
     }
@@ -243,6 +353,7 @@ public final class NativeUserProfilesTest {
     }
     private static final class FixtureSource implements NativeUserProfiles.Source {
         final Map<String, ProfileListEntry> local = new HashMap<>(), remote = new HashMap<>();
+        final Map<String, Exception> failures = new HashMap<>();
         final List<String> calls = new ArrayList<>();
         boolean fail;
         Runnable beforeFetch = () -> { };
@@ -250,6 +361,7 @@ public final class NativeUserProfilesTest {
         @Override public ProfileListEntry fetch(String uid, BooleanSupplier current) throws Exception {
             calls.add(uid);
             beforeFetch.run();
+            if (failures.containsKey(uid)) throw failures.get(uid);
             if (fail) throw new java.io.IOException("fixture");
             return remote.get(uid);
         }

@@ -190,9 +190,6 @@ public final class GestureQuickVoiceDialog {
             clear.setContentDescription("清空音色搜索"); clear.setTag("speech.quick.voice.search.clear");
             clear.setOnClickListener(ignored -> search.setText("")); row.addView(clear);
             header.addView(row); header.addView(status);
-            TextView hint = new TextView(header.getContext());
-            hint.setText("筛选已缓存音色；搜索全部或翻译名称请进入文本转语音设置。");
-            header.addView(hint);
             MiuixDialogBuilder builder = new MiuixDialogBuilder(activity, true);
             builder.setCustomTitle(header);
             builder.setSingleChoiceItems(new String[0], -1, (dialog, index) -> choose(index));

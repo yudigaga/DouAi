@@ -89,7 +89,7 @@ public final class UserProfileHostContractTest {
     @Test public void cacheAndRawIdentityFieldsExistInTheOriginalModel() {
         method(REPOSITORY, "40.6.0".equals(profile.versionName) ? "LJIILL" : "LJIILLIIL", CACHE);
         method(CACHE, "get", "Ljava/lang/Object;", "Ljava/lang/Object;");
-        for (String json : new String[]{"nickname", "avatar_thumb", "unique_id", "short_id"}) {
+        for (String json : new String[]{"nickname", "remark_name", "avatar_thumb", "unique_id", "short_id"}) {
             assertTrue("IMUser raw JSON field " + json, hasJsonField(json));
         }
     }

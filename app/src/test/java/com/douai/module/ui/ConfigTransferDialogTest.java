@@ -304,7 +304,7 @@ public final class ConfigTransferDialogTest {
         String preview = ((TextView) view("preview")).getText().toString();
         assertTrue(preview.contains("格式版本"));
         assertTrue(preview.contains("native_auto_reply"));
-        assertTrue(preview.contains("立即生效"));
+        assertTrue(preview.contains("导入方式：合并"));
         assertEquals("Old configuration backups do not offer analysis restoration", View.GONE,
                 view("restoreAnalytics").getVisibility());
         assertFalse(preview.contains("private-import-key"));

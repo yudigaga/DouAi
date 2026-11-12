@@ -192,6 +192,12 @@ public final class AiModelEditorTest {
         editor = new AiModelEditor(activity, store, original, false, () -> refreshes[0]++);
         show(editor);
         AlertDialog dialog = editor.dialog();
+        View form = dialog.getWindow().getDecorView();
+        assertNull("Usage explanations belong in Help, while the form keeps its input values",
+                label(form, "同一模型的对话、自动回复、自动评论和本地分析共用此设置；流式接收完成后显示完整结果。"));
+        assertNull(label(form, "选项使用接口实际参数值，是否支持取决于模型；更高强度可能耗时更久、使用更多 Token。“模型默认”不附加强度参数。"));
+        assertEquals("saved-model", input(dialog, "模型名称").getText().toString());
+        assertEquals("30", input(dialog, "超时秒数（5–120）").getText().toString());
         input(dialog, "模型名称").setText("changed-model");
         input(dialog, "超时秒数（5–120）").setText("4");
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();

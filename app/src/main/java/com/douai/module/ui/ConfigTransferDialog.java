@@ -102,23 +102,17 @@ final class ConfigTransferDialog implements AutoCloseable {
         body.setOrientation(LinearLayout.VERTICAL);
         int padding = Math.round(16 * context.getResources().getDisplayMetrics().density);
         body.setPadding(padding, 0, padding, padding);
-        TextView note = text(context, "导出为 JSON 文件；导入先预览，确认后写入。默认只备份配置，可选择包含本地分析数据；不包含发送账本和缓存。", "config.backup.note");
-        body.addView(note, matchWrap());
         secrets = miuix ? MiuixFormControls.checkbox(context, "导出包含 API 密钥", false) : new CheckBox(context);
         secrets.setText("导出包含 API 密钥"); secrets.setChecked(false); secrets.setTag("config.backup.secrets");
         body.addView(MiuixFormControls.viewFor(secrets), matchWrap());
-        TextView secretNote = text(context, "默认省略密钥和可能包含凭据的自定义接口字段，导入后可能需要补填。回复正文、提示词等自由文本原样保存，请检查其中手填的敏感信息。勾选后密钥会以明文保存，请妥善保管备份文件。", "config.backup.secretNote");
-        body.addView(secretNote, matchWrap());
         includeAnalytics = miuix ? MiuixFormControls.checkbox(context, "包含本地分析数据", false) : new CheckBox(context);
         includeAnalytics.setText("包含本地分析数据"); includeAnalytics.setChecked(false);
         includeAnalytics.setTag("config.backup.includeAnalytics");
         body.addView(MiuixFormControls.viewFor(includeAnalytics), matchWrap());
-        body.addView(text(context, "默认不包含。勾选后，浏览记录、作者话题、模块功能使用、使用目的和侧写反馈等本地分析数据会存入你选择的备份文件。", "config.backup.analyticsNote"), matchWrap());
         exportButton = button(context, miuix, body, "导出配置", "config.backup.export", () -> choose(true));
         replace = miuix ? MiuixFormControls.checkbox(context, "覆盖当前配置", false) : new CheckBox(context);
         replace.setText("覆盖当前配置"); replace.setChecked(false); replace.setTag("config.backup.replace");
         body.addView(MiuixFormControls.viewFor(replace), matchWrap());
-        body.addView(text(context, "默认合并。勾选覆盖会移除备份之外的功能配置；请核对预览中的移除数量。", "config.backup.modeNote"), matchWrap());
         replace.setOnCheckedChangeListener((button, checked) -> refreshMode());
         importButton = button(context, miuix, body, "选择配置文件", "config.backup.import", () -> choose(false));
         status = text(context, "请选择导出或导入。", "config.backup.status");
@@ -360,11 +354,7 @@ final class ConfigTransferDialog implements AutoCloseable {
                 .append("\n需要补充认证或自定义字段：").append(value.missingSecretsCount).append(" 项")
                 .append(value.mode == ConfigTransfer.Mode.REPLACE
                         ? "\n导入方式：覆盖，将移除备份之外的功能配置"
-                        : "\n导入方式：合并，保留备份之外的设置")
-                .append("\n确认后配置立即生效，可能改变自动回复、评论等功能开关。")
-                .append("\n脱敏备份保留同服务现有密钥，不同服务需重新填写。")
-                .append("\n目录和音频路径不包含原文件或系统授权，导入后可能需要重新选择。")
-                .append("\n密钥值不在此处展示。");
+                        : "\n导入方式：合并，保留备份之外的设置");
         if (!value.changedKeys.isEmpty()) {
             text.append("\n\n待变更设置：");
             for (String key : value.changedKeys) text.append('\n').append(key);

@@ -47,7 +47,7 @@ final class AutomationSettingsDialog implements AutoCloseable {
         LinearLayout panel = new LinearLayout(context);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(8), dp(16), dp(8));
-        controls[0] = addToggle(panel, "自动化总开关", "控制自动点赞、自动关注和续火花；自动回复、自动评论独立启停。",
+        controls[0] = addToggle(panel, "自动化总开关", "",
                 settings.automationEnabled, true, value -> change(Field.MASTER, value));
         controls[1] = addToggle(panel, "自动点赞", "",
                 settings.autoLikeEnabled, settings.automationEnabled, value -> change(Field.LIKE, value));
@@ -65,8 +65,6 @@ final class AutomationSettingsDialog implements AutoCloseable {
             change(Field.STOP, false);
         });
         panel.addView(MiuixFormControls.viewFor(stop), matchWrap());
-        TextView stopDetail = text("立即停止会关闭点赞、关注、自动回复、自动评论和续火花。", 12, MUTED);
-        panel.addView(stopDetail, matchWrap());
         ScrollView scroll = new ScrollView(context);
         scroll.addView(panel);
         dialog = new MiuixDialogBuilder(context, useMiuix).setTitle("互动自动化")

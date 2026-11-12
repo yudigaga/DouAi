@@ -143,12 +143,6 @@ class ModuleStatusScreen(private val activity: ComponentActivity) {
                     }
                 }
                 SmallTitle(stringResource(R.string.module_settings_title))
-                Text(
-                    text = stringResource(R.string.module_settings_location),
-                    modifier = Modifier.padding(horizontal = 28.dp),
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    fontSize = 14.sp,
-                )
                 TextButton(
                     text = stringResource(R.string.module_open_host),
                     onClick = ::openHost,

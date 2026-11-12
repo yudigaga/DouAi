@@ -9,6 +9,7 @@ import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.widget.ScrollView
+import android.widget.Spinner
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -34,6 +35,7 @@ import com.douai.module.feature.NativeMessagingHooks
 import com.douai.module.feature.NativeUserProfiles
 import com.douai.module.feature.NativeUserSearch
 import com.douai.module.feature.ProfileListEntry
+import com.douai.module.ui.miuix.MiuixFormControls
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -61,7 +63,7 @@ class AutomationScopeMiuixTest {
             replaceStatic(NativeMessagingHooks::class.java, "active", null)
             replaceStatic(NativeMessagingHooks::class.java, "contacts", linkedMapOf("101" to "Alice", "202" to "Bob"))
             replaceStatic(NativeMessagingHooks::class.java, "contactProfiles", linkedMapOf(
-                "101" to ProfileListEntry("101", "Alice", "", "alice.dy"),
+                "101" to ProfileListEntry("101", "Alice", "", "alice.dy", "同事"),
                 "202" to ProfileListEntry("202", "Bob", "", "bob.dy")))
             replaceStatic(NativeMessagingHooks::class.java, "groupMembers", emptyMap<String, Map<String, ProfileListEntry>>())
             replaceStatic(NativeFollowLists::class.java, "active", null)
@@ -103,6 +105,13 @@ class AutomationScopeMiuixTest {
         choose("用户范围", 1)
         compose.runOnIdle { assertEquals("whitelist", store.getString("reply_scope_mode", "")) }
         option("选择用户")
+        assertCompactRightFilterAboveSearch()
+        compose.onNodeWithTag("settings.followLists.searchAll").assertDoesNotExist()
+        compose.onNodeWithTag("settings.followLists.refreshProfiles").assertDoesNotExist()
+        compose.runOnIdle {
+            val alice = requireNotNull(currentRoot().findViewWithTag<View>("101"))
+            assertEquals("Alice（同事）", alice.findViewWithTag<android.widget.TextView>("member.name").text.toString())
+        }
         compose.onNodeWithTag("member.selection.101").assertIsOff().performTouchInput { click() }
         compose.onNodeWithTag("member.selection.101").assertIsOn()
         compose.runOnIdle { assertEquals("", store.getString("reply_targets", "")) }
@@ -113,7 +122,8 @@ class AutomationScopeMiuixTest {
         compose.onNodeWithTag("member.selection.101").assertIsOff().performTouchInput { click() }
         compose.onNodeWithTag("settings.followLists.search").performTextReplacement("Alice")
         compose.onAllNodesWithText("刷新").assertCountEquals(1)
-        compose.onNodeWithText("刷新").assertIsDisplayed().performClick()
+        compose.onNodeWithText("填写 UID").assertDoesNotExist()
+        compose.onNode(hasTestTag("miuix.dialog.button.-3") and hasText("刷新")).assertIsDisplayed().performClick()
         compose.onNodeWithTag("settings.followLists.search").assertIsDisplayed()
         compose.onNodeWithTag("member.selection.101").assertIsOn()
         compose.runOnIdle {
@@ -261,6 +271,18 @@ class AutomationScopeMiuixTest {
 
     private fun currentDialog(): Dialog? = ShadowDialog.getShownDialogs().lastOrNull { it.isShowing }
     private fun currentRoot(): View = currentDialog()?.window?.decorView ?: compose.activity.window.decorView
+    private fun assertCompactRightFilterAboveSearch() = compose.runOnIdle {
+        val root = currentRoot()
+        val filter = MiuixFormControls.viewFor(requireNotNull(root.findViewWithTag<Spinner>("settings.followLists.scope")))
+        val search = MiuixFormControls.viewFor(requireNotNull(root.findViewWithTag<android.widget.EditText>("settings.followLists.search")))
+        val filterBounds = Rect(); val searchBounds = Rect()
+        assertTrue(filter.getGlobalVisibleRect(filterBounds)); assertTrue(search.getGlobalVisibleRect(searchBounds))
+        assertTrue("The filter belongs to a compact control on the right, rather than another full-width row",
+            filterBounds.width() < root.width * 0.6f)
+        assertTrue("The right-aligned filter must stay above the search input", filterBounds.bottom <= searchBounds.top)
+        assertTrue("The filter must align with the right side of the picker",
+            filterBounds.right >= searchBounds.right - (24 * root.resources.displayMetrics.density).toInt())
+    }
     private fun assertAbsent(tag: String) = compose.runOnIdle { assertNull(tag, currentRoot().findViewWithTag<View>(tag)) }
     private fun assertHidden(tag: String) = compose.runOnIdle {
         assertFalse(tag, currentRoot().findViewWithTag<View>(tag)?.isShown ?: false)

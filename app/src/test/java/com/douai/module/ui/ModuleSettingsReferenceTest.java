@@ -3,9 +3,11 @@ package com.douai.module.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.graphics.Rect;
 import android.text.Layout;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.ListView;
 import android.widget.Spinner;
@@ -225,8 +227,8 @@ public final class ModuleSettingsReferenceTest {
         assertNull(comment.findViewWithTag("settings.toggle.评论自动文本转语音"));
         Switch global = toggle(comment, "#长按发送转语音（全局）");
         assertFalse(global.isChecked());
-        assertTrue(containsText(comment, "适用于私信、群聊和评论"));
-        assertTrue(containsText(comment, "只发送语音，不发送文字"));
+        assertFalse(containsText(comment, "适用于私信、群聊和评论"));
+        assertFalse(containsText(comment, "只发送语音，不发送文字"));
         global.setChecked(true);
         option(comment, "评论转语音").performClick();
         View page = ShadowDialog.getLatestDialog().getWindow().getDecorView();
@@ -268,7 +270,7 @@ public final class ModuleSettingsReferenceTest {
         assertFalse(dialog.isShowing());
     }
 
-    @Test public void settingsSwitchRowsKeepCompactLabelsAndVoiceCommentExplainsItsContentPolicy() {
+    @Test public void settingsSwitchRowsKeepCompactLabelsWithoutStaticDescriptions() {
         store.putString("playback_speed", "1.75");
         for (String category : new String[]{"BASIC", "INTERFACE", "FILTER", "DOWNLOAD", "AUTOPLAY",
                 "AUTO_REPLY", "AUTO_COMMENT", "COMMENT", "STREAK", "MESSAGE", "SPOOF"}) {
@@ -280,37 +282,7 @@ public final class ModuleSettingsReferenceTest {
                 for (int index = 0; index < labels.getChildCount(); index++) {
                     if (labels.getChildAt(index).getVisibility() == View.VISIBLE) visibleLabels++;
                 }
-                boolean voiceComment = "语音评论".contentEquals(control.getContentDescription());
-                boolean globalHashVoice = "#长按发送转语音（全局）".contentEquals(control.getContentDescription());
-                boolean privateMessageVoice = "MESSAGE".equals(category)
-                        && "自动文本转语音".contentEquals(control.getContentDescription());
-                boolean moduleOnlySpeed = "仅模块控制倍速".contentEquals(control.getContentDescription());
-                boolean homeSidebar = "首页右滑打开侧边栏".contentEquals(control.getContentDescription());
-                boolean highestQuality = "锁定最高画质".contentEquals(control.getContentDescription());
-                boolean commentReply = "AUTO_REPLY".equals(category)
-                        && "接收评论回复".contentEquals(control.getContentDescription());
-                assertEquals(category + ": " + control.getContentDescription(),
-                        voiceComment || globalHashVoice || privateMessageVoice || moduleOnlySpeed || homeSidebar || highestQuality || commentReply ? 2 : 1, visibleLabels);
-                if (commentReply) {
-                    assertTrue(containsText(labels, "私聊和群聊名单不适用"));
-                }
-                if (homeSidebar) {
-                    assertTrue(containsText(labels, "默认关闭"));
-                    assertTrue(containsText(labels, "仅适配抖音 41.0.0"));
-                    assertTrue(containsText(labels, "关闭恢复原行为"));
-                }
-                if (globalHashVoice) {
-                    assertTrue(containsText(labels, "适用于私信、群聊和评论"));
-                    assertTrue(containsText(labels, "只发送语音，不发送文字"));
-                }
-                if (voiceComment) {
-                    assertTrue(containsText(labels, "最终使用完整正文，不截断音频"));
-                    assertTrue(containsText(labels, "实际上传失败仍遵循原回退与防重"));
-                    assertFalse(containsText(labels, "30秒"));
-                }
-                if (privateMessageVoice) {
-                    assertTrue(containsText(labels, "私信以 # 开头时，单击发送转为语音。"));
-                }
+                assertEquals(category + ": " + control.getContentDescription(), 1, visibleLabels);
             }
             if ("AUTOPLAY".equals(category)) {
                 assertEquals("1.5x", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
@@ -321,6 +293,70 @@ public final class ModuleSettingsReferenceTest {
             }
             screen.dismissChildPages();
         }
+    }
+
+    @Test public void compactFeatureRowsKeepTheirCurrentValuesVersionAndModelMetadata() throws Exception {
+        MemoryStore desktopStore = new MemoryStore();
+        desktopStore.inHost = false;
+        ModuleSettingsScreen desktop = new ModuleSettingsScreen(activity, desktopStore);
+        try {
+            View desktopHome = desktop.createView();
+            assertTrue(containsText(option(desktopHome, "关于"), com.douai.module.BuildConfig.VERSION_NAME));
+            desktop.setFrameworkSyncStatus(false, "", "连接错误");
+            assertTrue(containsText(desktopHome, "连接错误"));
+        } finally { desktop.close(); }
+        store.putBoolean("streak_enabled", true);
+        store.putString("streak_targets", "101,102");
+        View streak = openCategory("STREAK");
+        assertEquals("已选择 2 人", settingValue(streak, "选择用户"));
+        screen.dismissChildPages();
+        ShadowLooper.idleMainLooper();
+        store.putBoolean("copy_comment_text", true);
+        View comments = openCategory("COMMENT");
+        assertTrue(settingValue(comments, "长按操作").contains("复制评论"));
+        assertFalse(containsText(option(comments, "长按操作"), "选择评论菜单中的工具"));
+        assertFalse(containsText(option(comments, "文本转语音设置"), "配置语音来源、接口与音色"));
+        screen.dismissChildPages();
+        ShadowLooper.idleMainLooper();
+
+        AiModelConfig configured = testAiProfile("help-only-model", "保留模型", "fixture-model061");
+        new AiModelSettings(Arrays.asList(configured), configured.id).save(store);
+        option(openCategory("EXTENSION"), "AI 模型设置").performClick();
+        View models = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        View model = models.findViewWithTag("ai.edit.help-only-model");
+        assertNotNull(model);
+        assertTrue(containsText(model, "fixture-model061"));
+        assertFalse(containsText(models, "搜索资料会提供给本次所选模型"));
+        assertEquals("fixture-model061", AiModelSettings.read(store).selected().modelName);
+    }
+
+    @Test public void compactAutomationKeepsPauseAndEmptyScopeStatesWithoutRuleDescriptions() {
+        store.putBoolean(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        store.putBoolean("native_auto_reply", false);
+        store.putString("reply_scope_mode", "whitelist");
+        store.putString("reply_targets", "");
+        store.putString("reply_scope_relations", "");
+        store.putString("reply_filter_mode", "include");
+        store.putString("reply_filter_keywords", "saved-keyword");
+        store.putString("reply_filter_fields", "caption");
+        View reply = openCategory("AUTO_REPLY");
+        View receiving = (View) toggle(reply, "接收评论回复").getParent();
+        assertTrue(containsText(receiving, "已暂停：自动回复未开启"));
+        assertFalse(containsText(receiving, "私聊和群聊名单不适用"));
+        option(reply, "私聊范围").performClick();
+        AlertDialog scope = (AlertDialog) ShadowDialog.getLatestDialog();
+        View page = scope.getWindow().getDecorView();
+        assertTrue(containsText(page, "名单为空，不会回复任何私聊用户。"));
+        assertEquals("saved-keyword", settingValue(page, "筛选关键词"));
+        assertFalse(containsText(page, "所选关系或手选用户任一命中"));
+        assertFalse(containsText(page, "消息筛选还需同时满足"));
+        scope.dismiss();
+        ShadowLooper.idleMainLooper();
+        toggle(reply, "开启自动回复").setChecked(true);
+        assertFalse(containsText(receiving, "已暂停"));
+        assertTrue(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false));
+        assertEquals("", store.getString("reply_targets", ""));
+        assertEquals("saved-keyword", store.getString("reply_filter_keywords", ""));
     }
 
     @Test public void thirdPartyDownloadsKeepDefaultBehaviorAboveTheirParserConfiguration() {
@@ -574,7 +610,7 @@ public final class ModuleSettingsReferenceTest {
         Switch automatic = toggle(playback, "自动倍速播放");
         assertTrue(automatic.isChecked());
         assertFalse(automatic.isEnabled());
-        assertTrue(containsText(playback, "手动切换优先"));
+        assertTrue(containsText(playback, "仅模块模式优先"));
         assertTrue(store.getBoolean("auto_speed", false));
         screen.dismissChildPages();
 
@@ -696,7 +732,8 @@ public final class ModuleSettingsReferenceTest {
         assertTrue(toggle(ShadowDialog.getLatestDialog().getWindow().getDecorView(), "识别图片").isChecked());
     }
 
-    @Test public void groupSettingsPersistConversationScopeAndReplyModeIndependentlyOfPrivateScope() {
+    @Test public void groupSettingsPersistConversationScopeAndReplyModeIndependentlyOfPrivateScope() throws Exception {
+        installFollowingProfiles(2);
         store.putString("reply_scope_mode", "blacklist");
         store.putString("reply_targets", "123");
         store.putString("reply_scope_relations", "following");
@@ -723,16 +760,20 @@ public final class ModuleSettingsReferenceTest {
         option(page, "选择成员").performClick();
         AlertDialog members = (AlertDialog) ShadowDialog.getLatestDialog();
         assertUserDirectory(members.getWindow().getDecorView());
+        togglePickerUser(members, "1000");
+        togglePickerUser(members, "1001");
+        assertEquals("刷新", members.getButton(AlertDialog.BUTTON_NEUTRAL).getText().toString());
         members.getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
         org.robolectric.shadows.ShadowLooper.idleMainLooper();
-        AlertDialog memberIds = (AlertDialog) ShadowDialog.getLatestDialog();
-        setEditorInput(memberIds, "成员 UID 或昵称", "222, 333,222");
-        memberIds.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertSame(members, ShadowDialog.getLatestDialog());
+        assertTrue(members.isShowing());
+        assertEquals("", store.getString("reply_group_members", ""));
+        members.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         org.robolectric.shadows.ShadowLooper.idleMainLooper();
-        assertEquals("222,333", store.getString("reply_group_members", ""));
+        assertEquals("1000,1001", store.getString("reply_group_members", ""));
         assertTrue(settingValue(page, "选择成员").contains("2"));
         assertTrue(settingValue(page, "选择成员").contains("人"));
-        assertFalse(settingValue(page, "选择成员").contains("222"));
+        assertFalse(settingValue(page, "选择成员").contains("1000"));
 
         option(page, "触发条件").performClick();
         mode = (AlertDialog) ShadowDialog.getLatestDialog();
@@ -743,7 +784,7 @@ public final class ModuleSettingsReferenceTest {
         assertEquals("123", store.getString("reply_targets", ""));
         assertEquals("following", store.getString("reply_scope_relations", ""));
         assertEquals("茶", store.getString("reply_scope_keywords", ""));
-        assertEquals("222,333", store.getString("reply_group_members", ""));
+        assertEquals("1000,1001", store.getString("reply_group_members", ""));
         assertTrue(groups.isShowing());
     }
 
@@ -776,7 +817,7 @@ public final class ModuleSettingsReferenceTest {
             assertTrue(settingValue(page, picker).contains("1"));
             assertTrue(settingValue(page, picker).contains("人"));
             assertFalse(settingValue(page, picker).contains("1000"));
-            assertTrue("Relation rules and chosen users form a union", containsText(page, "任一"));
+            assertFalse("The matching rule explanation belongs in help", containsText(page, "任一"));
             option(page, "关注关系").performClick();
             AlertDialog relations = (AlertDialog) ShadowDialog.getLatestDialog();
             assertEquals("互不关注", relations.getListView().getAdapter().getItem(2).toString());
@@ -816,7 +857,9 @@ public final class ModuleSettingsReferenceTest {
                 AlertDialog picker = (AlertDialog) ShadowDialog.getLatestDialog();
                 togglePickerUser(picker, "1001");
                 assertEquals("1000", store.getString(key, ""));
-                picker.getWindow().getDecorView().findViewWithTag("settings.followLists.refreshProfiles").performClick();
+                assertEquals("刷新", picker.getButton(AlertDialog.BUTTON_NEUTRAL).getText().toString());
+                picker.getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
+                assertTrue(picker.isShowing());
                 assertEquals(writes, (int) store.stringWrites.getOrDefault(key, 0));
                 if (back) picker.cancel(); else picker.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
                 ShadowLooper.idleMainLooper();
@@ -857,7 +900,7 @@ public final class ModuleSettingsReferenceTest {
         assertEquals("1000", store.getString("reply_targets", ""));
         assertEquals("group101", store.getString("reply_group_targets", ""));
         assertEquals("1001", store.getString("reply_group_members", ""));
-        assertTrue(containsText((View) toggle(page, "接收评论回复").getParent(), "私聊和群聊名单不适用"));
+        assertFalse(containsText((View) toggle(page, "接收评论回复").getParent(), "私聊和群聊名单不适用"));
     }
 
     @Test public void scopeKeywordTextRemainsDraftUntilItsExplicitSave() {
@@ -1099,14 +1142,99 @@ public final class ModuleSettingsReferenceTest {
                 assertNotNull(kind + " must keep the searchable picker with no cached candidates", list);
                 assertEquals(kind, 0, list.getAdapter().getCount());
                 assertUserDirectory(page);
-                View search = page.findViewWithTag("settings.followLists.searchAll");
+                EditText search = page.findViewWithTag("settings.followLists.search");
                 assertNotNull(kind + " must allow searching users outside the cached lists", search);
-                assertEquals(View.VISIBLE, search.getVisibility());
+                assertEquals(EditorInfo.IME_ACTION_SEARCH, search.getImeOptions() & EditorInfo.IME_MASK_ACTION);
+                assertEquals("刷新", choices.getButton(AlertDialog.BUTTON_NEUTRAL).getText().toString());
                 assertEquals("", store.getString(userPickerKey(kind), ""));
                 choices.dismiss();
                 screen.dismissChildPages();
             }
         } finally { contacts.set(null, previousContacts); profiles.set(null, previousProfiles); }
+    }
+
+    @Test public void allUserPickersKeepTheirQueryScopeAndDraftWhenTheFooterRefreshes() throws Exception {
+        installFollowingProfiles(2);
+        installFollowers(java.util.Collections.emptyMap());
+        for (String kind : new String[]{"streak", "reply", "comment", "group-member"}) {
+            AlertDialog picker = openUserPicker(kind);
+            View decor = picker.getWindow().getDecorView();
+            ListView list = decor.findViewWithTag("settings.followLists.members");
+            MemberListView members = (MemberListView) list.getParent();
+            Spinner scope = decor.findViewWithTag("settings.followLists.scope");
+            EditText search = decor.findViewWithTag("settings.followLists.search");
+            assertNull(kind + " must not retain an inline search button", decor.findViewWithTag("settings.followLists.searchAll"));
+            assertNull(kind + " refresh belongs in the dialog footer", members.findViewWithTag("settings.followLists.refreshProfiles"));
+            assertFalse(containsText(decor, "填写 UID"));
+            scope.setSelection(2);
+            ShadowLooper.idleMainLooper();
+            search.setText("1001");
+            assertEquals(1, list.getAdapter().getCount());
+            assertTrue(list.getAdapter().getView(0, null, list).performClick());
+            assertEquals(java.util.Collections.singleton("1001"), members.selected());
+            String key = userPickerKey(kind);
+            int writes = store.stringWrites.getOrDefault(key, 0);
+            assertEquals("", store.getString(key, ""));
+            assertEquals("刷新", picker.getButton(AlertDialog.BUTTON_NEUTRAL).getText().toString());
+            picker.getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
+            ShadowLooper.idleMainLooper();
+            assertSame(kind, picker, ShadowDialog.getLatestDialog());
+            assertTrue(kind, picker.isShowing());
+            assertEquals(2, scope.getSelectedItemPosition());
+            assertEquals("1001", search.getText().toString());
+            assertSame(list, decor.findViewWithTag("settings.followLists.members"));
+            assertEquals(java.util.Collections.singleton("1001"), members.selected());
+            assertEquals("", store.getString(key, ""));
+            assertEquals(writes, (int) store.stringWrites.getOrDefault(key, 0));
+            picker.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            ShadowLooper.idleMainLooper();
+            assertEquals("1001", store.getString(key, ""));
+            assertEquals(writes + 1, (int) store.stringWrites.getOrDefault(key, 0));
+            screen.dismissChildPages();
+        }
+    }
+
+    @Test public void everyUserFilterSharesTheTitleRowAtTheTopRight() throws Exception {
+        installFollowingProfiles(1);
+        for (String kind : new String[]{"streak", "reply", "comment", "group-member"}) {
+            AlertDialog picker = openUserPicker(kind);
+            View decor = picker.getWindow().getDecorView();
+            Spinner scope = decor.findViewWithTag("settings.followLists.scope");
+            String expectedTitle = "comment".equals(kind) ? "选择作者" : "group-member".equals(kind) ? "选择成员" : "选择用户";
+            TextView title = null;
+            for (TextView candidate : collect(decor, TextView.class)) {
+                if (expectedTitle.contentEquals(candidate.getText()) && !hasGoneAncestor(candidate, decor)) {
+                    title = candidate;
+                    break;
+                }
+            }
+            assertNotNull(expectedTitle, title);
+            for (int width : new int[]{296, 360}) {
+                int pixels = Math.round(width * decor.getResources().getDisplayMetrics().density);
+                decor.measure(View.MeasureSpec.makeMeasureSpec(pixels, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(760, View.MeasureSpec.AT_MOST));
+                decor.layout(0, 0, decor.getMeasuredWidth(), decor.getMeasuredHeight());
+                Rect titleBounds = boundsIn(decor, title);
+                Rect filterBounds = boundsIn(decor, scope);
+                Rect searchBounds = boundsIn(decor, decor.findViewWithTag("settings.followLists.search"));
+                assertTrue(kind + " title must remain visible", titleBounds.width() > 0 && titleBounds.height() > 0);
+                assertTrue(kind + " filter must remain visible", filterBounds.width() > 0 && filterBounds.height() > 0);
+                assertTrue(kind + " filter belongs to the right of the title", titleBounds.right <= filterBounds.left);
+                assertTrue(kind + " filter must occupy the title row", titleBounds.centerY() >= filterBounds.top
+                        && titleBounds.centerY() <= filterBounds.bottom);
+                assertTrue(kind + " filter must sit above search", filterBounds.bottom <= searchBounds.top);
+                assertTrue(kind + " filter must stay inside the dialog", filterBounds.right <= decor.getWidth());
+            }
+            picker.dismiss();
+            screen.dismissChildPages();
+        }
+    }
+
+    private static Rect boundsIn(View root, View view) {
+        Rect bounds = new Rect();
+        view.getDrawingRect(bounds);
+        ((ViewGroup) root).offsetDescendantRectToMyCoords(view, bounds);
+        return bounds;
     }
 
     @Test @SuppressWarnings("unchecked")
@@ -1307,9 +1435,11 @@ public final class ModuleSettingsReferenceTest {
         assertEquals("未关注", scope.getAdapter().getItem(1));
         assertEquals("我关注", scope.getAdapter().getItem(2));
         assertEquals("关注我", scope.getAdapter().getItem(3));
-        View search = root.findViewWithTag("settings.followLists.searchAll");
+        EditText search = root.findViewWithTag("settings.followLists.search");
         assertNotNull(search);
         assertEquals(View.VISIBLE, search.getVisibility());
+        assertEquals(EditorInfo.IME_ACTION_SEARCH, search.getImeOptions() & EditorInfo.IME_MASK_ACTION);
+        assertNull("Return submits the user search without an extra button", root.findViewWithTag("settings.followLists.searchAll"));
         return scope;
     }
 
@@ -2149,9 +2279,20 @@ public final class ModuleSettingsReferenceTest {
         Dialog category = ShadowDialog.getLatestDialog();
         option(page, "下载任务").performClick();
         Dialog tasks = ShadowDialog.getLatestDialog();
+        ShadowLooper.idleMainLooper();
         assertTrue(tasks.isShowing());
-        assertNotNull(tasks.getWindow().getDecorView().findViewWithTag("download.tasks"));
-        assertTrue(containsText(tasks.getWindow().getDecorView(), "关闭此页不会停止下载"));
+        View tasksRoot = tasks.getWindow().getDecorView();
+        tasksRoot.measure(View.MeasureSpec.makeMeasureSpec(activity.getResources().getDisplayMetrics().widthPixels,
+                        View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(activity.getResources().getDisplayMetrics().heightPixels,
+                        View.MeasureSpec.AT_MOST));
+        tasksRoot.layout(0, 0, tasksRoot.getMeasuredWidth(), tasksRoot.getMeasuredHeight());
+        ListView tasksList = tasksRoot.findViewWithTag("download.tasks");
+        assertNotNull(tasksList);
+        assertEquals(1, tasksList.getAdapter().getCount());
+        assertNull(tasksList.getAdapter().getItem(0));
+        assertNotNull(tasksList.findViewWithTag("download.tasks.empty"));
+        assertTrue(containsText(tasksRoot, "暂无下载任务"));
         category.dismiss();
         ShadowLooper.idleMainLooper();
         assertFalse(tasks.isShowing());
@@ -2660,6 +2801,7 @@ public final class ModuleSettingsReferenceTest {
     }
 
     private static final class MemoryStore implements SettingsStore {
+        boolean inHost = true;
         final Map<String, Object> values = new HashMap<>();
         final Map<String, Integer> stringWrites = new HashMap<>();
         FeatureSettings settings = FeatureSettings.defaults();
@@ -2676,6 +2818,6 @@ public final class ModuleSettingsReferenceTest {
             values.put(key, value);
             stringWrites.put(key, stringWrites.getOrDefault(key, 0) + 1);
         }
-        public boolean isInHost() { return true; }
+        public boolean isInHost() { return inHost; }
     }
 }

@@ -93,8 +93,9 @@ final class NativeUserProfileSource implements NativeUserProfiles.Source {
                 }
             }
             checkCurrent(current);
+            if (completion.value == null) return null;
             ProfileListEntry result = profile(selected, completion.value);
-            if (result == null) throw new IllegalStateException("Native profile result is empty or has another UID");
+            if (result == null) throw new IllegalStateException("Native profile result has another UID");
             return result;
         } finally {
             // The host does not return its Job: detach results without claiming to cancel its network request.
