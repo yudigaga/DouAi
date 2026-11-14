@@ -25,8 +25,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.Assert.*;
 
@@ -83,6 +85,62 @@ public final class HostDouyinSearchTest {
         latch("releaseNormalize").countDown();
         workers.shutdownNow();
         assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS));
+        awaitHostWork();
+    }
+
+    private static void awaitHostWork() throws Exception {
+        ThreadPoolExecutor nativeWorkers = (ThreadPoolExecutor) hostExecutor("SEARCH_WORK");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        // Cancellation can finish the caller before its work leaves this shared executor.
+        while (nativeWorkers.getActiveCount() != 0 || !nativeWorkers.getQueue().isEmpty()) {
+            assertTrue("Host search workers remained active after fixture cleanup",
+                    System.nanoTime() < deadline);
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        }
+        long remaining = deadline - System.nanoTime();
+        assertTrue("Host search cleanup exceeded its deadline", remaining > 0);
+        hostExecutor("DISPOSE_WORK").submit(() -> { }).get(remaining, TimeUnit.NANOSECONDS);
+    }
+
+    @Test public void cleanupWaitsForNativeWorkBeforeTheNextSearch() throws Exception {
+        ThreadPoolExecutor nativeWorkers = (ThreadPoolExecutor) hostExecutor("SEARCH_WORK");
+        CountDownLatch occupied = new CountDownLatch(nativeWorkers.getCorePoolSize());
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService cleanupWorker = Executors.newSingleThreadExecutor();
+        try {
+            for (int index = 0; index < nativeWorkers.getCorePoolSize(); index++) {
+                nativeWorkers.execute(() -> {
+                    occupied.countDown();
+                    try { release.await(); }
+                    catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+                });
+            }
+            assertTrue(occupied.await(2, TimeUnit.SECONDS));
+            int slots = nativeWorkers.getQueue().remainingCapacity();
+            for (int index = 0; index < slots; index++) nativeWorkers.execute(() -> { });
+            CountDownLatch cleanupStarted = new CountDownLatch(1);
+            Future<?> cleanup = cleanupWorker.submit(() -> {
+                cleanupStarted.countDown();
+                releasePendingFixtureCallbacks();
+                return null;
+            });
+            assertTrue(cleanupStarted.await(2, TimeUnit.SECONDS));
+            try {
+                assertThrows(TimeoutException.class, () -> cleanup.get(100, TimeUnit.MILLISECONDS));
+            } finally { release.countDown(); }
+            cleanup.get(3, TimeUnit.SECONDS);
+            invalidAndMissingVideoObjectsNeverBecomeInventedVideoResults();
+        } finally {
+            release.countDown();
+            cleanupWorker.shutdownNow();
+            assertTrue(cleanupWorker.awaitTermination(3, TimeUnit.SECONDS));
+        }
+    }
+
+    private static ExecutorService hostExecutor(String name) throws Exception {
+        java.lang.reflect.Field field = HostDouyinSearch.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return (ExecutorService) field.get(null);
     }
 
     @Test public void oldAndUnknownProfilesDoNotEvenInspectHostClasses() throws Exception {
