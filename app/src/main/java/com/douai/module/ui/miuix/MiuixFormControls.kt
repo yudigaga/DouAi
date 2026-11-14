@@ -544,7 +544,7 @@ private fun hideProxy(view: View) {
     view.isFocusableInTouchMode = false
 }
 
-private fun Context.formComposeContext(): Context {
+internal fun Context.formComposeContext(): Context {
     var wrapped: Context = this
     while (true) {
         if (wrapped is HostComposeContext) return wrapped

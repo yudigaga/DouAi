@@ -1784,6 +1784,75 @@ public final class FeedUiHideHookTest {
         activity.finish();
     }
 
+    @Test public void earlyPlayingRestoresConfiguredAlphaOnBookmarkDetailAndRejectsDepartedWork() throws Throwable {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout window=new FrameLayout(a), first=new FrameLayout(a), detail=new FrameLayout(a);
+        View like=new View(a); like.setId(2131374347); detail.addView(like);
+        window.addView(first); window.addView(detail); a.setContentView(window);
+        SharedPreferences prefs=componentPreferences();
+        prefs.edit().putBoolean(ComponentHideSettings.HIDE_ON_SWITCH,false).putString(Component.LIKE.key,"40").commit();
+        Map<String,XposedInterface.Hooker> hooks=new HashMap<>();
+        FeedUiHideHook hook=install(hooks,ExtendedSettings.readFrom(prefs));
+        FeedHolderFixture h1=holder(first), h2=holder(detail); h2.aid="detail";
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"),h1);
+            intercept(hooks.get("DouAi.FeedUi.PlayerPause"),new PlayerFixture(),"current");
+            idleMainLooper();assertTrue(hook.areComponentsTemporarilyShown());
+            intercept(hooks.get("DouAi.FeedUi.PlayerPlaying"),new PlayerFixture(),"detail");
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"),h2);
+            idleMainLooper(); assertFalse(hook.areComponentsTemporarilyShown());
+            assertEquals(40/255f,like.getAlpha(),0.001f);
+            hook.syncBookmarkPlayback(h1,true);
+            intercept(hooks.get("DouAi.FeedUi.PlayerPause"),new PlayerFixture(),"current");
+            idleMainLooper();assertFalse(hook.areComponentsTemporarilyShown());
+            hook.syncBookmarkPlayback(h2,true);idleMainLooper();
+            assertTrue(hook.areComponentsTemporarilyShown());assertEquals(1f,like.getAlpha(),0.001f);
+            intercept(hooks.get("DouAi.FeedUi.PlayerPlaying"),new PlayerFixture(),"detail");
+            idleMainLooper();assertFalse(hook.areComponentsTemporarilyShown());
+        }finally{hook.close();idleMainLooper();a.finish();}
+    }
+
+    @Test public void earlyPauseFollowsReusedRootAndDisabledPolicyDoesNotReveal() throws Throwable {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get(); FrameLayout root=new FrameLayout(a);
+        View like=new View(a); like.setId(2131374347);root.addView(like);a.setContentView(root);
+        SharedPreferences prefs=componentPreferences();
+        prefs.edit().putString(Component.LIKE.key,"-2").commit();
+        Map<String,XposedInterface.Hooker> hooks=new HashMap<>(); FeedUiHideHook hook=install(hooks,ExtendedSettings.readFrom(prefs));
+        FeedHolderFixture holder=holder(root);
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"),holder);idleMainLooper();
+            assertEquals(View.GONE,like.getVisibility());
+            intercept(hooks.get("DouAi.FeedUi.PlayerPause"),new PlayerFixture(),"target");idleMainLooper();
+            assertFalse(hook.areComponentsTemporarilyShown());
+            holder.aid="target";intercept(hooks.get("DouAi.FeedUi.HideVideoActions"),holder);idleMainLooper();
+            assertTrue(hook.areComponentsTemporarilyShown());assertEquals(View.VISIBLE,like.getVisibility());
+            prefs.edit().putBoolean(ComponentHideSettings.SHOW_ON_PAUSE,false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(prefs));idleMainLooper();
+            hook.syncBookmarkPlayback(holder,true);idleMainLooper();
+            assertFalse(hook.areComponentsTemporarilyShown());assertEquals(View.GONE,like.getVisibility());
+        }finally{hook.close();idleMainLooper();a.finish();}
+    }
+
+    @Test public void lateWorkBindingConsumesInitialPauseAndMasterOffIgnoresBookmarkState() throws Throwable {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root=new FrameLayout(a);View like=new View(a);like.setId(2131374347);root.addView(like);
+        a.setContentView(root);
+        SharedPreferences prefs=componentPreferences();prefs.edit().putString(Component.LIKE.key,"-2").commit();
+        Map<String,XposedInterface.Hooker> hooks=new HashMap<>();FeedUiHideHook hook=install(hooks,ExtendedSettings.readFrom(prefs));
+        FeedHolderFixture h=holder(root); h.aid=null;
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"),h);
+            intercept(hooks.get("DouAi.FeedUi.PlayerPause"),new PlayerFixture(),"target");idleMainLooper();
+            assertFalse(hook.areComponentsTemporarilyShown());
+            h.aid="target";root.getViewTreeObserver().dispatchOnPreDraw();
+            assertTrue(hook.areComponentsTemporarilyShown());assertEquals(View.VISIBLE,like.getVisibility());
+            prefs.edit().putBoolean(ComponentHideSettings.ENABLED,false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(prefs));idleMainLooper();
+            hook.syncBookmarkPlayback(h,false);hook.syncBookmarkPlayback(h,true);idleMainLooper();
+            assertFalse(hook.areComponentsTemporarilyShown());assertEquals(View.VISIBLE,like.getVisibility());
+        }finally{hook.close();idleMainLooper();a.finish();}
+    }
+
     @Test
     public void disablingPauseRevealReappliesHidingImmediately() throws Throwable {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();

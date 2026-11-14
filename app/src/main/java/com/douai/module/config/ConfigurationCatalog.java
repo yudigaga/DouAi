@@ -79,6 +79,8 @@ public final class ConfigurationCatalog {
         add(keys, "boolean", LocalOptions.HASH_LONG_PRESS_VOICE);
         add(keys, "boolean", LocalOptions.MODULE_ONLY_SPEED);
         add(keys, "boolean", LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY);
+        add(keys, "boolean", "hide_seen_works loaded_comment_search_enabled comment_transcript_enabled");
+        add(keys, "string", "seen_work_days");
         add(keys, "boolean", CommentAiSettings.TAKEOVER + " " + CommentAiSettings.SEARCH);
         add(keys, "boolean", SidebarSettings.ENABLED);
         add(keys, "string", SidebarSettings.ITEMS);
@@ -126,7 +128,7 @@ public final class ConfigurationCatalog {
         }
         TRANSFER_TYPES = Collections.unmodifiableMap(keys);
         // These groups replace updateConfiguration's inline lists. Prefixes retain future/legacy keys.
-        depend(Feature.FEED_FILTER, "feed_filter_enabled hide_ads hide_lives hide_image_posts hide_recommendation_cards hide_recommendation_merchants keyword_filter_enabled keyword minimum_duration_enabled minimum_duration_seconds minimum_likes_enabled minimum_like_count filter_interrupt hide_mini_games hide_long_videos hide_product_cards hide_hotspot_rank_cards maximum_duration_seconds", "");
+        depend(Feature.FEED_FILTER, "feed_filter_enabled hide_ads hide_lives hide_image_posts hide_recommendation_cards hide_recommendation_merchants keyword_filter_enabled keyword minimum_duration_enabled minimum_duration_seconds minimum_likes_enabled minimum_like_count filter_interrupt hide_mini_games hide_long_videos hide_product_cards hide_hotspot_rank_cards maximum_duration_seconds hide_seen_works seen_work_days", "");
         depend(Feature.DOWNLOAD, "download_enabled remove_watermark download_custom_name download_name_template remove_download_limits download_method download_directory_uri", "third_party_");
         depend(Feature.REPLY, "automation_enabled native_auto_reply reply_global reply_targets reply_mode reply_prompt reply_model_id reply_delay_seconds auto_message_text reply_daily_limit reply_user_cooldown_minutes reply_recognize_images reply_recognize_video reply_keywords reply_scope_mode reply_scope_relations reply_scope_fields reply_scope_keywords reply_scope_users reply_filter_mode reply_filter_keywords reply_filter_fields reply_private_chats reply_group_chats reply_group_scope_mode reply_group_targets reply_group_mode reply_group_members reply_random ai_model_settings_v2 streak_enabled streak_targets streak_content streak_content_api streak_start streak_end streak_tip streak_reset_token streak_retry_unknown_token reply_voice", "tts_ voice_catalog_");
         depend(Feature.COMMENT_AUTOMATION, "automation_enabled native_auto_comment comment_mode comment_prompt comment_model_id comment_delay_seconds auto_comment_text comment_daily_limit comment_user_cooldown_minutes comment_recognize_images comment_recognize_video comment_scope_mode comment_scope_relations comment_scope_fields comment_scope_keywords comment_scope_users comment_filter_mode comment_filter_keywords comment_filter_fields ai_model_settings_v2 comment_voice", "tts_ voice_catalog_");
@@ -149,7 +151,7 @@ public final class ConfigurationCatalog {
         depend(Feature.AUTO_LIKE, "automation_enabled auto_like_enabled", "");
         depend(Feature.AUTO_FOLLOW, "automation_enabled auto_follow_enabled", "");
         depend(Feature.AUTO_MESSAGE, "automation_enabled auto_message_enabled native_auto_reply auto_message_text hide_interface", "");
-        depend(Feature.COMMENT_TOOLS, "copy_comment_text comment_media_tools copy_source_data", "");
+        depend(Feature.COMMENT_TOOLS, "copy_comment_text comment_media_tools copy_source_data loaded_comment_search_enabled comment_transcript_enabled", "");
         depend(Feature.IMMERSIVE, "remove_black_edges hide_navigation_bar", "");
         depend(Feature.VERSION, "spoof_version fake_version_name fake_version_code", "");
         depend(Feature.TOP_TABS, "hide_top_tabs hidden_top_tabs", "");
@@ -170,6 +172,10 @@ public final class ConfigurationCatalog {
         defaults.put(SidebarSettings.ENABLED, false);
         defaults.put(SidebarSettings.ITEMS, SidebarSettings.DEFAULT_ITEMS);
         defaults.put("hide_product_cards", false);
+        defaults.put("hide_seen_works", false);
+        defaults.put("seen_work_days", "3");
+        defaults.put("loaded_comment_search_enabled", false);
+        defaults.put("comment_transcript_enabled", false);
         defaults.put("hide_hotspot_rank_cards", false);
         defaults.put(PLAYBACK_SPEED, PLAYBACK_SPEED_DEFAULT);
         defaults.put("download_method", DOWNLOAD_METHOD_DEFAULT);
@@ -226,6 +232,7 @@ public final class ConfigurationCatalog {
 
     /** Transfer keeps its existing type/size checks so legacy range values remain importable. */
     static void validateTransfer(String key, Object value) {
+        if ("seen_work_days".equals(key) && !java.util.Arrays.asList("1", "3", "7").contains(value)) throw ConfigJson.invalid();
         String expected = TRANSFER_TYPES.get(key);
         if (expected == null || !("boolean".equals(expected) && value instanceof Boolean
                 || "string".equals(expected) && value instanceof String

@@ -464,6 +464,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
     }
 
     private static boolean hasActiveFilter(FeatureSettings settings, LocalOptions options) {
+        // hide_seen_works is an active feed option at the module level, but cannot run on a
+        // generic Retrofit response. SeenWorkHook handles the originating recommendation callable.
         return settings.hideAds || settings.hideLives || settings.hideImagePosts
                 || settings.hideRecommendationCards || settings.hideRecommendationMerchants
                 || settings.keywordFilterEnabled

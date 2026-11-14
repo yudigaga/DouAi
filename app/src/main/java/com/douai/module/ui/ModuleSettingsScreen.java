@@ -115,12 +115,12 @@ public final class ModuleSettingsScreen {
             new SearchEntry("video-quality", "锁定最高画质", "自动播放 > 锁定最高画质", "画质 清晰度 最高画质 自动 高清 超清 分辨率 1080 2K 4K", SearchDestination.AUTOPLAY,
                     "settings.toggle.锁定最高画质"),
             new SearchEntry("interaction", "互动自动化", "自动播放 > 互动自动化", "自动点赞 自动关注 停止自动化", SearchDestination.INTERACTION),
-            new SearchEntry("feed-filter", "视频筛选", "视频筛选 > 过滤总开关", "过滤 广告 直播 图集 关键词 时长 低赞 推荐商家 商品卡 购物卡 热点榜单", SearchDestination.FILTER),
+            new SearchEntry("feed-filter", "视频筛选", "视频筛选 > 过滤总开关", "过滤 广告 直播 图集 关键词 时长 低赞 推荐商家 商品卡 购物卡 热点榜单 已看 去重 重复", SearchDestination.FILTER),
             new SearchEntry("component-hide", "组件隐藏", "组件隐藏 > 隐藏与透明度", "界面 隐藏 透明度 自定义控件 暂停显示", SearchDestination.COMPONENT_HIDE),
             new SearchEntry("streak", "自动续火花", "自动续火花 > 选择用户", "续火花 好友 定时 结果未知 重试", SearchDestination.STREAK),
             new SearchEntry("message-recall", "消息防撤回", "消息管理 > 消息防撤回", "私信 防撤回 撤回背景 消息记录", SearchDestination.MESSAGE),
             new SearchEntry("gestures", "长按与双击手势", "界面相关 > 长按事件与双击事件", "手势 长按 双击 悬浮条 工具栏", SearchDestination.GESTURES),
-            new SearchEntry("comment-tools", "评论工具", "评论相关 > 长按操作", "复制评论 评论图片 复制源数据 查看评论数据 评论解析 JSON 语音摘要 彩色评论 后缀 替换语音", SearchDestination.COMMENT),
+            new SearchEntry("comment-tools", "评论工具", "评论相关 > 长按操作", "复制评论 评论图片 复制源数据 查看评论数据 评论解析 JSON 语音摘要 彩色评论 后缀 替换语音 查评论 搜索评论 转写", SearchDestination.COMMENT),
             new SearchEntry("comment-voice-file", "评论语音文件", "评论相关 > 评论语音文件", "替换语音 音频 文件路径 选择文件", SearchDestination.COMMENT, "settings.option.评论语音文件"),
             new SearchEntry("message-voice-file", "私聊语音文件", "消息管理 > 私聊语音文件", "私信 替换语音 音频 文件路径 选择文件", SearchDestination.MESSAGE, "settings.option.私聊语音文件"),
             new SearchEntry("comment-speech", "评论转语音", "评论相关 > 评论转语音", "语音 TTS # 单击发送 评论", SearchDestination.COMMENT, "settings.option.评论转语音"),
@@ -690,6 +690,8 @@ public final class ModuleSettingsScreen {
                 addOption("版本信息", "", null, true, this::showVersionSettings);
                 break;
             case EXTENSION:
+                if (reading41()) addOption("我的时间点书签", "", null, true,
+                        () -> com.douai.module.feature.PlaybackBookmarks.show(findOwnerActivity(context)));
                 addOption("AI 模型设置", "", null, true, this::showAiModelSettings);
                 addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
                 addOption("本地数据分析", "", null, true, this::showLocalAnalytics);
@@ -713,12 +715,13 @@ public final class ModuleSettingsScreen {
     }
 
     private void showSidebarSelection(OptionRow preview) {
-        String[] labels = new String[SidebarSettings.ENTRIES.size()];
+        java.util.List<SidebarSettings.Entry> entries = SidebarSettings.availableEntries();
+        String[] labels = new String[entries.size()];
         boolean[] checked = new boolean[labels.length];
         java.util.Set<String> selected = new java.util.HashSet<>();
         for (SidebarSettings.Entry entry : SidebarSettings.selected(repository)) selected.add(entry.id);
         for (int index = 0; index < labels.length; index++) {
-            SidebarSettings.Entry entry = SidebarSettings.ENTRIES.get(index);
+            SidebarSettings.Entry entry = entries.get(index);
             labels[index] = entry.title;
             checked[index] = selected.contains(entry.id);
         }
@@ -726,8 +729,8 @@ public final class ModuleSettingsScreen {
                 .setMultiChoiceItems(labels, checked, (ignored, which, value) -> checked[which] = value)
                 .setNegativeButton("取消", null).setPositiveButton("保存", (ignored, which) -> {
                     java.util.List<String> ids = new java.util.ArrayList<>();
-                    for (int index = 0; index < checked.length; index++) if (checked[index]) ids.add(SidebarSettings.ENTRIES.get(index).id);
-                    repository.putString(SidebarSettings.ITEMS, SidebarSettings.serialize(ids));
+                    for (int index = 0; index < checked.length; index++) if (checked[index]) ids.add(entries.get(index).id);
+                    repository.putString(SidebarSettings.ITEMS, SidebarSettings.serializeSelection(repository, ids));
                     preview.setValue(sidebarSelectionPreview());
                 }).create());
     }
@@ -922,6 +925,18 @@ public final class ModuleSettingsScreen {
             addSwitch("整页筛空时保留原列表", "",
                     repository.getBoolean("filter_interrupt", true), settings.feedFilterEnabled, true,
                     value -> repository.putBoolean("filter_interrupt", value));
+            if (reading41()) {
+                addSwitch("减少已看作品", "", repository.getBoolean("hide_seen_works", false),
+                        settings.feedFilterEnabled, true, value -> repository.putBoolean("hide_seen_works", value));
+                OptionRow[] days = new OptionRow[1];
+                days[0] = addOption("已看记录保留天数", "", repository.getString("seen_work_days", "3") + " 天", true, () ->
+                        new MiuixDialogBuilder(context, true).setTitle("已看记录保留天数")
+                                .setItems(new String[]{"1 天", "3 天", "7 天"}, (dialog, which) -> {
+                                    String value = new String[]{"1","3","7"}[which];
+                                    repository.putString("seen_work_days", value);
+                                    days[0].setValue(value + " 天");
+                                }).setNegativeButton("取消", null).show());
+            }
             addSwitch("去广告开关", "", settings.hideAds, settings.feedFilterEnabled,
                     true, value -> update(s -> withFilter(s, value, Filter.AD)));
             addSwitch("去直播开关", "", settings.hideLives, settings.feedFilterEnabled,
@@ -966,6 +981,12 @@ public final class ModuleSettingsScreen {
                             value -> update(s -> withDuration(s, parseNonNegative(value)))));
         });
         setFeedFilterControlsEnabled(settings.feedFilterEnabled);
+        if (reading41()) addOption("清空已看记录", "", null, true, () ->
+                new MiuixDialogBuilder(context, true).setTitle("清空当前账号已看记录？")
+                        .setMessage("书签和本地分析数据会保留。")
+                        .setNegativeButton("取消", null).setPositiveButton("清空", (dialog, which) ->
+                                com.douai.module.feature.SeenWorkHook.clearCurrentAccount(context,
+                                        ok -> android.widget.Toast.makeText(context, ok ? "已清空" : "未能清空，请确认账号并重试", android.widget.Toast.LENGTH_SHORT).show())).show());
     }
 
     private void showProfileSelection(String title, java.util.Map<String, ProfileListEntry> available,
@@ -1111,6 +1132,12 @@ public final class ModuleSettingsScreen {
     }
 
     private void addCommentLongPressOption() {
+        if (reading41()) {
+            addLocalSwitch("查看和复制语音转写", "", "comment_transcript_enabled");
+            addLocalSwitch("在已加载评论中查找", "", "loaded_comment_search_enabled");
+            addOption("查找当前作品评论", "", null, repository.getBoolean("loaded_comment_search_enabled", false),
+                    () -> FeedGestureToolsHook.launchCurrentAction(context, "comment_search"));
+        }
         String[] labels = {"复制评论", "保存评论图片", "复制源数据"};
         String[] keys = {"copy_comment_text", "comment_media_tools", "copy_source_data"};
         java.util.function.Supplier<String> selection = () -> {
@@ -1512,7 +1539,7 @@ public final class ModuleSettingsScreen {
                 int selected = Math.max(0, java.util.Arrays.asList(FeedGestureToolsHook.ACTION_IDS).indexOf(action));
                 showOptionDialog(new MiuixDialogBuilder(context, true)
                         .setTitle(title + " · " + FeedGestureToolsHook.REGION_LABELS[region])
-                        .setSingleChoiceItems(FeedGestureToolsHook.ACTION_LABELS, selected, (dialog, which) -> {
+                        .setSingleChoiceItems(gestureActionLabels(), Math.min(selected, gestureActionLabels().length-1), (dialog, which) -> {
                             repository.putString(key, FeedGestureToolsHook.ACTION_IDS[which]);
                             grid[0].setAction(region, FeedGestureToolsHook.ACTION_LABELS[which]);
                             dialog.dismiss();
@@ -1557,7 +1584,7 @@ public final class ModuleSettingsScreen {
                     String action = FeedGestureToolsHook.regionAction(gestureOptions(prefix), prefix, region);
                     int current = java.util.Arrays.asList(FeedGestureToolsHook.ACTION_IDS).indexOf(action);
                     showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle(title + " · " + label)
-                            .setSingleChoiceItems(FeedGestureToolsHook.ACTION_LABELS, Math.max(0, current),
+                            .setSingleChoiceItems(gestureActionLabels(), Math.max(0, Math.min(current, gestureActionLabels().length-1)),
                                     (dialog, which) -> {
                                         repository.putString(key, FeedGestureToolsHook.ACTION_IDS[which]);
                                         updateGestureCell(cell, value, label, prefix, region);
@@ -2040,6 +2067,14 @@ public final class ModuleSettingsScreen {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
         parent.addView(divider, p);
+    }
+
+    private static boolean reading41() {
+        return com.douai.module.scan.HostAdaptation.PROFILE_410.equals(com.douai.module.scan.HostAdaptation.currentProfile());
+    }
+
+    private static String[] gestureActionLabels() {
+        return reading41() ? FeedGestureToolsHook.ACTION_LABELS : java.util.Arrays.copyOf(FeedGestureToolsHook.ACTION_LABELS, 8);
     }
 
     private static Activity findOwnerActivity(Context context) {

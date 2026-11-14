@@ -447,6 +447,7 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
             event("entry_unavailable", "reason=no_current_activity");
             return;
         }
+        if(!SidebarSettings.isFeedAction(id)) FeedGestureToolsHook.keepPauseForSidebarSettings(activity);
         try { closeSidebar.run(); }
         catch (RuntimeException unavailable) { event("close_unavailable", "error_type=" + unavailable.getClass().getSimpleName()); }
         try { launcher.accept(activity, id); }

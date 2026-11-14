@@ -4,20 +4,25 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.graphics.Typeface;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import com.douai.module.config.ExtendedSettings;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostCandidate;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
 import com.douai.module.ui.ModuleTheme;
+import com.douai.module.ui.miuix.MiuixCommentDetails;
+import com.douai.module.ui.miuix.MiuixDialogBuilder;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -39,7 +44,7 @@ import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.function.Consumer;
 
-/** Adds copy and image tools to the already-open native comment long-press panel. */
+/** Adds a visible entry to the 41 native comment menu. Older menus retain their long-click shortcut. */
 public final class CommentToolsHook implements AutoCloseable {
     private static final String ITEM_VIEW_CLASS = "com.ss.android.ugc.aweme.comment.ui.longpress.CommentLongPressItemView";
     private static final String NATIVE_IMAGE_SAVE_ACTION_CLASS =
@@ -53,8 +58,20 @@ public final class CommentToolsHook implements AutoCloseable {
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
     private final Map<View, RowContext> contextsByRow = new WeakHashMap<>();
     private final Map<View, View.OnLongClickListener> listenersByRow = new WeakHashMap<>();
+    private final Map<Object, WeakReference<TextView>> entriesByPanel = new WeakHashMap<>();
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private volatile boolean visiblePanelInstalled;
+    private volatile boolean closed;
     private final Consumer<String> log;
     private volatile ExtendedSettings settings;
+    private volatile boolean transcriptEnabled, searchEnabled;
+
+    public void setReadingOptions(boolean transcriptEnabled, boolean searchEnabled) {
+        boolean changed = this.transcriptEnabled != transcriptEnabled || this.searchEnabled != searchEnabled;
+        this.transcriptEnabled = transcriptEnabled;
+        this.searchEnabled = searchEnabled;
+        if (changed) refreshEntries();
+    }
 
     private CommentToolsHook(ClassLoader loader, Class<?> itemModelClass, Class<?> commentClass,
                              Class<?> nativeImageSaveActionClass,
@@ -105,6 +122,13 @@ public final class CommentToolsHook implements AutoCloseable {
                     .intercept(hook::afterBind);
             if (handle == null) throw new IllegalStateException("Framework returned an empty hook handle");
             hook.handles.add(handle);
+            if (HostAdaptation.currentProfile() == HostAdaptation.PROFILE_410) {
+                try {
+                    hook.installVisiblePanel(framework, bind.getParameterTypes()[0]);
+                } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) {
+                    hook.safeLog("Visible comment menu unavailable: " + unavailable.getClass().getSimpleName());
+                }
+            }
             return hook;
         } catch (Throwable failure) {
             hook.unhookAll(failure);
@@ -114,13 +138,137 @@ public final class CommentToolsHook implements AutoCloseable {
     }
 
     public void setSettings(ExtendedSettings settings) {
+        ExtendedSettings previous = this.settings;
         this.settings = settings;
+        if (previous.copyCommentText != settings.copyCommentText || previous.copySourceData != settings.copySourceData
+                || previous.commentMediaTools != settings.commentMediaTools) refreshEntries();
+    }
+
+    private static final int HOST_ACTION_LIST_41 = 0x7f0ad256;
+    private void installVisiblePanel(XposedInterface framework, Class<?> qModelType) throws ReflectiveOperationException {
+        Class<?> list = Class.forName("com.ss.android.ugc.aweme.comment.ui.longpress.CommentLongPressVerListPresenter",false,loader);
+        Class<?> root = Class.forName("com.ss.android.ugc.aweme.comment.ui.longpress.CommentRootPanelModel",false,loader);
+        Class<?> panelType = Class.forName("com.ss.android.ugc.aweme.sharer.panelmodel.base.PanelModel",false,loader);
+        Class<?> paramsType = itemParamsField.getType();
+        Field rootComment = root.getDeclaredField("comment"), panelParams = panelType.getDeclaredField("m");
+        Method getView=list.getMethod("getView");
+        Method bind = list.getDeclaredMethod("onBind",qModelType);
+        if (bind.getReturnType()!=void.class || getView.getReturnType()!=View.class || rootComment.getType()!=commentClass
+                || !panelParams.getType().isAssignableFrom(paramsType) || !panelType.isAssignableFrom(root))
+            throw new NoSuchMethodException("41 comment action list changed");
+        XposedInterface.HookHandle handle = framework.hook(bind).setId("DouAi.Comment.Tools.VisibleList")
+                .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH)
+                .intercept(chain -> {
+                    Object result = chain.proceed(); // wait for the host to finish binding its children
+                    if (closed || !anyEnabled()) return result;
+                    try {
+                        Object model = chain.getArg(0);
+                        if (!panelType.isInstance(model)) return result;
+                        LinearLayout listView=actionList((View)getView.invoke(chain.getThisObject()));
+                        if(listView==null)return result;
+                        Object params = panelParams.get(model);
+                        Object comment = root.isInstance(model) ? rootComment.get(model)
+                                : paramsType.isInstance(params) ? paramsCommentField.get(params) : null;
+                        if (commentClass.isInstance(comment)) bindToolsEntry(listView,model,comment);
+                    } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) {
+                        DouAiLog.failure("comment_tools","visible_entry_bind",unavailable);
+                    }
+                    return result;
+                });
+        if(handle==null) throw new IllegalStateException("Empty visible comment hook");
+        handles.add(handle);
+        visiblePanelInstalled=true;
+    }
+
+    private boolean anyEnabled() {
+        ExtendedSettings s=settings;
+        return s.copyCommentText || s.copySourceData || s.commentMediaTools || searchEnabled || transcriptEnabled;
+    }
+
+    static LinearLayout actionList(View groupRoot) {
+        View list=groupRoot==null?null:groupRoot.findViewById(HOST_ACTION_LIST_41);
+        return list instanceof LinearLayout && ((LinearLayout)list).getOrientation()==LinearLayout.VERTICAL ? (LinearLayout)list : null;
+    }
+
+    /** Only the first eligible native action group for this particular panel gets a module row. */
+    @android.annotation.SuppressLint("ResourceType") // This exact 41 host ID belongs to the host's resource table, not module R.
+    void bindToolsEntry(LinearLayout list, Object panel, Object comment) {
+        if(closed || list.getOrientation()!=LinearLayout.VERTICAL)return;
+        WeakReference<TextView> previous=entriesByPanel.get(panel);
+        TextView old=previous==null?null:previous.get();
+        if(old!=null && old.getParent()!=null) {
+            PanelEntry previousBinding=(PanelEntry)old.getTag();
+            if(previousBinding.comment.get()==comment)return;
+            removeEntry(old);
+        }
+        // The same list view may be rebound to a different panel before its first detach.
+        for(int i=0;i<list.getChildCount();i++){
+            View child=list.getChildAt(i);
+            if(!(child.getTag() instanceof PanelEntry)) continue;
+            Object prior=((PanelEntry)child.getTag()).panel.get();
+            entriesByPanel.remove(prior);
+            removeEntry(child);
+            break;
+        }
+        if(!anyEnabled()) return;
+        Object save=settings.commentMediaTools?findNativeImageSaveAction(panel,null,comment):null;
+        if(actions(comment,save).isEmpty()) return;
+        Context context=list.getContext();
+        TextView entry=new TextView(context);
+        PanelEntry binding=new PanelEntry(panel,comment);
+        entry.setTag(binding);
+        entry.setText(String.format(Locale.ROOT,"%s 评论工具","DouAi"));
+        entry.setTextSize(16);
+        // Host action groups have their own light background even when the Activity theme is dark.
+        View nativeTitle=list.findViewById(2131398470);
+        entry.setTextColor(nativeTitle instanceof TextView?((TextView)nativeTitle).getCurrentTextColor():ModuleTheme.color(context,0xFF1F272D));
+        int dp16=Math.round(16*context.getResources().getDisplayMetrics().density);
+        entry.setMinHeight(dp16*3);entry.setPaddingRelative(dp16,0,dp16,0);entry.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        TypedValue ripple=new TypedValue();
+        if(context.getTheme().resolveAttribute(android.R.attr.selectableItemBackground,ripple,true) && ripple.resourceId!=0)
+            entry.setBackgroundResource(ripple.resourceId);
+        entry.setFocusable(true);
+        entry.setOnClickListener(v -> {
+            Object current=binding.comment.get(), model=binding.panel.get();
+            if(closed || current==null || model==null || !anyEnabled()) return;
+            Object available=settings.commentMediaTools?findNativeImageSaveAction(model,null,current):null;
+            if(!showMenu(v.getContext(),current,available))refreshEntries();
+        });
+        list.addView(entry,0,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));
+        entriesByPanel.put(panel,new WeakReference<>(entry));
+        DouAiLog.event("comment_tools","menu_entry","entry_added","native_action_group=true;clicked=false");
+    }
+
+    private static final class PanelEntry {
+        final WeakReference<Object> panel, comment;
+        PanelEntry(Object p,Object c){panel=new WeakReference<>(p);comment=new WeakReference<>(c);}
+    }
+
+    private static void removeEntry(View entry) {
+        entry.setOnClickListener(null);
+        if(entry.getParent() instanceof ViewGroup)((ViewGroup)entry.getParent()).removeView(entry);
+    }
+
+    private void refreshEntries() {
+        if(Looper.myLooper()!=Looper.getMainLooper()){main.post(this::refreshEntries);return;}
+        Iterator<Map.Entry<Object,WeakReference<TextView>>> it=entriesByPanel.entrySet().iterator();
+        while(it.hasNext()){
+            Map.Entry<Object,WeakReference<TextView>> mapEntry=it.next();
+            TextView entry=mapEntry.getValue().get();Object model=mapEntry.getKey();
+            if(entry==null || model==null){it.remove();continue;}
+            Object c=((PanelEntry)entry.getTag()).comment.get();
+            if(!closed && anyEnabled() && c!=null && !actions(c,settings.commentMediaTools
+                    ?findNativeImageSaveAction(model,null,c):null).isEmpty()) continue;
+            removeEntry(entry);
+            it.remove();
+        }
     }
 
     private Object afterBind(XposedInterface.Chain chain) throws Throwable {
         Object result = chain.proceed();
+        if (visiblePanelInstalled || closed) return result;
         ExtendedSettings current = settings;
-        if (!current.copyCommentText && !current.commentMediaTools && !current.copySourceData) {
+        if (!current.copyCommentText && !current.commentMediaTools && !current.copySourceData && !transcriptEnabled && !searchEnabled) {
             DouAiLog.event("comment_tools", "decision", "disabled", "tools_attached=false");
             return result;
         }
@@ -161,11 +309,16 @@ public final class CommentToolsHook implements AutoCloseable {
         return result;
     }
 
-    private boolean showMenu(Context context, Object comment, Object nativeImageSaveAction) {
+    private ArrayList<Action> actions(Object comment, Object nativeImageSaveAction) {
         ExtendedSettings current = settings;
         ArrayList<Action> actions = new ArrayList<>();
         String text = readString(comment, "text");
         if (current.copyCommentText && text != null) actions.add(new Action("复制评论内容", text, null));
+        String transcript = transcriptEnabled ? CommentTranscript.read(comment) : null;
+        if (transcript != null) actions.add(new Action("查看语音转写", transcript, null));
+        if (searchEnabled && LoadedCommentSearchHook.available(comment)) {
+            actions.add(new Action("查找已加载评论", null, comment));
+        }
         if (current.copySourceData) {
             actions.add(new Action("查看评论数据", comment));
             actions.add(new Action("复制评论源数据", null, comment));
@@ -173,6 +326,11 @@ public final class CommentToolsHook implements AutoCloseable {
         if (current.commentMediaTools && nativeImageSaveAction != null && hasCommentImages(comment)) {
             actions.add(new Action("使用抖音保存评论图片", nativeImageSaveAction, true));
         }
+        return actions;
+    }
+
+    private boolean showMenu(Context context, Object comment, Object nativeImageSaveAction) {
+        ArrayList<Action> actions=actions(comment,nativeImageSaveAction);
         if (actions.isEmpty()) {
             DouAiLog.event("comment_tools", "decision", "no_applicable_actions", "menu_shown=false");
             return false;
@@ -181,12 +339,11 @@ public final class CommentToolsHook implements AutoCloseable {
         String[] labels = new String[actions.size()];
         for (int index = 0; index < actions.size(); index++) labels[index] = actions.get(index).title;
         try {
-            AlertDialog dialog = new AlertDialog.Builder(context, ModuleTheme.alertTheme(context))
+            new MiuixDialogBuilder(context, true)
                     .setTitle("评论工具")
                     .setItems(labels, (ignoredDialog, which) -> runAction(context, actions.get(which)))
                     .setNegativeButton("取消", null)
                     .show();
-            ModuleTheme.bind(dialog.getWindow().getDecorView());
             DouAiLog.event("comment_tools", "menu", "menu_show_returned", "action_count=" + actions.size() + ";action_selected=false");
             return true;
         } catch (Throwable failure) {
@@ -197,15 +354,32 @@ public final class CommentToolsHook implements AutoCloseable {
     }
 
     private void runAction(Context context, Action action) {
+        if ("查看语音转写".equals(action.title)) {
+            if (!transcriptEnabled) return;
+            new MiuixDialogBuilder(context, true)
+                    .setTitle("语音转写").setView(MiuixCommentDetails.transcript(context, action.text))
+                    .setPositiveButton("复制转写", (d,w) -> {
+                        if (transcriptEnabled) copyText(context,action.text,"语音转写");
+                    }).setNegativeButton("关闭",null).show();
+            return;
+        }
+        if ("查找已加载评论".equals(action.title)) {
+            if (searchEnabled && LoadedCommentSearchHook.available(action.source)) LoadedCommentSearchHook.show(context);
+            return;
+        }
         DouAiLog.event("comment_tools", "action", "user_selected", "kind=" + (action.nativeImageSaveAction != null
                 ? "native_image_save" : action.viewData ? "view_data" : action.text != null ? "copy_text" : "copy_source"));
         if (action.nativeImageSaveAction != null) {
+            if (!settings.commentMediaTools) return;
             invokeNativeImageSaveAction(context, action.nativeImageSaveAction);
         } else if (action.viewData) {
+            if (!settings.copySourceData) return;
             showCommentData(context, action.source);
         } else if (action.text != null) {
+            if (!settings.copyCommentText) return;
             copyText(context, action.text, "评论");
         } else if (action.source != null) {
+            if (!settings.copySourceData) return;
             String sourceJson = toJson(action.source);
             if (sourceJson == null || sourceJson.isEmpty()) {
                 showToast(context, "复制评论源数据失败");
@@ -222,43 +396,13 @@ public final class CommentToolsHook implements AutoCloseable {
             return;
         }
         try {
-            AlertDialog.Builder builder = new AlertDialog.Builder(context, ModuleTheme.alertTheme(context));
-            Context themed = builder.getContext();
-            LinearLayout content = new LinearLayout(themed);
-            content.setOrientation(LinearLayout.VERTICAL);
-            int padding = Math.round(20 * context.getResources().getDisplayMetrics().density);
-            content.setPadding(padding, padding / 2, padding, padding / 2);
-            TextView entry = new TextView(themed);
-            entry.setText("入口：长按评论，再长按弹出菜单中的一项。");
-            entry.setTextSize(12);
-            entry.setTextColor(0xFF69737A);
-            content.addView(entry);
-            TextView summary = new TextView(themed);
-            summary.setTag("comment_tools.data.summary");
-            summary.setText(sourceAudioSummary(sourceJson));
-            summary.setTextSize(14);
-            summary.setTextColor(0xFF1F272D);
-            summary.setPadding(0, padding / 2, 0, padding);
-            summary.setTextIsSelectable(true);
-            content.addView(summary);
-            TextView json = new TextView(themed);
-            json.setTag("comment_tools.data.json");
-            json.setText(prettySourceJson(sourceJson));
-            json.setTextSize(12);
-            json.setTextColor(0xFF1F272D);
-            json.setTypeface(Typeface.MONOSPACE);
-            json.setTextIsSelectable(true);
-            content.addView(json);
-            ScrollView scroll = new ScrollView(themed);
-            scroll.setTag("comment_tools.data.scroll");
-            scroll.addView(content, new ScrollView.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            AlertDialog dialog = builder.setTitle("评论数据").setView(scroll)
+            AlertDialog dialog = new MiuixDialogBuilder(context,true).setTitle("评论数据")
+                    .setView(MiuixCommentDetails.data(context,sourceAudioSummary(sourceJson),prettySourceJson(sourceJson)))
                     .setPositiveButton("复制 JSON", null).setNegativeButton("关闭", null).create();
             dialog.show();
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(
-                    ignored -> copyText(context, sourceJson, "评论源数据"));
-            ModuleTheme.bind(dialog.getWindow().getDecorView());
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+                if (settings.copySourceData) copyText(context, sourceJson, "评论源数据");
+            });
         } catch (RuntimeException | LinkageError unavailable) {
             safeLog("Could not show comment data: " + unavailable.getClass().getSimpleName());
             showToast(context, "无法显示评论数据");
@@ -483,7 +627,7 @@ public final class CommentToolsHook implements AutoCloseable {
         return null;
     }
 
-    private static Field fieldForJsonName(Class<?> type, String name) {
+    static Field fieldForJsonName(Class<?> type, String name) {
         for (Field field : type.getDeclaredFields()) {
             if (name.equals(serializedName(field))) return field;
         }
@@ -619,6 +763,8 @@ public final class CommentToolsHook implements AutoCloseable {
 
     @Override
     public void close() {
+        closed=true;
+        refreshEntries();
         synchronized (contextsByRow) {
             for (Map.Entry<View, View.OnLongClickListener> entry : listenersByRow.entrySet()) {
                 View row = entry.getKey();

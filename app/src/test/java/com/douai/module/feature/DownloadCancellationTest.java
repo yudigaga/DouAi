@@ -227,6 +227,9 @@ public final class DownloadCancellationTest {
                 org.robolectric.shadows.ShadowDownloadManager.ShadowRequest request =
                         org.robolectric.shadow.api.Shadow.extract(shadow.getRequest(owned));
                 request.setTotalSize(1); request.setBytesSoFar(1);
+                // Shadow cursors read live fields: publish observed progress before the terminal
+                // transition, so a cursor can't combine old 0/0 bytes with the new success status.
+                await(() -> { DownloadTasks.Snapshot view = snapshot(task); return view.bytes == 1 && view.totalBytes == 1; });
                 request.setStatus(success ? android.app.DownloadManager.STATUS_SUCCESSFUL : android.app.DownloadManager.STATUS_FAILED);
                 await(() -> (success ? "completed" : "failed").equals(snapshot(task).status));
                 assertNotNull(shadow.getRequest(unrelated));

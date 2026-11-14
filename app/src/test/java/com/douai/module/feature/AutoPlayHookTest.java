@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import android.app.Activity;
+import X.TestRenderDispatcher;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Looper;
@@ -107,9 +108,13 @@ public final class AutoPlayHookTest {
     public static final class FeedPager extends View {
         int state;
         int touchCalls;
+        int page;
+        boolean smooth;
         FeedPager(Context context) { super(context); }
         public boolean touch(MotionEvent event) { touchCalls++; return true; }
         public int scrollState() { return state; }
+        public int getCurrentItem() {return page;}
+        public void setCurrentItem(int target,boolean animate){page=target;smooth=animate;}
     }
 
     public static final class DialogState {
@@ -119,21 +124,14 @@ public final class AutoPlayHookTest {
 
     public static final class FeedPanel {
         public PagerContext B3 = new PagerContext();
+        public PanelPlayer V=new PanelPlayer();
         public FeedPager f;
         public DialogState L0 = new DialogState();
         public Holder current;
         public PagerContext pagerContext() { return B3; }
         public Holder currentHolder() { return current; }
     }
-
-    public static final class Dispatcher {
-        Runnable completionListener;
-        public void completed(String aid) {
-            if (completionListener != null) completionListener.run();
-        }
-        public void playing(String aid) { }
-        public void paused(String aid) { }
-    }
+    public static final class PanelPlayer {public TestRenderDispatcher m;}
 
     private static final class FeedRoot extends FrameLayout {
         boolean focused = true;
@@ -149,7 +147,7 @@ public final class AutoPlayHookTest {
             assertEquals(1, f.panel.B3.nextCalls);
             assertEquals(0, f.panel.B3.previousCalls);
             assertEquals("DouAiAutoSlide", f.panel.B3.source);
-            assertFalse("Automatic advance skips the blank SurfaceView smooth-scroll transition",
+            assertTrue("Without a capture, let the host animate rather than hard-cut to a blank surface",
                     f.panel.B3.smooth);
             f.select(f.holder("two"));
             f.completed("two");
@@ -192,13 +190,75 @@ public final class AutoPlayHookTest {
             f.completed("one");
             assertEquals(0, f.panel.B3.nextCalls);
             assertEquals(1, f.panel.B3.previousCalls);
-            assertFalse("Automatic playback advance does not animate a blank SurfaceView handoff",
+            assertTrue("Backward advance also preserves native animation without a capture",
                     f.panel.B3.smooth);
             f.select(f.holder("two"));
             f.completed("two");
             assertEquals(0, f.panel.B3.nextCalls);
             assertEquals(2, f.panel.B3.previousCalls);
         }
+    }
+    @Test public void manualSmoothSelectionIsNeverRedirectedEvenWhenAutoPlayEnabled()throws Throwable{
+        try(Fixture f=new Fixture(Collections.emptyMap())){
+            Method nativeSelect=FeedPager.class.getMethod("setCurrentItem",int.class,boolean.class);
+            assertFalse("No interception/wait/replay of a manual settle",f.harness.interceptors.containsKey(nativeSelect));
+            f.panel.f.setCurrentItem(1,true);
+            assertTrue(f.panel.f.smooth);assertEquals(1,f.panel.f.page);
+        }
+    }
+    @Test public void bridgeSurvivesOutgoingPauseAndPlaybackNotificationUntilSelectedTargetRenders()throws Throwable{
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try(Fixture f=new Fixture(Collections.emptyMap(),false,true)){
+            android.graphics.Bitmap bitmap=armFrame(f);
+            f.harness.invoke(ModernHolder.class.getMethod("pause"),f.selected);
+            assertNotNull("source holder pause is normal during navigation",bridge(f));
+            f.panel.f.page=1; f.select(f.holder("two"));
+            f.harness.invoke(TestRenderDispatcher.class.getMethod("playing",String.class),f.dispatcher,"two");
+            org.robolectric.shadows.ShadowLooper.getShadowMainLooper().idleFor(java.time.Duration.ofMillis(220));
+            assertNotNull("onPlaying does not establish a first frame",bridge(f));
+            Method resume=TestRenderDispatcher.class.getMethod("onRenderFirstFrameFromResume",String.class);
+            assertFalse("host can synthesize resume notification",f.harness.interceptors.containsKey(resume));
+            Method first=TestRenderDispatcher.class.getMethod("onRenderFirstFrame",String.class,Class.forName("X.0Gf4"));
+            f.harness.invoke(first,f.dispatcher,"one",null);f.harness.invoke(first,f.dispatcher,"some-other-target",null);
+            f.harness.invoke(first,new TestRenderDispatcher(),"two",null);
+            org.robolectric.shadows.ShadowLooper.getShadowMainLooper().idleFor(java.time.Duration.ofMillis(32));
+            assertNotNull("foreign or old first-frame events do not release",bridge(f));
+            f.harness.invoke(first,f.dispatcher,"two",null);
+            assertNotNull("give the target renderer one frame before fading",bridge(f));
+            org.robolectric.shadows.ShadowLooper.getShadowMainLooper().idleFor(java.time.Duration.ofMillis(32));
+            assertNull("verified render releases the covering frame",bridge(f));
+            f.hook.close();assertTrue(bitmap.isRecycled());
+        }
+    }
+    @Test public void foreignCompletionWithSameWorkIdCannotAdvance41EvenWithoutBridge()throws Throwable{
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try(Fixture f=new Fixture(Collections.emptyMap(),false,true)){
+            f.harness.invoke(TestRenderDispatcher.class.getMethod("completed",String.class),new TestRenderDispatcher(),"one");
+            idle();assertEquals(0,f.panel.B3.nextCalls);
+            f.panel.V.m=null;f.completed("one");assertEquals(0,f.panel.B3.nextCalls);
+            f.panel.V.m=f.dispatcher;f.completed("one");assertEquals(1,f.panel.B3.nextCalls);
+        }
+    }
+    @Test public void stalledFirstFrameCannotLeaveCoverVisibleOrKeepReservation()throws Throwable{
+        try(Fixture f=new Fixture(Collections.emptyMap())){
+            android.graphics.Bitmap bitmap=armFrame(f);
+            f.panel.f.page=1;f.select(f.holder("two"));
+            org.robolectric.shadows.ShadowLooper.getShadowMainLooper().idleFor(java.time.Duration.ofMillis(1200));
+            assertNull(bridge(f));assertTrue(bitmap.isRecycled());
+        }
+    }
+    private static Object bridge(Fixture f)throws Exception{
+        var field=AutoPlayHook.class.getDeclaredField("transitionFrame");
+        field.setAccessible(true);return field.get(f.hook);
+    }
+    private static android.graphics.Bitmap armFrame(Fixture f)throws Exception{
+        var b=android.graphics.Bitmap.createBitmap(24,48,android.graphics.Bitmap.Config.ARGB_8888);
+        var reservation=MediaMemoryBudget.tryAcquire(24L*48*4);assertNotNull(reservation);
+        var overlay=new PlaybackTransitionFrame.Overlay((FrameLayout)f.activity.getWindow().getDecorView(),
+                b,new android.graphics.Rect(0,0,24,48),reservation);
+        Method begin=AutoPlayHook.class.getDeclaredMethod("beginHandoff",PlaybackTransitionFrame.Overlay.class,
+                String.class,Object.class,Object.class,int.class,Object.class);
+        begin.setAccessible(true);assertEquals(true,begin.invoke(f.hook,overlay,"one",f.panel,f.panel.f,1,f.dispatcher));return b;
     }
 
     @Test
@@ -326,10 +386,10 @@ public final class AutoPlayHookTest {
     @Test
     public void playbackPauseBackgroundAndLostWindowFocusPreventAdvancing() throws Throwable {
         try (Fixture f = new Fixture(Collections.emptyMap())) {
-            f.harness.invoke(Dispatcher.class.getMethod("paused", String.class), f.dispatcher, "one");
+            f.harness.invoke(TestRenderDispatcher.class.getMethod("paused", String.class), f.dispatcher, "one");
             f.completed("one");
             assertEquals(0, f.panel.B3.nextCalls);
-            f.harness.invoke(Dispatcher.class.getMethod("playing", String.class), f.dispatcher, "one");
+            f.harness.invoke(TestRenderDispatcher.class.getMethod("playing", String.class), f.dispatcher, "one");
             f.hook.onActivityPaused(f.activity);
             f.completed("one");
             assertEquals(0, f.panel.B3.nextCalls);
@@ -346,7 +406,7 @@ public final class AutoPlayHookTest {
     @Test
     public void repeatedSelectionDoesNotClearCurrentVideoPauseState() throws Throwable {
         try (Fixture f = new Fixture(Collections.emptyMap())) {
-            f.harness.invoke(Dispatcher.class.getMethod("paused", String.class), f.dispatcher, "one");
+            f.harness.invoke(TestRenderDispatcher.class.getMethod("paused", String.class), f.dispatcher, "one");
             idle();
             assertEquals(Boolean.TRUE, f.hook.pauseStateFor("one"));
 
@@ -356,7 +416,7 @@ public final class AutoPlayHookTest {
             f.completed("one");
             assertEquals(0, f.panel.B3.nextCalls);
 
-            f.harness.invoke(Dispatcher.class.getMethod("playing", String.class), f.dispatcher, "one");
+            f.harness.invoke(TestRenderDispatcher.class.getMethod("playing", String.class), f.dispatcher, "one");
             idle();
             assertEquals(Boolean.FALSE, f.hook.pauseStateFor("one"));
         }
@@ -511,8 +571,8 @@ public final class AutoPlayHookTest {
         try(Fixture f=new Fixture(Collections.emptyMap())) {
             java.util.concurrent.atomic.AtomicReference<Throwable> failure=new java.util.concurrent.atomic.AtomicReference<>();
             Thread worker=new Thread(()->{try {
-                f.harness.invoke(Dispatcher.class.getMethod("paused",String.class),f.dispatcher,"one");
-                f.harness.invoke(Dispatcher.class.getMethod("playing",String.class),f.dispatcher,"one");
+                f.harness.invoke(TestRenderDispatcher.class.getMethod("paused",String.class),f.dispatcher,"one");
+                f.harness.invoke(TestRenderDispatcher.class.getMethod("playing",String.class),f.dispatcher,"one");
             } catch(Throwable error) {failure.set(error);} });
             worker.start();worker.join();assertNull(failure.get());idle();
             assertEquals(Boolean.FALSE,f.hook.pauseStateFor("one"));
@@ -523,7 +583,7 @@ public final class AutoPlayHookTest {
         final Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         final FeedRoot root = new FeedRoot(activity);
         final FeedPanel panel = new FeedPanel();
-        final Dispatcher dispatcher = new Dispatcher();
+        final TestRenderDispatcher dispatcher = new TestRenderDispatcher();
         final Harness harness = new Harness();
         final LocalOptions options;
         final HostScanReport report;
@@ -541,6 +601,7 @@ public final class AutoPlayHookTest {
 
         Fixture(Map<String, ?> values, boolean installLate, boolean modern) throws Throwable {
             this.modern = modern;
+            panel.V.m=dispatcher;
             options = new LocalOptions(values);
             activity.setContentView(root);
             panel.f = new FeedPager(activity);
@@ -589,7 +650,7 @@ public final class AutoPlayHookTest {
         }
 
         void queueCompletion(String aid) throws Throwable {
-            harness.invoke(Dispatcher.class.getMethod("completed", String.class), dispatcher, aid);
+            harness.invoke(TestRenderDispatcher.class.getMethod("completed", String.class), dispatcher, aid);
         }
 
         void completed(String aid) throws Throwable { queueCompletion(aid); idle(); }
@@ -643,9 +704,9 @@ public final class AutoPlayHookTest {
         add(results, "auto_slide_pager_touch", FeedPager.class.getMethod("touch", MotionEvent.class));
         add(results, "auto_slide_scroll_state", FeedPager.class.getMethod("scrollState"));
         add(results, "auto_slide_comments_showing", DialogState.class.getMethod("commentsShowing", boolean.class));
-        add(results, "auto_slide_completed", Dispatcher.class.getMethod("completed", String.class));
-        add(results, "component_player_playing", Dispatcher.class.getMethod("playing", String.class));
-        add(results, "component_player_pause", Dispatcher.class.getMethod("paused", String.class));
+        add(results, "auto_slide_completed", TestRenderDispatcher.class.getMethod("completed", String.class));
+        add(results, "component_player_playing", TestRenderDispatcher.class.getMethod("playing", String.class));
+        add(results, "component_player_pause", TestRenderDispatcher.class.getMethod("paused", String.class));
         return new HostScanReport("fixture", results, false);
     }
 

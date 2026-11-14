@@ -3,6 +3,8 @@ package com.douai.module.feature;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.os.Looper;
+import android.app.Activity;
+import android.view.MotionEvent;
 import android.view.View;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SidebarSettings;
@@ -34,6 +36,25 @@ public final class HomeSidebarGestureHook implements AutoCloseable {
         }
         HomeSidebarGestureHook feature = new HomeSidebarGestureHook(new Bindings(loader), options, log);
         try {
+            // Read before the pager can pause the feed for its drawer. A touch inside the drawer must
+            // not replace the earlier observation with the host's temporary paused state.
+            feature.hooks.add(framework, feature.host.dispatch, chain -> {
+                Object pager=chain.getThisObject(), event=chain.getArg(0);
+                LocalOptions opts=feature.options;
+                if(!feature.closed && opts!=null && opts.enabled(SidebarSettings.ENABLED)
+                        && event instanceof MotionEvent && ((MotionEvent)event).getActionMasked()==MotionEvent.ACTION_DOWN
+                        && pager instanceof View && Looper.myLooper()==Looper.getMainLooper()){
+                    try {
+                        Object ability=feature.host.sideAbility.invoke(null);
+                        Context owner=activityContext(((View)pager).getContext(),feature.host.activityType);
+                        if(ability!=null && owner instanceof Activity
+                                && Boolean.FALSE.equals(feature.host.sideVisible.invoke(ability,""))
+                                && Boolean.TRUE.equals(feature.host.mainPage.invoke(pager)))
+                            FeedGestureToolsHook.captureSidebarPlayback((Activity)owner);
+                    }catch(ReflectiveOperationException | RuntimeException | LinkageError ignored){}
+                }
+                return chain.proceed();
+            });
             feature.hooks.add(framework, feature.host.area, chain -> {
                 Object pager = chain.getThisObject();
                 if (feature.applies(pager) && "homepage_home".equals(chain.getArgs().get(1))) return true;
@@ -115,7 +136,7 @@ public final class HomeSidebarGestureHook implements AutoCloseable {
 
     private static final class Bindings {
         final Class<?> activityType, awemeType;
-        final Method area, childrenCanScroll, bottomTab, topTab, mainPage, sidebarAvailable;
+        final Method dispatch, area, childrenCanScroll, bottomTab, topTab, mainPage, sidebarAvailable;
         final Method homeData, live, sideAbility, sideVisible, closeSidebar;
         final Field pagingEnabled, currentWork, photoPosition, images;
         final Object sidebar;
@@ -127,6 +148,7 @@ public final class HomeSidebarGestureHook implements AutoCloseable {
             Class<?> data = type(loader, "com.ss.android.ugc.aweme.homepage.api.data.HomePageDataViewModel");
             Class<?> proxy = type(loader, "com.ss.android.ugc.aweme.sidebar.HomeSideBarServiceProxy");
             Class<?> side = type(loader, "X.1aOQ");
+            dispatch=method(pager,"dispatchTouchEvent",boolean.class,MotionEvent.class);
             area = method(pager, "LJLJJL", boolean.class, float.class, String.class);
             childrenCanScroll = method(pager, "LJIILIIL", boolean.class, int.class, int.class, int.class, View.class, boolean.class);
             bottomTab = method(pager, "LJLJJLL", String.class);

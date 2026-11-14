@@ -11,6 +11,7 @@ import android.view.ViewTreeObserver;
 import android.widget.TextView;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import com.douai.module.config.ExtendedSettings;
 import com.douai.module.diagnostics.DouAiLog;
@@ -104,6 +105,14 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private WeakReference<View> selectedRoot = new WeakReference<>(null);
     private WeakReference<Object> selectedHolder = new WeakReference<>(null);
     private String selectedAid;
+    // A dispatcher notification can precede the detail holder's selection or first attached frame.
+    // Keep only a short hand-off, never a playback history. Reconcile only against the actual card.
+    private String pendingPlaybackAid;
+    private boolean pendingPaused;
+    private WeakReference<Object> pendingPlaybackHolder;
+    private long pendingPlaybackUntil;
+    private String previousAid;
+    private long previousAidUntil;
     private Runnable progressDiagnosticTask;
     private int progressSelectionSnapshots;
     private int progressChangeSnapshots;
@@ -170,6 +179,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         mainHandler.post(() -> {
             if (closed) return;
             ComponentHideSettings current = components;
+            if (!usesPlaybackPolicy(current)) clearPendingPlayback();
             if (componentsShown && (current == null || !current.enabled || !current.showOnPause)) {
                 componentsShown = false;
                 notifyVisibility();
@@ -205,6 +215,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             if (closed || componentsShown == shown || current == null
                     || !current.configured || !current.enabled) return;
             componentsShown = shown;
+            clearPendingPlayback();
             for (View root : new ArrayList<>(activeCards)) {
                 if (root.isAttachedToWindow()) hiddenViews.addAndGet(hideMatchingViews(root));
             }
@@ -263,13 +274,77 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
     }
 
+    private static boolean usesPlaybackPolicy(ComponentHideSettings current) {
+        return current != null && current.configured && current.enabled && current.showOnPause;
+    }
+
+    /** A verified state read after positioning a bookmark; never change user preferences. */
+    public void syncBookmarkPlayback(Object holder, Boolean paused) {
+        if (closed || holder == null || paused == null || !usesPlaybackPolicy(components)) return;
+        String aid = readAid(holder);
+        if (aid == null || aid.isEmpty()) return;
+        // Queue behind player events already emitted by seek. Guard holder recycling at delivery.
+        mainHandler.post(() -> {
+            if (!closed && aid.equals(readAid(holder))) receivePlayback(aid, paused, holder);
+        });
+    }
+
     private void onPlaybackVisibility(String aid, boolean paused) {
+        receivePlayback(aid, paused, null);
+    }
+
+    private void receivePlayback(String aid, boolean paused, Object verifiedHolder) {
         ComponentHideSettings current = components;
         View root = selectedRoot.get();
-        if (closed || current == null || !current.configured || !current.enabled || !current.showOnPause
-                || root == null || !activeCards.contains(root) || !root.isAttachedToWindow()
-                || !isShownWithoutModuleHiding(root) || aid.isEmpty() || !aid.equals(selectedAid)
-                || !aid.equals(readAid(selectedHolder.get()))) return;
+        Object holder = selectedHolder.get();
+        if (closed || !usesPlaybackPolicy(current) || aid == null || aid.isEmpty()) return;
+        if (aid.equals(selectedAid) && (verifiedHolder == null || verifiedHolder == holder)
+                && aid.equals(readAid(holder)) && root != null && activeCards.contains(root)
+                && root.isAttachedToWindow() && isShownWithoutModuleHiding(root)) {
+            if (aid.equals(pendingPlaybackAid)) clearPendingPlayback();
+            applyPlayback(root, current, paused);
+            return;
+        }
+        // Outgoing callbacks must not overwrite a new card's already buffered initial state.
+        boolean recentlyDeparted = aid.equals(previousAid) && SystemClock.uptimeMillis() <= previousAidUntil;
+        if (!aid.equals(selectedAid) && recentlyDeparted && verifiedHolder == null) return;
+        if (verifiedHolder != null && holder != null && verifiedHolder != holder
+                && recentlyDeparted) return;
+        pendingPlaybackAid = aid;
+        pendingPlaybackHolder = verifiedHolder == null ? null : new WeakReference<>(verifiedHolder);
+        pendingPaused = paused;
+        pendingPlaybackUntil = SystemClock.uptimeMillis() + 1500;
+    }
+
+    private void clearPendingPlayback() {
+        pendingPlaybackAid = null;
+        pendingPlaybackHolder = null;
+    }
+
+    private void consumePendingPlayback(View root) {
+        if (pendingPlaybackAid == null) return;
+        ComponentHideSettings current = components;
+        if (!usesPlaybackPolicy(current) || SystemClock.uptimeMillis() > pendingPlaybackUntil) {
+            clearPendingPlayback(); return;
+        }
+        Object holder = selectedHolder.get();
+        if (root != selectedRoot.get() || !root.isAttachedToWindow() || !activeCards.contains(root)
+                || (pendingPlaybackHolder != null && pendingPlaybackHolder.get() != holder)
+                || !pendingPlaybackAid.equals(readAid(holder)) || !isShownWithoutModuleHiding(root)) return;
+        // A just-selected holder can be present before its work model is bound.
+        if (selectedAid == null || selectedAid.isEmpty()) selectedAid = pendingPlaybackAid;
+        if (!pendingPlaybackAid.equals(selectedAid)) return;
+        boolean paused = pendingPaused; clearPendingPlayback();
+        applyPlayback(root,current,paused);
+    }
+
+    private void departed(String aid) {
+        if (aid == null || aid.isEmpty()) return;
+        previousAid = aid;
+        previousAidUntil = SystemClock.uptimeMillis() + 1500;
+    }
+
+    private void applyPlayback(View root, ComponentHideSettings current, boolean paused) {
         if (componentsShown == paused) return;
         componentsShown = paused;
         hiddenViews.addAndGet(hideMatchingViews(root));
@@ -419,6 +494,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 mainHandler.post(() -> {
                     if (closed) return;
                     if (paused) {
+                        if (selectedRoot.get() == root && selectedHolder.get() != holder) return;
                         activeCards.remove(root);
                         HideMonitor monitor = hideMonitors.remove(root);
                         if (monitor != null) monitor.remove();
@@ -430,13 +506,17 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                             cancelProgressDiagnostics();
                             selectedRoot.clear();
                             selectedHolder.clear();
+                            departed(selectedAid);
                             selectedAid = null;
                         }
                         return;
                     }
                     String aid = readAid(holder);
-                    boolean changedCard = selectedRoot.get() != root
+                    boolean changedCard = selectedRoot.get() != root || selectedHolder.get() != holder
                             || (aid != null && !aid.equals(selectedAid));
+                    if (changedCard && selectedAid != null && !selectedAid.equals(aid)) departed(selectedAid);
+                    if (changedCard && pendingPlaybackAid != null && aid != null && !aid.isEmpty()
+                            && !pendingPlaybackAid.equals(aid)) clearPendingPlayback();
                     selectedRoot = new WeakReference<>(root);
                     selectedHolder = new WeakReference<>(holder);
                     selectedAid = aid;
@@ -452,6 +532,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                     if (hasAnyEffect()) {
                         hiddenViews.addAndGet(hideMatchingViews(root));
                         installHideMonitor(root);
+                        consumePendingPlayback(root);
                     }
                     if (changedCard) scheduleProgressDiagnostics("selection");
                     safeLog("Feed UI card scan: callbacks=" + selectedCallbacks.get()
@@ -1140,6 +1221,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 return true;
             }
             if (hasAnyEffect() && !closed && activeCards.contains(root)) {
+                if (pendingPlaybackAid != null) consumePendingPlayback(root);
                 preDrawRechecks.incrementAndGet();
                 if (!targetsDirty && !structure.matches(structureNodeChecks)) targetsDirty = true;
                 Map<View, TargetStyle> targets = fixedTargets.get(root);
@@ -1192,6 +1274,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         @Override
         public void onViewAttachedToWindow(View view) {
             if (closed || !hasAnyEffect() || !activeCards.contains(view)) return;
+            consumePendingPlayback(view);
             hiddenViews.addAndGet(hideMatchingViews(view));
             attachObserver(view);
             captureStructure(view);
@@ -1563,6 +1646,8 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             selectedRoot.clear();
             selectedHolder.clear();
             selectedAid = null;
+            previousAid = null;
+            clearPendingPlayback();
             visibilityListener = ignored -> { };
         });
         unhookAll(null);

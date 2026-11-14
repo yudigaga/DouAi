@@ -5,7 +5,6 @@ import android.app.AlertDialog;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.widget.ScrollView;
 import android.widget.TextView;
 
 import com.douai.module.config.ExtendedSettings;
@@ -30,8 +29,85 @@ import java.util.function.Consumer;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
+@Config(sdk = 35)
 public final class CommentToolsHookTest {
+    @Test public void firstLongPressPanelOffersOneClickableEntryWithoutTakingNativeActions() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        android.widget.LinearLayout a = new android.widget.LinearLayout(activity);
+        android.widget.LinearLayout b = new android.widget.LinearLayout(activity);
+        a.setOrientation(android.widget.LinearLayout.VERTICAL);
+        b.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.widget.FrameLayout groupRoot=new android.widget.FrameLayout(activity);
+        groupRoot.addView(a);
+        // The host's blockView is a separate FrameLayout; the action group lives under getView().
+        groupRoot.addView(new android.widget.FrameLayout(activity));
+        assertNull(CommentToolsHook.actionList(groupRoot));
+        a.setId(0x7f0ad256);
+        assertSame(a,CommentToolsHook.actionList(groupRoot));
+        android.view.View nativeRow = new android.view.View(activity);
+        int[] calls={0,0};
+        nativeRow.setOnClickListener(v->calls[0]++);
+        nativeRow.setOnLongClickListener(v->{calls[1]++;return true;});
+        a.addView(nativeRow);
+        try (CommentToolsHook hook = hook(activity,new ArrayList<>())) {
+            Object panel=new Object(); Comment value=new Comment();
+            hook.bindToolsEntry(a, panel, value);
+            hook.bindToolsEntry(b, panel, value);
+            hook.bindToolsEntry(a, panel, value);
+            assertEquals(2,a.getChildCount()); assertEquals(0,b.getChildCount());
+            assertEquals("DouAi 评论工具",((TextView)a.getChildAt(0)).getText().toString());
+            assertSame(nativeRow,a.getChildAt(1));
+            assertTrue(nativeRow.performClick()); assertTrue(nativeRow.performLongClick());
+            assertArrayEquals(new int[]{1,1},calls);
+            assertTrue(a.getChildAt(0).performClick());
+            AlertDialog tools=ShadowAlertDialog.getLatestAlertDialog();
+            assertNotNull(tools.getWindow().getDecorView().findViewWithTag("miuix.dialog.root"));
+            assertEquals("查看评论数据",tools.getListView().getItemAtPosition(0));tools.dismiss();
+            android.view.View obsolete=a.getChildAt(0);
+            hook.bindToolsEntry(a,new Object(),new Comment());
+            assertEquals(2,a.getChildCount());assertSame(nativeRow,a.getChildAt(1));
+            assertNotSame(obsolete,a.getChildAt(0));assertFalse(obsolete.hasOnClickListeners());
+            activity.getPreferences(0).edit().clear().commit();
+            hook.setSettings(ExtendedSettings.readFrom(activity.getPreferences(0)));
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals(1,a.getChildCount()); assertSame(nativeRow,a.getChildAt(0));
+        } finally {activity.finish();}
+    }
+    @Test public void transcriptReadsOnlyNonblankAnnotatedStringAndPreservesCopy() {
+        Comment value = new Comment();
+        value.audio.transcript = " 转写原文 ";
+        assertEquals(" 转写原文 ", CommentTranscript.read(value));
+        value.audio.transcript = " \t\n　";
+        assertNull(CommentTranscript.read(value));
+        assertNull(CommentTranscript.read(new Object() {
+            @SerializedName("comment_audio") Object audio = new Object() {
+                @SerializedName("asr_text") Integer wrong = 1;
+                @SerializedName("timbre_text") String other = "不是转写";
+            };
+        }));
+        value.audio = null;
+        assertNull(CommentTranscript.read(value));
+    }
+
+    @Test public void viewingTranscriptKeepsClipboardUntilUserCopies() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        try (CommentToolsHook hook = hook(activity, new ArrayList<>())) {
+            hook.setReadingOptions(true, false);
+            assertTrue(menu(hook, activity));
+            AlertDialog tools = ShadowAlertDialog.getLatestAlertDialog();
+            int index = -1;
+            for (int i=0; i<tools.getListView().getCount(); i++)
+                if ("查看语音转写".equals(tools.getListView().getItemAtPosition(i))) index=i;
+            assertTrue(index>=0);
+            tools.getListView().performItemClick(null,index,index);
+            AlertDialog viewer = ShadowAlertDialog.getLatestAlertDialog();
+            ClipboardManager clipboard = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+            assertFalse(clipboard.hasPrimaryClip());
+            viewer.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals(" 转写原文 ",clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+        } finally { activity.finish(); }
+    }
     @Test public void summaryKeepsCommentStateSeparateFromEmbeddedPlaybackResponse() throws Exception {
         String source = source();
         String summary = CommentToolsHook.sourceAudioSummary(source);
@@ -85,11 +161,7 @@ public final class CommentToolsHookTest {
             tools.getListView().performItemClick(null, 0, 0);
             AlertDialog viewer = ShadowAlertDialog.getLatestAlertDialog();
             assertNotSame(tools, viewer);
-            assertTrue(viewer.getWindow().getDecorView().findViewWithTag("comment_tools.data.scroll") instanceof ScrollView);
-            TextView json = viewer.getWindow().getDecorView().findViewWithTag("comment_tools.data.json");
-            assertTrue(json.isTextSelectable());
-            assertEquals(0xFF1F272D, json.getCurrentTextColor());
-            assertTrue(json.getText().toString().contains("private-token"));
+            assertNotNull(viewer.getWindow().getDecorView().findViewWithTag("miuix.dialog.root"));
             assertFalse("Opening data must not copy it automatically", clipboard.hasPrimaryClip());
             viewer.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
             String copied = clipboard.getPrimaryClip().getItemAt(0).coerceToText(activity).toString();
@@ -115,21 +187,19 @@ public final class CommentToolsHookTest {
             menu(hook, activity);
             ShadowAlertDialog.getLatestAlertDialog().getListView().performItemClick(null, 0, 0);
             AlertDialog viewer = ShadowAlertDialog.getLatestAlertDialog();
-            TextView summary = viewer.getWindow().getDecorView().findViewWithTag("comment_tools.data.summary");
             assertTrue(ModuleTheme.isDark(activity));
-            assertEquals(0xFFF2F2F2, summary.getCurrentTextColor());
-            assertTrue(summary.isTextSelectable());
+            assertNotNull(viewer.getWindow().getDecorView().findViewWithTag("miuix.dialog.root"));
             viewer.dismiss();
         } finally { hook.close(); activity.finish(); }
     }
 
-    private static boolean menu(CommentToolsHook hook, Activity activity) throws Exception {
+    static boolean menu(CommentToolsHook hook, Activity activity) throws Exception {
         Method show = CommentToolsHook.class.getDeclaredMethod("showMenu", Context.class, Object.class, Object.class);
         show.setAccessible(true);
         return (Boolean) show.invoke(hook, activity, new Comment(), null);
     }
 
-    private static CommentToolsHook hook(Activity activity, List<String> logs) throws Exception {
+    static CommentToolsHook hook(Activity activity, List<String> logs) throws Exception {
         SharedPreferences preferences = activity.getPreferences(0);
         preferences.edit().clear().putBoolean("copy_source_data", true).commit();
         Constructor<CommentToolsHook> constructor = CommentToolsHook.class.getDeclaredConstructor(
@@ -157,6 +227,7 @@ public final class CommentToolsHookTest {
         @SerializedName("comment_audio") public Audio audio = new Audio();
     }
     public static final class Audio {
+        @SerializedName("asr_text") public String transcript = " 转写原文 ";
         public String vid = "private-vid";
         public long duration = 2000;
         public boolean isFolded = true;

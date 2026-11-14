@@ -82,6 +82,8 @@ import com.douai.module.feature.AutomationDispatcher;
 import com.douai.module.feature.CommentReplyHook;
 import com.douai.module.feature.AutoMessageDraftHook;
 import com.douai.module.feature.CommentToolsHook;
+import com.douai.module.feature.LoadedCommentSearchHook;
+import com.douai.module.feature.SeenWorkHook;
 import com.douai.module.feature.ImmersiveModeController;
 import com.douai.module.feature.HomeNavigationHideController;
 import com.douai.module.feature.HomeSidebarGestureHook;
@@ -157,6 +159,8 @@ public final class DouAiModule extends XposedModule {
     private volatile String commentReplyHookFailure;
     private volatile AutoMessageDraftHook autoMessageDraftHook;
     private volatile CommentToolsHook commentToolsHook;
+    private volatile LoadedCommentSearchHook loadedCommentSearchHook;
+    private volatile SeenWorkHook seenWorkHook;
     private volatile ImmersiveModeController immersiveModeController;
     private volatile HomeNavigationHideController homeNavigationHideController;
     private volatile HostUiController hostUiController;
@@ -731,6 +735,7 @@ public final class DouAiModule extends XposedModule {
                 hook.setSettings(settings);
                 hook.setOptions(options);
             }
+            if (seenWorkHook != null && feedFilterChanged) seenWorkHook.setOptions(settings.feedFilterEnabled, options);
             if (hostBehaviorHooks != null && (initial || changes.affects(Feature.HOST_BEHAVIOR))) hostBehaviorHooks.setOptions(options);
             if (feedGestureToolsHook != null && gestureChanged) feedGestureToolsHook.setOptions(options);
             if (initial || changes.affects(Feature.SIDEBAR)) {
@@ -779,6 +784,12 @@ public final class DouAiModule extends XposedModule {
             CommentToolsHook commentHook = commentToolsHook;
             if (commentHook != null && (initial || changes.affects(Feature.COMMENT_TOOLS))) {
                 commentHook.setSettings(extended);
+                boolean reading41 = HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile());
+                commentHook.setReadingOptions(reading41 && options.enabled("comment_transcript_enabled"),
+                        reading41 && options.enabled("loaded_comment_search_enabled"));
+            }
+            if (loadedCommentSearchHook != null && (initial || changes.affects(Feature.COMMENT_TOOLS))) {
+                loadedCommentSearchHook.setOptions(options.enabled("loaded_comment_search_enabled"), options.enabled("comment_transcript_enabled"));
             }
             ImmersiveModeController immersive = immersiveModeController;
             if (immersive != null && (initial || changes.affects(Feature.IMMERSIVE))) {
@@ -842,6 +853,24 @@ public final class DouAiModule extends XposedModule {
                             + ";context=" + (targetContext != null) + ";configuration=" + configurationReady);
             publishFeatureLogState();
             return;
+        }
+        if (HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile())) {
+            if (seenWorkHook == null) {
+                try {
+                    seenWorkHook = SeenWorkHook.install(hookFramework(), hostScanReport, hostClassLoader, targetContext,
+                            () -> hostUiController == null ? null : hostUiController.getResumedActivity(),
+                            message -> moduleLog(3, TAG, message));
+                } catch (Throwable failure) { DouAiLog.failure("feed_filter", "seen_work_installation", failure); }
+            }
+            if (seenWorkHook != null) seenWorkHook.setOptions(currentSettings.feedFilterEnabled, localOptions);
+            if (loadedCommentSearchHook == null) {
+                try {
+                    loadedCommentSearchHook = LoadedCommentSearchHook.install(hookFramework(), hostClassLoader,
+                            message -> moduleLog(3, TAG, message));
+                } catch (Throwable failure) { DouAiLog.failure("comment_tools", "loaded_search_installation", failure); }
+            }
+            if (loadedCommentSearchHook != null) loadedCommentSearchHook.setOptions(
+                    localOptions.enabled("loaded_comment_search_enabled"), localOptions.enabled("comment_transcript_enabled"));
         }
         if (localAnalyticsHook == null) {
             try {
@@ -1075,6 +1104,9 @@ public final class DouAiModule extends XposedModule {
             try {
                 commentToolsHook = CommentToolsHook.install(hookFramework(), hostScanReport, hostClassLoader,
                         extendedSettings, message -> moduleLog(3, TAG, message));
+                boolean reading41 = HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile());
+                commentToolsHook.setReadingOptions(reading41 && localOptions.enabled("comment_transcript_enabled"),
+                        reading41 && localOptions.enabled("loaded_comment_search_enabled"));
                 commentToolsHookFailure = null;
                 moduleLog(3, TAG, "Comment long-press tools hook installed");
             } catch (Throwable failure) {
@@ -1141,7 +1173,13 @@ public final class DouAiModule extends XposedModule {
                 if (homeSidebarModuleHook == null) {
                     HostUiController ui = hostUiController;
                     if (ui != null) homeSidebarModuleHook = HomeSidebarModuleHook.install(hookFramework(), hostClassLoader,
-                            localOptions, ui::showSidebarEntry, () -> homeSidebarGestureHook.closeSidebar(),
+                            localOptions, (owner, id) -> {
+                                if (com.douai.module.config.SidebarSettings.isFeedAction(id)) {
+                                    FeedGestureToolsHook tools = feedGestureToolsHook;
+                                    if (tools != null) tools.launchAction(owner, id);
+                                    else android.widget.Toast.makeText(owner, "当前作品工具尚未就绪", android.widget.Toast.LENGTH_SHORT).show();
+                                } else ui.showSidebarEntry(owner, id);
+                            }, () -> homeSidebarGestureHook.closeSidebar(),
                             message -> moduleLog(3, TAG, message));
                 }
                 homeSidebarFailure = null;
@@ -1236,6 +1274,12 @@ public final class DouAiModule extends XposedModule {
                         targetContext, localOptions, message -> moduleLog(3, TAG, message));
                 HostUiController ui = hostUiController;
                 if (ui != null) feedGestureToolsHook.setModuleSettingsLauncher(ui::showSettingsFromGesture);
+                if (ui != null) feedGestureToolsHook.setSidebarSettingsVisible(ui::isSettingsShowing);
+                feedGestureToolsHook.setManualLike((owner, id) -> {
+                    AutoLikeHook liking = autoLikeHook;
+                    if (liking != null) liking.requestManualLike(owner, id);
+                    else android.widget.Toast.makeText(owner, "当前点赞入口尚未就绪", android.widget.Toast.LENGTH_SHORT).show();
+                });
                 Activity activity = ui == null ? null : ui.getResumedActivity();
                 if (activity != null) feedGestureToolsHook.onActivityResumed(activity);
                 AutoPlayHook pauseState = autoPlayHook;
@@ -1248,6 +1292,7 @@ public final class DouAiModule extends XposedModule {
         if (feedGestureToolsHook != null && feedUiHideHook != null) {
             feedGestureToolsHook.setComponentVisibility(feedUiHideHook::setComponentsTemporarilyShown,
                     feedUiHideHook::areComponentsTemporarilyShown);
+            feedGestureToolsHook.setBookmarkPlaybackSync(feedUiHideHook::syncBookmarkPlayback);
         }
         if (directMessageSpeechHook == null) {
             DirectMessageSpeechHook candidate = null;
@@ -1535,6 +1580,7 @@ public final class DouAiModule extends XposedModule {
                 || settings.minimumDurationEnabled || settings.minimumLikesEnabled
                 || localOptions.enabled("hide_product_cards")
                 || localOptions.enabled("hide_hotspot_rank_cards")
+                || HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile()) && localOptions.enabled("hide_seen_works")
                 || localOptions.enabled("hide_mini_games") || localOptions.enabled("hide_long_videos"));
     }
 

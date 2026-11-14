@@ -3,6 +3,8 @@ package com.douai.module.feature;
 import android.app.Activity;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.os.SystemClock;
+import android.widget.Toast;
 
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.FeatureSettings;
@@ -14,9 +16,12 @@ import io.github.libxposed.api.XposedInterface;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.ref.WeakReference;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,6 +38,9 @@ public final class AutoLikeHook implements AutoCloseable {
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
     private final Object settingsLock = new Object();
     private final AtomicLong settingsGeneration = new AtomicLong();
+    private static final int MAX_MANUAL_BINDINGS = 16;
+    private final ArrayDeque<WeakReference<Object>> recentPresenters = new ArrayDeque<>();
+    private final LinkedHashMap<String,Long> lastLikeRequest = new LinkedHashMap<>();
     private final Consumer<String> log;
     private volatile FeatureSettings settings;
     private boolean closed;
@@ -104,6 +112,8 @@ public final class AutoLikeHook implements AutoCloseable {
 
     private Object afterBind(XposedInterface.Chain chain) throws Throwable {
         Object result = chain.proceed();
+        Object presenter = chain.getThisObject();
+        rememberPresenter(presenter);
         long generation;
         synchronized (settingsLock) {
             FeatureSettings current = settings;
@@ -114,7 +124,6 @@ public final class AutoLikeHook implements AutoCloseable {
             generation = settingsGeneration.get();
         }
 
-        Object presenter = chain.getThisObject();
         String reservedAwemeId = null;
         boolean likeQueued = false;
         DouAiLog.Operation trace = null;
@@ -138,7 +147,9 @@ public final class AutoLikeHook implements AutoCloseable {
                         || Boolean.TRUE.equals(invokeBoolean(currentAweme, "getIsAdAweme"))) { DouAiLog.event("auto_like", "eligibility", "work_changed_or_ad", "target_ref=" + DouAiLog.reference(id)); return result; }
                 Object currentLiked = fieldValue(currentAweme, "userDigg");
                 if (currentLiked instanceof Number && ((Number) currentLiked).intValue() != 0) { DouAiLog.event("auto_like", "eligibility", "liked_before_invocation", "user_digg_nonzero=true"); return result; }
-                if (!attemptedAwemeIds.add(id)) { DouAiLog.event("auto_like", "eligibility", "duplicate", "target_ref=" + DouAiLog.reference(id)); return result; }
+                if (attemptedAwemeIds.contains(id)) { DouAiLog.event("auto_like", "eligibility", "duplicate", "target_ref=" + DouAiLog.reference(id)); return result; }
+                if (!reserveLikeRequest(id)) return result; // a manual tap has already dispatched this request
+                attemptedAwemeIds.add(id);
                 reservedAwemeId = id;
                 trace = DouAiLog.begin("auto_like", "visible_card_bind");
                 trace.stage("native_invoking", "target_ref=" + DouAiLog.reference(id) + ";logged_in=true;current_card=true;user_digg=0");
@@ -158,6 +169,64 @@ public final class AutoLikeHook implements AutoCloseable {
             if (!likeQueued && reservedAwemeId != null) attemptedAwemeIds.remove(reservedAwemeId);
         }
         return result;
+    }
+
+    // Binding also happens on neighboring/preloaded views. Don't reflect over their models
+    // until a user actually taps; retain neither an Activity nor a host work object here.
+    private void rememberPresenter(Object presenter) {
+        synchronized (settingsLock) {
+            if (closed || presenter == null) return;
+            recentPresenters.removeIf(ref -> ref.get() == null || ref.get() == presenter);
+            if (recentPresenters.size() == MAX_MANUAL_BINDINGS) recentPresenters.removeLast();
+            recentPresenters.addFirst(new WeakReference<>(presenter));
+        }
+    }
+
+    /** Called by the gesture dispatcher on main. JD (and its profile aliases) only likes;
+     *  native double tap and the separate un-digg path are never invoked. */
+    public void requestManualLike(Activity owner, String aid) {
+        if (owner == null || owner.isFinishing() || owner.isDestroyed()) return;
+        String message = "当前作品暂时无法点赞";
+        synchronized (settingsLock) {
+            if (closed) return;
+            if (aid != null && !aid.isEmpty()) for (WeakReference<Object> ref : recentPresenters) {
+                Object presenter = ref.get();
+                if (presenter == null || presenterActivity(presenter) != owner) continue;
+                try {
+                    Object vm = presenterViewModelMethod.invoke(presenter);
+                    if (vm == null) continue;
+                    Object work = viewModelAwemeField.get(vm);
+                    if (!aid.equals(HostTargets.invoke(work, "getAid"))) continue;
+                    // In 41 the original VideoItemParams lives on model. diggParams may
+                    // instead be the separate component parameter used by the native widget.
+                    Object panel = HostTargets.read(HostTargets.read(presenter,"model"),"mFeedContext");
+                    if (panel == null) panel = HostTargets.read(HostTargets.read(presenter,"diggParams"),"mFeedContext");
+                    Object holder = HostTargets.invoke(panel,"getCurrentViewHolderP");
+                    if (work != HostTargets.invoke(holder,"getAweme")) continue;
+                    Object liked = HostTargets.read(work,"userDigg");
+                    if (Integer.valueOf(1).equals(liked)) { message = "这条作品已经赞过"; break; }
+                    if (!Integer.valueOf(0).equals(liked)) break;
+                    if (!reserveLikeRequest(aid)) { message = "刚刚已请求点赞"; break; }
+                    likeMethod.invoke(vm, owner, "douai_gesture", null);
+                    return; // the host owns permission/login prompts and visual confirmation
+                } catch (ReflectiveOperationException | RuntimeException failure) {
+                    break; // invocation may have reached the host; don't try the next presenter
+                }
+            }
+        }
+        Toast.makeText(owner, message, Toast.LENGTH_SHORT).show();
+    }
+
+    /** Called under settingsLock. Share the short pending window with automatic requests. */
+    private boolean reserveLikeRequest(String id) {
+        long now = SystemClock.elapsedRealtime();
+        Long previous = lastLikeRequest.get(id);
+        if (previous != null && now - previous < 2000) return false;
+        lastLikeRequest.remove(id);
+        lastLikeRequest.put(id, now);
+        if (lastLikeRequest.size() > MAX_MANUAL_BINDINGS)
+            lastLikeRequest.remove(lastLikeRequest.keySet().iterator().next());
+        return true;
     }
 
     private boolean enabledLocked(long generation) {
@@ -313,6 +382,8 @@ public final class AutoLikeHook implements AutoCloseable {
     public void close() {
         synchronized (settingsLock) {
             closed = true;
+            recentPresenters.clear();
+            lastLikeRequest.clear();
             settingsGeneration.incrementAndGet();
         }
         unhookAll(null);

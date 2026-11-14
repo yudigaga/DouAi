@@ -18,6 +18,21 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void importingSeenPreferenceNeverStartsLocalRecording() {
+        MemoryStore source = new MemoryStore(); source.values.put("hide_seen_works",true);
+        source.values.put("seen_work_days","7");
+        MemoryStore target = new MemoryStore();
+        ConfigTransfer.apply(target,ConfigTransfer.inspect(target,ConfigTransfer.export(source,false)));
+        assertFalse(Boolean.TRUE.equals(target.values.get("hide_seen_works")));
+        assertEquals("7",target.values.get("seen_work_days"));
+        target.values.put("hide_seen_works",true);
+        ConfigTransfer.apply(target,ConfigTransfer.inspect(target,ConfigTransfer.export(source,false),ConfigTransfer.Mode.REPLACE));
+        assertEquals(true,target.values.get("hide_seen_works"));
+        source.values.put("feed_filter_enabled",true);
+        target.values.put("feed_filter_enabled",false);
+        ConfigTransfer.apply(target,ConfigTransfer.inspect(target,ConfigTransfer.export(source,false)));
+        assertEquals(false,target.values.get("hide_seen_works"));
+    }
     @Test public void randomSourceRangeRoundTripsInCanonicalProviderOrder() throws Exception {
         MemoryStore source = new MemoryStore(), target = new MemoryStore();
         source.values.put("tts_random_sources", "[\"fish\",\"local\",\"fish\"]");

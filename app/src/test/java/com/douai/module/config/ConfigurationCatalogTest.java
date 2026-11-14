@@ -11,6 +11,16 @@ import static com.douai.module.config.ConfigurationCatalog.Feature.*;
 import static org.junit.Assert.*;
 
 public final class ConfigurationCatalogTest {
+    @Test public void readingFlagsAreOffAndRefreshOnlyTheirOwners() {
+        for (String key : new String[]{"loaded_comment_search_enabled", "comment_transcript_enabled"}) {
+            assertEquals(false, ConfigurationCatalog.settings().get(key).defaultValue);
+            assertConsumers(key, EnumSet.of(COMMENT_TOOLS));
+        }
+        assertEquals(false, ConfigurationCatalog.settings().get("hide_seen_works").defaultValue);
+        assertEquals("3", ConfigurationCatalog.settings().get("seen_work_days").defaultValue);
+        assertConsumers("hide_seen_works", EnumSet.of(FEED_FILTER));
+        assertConsumers("seen_work_days", EnumSet.of(FEED_FILTER));
+    }
     @Test public void fishSettingsTransferIndependentlyAndReuseTheSharedSpeechRefreshContract() {
         for (String key : FishSpeechSettings.KEYS) {
             if (FishSpeechSettings.REFERENCE_SAMPLES.equals(key)) assertFalse(ConfigKeys.TYPES.containsKey(key));

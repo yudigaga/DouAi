@@ -28,15 +28,97 @@ import static org.junit.Assert.*;
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class PlaybackTransitionFrameTest {
-    @Test public void ordinaryPortraitFramesKeepTheirResolutionAndExtremeSizesStayBounded() {
-        assertArrayEquals(new int[]{1080, 2400}, PlaybackTransitionFrame.captureSize(1080, 2400));
-        assertArrayEquals(new int[]{1440, 3200}, PlaybackTransitionFrame.captureSize(1440, 3200));
+    @Test public void transitionFramesHaveABoundedProportionalWorkingSet() {
+        assertArrayEquals(new int[]{720, 1600}, PlaybackTransitionFrame.captureSize(1080, 2400));
+        assertArrayEquals(new int[]{720, 1600}, PlaybackTransitionFrame.captureSize(1440, 3200));
         for (int[] source : new int[][]{{1440, 9000}, {9000, 1440}, {1, Integer.MAX_VALUE},
                 {Integer.MAX_VALUE, 1}, {Integer.MAX_VALUE, Integer.MAX_VALUE}}) {
             int[] size = PlaybackTransitionFrame.captureSize(source[0], source[1]);
-            assertTrue(size[0] > 0 && size[0] <= 1440);
-            assertTrue(size[1] > 0 && size[1] <= 4096);
+            assertTrue(size[0] > 0 && size[0] <= 900);
+            assertTrue(size[1] > 0 && size[1] <= 1600);
             assertTrue((long) size[0] * size[1] <= PlaybackTransitionFrame.MAX_CAPTURE_PIXELS);
+        }
+    }
+
+    @Test public void blackOrTransparentCopyNeverCoversTheNextVideo() {
+        try(Fixture f=new Fixture()) {
+            for(int color:new int[]{android.graphics.Color.BLACK,android.graphics.Color.TRANSPARENT}) {
+                FakeCopier copier=new FakeCopier();copier.color=color;
+                PlaybackTransitionFrame.capture(f.root,f.owner,()->true,frame->assertNull(frame),copier);
+                copier.complete(PixelCopy.SUCCESS);
+                assertTrue(copier.bitmap.isRecycled());assertBudgetAvailable();
+            }
+        }
+    }
+
+    @Test public void changedGeometryAndThrowingOwnerCannotLeaveAStaleOverlay() {
+        try(Fixture f=new Fixture()) {
+            FakeCopier moved=new FakeCopier();
+            PlaybackTransitionFrame.capture(f.root,f.owner,()->true,frame->assertNull(frame),moved);
+            f.surface.setTranslationY(30);moved.complete(PixelCopy.SUCCESS);
+            assertTrue(moved.bitmap.isRecycled());assertBudgetAvailable();
+            f.surface.setTranslationY(0);
+            FakeCopier throwing=new FakeCopier();
+            AtomicBoolean throwNow=new AtomicBoolean();
+            PlaybackTransitionFrame.capture(f.root,f.owner,()->{if(throwNow.get())throw new IllegalStateException("gone");return true;},frame->assertNull(frame),throwing);
+            throwNow.set(true);
+            throwing.complete(PixelCopy.SUCCESS);
+            assertTrue(throwing.bitmap.isRecycled());assertBudgetAvailable();
+        }
+    }
+
+    @Test public void expiredOwnerAndRejectedAllocationDoNotStartPixelCopy() {
+        try(Fixture f=new Fixture()) {
+            java.util.ArrayList<Runnable> queued=new java.util.ArrayList<>();
+            AtomicBoolean current=new AtomicBoolean(true);FakeCopier copy=new FakeCopier();
+            int[] calls={0};
+            PlaybackTransitionFrame.captureDeferred(f.root,f.owner,current::get,frame->{assertNull(frame);calls[0]++;},copy,queued::add);
+            assertEquals(0,copy.requests);assertEquals(1,queued.size());assertBudgetInUse();
+            current.set(false);queued.remove(0).run();
+            assertEquals(0,copy.requests);assertEquals(1,calls[0]);assertBudgetAvailable();
+            PlaybackTransitionFrame.captureDeferred(f.root,f.owner,()->true,frame->assertNull(frame),copy,
+                    task->{throw new java.util.concurrent.RejectedExecutionException();});
+            assertEquals(0,copy.requests);assertBudgetAvailable();
+        }
+    }
+
+    @Test public void mismatchedBufferAspectUsesNativeTransitionInsteadOfStretching() {
+        try(Fixture f=new Fixture()) {
+            f.surface.bufferWidth=1920;f.surface.bufferHeight=1080;
+            FakeCopier copier=new FakeCopier();
+            PlaybackTransitionFrame.capture(f.root,f.owner,()->true,frame->assertNull(frame),copier);
+            assertEquals(0,copier.requests);assertBudgetAvailable();
+        }
+    }
+
+    @Test public void mutableSurfaceBufferChangeCannotStretchAnInFlightCapture() {
+        try(Fixture f=new Fixture()) {
+            f.surface.frameOverride=new android.graphics.Rect(0,0,f.surface.getWidth(),f.surface.getHeight());
+            FakeCopier copier=new FakeCopier();
+            PlaybackTransitionFrame.capture(f.root,f.owner,()->true,frame->assertNull(frame),copier);
+            f.surface.frameOverride.set(0,0,1920,1080);
+            copier.complete(PixelCopy.SUCCESS);
+            assertTrue(copier.bitmap.isRecycled());assertBudgetAvailable();
+        }
+    }
+
+    @Test public void overlayPreservesAspectAndClipsToOnlyTheVisibleVideoRegion() {
+        try(Fixture f=new Fixture()) {
+            f.decor.setPadding(7,11,3,5);f.decor.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+            Bitmap image=Bitmap.createBitmap(220,320,Bitmap.Config.ARGB_8888);
+            var memory=MediaMemoryBudget.tryAcquire(220L*320*4);
+            var overlay=new PlaybackTransitionFrame.Overlay(f.decor,image,
+                    new android.graphics.Rect(-20,30,200,350),new android.graphics.Rect(7,40,160,300),memory);
+            FrameLayout layer=(FrameLayout)f.decor.getChildAt(f.decor.getChildCount()-1);
+            android.widget.ImageView content=(android.widget.ImageView)layer.getChildAt(0);
+            assertEquals(android.widget.ImageView.ScaleType.FIT_CENTER,content.getScaleType());
+            FrameLayout.LayoutParams box=(FrameLayout.LayoutParams)layer.getLayoutParams();
+            assertEquals(153,box.width);assertEquals(260,box.height);assertEquals(29,box.topMargin);
+            assertTrue(layer.getClipChildren());
+            f.decor.measure(View.MeasureSpec.makeMeasureSpec(1080,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(2400,View.MeasureSpec.EXACTLY));
+            f.decor.layout(0,0,1080,2400);
+            assertEquals(7,layer.getLeft());assertEquals(40,layer.getTop());assertEquals(-27,content.getLeft());
+            overlay.close();assertTrue(image.isRecycled());assertBudgetAvailable();
         }
     }
 
@@ -87,8 +169,10 @@ public final class PlaybackTransitionFrameTest {
     @Test public void ownerCallbackRemovalCannotDiscardPixelCopyCleanup() {
         try (Fixture f = new Fixture()) {
             FakeCopier copy = new FakeCopier();
-            PlaybackTransitionFrame.capture(f.root, f.owner, () -> false,
+            AtomicBoolean current=new AtomicBoolean(true);
+            PlaybackTransitionFrame.capture(f.root, f.owner, current::get,
                     frame -> { assertNull(frame); }, copy);
+            current.set(false);
             assertNotSame("Copy completion must survive owner handler shutdown", f.owner, copy.handler);
             copy.handler.post(() -> copy.complete(PixelCopy.SUCCESS));
             f.owner.removeCallbacksAndMessages(null);
@@ -182,6 +266,7 @@ public final class PlaybackTransitionFrameTest {
     }
 
     private static final class FakeCopier implements PlaybackTransitionFrame.Copier {
+        int color=android.graphics.Color.RED;
         int requests;
         Bitmap bitmap;
         Handler handler;
@@ -193,7 +278,10 @@ public final class PlaybackTransitionFrameTest {
             this.listener = listener;
             this.handler = handler;
         }
-        void complete(int result) { listener.onPixelCopyFinished(result); }
+        void complete(int result) {
+            if(result==PixelCopy.SUCCESS && !bitmap.isRecycled())bitmap.eraseColor(color);
+            listener.onPixelCopyFinished(result);
+        }
     }
 
     private static final class CountingRoot extends FrameLayout {
@@ -208,10 +296,14 @@ public final class PlaybackTransitionFrameTest {
     }
 
     private static final class ValidSurfaceView extends SurfaceView {
+        int bufferWidth,bufferHeight;
+        android.graphics.Rect frameOverride;
         private final Surface validSurface = new ValidSurface();
         private final SurfaceHolder validHolder = (SurfaceHolder) Proxy.newProxyInstance(
                 SurfaceHolder.class.getClassLoader(), new Class<?>[]{SurfaceHolder.class}, (proxy, method, args) -> {
                     if ("getSurface".equals(method.getName())) return validSurface;
+                    if ("getSurfaceFrame".equals(method.getName())) return frameOverride!=null?frameOverride:new android.graphics.Rect(0,0,
+                            bufferWidth>0?bufferWidth:getWidth(),bufferHeight>0?bufferHeight:getHeight());
                     if ("isCreating".equals(method.getName())) return false;
                     return null;
                 });

@@ -168,6 +168,12 @@ public final class ConfigTransfer {
             reason = Reason.MERGED_SETTINGS;
             if (mode == Mode.REPLACE) for (String key : ConfigKeys.TYPES.keySet()) result.remove(key);
             result.putAll(incoming);
+            // Importing preferences must not begin recording viewed works on this device.
+            if (before.containsKey("hide_seen_works")) result.put("hide_seen_works", before.get("hide_seen_works"));
+            else result.remove("hide_seen_works");
+            if (!Boolean.TRUE.equals(before.get("feed_filter_enabled")) && Boolean.TRUE.equals(result.get("feed_filter_enabled"))
+                    && Boolean.TRUE.equals(result.get("hide_seen_works")))
+                result.put("hide_seen_works", false);
             int[] missing = {0};
             if (!secrets && mode == Mode.REPLACE) {
                 for (Map.Entry<String, ?> entry : before.entrySet()) {

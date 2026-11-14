@@ -131,6 +131,53 @@ public final class FeedGestureToolsHookTest {
             if (playControl != null) playControl.setVisibility(View.VISIBLE);
         }
     }
+
+    @Test public void configuredLikeRunsAheadOfDisabledNativeDoubleTapOnlyInItsRegion() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try (Fixture f = new Fixture(Map.of("double_tap_top_left", "like", "disable_double_tap_like", true), false, true)) {
+            List<String> requests = new ArrayList<>();
+            f.holder.aid = "123";
+            f.hook.setManualLike((owner,id) -> { assertSame(f.activity,owner); requests.add(id); });
+            f.select(); f.harness.suppressNativeDoubleTap = true;
+            assertEquals(Integer.valueOf(XposedInterface.PRIORITY_HIGHEST),
+                    f.harness.priorities.get(Panel.class.getMethod("doubleTap",MotionEvent.class)));
+            f.doubleTap(0,0); ShadowLooper.idleMainLooper();
+            assertEquals(List.of("123"),requests); assertEquals(0,f.panel.nativeDoubleTaps);
+            f.doubleTap(2,2); ShadowLooper.idleMainLooper();
+            assertEquals(1,requests.size()); assertEquals(0,f.panel.nativeDoubleTaps);
+        }
+    }
+
+    @Test public void readingActionsKeepStableIdsAndAreIndividuallyAssignable() {
+        String[] ids={"bookmark_add","reading_search","comment_search","bookmark_list","like"};
+        for(String id:ids) {
+            assertTrue(Arrays.asList(FeedGestureToolsHook.ACTION_IDS).contains(id));
+            assertEquals(id,FeedGestureToolsHook.regionAction(new LocalOptions(Map.of("double_tap_top_left",id)),"double_tap",0));
+            assertEquals(id,FeedGestureToolsHook.regionAction(new LocalOptions(Map.of("long_press_bottom_right",id)),"long_press",8));
+        }
+        assertEquals("view_finder",FeedGestureToolsHook.ACTION_IDS[7]);
+        assertEquals("seek_back_10",FeedGestureToolsHook.ACTION_IDS[8]);
+        assertEquals("seek_forward_10",FeedGestureToolsHook.ACTION_IDS[9]);
+    }
+
+    @Test public void commentRequestSurvivesCoveredHolderButNotDifferentWorkOrBackground() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try (Fixture f = new Fixture(Map.of(),false,true)) {
+            f.holder.aid="123"; f.select();
+            Field epochField=FeedGestureToolsHook.class.getDeclaredField("commentSelectionEpoch");epochField.setAccessible(true);
+            long epoch=epochField.getLong(f.hook);
+            Method current=FeedGestureToolsHook.class.getDeclaredMethod("currentForCommentRequest",Activity.class,Object.class,String.class,long.class);
+            current.setAccessible(true);
+            assertTrue((Boolean)current.invoke(f.hook,f.activity,f.holder,"123",epoch));
+            f.harness.invoke(f.holder.getClass().getMethod("pause"),f.holder);ShadowLooper.idleMainLooper();
+            assertTrue("A comment half-panel can pause the original holder",(Boolean)current.invoke(f.hook,f.activity,f.holder,"123",epoch));
+            f.holder.aid="456";f.select();
+            assertFalse((Boolean)current.invoke(f.hook,f.activity,f.holder,"123",epoch));
+            long latest=epochField.getLong(f.hook);
+            f.hook.onActivityPaused(f.activity);ShadowLooper.idleMainLooper();
+            assertFalse((Boolean)current.invoke(f.hook,f.activity,f.holder,"456",latest));
+        }
+    }
     public interface IPlayerInfo {
         float getSpeed();
         default boolean isPlaying() { return true; }
@@ -1960,10 +2007,11 @@ public final class FeedGestureToolsHookTest {
     }
 
     @Test public void viewFinderIsAvailableInLongPressAndDoubleTapActionChoices() {
-        assertEquals("view_finder", FeedGestureToolsHook.ACTION_IDS[
-                FeedGestureToolsHook.ACTION_IDS.length - 1]);
-        assertEquals("视图查找", FeedGestureToolsHook.ACTION_LABELS[
-                FeedGestureToolsHook.ACTION_LABELS.length - 1]);
+        // Existing toolbar and saved options rely on the original index.
+        assertEquals("view_finder", FeedGestureToolsHook.ACTION_IDS[7]);
+        assertEquals("视图查找", FeedGestureToolsHook.ACTION_LABELS[7]);
+        assertEquals("seek_back_10", FeedGestureToolsHook.ACTION_IDS[8]);
+        assertEquals("seek_forward_10", FeedGestureToolsHook.ACTION_IDS[9]);
         LocalOptions options = new LocalOptions(Map.of(
                 "long_press_bottom_right", "view_finder",
                 "double_tap_top_left", "view_finder"));
@@ -2003,6 +2051,52 @@ public final class FeedGestureToolsHookTest {
         }
     }
 
+    @Test public void sidebarPreviouslyPausedSurvivesCloseSettingsAndFocusResumeUntilRealUserTouch() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try(Fixture f=new Fixture(Map.of(),false,true)) {
+            f.hook.onActivityResumed(f.activity); f.select();
+            f.player.delegate.playing=false; f.hook.setPausedStateProvider(id->true);
+            boolean[] showing={false}; f.hook.setSidebarSettingsVisible(owner->showing[0]);
+            FeedGestureToolsHook.captureSidebarPlayback(f.activity);
+            f.harness.invoke(f.holder.getClass().getMethod("pause"),f.holder);
+            ShadowLooper.idleMainLooper();
+            FeedGestureToolsHook.keepPauseForSidebarSettings(f.activity);
+            f.harness.invoke(PlayerManager.class.getMethod("resumePlay"),f.player);
+            assertFalse("closing drawer must not resume",f.player.delegate.playing);
+            showing[0]=true; f.player.delegate.playing=true; // Native side effect outside guarded resume method.
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(250));
+            assertFalse("read back and restore original paused state",f.player.delegate.playing);
+            showing[0]=false;
+            f.harness.invoke(PlayerManager.class.getMethod("resumePlay"),f.player);
+            assertFalse(f.player.delegate.playing);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(225));
+            assertFalse("return never initiates playback",f.player.delegate.playing);
+            // A neighboring card must not release the guard. The original card must, even though
+            // the drawer cleared selectedRoot and the holder has not yet had a resume callback.
+            TouchLayout neighbor=new TouchLayout(f.activity);
+            MotionEvent down=MotionEvent.obtain(0,0,MotionEvent.ACTION_DOWN,80,80,0);
+            try {
+                f.harness.invoke(TouchLayout.class.getMethod("dispatchTouchEvent",MotionEvent.class),neighbor,down);
+                f.harness.invoke(PlayerManager.class.getMethod("resumePlay"),f.player);
+                assertFalse("foreign feed touch must not release",f.player.delegate.playing);
+                f.harness.invoke(TouchLayout.class.getMethod("dispatchTouchEvent",MotionEvent.class),f.touch,down);
+            }finally{down.recycle();}
+            f.harness.invoke(PlayerManager.class.getMethod("resumePlay"),f.player);
+            assertTrue("next play is delegated",f.player.delegate.playing);
+        }
+    }
+    @Test public void drawerThatTemporarilyPausedAPlayingVideoNeverAcquiresTheSettingsGuard() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try(Fixture f=new Fixture(Map.of(),false,true)){
+            f.hook.onActivityResumed(f.activity);f.select();
+            f.player.delegate.playing=true; f.hook.setPausedStateProvider(id->true);
+            FeedGestureToolsHook.captureSidebarPlayback(f.activity);
+            f.player.delegate.playing=false;
+            FeedGestureToolsHook.keepPauseForSidebarSettings(f.activity);
+            assertEquals(0,f.player.delegate.pauseCalls);
+            assertTrue("no guard installed on this player",!f.harness.interceptors.containsKey(PlayerManager.class.getMethod("resumePlay")));
+        }
+    }
     @Test public void finderSuppressesResumeAndPlayWhenTheCurrentVideoWasPaused() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_top_right", "view_finder"))) {
             f.player.delegate.playing = false;
@@ -2615,6 +2709,8 @@ public final class FeedGestureToolsHookTest {
 
     private static final class Harness {
         final Map<Method, XposedInterface.Hooker> interceptors = new HashMap<>();
+        final Map<Method, Integer> priorities = new HashMap<>();
+        boolean suppressNativeDoubleTap;
         final XposedInterface framework = (XposedInterface) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[] { XposedInterface.class }, (proxy, operation, values) -> {
                     if (!operation.getName().equals("hook")) return null;
@@ -2624,6 +2720,7 @@ public final class FeedGestureToolsHookTest {
                     }
                     return Proxy.newProxyInstance(getClass().getClassLoader(),
                             new Class<?>[] { XposedInterface.HookBuilder.class }, (builder, action, arguments) -> {
+                                if (action.getName().equals("setPriority")) priorities.put(target,(Integer)arguments[0]);
                                 if (!action.getName().equals("intercept")) return builder;
                                 interceptors.put(target, (XposedInterface.Hooker) arguments[0]);
                                 return Proxy.newProxyInstance(getClass().getClassLoader(),
@@ -2651,6 +2748,7 @@ public final class FeedGestureToolsHookTest {
                             case "getArg": return arguments[(Integer) values[0]];
                             case "getArgs": return Arrays.asList(arguments);
                             case "proceed":
+                                if (suppressNativeDoubleTap && target.getName().equals("doubleTap")) return null;
                                 try { return target.invoke(owner, values == null ? arguments : (Object[]) values[0]); }
                                 catch (InvocationTargetException failure) { throw failure.getCause(); }
                             default: return null;

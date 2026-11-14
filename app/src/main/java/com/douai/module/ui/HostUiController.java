@@ -133,6 +133,10 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         return resumedActivity.get();
     }
 
+    public boolean isSettingsShowing(Activity owner) {
+        return !closed && settingsDialog != null && settingsDialog.isShowing() && settingsDialog.getOwnerActivity() == owner;
+    }
+
     private void attachNativeSettingsEntry(Activity activity) {
         if (closed || !isSettingsPage(activity)) return;
         WeakReference<View> reference = nativeSettingsEntries.get(activity);

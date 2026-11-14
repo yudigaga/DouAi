@@ -4,12 +4,14 @@ import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.os.Handler;
+import android.os.Looper;
 import android.view.PixelCopy;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
+import android.view.Gravity;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 
@@ -22,15 +24,21 @@ import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 /** Captures only the visible video surface to bridge its short detach/decode handoff. */
 final class PlaybackTransitionFrame {
     private static final int MAX_SURFACE_NODES = 1024;
-    private static final int MAX_CAPTURE_WIDTH = 1440;
-    private static final int MAX_CAPTURE_HEIGHT = 4096;
-    static final int MAX_CAPTURE_PIXELS = 1440 * 3200;
+    private static final int MAX_CAPTURE_WIDTH = 900;
+    private static final int MAX_CAPTURE_HEIGHT = 1600;
+    static final int MAX_CAPTURE_PIXELS = 900 * 1600;
     private static final Map<View, Object> IN_FLIGHT = new WeakHashMap<>();
     private static final Map<View, SurfaceCache> SURFACES = new WeakHashMap<>();
+    private static final ThreadPoolExecutor ALLOCATIONS = new ThreadPoolExecutor(0,1,10,TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(1),r->{Thread t=new Thread(r,"DouAi-transition-frame");t.setDaemon(true);return t;});
 
     interface Copier {
         void request(SurfaceView source, Bitmap target, PixelCopy.OnPixelCopyFinishedListener listener, Handler handler);
@@ -43,63 +51,82 @@ final class PlaybackTransitionFrame {
     }
 
     static void capture(View holderRoot, Handler main, BooleanSupplier current, Consumer<Overlay> callback) {
-        capture(holderRoot, main, current, callback, PixelCopy::request);
+        captureDeferred(holderRoot, main, current, callback, PixelCopy::request,ALLOCATIONS);
     }
 
     static void capture(View holderRoot, Handler main, BooleanSupplier current, Consumer<Overlay> callback, Copier copier) {
+        captureDeferred(holderRoot,main,current,callback,copier,Runnable::run);
+    }
+
+    static void captureDeferred(View holderRoot, Handler main, BooleanSupplier current, Consumer<Overlay> callback,
+                                Copier copier, Executor allocation) {
+        captureSurface(holderRoot, holderRoot == null ? null : videoSurface(holderRoot), main, current, callback, copier,allocation);
+    }
+
+    /** Production uses the selected holder's own renderer, not a guessed largest child surface. */
+    static void captureRenderer(View holderRoot, View renderer, Handler main, BooleanSupplier current, Consumer<Overlay> callback) {
+        captureSurface(holderRoot, renderer instanceof SurfaceView ? (SurfaceView)renderer : null,
+                main, current, callback, PixelCopy::request,ALLOCATIONS);
+    }
+
+    private static void captureSurface(View holderRoot, SurfaceView surface, Handler main, BooleanSupplier current,
+                                       Consumer<Overlay> callback, Copier copier, Executor allocation) {
         if (callback == null) return;
         if (holderRoot == null || main == null || callback == null || !holderRoot.isAttachedToWindow()) {
-            callback.accept(null);
+            noFrame(callback);
             return;
         }
         Activity activity = activity(holderRoot.getContext());
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
-            callback.accept(null);
+            noFrame(callback);
             return;
         }
-        SurfaceView surface = videoSurface(holderRoot);
-        if (surface == null) {
-            callback.accept(null);
+        if (surface == null || !visibleInRoot(surface, holderRoot) || !untransformed(surface)) {
+            noFrame(callback);
             return;
         }
         SurfaceHolder holder = surface.getHolder();
         if (holder == null || holder.getSurface() == null || !holder.getSurface().isValid()) {
-            callback.accept(null);
+            noFrame(callback);
             return;
         }
         int sourceWidth = surface.getWidth(), sourceHeight = surface.getHeight();
         if (sourceWidth <= 0 || sourceHeight <= 0) {
-            callback.accept(null);
+            noFrame(callback);
             return;
         }
+        Rect bufferFrame = holder.getSurfaceFrame();
+        Rect sourceBuffer = bufferFrame == null ? null : new Rect(bufferFrame);
+        if (sourceBuffer == null || sourceBuffer.isEmpty()
+                || !sameAspect(sourceWidth, sourceHeight, sourceBuffer.width(), sourceBuffer.height())) {
+            noFrame(callback); return;
+        }
+        Rect visible = new Rect();
+        if (!surface.getLocalVisibleRect(visible) || visible.isEmpty()) { noFrame(callback); return; }
         View decor = activity.getWindow() == null ? null : activity.getWindow().getDecorView();
         if (!(decor instanceof FrameLayout)) {
-            callback.accept(null);
+            noFrame(callback);
             return;
         }
+        Object window = holderRoot.getWindowToken();
+        if(window==null){noFrame(callback);return;}
         Object flight = new Object();
         synchronized (IN_FLIGHT) {
             if (IN_FLIGHT.containsKey(decor)) {
-                callback.accept(null);
+                noFrame(callback);
                 return;
             }
             IN_FLIGHT.put(decor, flight);
         }
-        int[] size = captureSize(sourceWidth, sourceHeight);
+        int[] size = captureSize(sourceBuffer.width(), sourceBuffer.height());
         int width = size[0], height = size[1];
+        if (!sameAspect(sourceWidth, sourceHeight, width, height)) {
+            releaseFlight(decor,flight); noFrame(callback); return;
+        }
         MediaMemoryBudget.Reservation memory = MediaMemoryBudget.tryAcquire((long) width * height * 4);
         if (memory == null) {
             releaseFlight(decor, flight);
-            callback.accept(null);
-            return;
-        }
-        Bitmap bitmap;
-        try {
-            bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        } catch (RuntimeException | OutOfMemoryError unavailable) {
-            memory.close();
-            releaseFlight(decor, flight);
-            callback.accept(null);
+            noFrame(callback);
             return;
         }
         int[] surfaceLocation = new int[2], decorLocation = new int[2];
@@ -109,24 +136,47 @@ final class PlaybackTransitionFrame {
                 surfaceLocation[1] - decorLocation[1],
                 surfaceLocation[0] - decorLocation[0] + sourceWidth,
                 surfaceLocation[1] - decorLocation[1] + sourceHeight);
+        Rect clipping = new Rect(visible);
+        clipping.offset(surfaceLocation[0]-decorLocation[0], surfaceLocation[1]-decorLocation[1]);
         AtomicBoolean delivered = new AtomicBoolean();
+        // Allocation is off-main in production; use an independent handler so owner cancellation
+        // cannot strand its reservation. Native PixelCopy is not started for an expired owner.
+        Handler results = new Handler(main.getLooper());
+        allocate(allocation,results,width,height, bitmap -> {
+        boolean allowed=false;
+        try { allowed=bitmap!=null && surface.isAttachedToWindow() && holderRoot.getWindowToken()==window && current.getAsBoolean(); }
+        catch(RuntimeException|LinkageError ignored){ }
+        if(!allowed){
+            releaseFlight(decor,flight);
+            if(bitmap!=null)release(bitmap,memory);else memory.close();
+            noFrame(callback);return;
+        }
         try {
-            // An owner's removeCallbacksAndMessages() must not discard PixelCopy's release callback.
-            Handler results = new Handler(main.getLooper());
             copier.request(surface, bitmap, result -> {
                 if (!delivered.compareAndSet(false, true)) return;
                 releaseFlight(decor, flight);
-                if (result != PixelCopy.SUCCESS || !surface.isAttachedToWindow()
-                        || holderRoot.getWindowToken() == null || !current.getAsBoolean()) {
+                boolean valid = false;
+                try {
+                    int[] now=new int[2]; surface.getLocationOnScreen(now);
+                    Rect shown=new Rect();
+                    valid = result==PixelCopy.SUCCESS && !activity.isFinishing() && !activity.isDestroyed()
+                            && surface.isAttachedToWindow() && holderRoot.getWindowToken()==window
+                            && sourceWidth==surface.getWidth() && sourceHeight==surface.getHeight()
+                            && sourceBuffer.equals(surface.getHolder().getSurfaceFrame())
+                            && untransformed(surface) && surface.getLocalVisibleRect(shown) && visible.equals(shown)
+                            && now[0]==surfaceLocation[0] && now[1]==surfaceLocation[1]
+                            && current.getAsBoolean() && hasVisiblePixels(bitmap);
+                } catch (RuntimeException | LinkageError ignored) { }
+                if (!valid) {
                     release(bitmap, memory);
-                    callback.accept(null);
+                    noFrame(callback);
                     return;
                 }
                 Overlay overlay;
-                try { overlay = new Overlay((FrameLayout) decor, bitmap, location, memory); }
+                try { overlay = new Overlay((FrameLayout) decor, bitmap, location, clipping, memory); }
                 catch (RuntimeException | LinkageError failure) {
                     release(bitmap, memory);
-                    callback.accept(null);
+                    noFrame(callback);
                     return;
                 }
                 try { callback.accept(overlay); }
@@ -136,9 +186,24 @@ final class PlaybackTransitionFrame {
             if (delivered.compareAndSet(false, true)) {
                 releaseFlight(decor, flight);
                 release(bitmap, memory);
-                callback.accept(null);
+                noFrame(callback);
             }
         }
+        });
+    }
+
+    private static void allocate(Executor executor,Handler ui,int width,int height,Consumer<Bitmap> ready) {
+        try { executor.execute(()->{
+            Bitmap created;
+            try { created=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888); }
+            catch(RuntimeException|OutOfMemoryError unavailable){created=null;}
+            Bitmap result=created;
+            if(Looper.myLooper()==ui.getLooper())ready.accept(result);else ui.post(()->ready.accept(result));
+        }); }catch(java.util.concurrent.RejectedExecutionException busy){ready.accept(null);}
+    }
+
+    private static void noFrame(Consumer<Overlay> callback) {
+        try { callback.accept(null); } catch(RuntimeException|LinkageError ignored){ }
     }
 
     static int[] captureSize(int sourceWidth, int sourceHeight) {
@@ -148,6 +213,27 @@ final class PlaybackTransitionFrame {
         scale = Math.min(scale, Math.sqrt(MAX_CAPTURE_PIXELS / ((double) sourceWidth * sourceHeight)));
         return new int[]{Math.max(1, (int) Math.floor(sourceWidth * scale)),
                 Math.max(1, (int) Math.floor(sourceHeight * scale))};
+    }
+
+    private static boolean sameAspect(int w,int h,int otherW,int otherH) {
+        if(w<=0 || h<=0 || otherW<=0 || otherH<=0)return false;
+        return Math.abs(((double)w*otherH)/(h*(double)otherW)-1d) <= .01d;
+    }
+    private static boolean untransformed(View view) {
+        for(View v=view;v!=null;v=v.getParent() instanceof View?(View)v.getParent():null) {
+            if(Math.abs(v.getScaleX()-1f)>.001f || Math.abs(v.getScaleY()-1f)>.001f
+                    || Math.abs(v.getRotation())>.001f || Math.abs(v.getRotationX())>.001f || Math.abs(v.getRotationY())>.001f
+                    || v.getAnimation()!=null)return false;
+        }
+        return true;
+    }
+    // A black/empty bridge adds no continuity; retain the host's native transition instead.
+    private static boolean hasVisiblePixels(Bitmap bitmap) {
+        for(int y=0;y<5;y++)for(int x=0;x<5;x++) {
+            int color=bitmap.getPixel(x*(bitmap.getWidth()-1)/4,y*(bitmap.getHeight()-1)/4);
+            if((color>>>24)!=0 && (color&0xFFFFFF)!=0)return true;
+        }
+        return false;
     }
 
     private static void releaseFlight(View decor, Object flight) {
@@ -299,24 +385,37 @@ final class PlaybackTransitionFrame {
         private final Bitmap bitmap;
         private final MediaMemoryBudget.Reservation memory;
         private ImageView image;
+        private FrameLayout clip;
         private boolean closed;
 
         Overlay(FrameLayout decor, Bitmap bitmap, Rect location, MediaMemoryBudget.Reservation memory) {
+            this(decor,bitmap,location,location,memory);
+        }
+
+        @android.annotation.SuppressLint("RtlHardcoded") // Physical video coordinates must not mirror with UI language.
+        Overlay(FrameLayout decor, Bitmap bitmap, Rect location, Rect clipping, MediaMemoryBudget.Reservation memory) {
             this.decor = decor;
             this.bitmap = bitmap;
             this.memory = memory;
             image = new ImageView(decor.getContext());
             image.setImageBitmap(bitmap);
-            image.setScaleType(ImageView.ScaleType.FIT_XY);
+            image.setScaleType(ImageView.ScaleType.FIT_CENTER);
             image.setClickable(false);
             image.setFocusable(false);
             image.setEnabled(false);
             image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(location.width(), location.height());
-            params.leftMargin = location.left;
-            params.topMargin = location.top;
-            decor.addView(image, params);
-            image.bringToFront();
+            params.gravity=Gravity.TOP|Gravity.LEFT;
+            params.leftMargin = location.left-clipping.left;
+            params.topMargin = location.top-clipping.top;
+            clip=new FrameLayout(decor.getContext());
+            clip.setClipChildren(true);clip.setClickable(false);clip.setFocusable(false);
+            clip.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            clip.addView(image,params);
+            FrameLayout.LayoutParams bounds=new FrameLayout.LayoutParams(clipping.width(),clipping.height());
+            bounds.gravity=Gravity.TOP|Gravity.LEFT;
+            bounds.leftMargin=clipping.left-decor.getPaddingLeft();bounds.topMargin=clipping.top-decor.getPaddingTop();
+            decor.addView(clip,bounds);clip.bringToFront();
         }
 
         void fadeAndClose(long durationMillis) {
@@ -331,9 +430,10 @@ final class PlaybackTransitionFrame {
             closed = true;
             if (image != null) {
                 image.animate().cancel();
-                if (image.getParent() == decor) decor.removeView(image);
+                if (clip != null && clip.getParent() == decor) decor.removeView(clip);
                 image.setImageDrawable(null);
                 image = null;
+                clip = null;
             }
             release(bitmap, memory);
         }
