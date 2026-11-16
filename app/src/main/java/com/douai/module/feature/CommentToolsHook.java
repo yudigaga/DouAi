@@ -182,7 +182,7 @@ public final class CommentToolsHook implements AutoCloseable {
 
     private boolean anyEnabled() {
         ExtendedSettings s=settings;
-        return s.copyCommentText || s.copySourceData || s.commentMediaTools || searchEnabled || transcriptEnabled;
+        return CommentBookmarks.enabled() || s.copyCommentText || s.copySourceData || s.commentMediaTools || searchEnabled || transcriptEnabled;
     }
 
     static LinearLayout actionList(View groupRoot) {
@@ -268,7 +268,7 @@ public final class CommentToolsHook implements AutoCloseable {
         Object result = chain.proceed();
         if (visiblePanelInstalled || closed) return result;
         ExtendedSettings current = settings;
-        if (!current.copyCommentText && !current.commentMediaTools && !current.copySourceData && !transcriptEnabled && !searchEnabled) {
+        if (!anyEnabled()) {
             DouAiLog.event("comment_tools", "decision", "disabled", "tools_attached=false");
             return result;
         }
@@ -326,6 +326,7 @@ public final class CommentToolsHook implements AutoCloseable {
         if (current.commentMediaTools && nativeImageSaveAction != null && hasCommentImages(comment)) {
             actions.add(new Action("使用抖音保存评论图片", nativeImageSaveAction, true));
         }
+        if(CommentBookmarks.available(comment))actions.add(new Action("收藏评论",null,comment));
         return actions;
     }
 
@@ -354,6 +355,7 @@ public final class CommentToolsHook implements AutoCloseable {
     }
 
     private void runAction(Context context, Action action) {
+        if("收藏评论".equals(action.title)){CommentBookmarks.save(context,action.source,action.bookmarkAccount);return;}
         if ("查看语音转写".equals(action.title)) {
             if (!transcriptEnabled) return;
             new MiuixDialogBuilder(context, true)
@@ -646,6 +648,9 @@ public final class CommentToolsHook implements AutoCloseable {
         }
         return null;
     }
+    static Object mapped(Object target,String name){
+        try{return readMappedField(target,name);}catch(ReflectiveOperationException|RuntimeException|LinkageError ignored){return null;}
+    }
 
     private static String serializedName(Field field) {
         for (Annotation annotation : field.getAnnotations()) {
@@ -716,6 +721,7 @@ public final class CommentToolsHook implements AutoCloseable {
         final Object source;
         final Object nativeImageSaveAction;
         final boolean viewData;
+        final String bookmarkAccount;
 
         Action(String title, String text, Object payload) {
             this(title, text, payload, false);
@@ -731,6 +737,7 @@ public final class CommentToolsHook implements AutoCloseable {
             this.source = text == null && payload != null && !(payload instanceof String) ? payload : null;
             this.nativeImageSaveAction = null;
             this.viewData = viewData;
+            this.bookmarkAccount="收藏评论".equals(title)?NativeFollowLists.currentAccountUid():"";
         }
 
         Action(String title, Object nativeImageSaveAction, boolean nativeSave) {
@@ -739,6 +746,7 @@ public final class CommentToolsHook implements AutoCloseable {
             this.source = null;
             this.nativeImageSaveAction = nativeSave ? nativeImageSaveAction : null;
             this.viewData = false;
+            this.bookmarkAccount="";
         }
 
     }

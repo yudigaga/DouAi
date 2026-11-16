@@ -53,25 +53,50 @@ public final class ModuleSettingsDependencyTest {
     }
 
     @Test public void interfaceChildrenFollowOnlyTheirOwnSwitchAndKeepTheirSavedSelections() {
+        store.putBoolean("hide_top_tabs", true);
         store.putString("hidden_top_tabs", "saved-tab");
         store.putString(SidebarSettings.ITEMS, "module,reply_history");
+        store.putString(SidebarSettings.COMMON_ITEMS, "hide:wallet");
         View page = open("INTERFACE");
-        hidden(page, "settings.option.设置顶部Tab");
-        hidden(page, "settings.option.侧边栏显示项");
+        assertNull(page.findViewWithTag("settings.toggle.隐藏顶部Tab开关"));
+        assertNull(page.findViewWithTag("settings.option.设置顶部Tab"));
+        hidden(page, "settings.toggle.侧边栏显示项");
+        hidden(page, "settings.option.选择模块显示项");
+        hidden(page, "settings.toggle.保留常用功能");
+        hidden(page, "settings.option.常用功能显示项");
         visible(page, "settings.option.长按事件");
         visible(page, "settings.option.双击事件");
         visible(page, "settings.option.沉浸式全屏");
-        toggle(page, "隐藏顶部Tab开关", true);
-        visible(page, "settings.option.设置顶部Tab");
-        hidden(page, "settings.option.侧边栏显示项");
+        hidden(page, "settings.toggle.侧边栏显示项");
         toggle(page, "首页右滑打开侧边栏", true);
-        visible(page, "settings.option.侧边栏显示项");
-        toggle(page, "隐藏顶部Tab开关", false);
+        visible(page, "settings.toggle.侧边栏显示项");
+        visible(page, "settings.option.选择模块显示项");
+        visible(page, "settings.toggle.保留常用功能");
+        hidden(page, "settings.option.常用功能显示项");
+        toggle(page, "保留常用功能", true);
+        visible(page, "settings.option.常用功能显示项");
+        toggle(page, "侧边栏显示项", false);
+        hidden(page, "settings.option.选择模块显示项");
+        hidden(page, "settings.toggle.保留常用功能");
+        hidden(page, "settings.option.常用功能显示项");
+        toggle(page, "侧边栏显示项", true);
+        visible(page, "settings.option.选择模块显示项");
+        visible(page, "settings.toggle.保留常用功能");
+        visible(page, "settings.option.常用功能显示项");
+        visible(page, "settings.option.选择模块显示项");
         toggle(page, "首页右滑打开侧边栏", false);
-        hidden(page, "settings.option.设置顶部Tab");
-        hidden(page, "settings.option.侧边栏显示项");
+        assertNull(page.findViewWithTag("settings.toggle.隐藏顶部Tab开关"));
+        assertNull(page.findViewWithTag("settings.option.设置顶部Tab"));
+        hidden(page, "settings.toggle.侧边栏显示项");
+        hidden(page, "settings.option.选择模块显示项");
+        hidden(page, "settings.toggle.保留常用功能");
+        hidden(page, "settings.option.常用功能显示项");
         assertEquals("saved-tab", store.getString("hidden_top_tabs", ""));
+        assertTrue(store.getBoolean("hide_top_tabs", false));
         assertEquals("module,reply_history", store.getString(SidebarSettings.ITEMS, ""));
+        assertEquals("hide:wallet", store.getString(SidebarSettings.COMMON_ITEMS, ""));
+        assertTrue(store.getBoolean(SidebarSettings.ITEMS_ENABLED, false));
+        assertTrue(store.getBoolean(SidebarSettings.KEEP_COMMON, false));
     }
 
     @Test public void filterMasterAndDurationParentsHideOnlyTheirDependentInputs() {

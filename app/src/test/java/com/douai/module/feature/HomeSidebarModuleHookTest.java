@@ -22,6 +22,138 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class HomeSidebarModuleHookTest {
+    @Test public void retainedCommonItemsStayAboveTheModuleAndHideByBusinessIdentityWithGridRestoration() {
+        Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
+        LinearLayout list=new LinearLayout(activity);list.setOrientation(LinearLayout.VERTICAL);
+        GridLayout nativeGrid=new GridLayout(activity);nativeGrid.setColumnCount(3);list.addView(nativeGrid);
+        String[] ids={"history","favorite","download"};List<View> cells=new ArrayList<>();
+        List<GridLayout.Spec> originalColumns=new ArrayList<>();
+        java.util.concurrent.atomic.AtomicInteger clicked=new java.util.concurrent.atomic.AtomicInteger();
+        for(int i=0;i<ids.length;i++) {
+            View cell=new com.ss.android.ugc.aweme.sidebar.panel.ui.template.base.BaseSideBarItemView(activity,ids[i],"相同展示名称");
+            cell.setOnClickListener(v->clicked.incrementAndGet());GridLayout.LayoutParams lp=new GridLayout.LayoutParams();
+            lp.width=80;lp.height=60;lp.rowSpec=GridLayout.spec(0);lp.columnSpec=GridLayout.spec(i);
+            originalColumns.add(lp.columnSpec);nativeGrid.addView(cell,lp);cells.add(cell);
+        }
+        activity.setContentView(list);
+        HomeSidebarModuleHook.Binding binding=HomeSidebarModuleHook.Binding.attach(nativeGrid,false,(id,owner)->{});
+        try {
+            com.douai.module.config.LocalOptions options=new com.douai.module.config.LocalOptions(java.util.Map.of(
+                    SidebarSettings.KEEP_COMMON,true,SidebarSettings.COMMON_ITEMS,"hide:favorite"));
+            binding.update(true,SidebarSettings.parse("module,help"),options);
+            int width=View.MeasureSpec.makeMeasureSpec(320,View.MeasureSpec.EXACTLY);
+            binding.view().measure(width,View.MeasureSpec.makeMeasureSpec(800,View.MeasureSpec.AT_MOST));
+            binding.view().layout(0,0,320,binding.view().getMeasuredHeight());
+            for(int repeat=0;repeat<3;repeat++) {
+                binding.view().requestLayout();binding.view().measure(width,View.MeasureSpec.makeMeasureSpec(800,View.MeasureSpec.AT_MOST));
+                binding.update(true,SidebarSettings.parse("module,help"),options);
+            }
+            assertEquals(View.VISIBLE,nativeGrid.getVisibility());assertEquals(View.GONE,cells.get(1).getVisibility());
+            assertEquals(View.VISIBLE,cells.get(0).getVisibility());assertEquals(View.VISIBLE,cells.get(2).getVisibility());
+            assertTrue(binding.module.getTop()>=nativeGrid.getBottom());
+            assertEquals(originalColumns.get(1),((GridLayout.LayoutParams)cells.get(2).getLayoutParams()).columnSpec);
+            cells.get(2).performClick();assertEquals(1,clicked.get());
+            binding.update(false,SidebarSettings.parse("module"),options);
+            assertEquals(View.VISIBLE,nativeGrid.getVisibility());assertEquals(View.GONE,binding.module.getVisibility());
+            assertEquals(View.VISIBLE,cells.get(1).getVisibility());
+            assertSame(originalColumns.get(2),((GridLayout.LayoutParams)cells.get(2).getLayoutParams()).columnSpec);
+            assertTrue(SidebarSettings.commonEntries().stream().anyMatch(entry->entry.id.equals("favorite")));
+        }finally{binding.restore();activity.finish();}
+    }
+
+    @Test public void commonGridSpecRestorationDoesNotOverwriteAHostWeightOrAutomaticSpanChange() {
+        for(boolean automatic:new boolean[]{false,true}) {
+            Activity activity=Robolectric.buildActivity(Activity.class).setup().get();GridLayout grid=new GridLayout(activity);grid.setColumnCount(3);
+            View last=null;
+            for(int index=0;index<3;index++) {
+                View item=new com.ss.android.ugc.aweme.sidebar.panel.ui.template.base.BaseSideBarItemView(activity,"id"+index,"Item"+index);
+                GridLayout.LayoutParams params=new GridLayout.LayoutParams();params.width=70;params.height=60;
+                params.rowSpec=GridLayout.spec(0);params.columnSpec=GridLayout.spec(index,1,GridLayout.END,2f);grid.addView(item,params);last=item;
+            }
+            HomeSidebarModuleHook.Binding binding=new HomeSidebarModuleHook.Binding(grid,false,ignored->{});
+            try {
+                binding.update(true,SidebarSettings.parse("module"),new com.douai.module.config.LocalOptions(java.util.Map.of(
+                        SidebarSettings.KEEP_COMMON,true,SidebarSettings.COMMON_ITEMS,"hide:id1")));
+                binding.view().measure(View.MeasureSpec.makeMeasureSpec(320,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(800,View.MeasureSpec.AT_MOST));
+                GridLayout.LayoutParams live=(GridLayout.LayoutParams)last.getLayoutParams();
+                GridLayout.Spec host=GridLayout.spec(automatic?GridLayout.UNDEFINED:1,1,GridLayout.END,5f);live.columnSpec=host;
+                binding.restore();assertSame("Host weight/start-defined changes survive module release",host,live.columnSpec);
+            }finally{binding.restore();activity.finish();}
+        }
+    }
+
+    @Test public void disablingModuleDisplayRestoresNativeCommonEvenWithoutTheKeepOption() {
+        Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
+        HomeSidebarModuleHook.Binding binding=new HomeSidebarModuleHook.Binding(new FrameLayout(activity),false,ignored->{});
+        ViewGroup nativeView=(ViewGroup)binding.view().getChildAt(0);
+        try {
+            binding.update(true,SidebarSettings.parse("module"));assertEquals(View.GONE,nativeView.getVisibility());
+            binding.update(false,SidebarSettings.parse("module"),new com.douai.module.config.LocalOptions(java.util.Map.of(SidebarSettings.ITEMS_ENABLED,false)));
+            assertEquals(View.VISIBLE,nativeView.getVisibility());assertEquals(View.GONE,binding.module.getVisibility());
+        }finally{binding.restore();activity.finish();}
+    }
+
+    @Test @Config(manifest=Config.NONE,sdk=35,qualifiers="w360dp-h800dp-mdpi")
+    public void ownedSidebarRowsActuallyMoveBothAxesAndReleaseTheirSensorAndTransforms() {
+        org.robolectric.android.controller.ActivityController<Activity> lifecycle=Robolectric.buildActivity(Activity.class).setup();
+        Activity activity=lifecycle.get();FrameLayout root=new FrameLayout(activity);LinearLayout list=new LinearLayout(activity);
+        list.setOrientation(LinearLayout.VERTICAL);FrameLayout.LayoutParams position=new FrameLayout.LayoutParams(320,-2);position.topMargin=120;
+        root.addView(list,position);FrameLayout nativeCommon=new FrameLayout(activity);
+        nativeCommon.setMinimumHeight(60);list.addView(nativeCommon,new LinearLayout.LayoutParams(-1,-2));
+        HomeSidebarModuleHook.Binding binding=HomeSidebarModuleHook.Binding.attach(nativeCommon,false,(id,owner)->{});
+        activity.setContentView(root);lifecycle.visible().windowFocusChanged(true);
+        org.robolectric.shadows.ShadowSensorManager sensors=org.robolectric.shadow.api.Shadow.extract(
+                (android.hardware.SensorManager)activity.getSystemService(android.content.Context.SENSOR_SERVICE));
+        android.hardware.Sensor sensor=org.robolectric.shadows.ShadowSensor.newInstance(android.hardware.Sensor.TYPE_GRAVITY);sensors.addSensor(sensor);
+        org.robolectric.shadows.ShadowChoreographer.setPaused(true);
+        org.robolectric.shadows.ShadowChoreographer.setFrameDelay(java.time.Duration.ofMillis(16));
+        try {
+            binding.update(true,SidebarSettings.parse("module,help"),new com.douai.module.config.LocalOptions(java.util.Map.of(
+                    SidebarSettings.KEEP_COMMON,true,"theme_style","liquid_glass","theme_gravity_enabled",true)));
+            View decor=activity.getWindow().getDecorView();decor.measure(View.MeasureSpec.makeMeasureSpec(360,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(800,View.MeasureSpec.EXACTLY));
+            decor.layout(0,0,360,800);decor.getViewTreeObserver().dispatchOnPreDraw();
+            android.hardware.SensorEvent event=org.robolectric.shadows.ShadowSensorManager.createSensorEvent(3);event.sensor=sensor;event.timestamp=100_000_000L;event.values[2]=9.80665f;sensors.sendSensorEventToListeners(event);
+            event=org.robolectric.shadows.ShadowSensorManager.createSensorEvent(3);event.sensor=sensor;event.timestamp=200_000_000L;event.values[0]=-6;event.values[1]=6;event.values[2]=9.80665f;sensors.sendSensorEventToListeners(event);
+            org.robolectric.shadows.ShadowLooper.shadowMainLooper().idleFor(java.time.Duration.ofSeconds(2));
+            View row=binding.view().findViewWithTag("douai.sidebar.module");
+            assertTrue("A sidebar row must actually move horizontally",row.getTranslationX()>0);
+            assertTrue("A sidebar row must actually move vertically",row.getTranslationY()>0);
+            assertTrue("Retained native common follows the same tilt",nativeCommon.getTranslationX()>0 && nativeCommon.getTranslationY()>0);
+            binding.restore();assertEquals(0f,row.getTranslationX(),0);assertEquals(0f,row.getTranslationY(),0);
+            assertEquals(0f,nativeCommon.getTranslationX(),0);assertTrue(sensors.getListeners().isEmpty());
+        }finally{binding.restore();activity.finish();}
+    }
+
+    @Test @Config(manifest=Config.NONE,sdk=35,qualifiers="w360dp-h800dp-mdpi")
+    public void scrollingReappliesTheCurrentPoseAndHiddenAncestorsReleaseTheSidebarSensor() {
+        org.robolectric.android.controller.ActivityController<Activity> lifecycle=Robolectric.buildActivity(Activity.class).setup();
+        Activity activity=lifecycle.get();android.widget.ScrollView scroll=new android.widget.ScrollView(activity);
+        LinearLayout list=new LinearLayout(activity);list.setOrientation(LinearLayout.VERTICAL);scroll.addView(list);
+        FrameLayout nativeCommon=new FrameLayout(activity);list.addView(nativeCommon);
+        HomeSidebarModuleHook.Binding binding=HomeSidebarModuleHook.Binding.attach(nativeCommon,false,(id,owner)->{});
+        activity.setContentView(scroll);lifecycle.visible().windowFocusChanged(true);
+        org.robolectric.shadows.ShadowSensorManager sensors=org.robolectric.shadow.api.Shadow.extract(
+                (android.hardware.SensorManager)activity.getSystemService(android.content.Context.SENSOR_SERVICE));
+        android.hardware.Sensor sensor=org.robolectric.shadows.ShadowSensor.newInstance(android.hardware.Sensor.TYPE_GRAVITY);sensors.addSensor(sensor);
+        org.robolectric.shadows.ShadowChoreographer.setPaused(true);
+        org.robolectric.shadows.ShadowChoreographer.setFrameDelay(java.time.Duration.ofMillis(16));
+        try {
+            binding.update(true,SidebarSettings.ENTRIES,new com.douai.module.config.LocalOptions(java.util.Map.of(
+                    "theme_style","liquid_glass","theme_gravity_enabled",true)));
+            View decor=activity.getWindow().getDecorView();decor.measure(View.MeasureSpec.makeMeasureSpec(360,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(800,View.MeasureSpec.EXACTLY));
+            decor.layout(0,0,360,800);decor.getViewTreeObserver().dispatchOnPreDraw();
+            android.hardware.SensorEvent event=org.robolectric.shadows.ShadowSensorManager.createSensorEvent(3);event.sensor=sensor;event.timestamp=100_000_000L;event.values[2]=9.80665f;sensors.sendSensorEventToListeners(event);
+            event=org.robolectric.shadows.ShadowSensorManager.createSensorEvent(3);event.sensor=sensor;event.timestamp=200_000_000L;event.values[0]=-9.80665f;event.values[2]=9.80665f;sensors.sendSensorEventToListeners(event);
+            org.robolectric.shadows.ShadowLooper.shadowMainLooper().idleFor(java.time.Duration.ofSeconds(2));
+            View later=binding.view().findViewWithTag("douai.sidebar."+SidebarSettings.ENTRIES.get(20).id);
+            assertEquals(0f,later.getTranslationX(),0);
+            scroll.scrollTo(0,800);decor.getViewTreeObserver().dispatchOnPreDraw();
+            assertTrue("A newly visible row uses the settled pose without another sensor sample",later.getTranslationX()>0);
+            scroll.setAlpha(0);decor.getViewTreeObserver().dispatchOnPreDraw();assertTrue(sensors.getListeners().isEmpty());
+            scroll.setAlpha(1);decor.getViewTreeObserver().dispatchOnPreDraw();assertFalse(sensors.getListeners().isEmpty());
+            scroll.setVisibility(View.GONE);decor.getViewTreeObserver().dispatchOnPreDraw();assertTrue(sensors.getListeners().isEmpty());
+        }finally{binding.restore();activity.finish();}
+    }
     @Test public void themedViewContextsResolveTheActivityWithoutAcceptingApplicationContext() {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         try {

@@ -9,6 +9,7 @@ import android.os.Looper;
 import android.view.View;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.ConfigurationApplyAction;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 import io.github.libxposed.api.XposedInterface;
@@ -23,6 +24,7 @@ public final class RecallHighlightHook implements AutoCloseable {
     private final BehaviorHookGroup registration;
     private final SharedPreferences records;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final RetainedConfigurationAction.Owner configurationActions = new RetainedConfigurationAction.Owner();
     private volatile LocalOptions options;
     private volatile boolean closed;
 
@@ -88,8 +90,36 @@ public final class RecallHighlightHook implements AutoCloseable {
         if (!options.enabled("prevent_message_recall")) main.post(this::restoreAll);
     }
 
+    public ConfigurationApplyAction prepareOptions(LocalOptions next) {
+        return new RetainedConfigurationAction(main, () -> !closed, configurationActions) {
+            private ArrayList<View> remaining;
+            private int cursor;
+            private boolean accepted;
+            @Override void advance(Attempt attempt) {
+                if (!accepted) {
+                    attempt.check();
+                    remaining = next == null || !next.enabled("prevent_message_recall")
+                            ? new ArrayList<>(originals.keySet()) : new ArrayList<>();
+                    options = next;
+                    accepted = true;
+                }
+                while (cursor < remaining.size()) {
+                    attempt.check();
+                    View view = remaining.get(cursor);
+                    if (view != null) restore(view);
+                    remaining.set(cursor++, null);
+                }
+                attempt.success();
+            }
+            @Override void release() { remaining = null; }
+        };
+    }
+
     private void restore(View view) {
-        if (originals.containsKey(view)) view.setBackground(originals.remove(view));
+        if (originals.containsKey(view)) {
+            view.setBackground(originals.get(view));
+            originals.remove(view);
+        }
     }
 
     private void restoreAll() {
@@ -98,6 +128,7 @@ public final class RecallHighlightHook implements AutoCloseable {
 
     @Override public void close() {
         closed = true;
+        configurationActions.cancel();
         registration.close();
         main.post(this::restoreAll);
     }

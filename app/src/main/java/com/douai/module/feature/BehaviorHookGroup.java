@@ -4,7 +4,7 @@ import io.github.libxposed.api.XposedInterface;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.diagnostics.FeatureLogCatalog;
 
-import java.lang.reflect.Method;
+import java.lang.reflect.Executable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
@@ -22,12 +22,12 @@ final class BehaviorHookGroup implements AutoCloseable {
         this.log = log;
     }
 
-    synchronized void add(XposedInterface framework, Method target,
+    synchronized void add(XposedInterface framework, Executable target,
                           XposedInterface.Hooker hooker) {
         add(framework, target, XposedInterface.PRIORITY_DEFAULT, hooker);
     }
 
-    synchronized void add(XposedInterface framework, Method target, int priority,
+    synchronized void add(XposedInterface framework, Executable target, int priority,
                           XposedInterface.Hooker hooker) {
         if (closed) throw new IllegalStateException("Closed feature: " + id);
         XposedInterface.HookHandle handle = framework.hook(target)

@@ -6,6 +6,7 @@ import android.os.Looper;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.CommentAiSettings;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.ConfigurationApplyAction;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostAdaptation;
 import io.github.libxposed.api.XposedInterface;
@@ -43,7 +44,10 @@ public final class CommentAiAnalysisHook implements AutoCloseable {
     private final DouyinSearch search;
     private final Consumer<String> log;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final RetainedConfigurationAction.Owner configurationActions = new RetainedConfigurationAction.Owner();
     private final Map<Object, Conversation> conversations = new WeakHashMap<>();
+    private final ArrayDeque<ConfigurationCancellation> configurationCancellations = new ArrayDeque<>();
+    private boolean configurationPrefetchPending;
     private final AtomicLong optionsEpoch = new AtomicLong();
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 2, 30, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(4), task -> {
@@ -166,11 +170,7 @@ public final class CommentAiAnalysisHook implements AutoCloseable {
 
     public void setOptions(LocalOptions next) {
         LocalOptions previous = options;
-        boolean changed = previous == null || next == null
-                || previous.enabled(CommentAiSettings.TAKEOVER) != next.enabled(CommentAiSettings.TAKEOVER)
-                || previous.enabled(CommentAiSettings.SEARCH) != next.enabled(CommentAiSettings.SEARCH)
-                || !previous.text(AiModelSettings.KEY, "").equals(next.text(AiModelSettings.KEY, ""))
-                || !previous.text(CommentAiSettings.MODEL_ID, "").equals(next.text(CommentAiSettings.MODEL_ID, ""));
+        boolean changed = configurationChanged(previous, next);
         if (changed) optionsEpoch.incrementAndGet();
         options = next;
         if (changed) {
@@ -181,14 +181,153 @@ public final class CommentAiAnalysisHook implements AutoCloseable {
         }
     }
 
+    private static boolean configurationChanged(LocalOptions previous, LocalOptions next) {
+        return previous == null || next == null
+                || previous.enabled(CommentAiSettings.TAKEOVER) != next.enabled(CommentAiSettings.TAKEOVER)
+                || previous.enabled(CommentAiSettings.SEARCH) != next.enabled(CommentAiSettings.SEARCH)
+                || !previous.text(AiModelSettings.KEY, "").equals(next.text(AiModelSettings.KEY, ""))
+                || !previous.text(CommentAiSettings.MODEL_ID, "").equals(next.text(CommentAiSettings.MODEL_ID, ""));
+    }
+
+    public ConfigurationApplyAction prepareOptions(LocalOptions next) {
+        return new RetainedConfigurationAction(main, () -> !closed, configurationActions) {
+            private boolean accepted;
+            @Override void advance(Attempt attempt) {
+                if (!accepted) {
+                    attempt.check();
+                    if (configurationChanged(options, next)) {
+                        configurationPrefetchPending = true;
+                        synchronized (conversations) {
+                            for (Conversation owner : conversations.values()) configurationCancellations.addLast(new ConfigurationCancellation(owner, owner.round));
+                            conversations.clear();
+                        }
+                        optionsEpoch.incrementAndGet();
+                    }
+                    options = next;
+                    accepted = true;
+                }
+                drainConfigurationCancellations(attempt::check, false);
+                if (configurationPrefetchPending) {
+                    attempt.check();
+                    if (readySettings() != null && nativeSchemaReady()) cancelPrefetch();
+                    configurationPrefetchPending = false;
+                }
+                attempt.success();
+            }
+        };
+    }
+
+    private void drainConfigurationCancellations(Runnable current, boolean closing) {
+        while (!configurationCancellations.isEmpty()) {
+            ConfigurationCancellation tail = configurationCancellations.peekFirst();
+            try { resumeConfigurationCancellation(tail, current); }
+            catch (ConfigurationApplyAction.PermanentFailure failure) {
+                if (!closing) throw failure;
+                safeLog("comment_ai_configuration_cleanup_unknown; replay=false");
+            }
+            configurationCancellations.removeFirst();
+        }
+    }
+
+    private void resumeConfigurationCancellation(ConfigurationCancellation tail, Runnable current) {
+        if (tail.failure != null) throw tail.failure;
+        if (!tail.detached) {
+            configurationOnce(tail, current, () -> { tail.owner.generation.incrementAndGet(); tail.owner.round = null; });
+            tail.detached = true;
+        }
+        Session session = tail.session;
+        if (session != null) {
+            if (!tail.invalidated) {
+                configurationOnce(tail, current, () -> invalidateConfigurationSession(session));
+                tail.invalidated = true;
+            }
+            if (!tail.pagingClosed) {
+                // The handle sets its own closed guard before cleanup; a thrown tail cannot be replayed.
+                configurationOnce(tail, current, () -> { if (session.paging != null) { session.paging.close(); session.paging = null; } });
+                tail.pagingClosed = true;
+            }
+            if (!tail.suggestionsClosed) {
+                configurationOnce(tail, current, () -> { if (session.suggestions != null) { session.suggestions.close(); session.suggestions = null; } });
+                tail.suggestionsClosed = true;
+            }
+            if (!tail.finished) {
+                configurationOnce(tail, current, () -> finishConfigurationCancellation(session));
+                tail.finished = true;
+            }
+        }
+        if (!tail.historyCleared) {
+            configurationOnce(tail, current, tail.owner.client::clearHistory);
+            tail.historyCleared = true;
+        }
+    }
+
+    private void configurationOnce(ConfigurationCancellation tail, Runnable current, Runnable mutation) {
+        current.run();
+        try { mutation.run(); }
+        catch (Throwable failure) {
+            tail.failure = new ConfigurationApplyAction.PermanentFailure("Configuration cancellation has an unknown effect", failure);
+            throw tail.failure;
+        }
+    }
+
+    private static final class ConfigurationCancellation {
+        final Conversation owner;
+        final Session session;
+        boolean detached, invalidated, pagingClosed, suggestionsClosed, finished, historyCleared;
+        ConfigurationApplyAction.PermanentFailure failure;
+        ConfigurationCancellation(Conversation owner, Session session) {
+            this.owner = owner;
+            this.session = session;
+            invalidated = finished = session != null && session.cancelled;
+        }
+    }
+
+    private void invalidateConfigurationSession(Session session) {
+        synchronized (session) {
+            if (session.cancelled) return;
+            session.cancelled = true;
+        }
+        session.stream.cancel();
+        session.media.cancel();
+        session.owner.client.cancelCurrentRequest();
+        session.textFallbackClient.cancelCurrentRequest();
+        session.recommendationClient.cancelCurrentRequest();
+        session.pages.close();
+        DouyinSearch.Request searchOperation, pageOperation;
+        synchronized (session) {
+            searchOperation = session.recommendationSearch; pageOperation = session.pageSearch;
+            session.recommendationSearch = null; session.pageSearch = null;
+            session.recommendationWorks.clear(); session.pendingVideos.clear(); session.videoIds.clear();
+        }
+        if (searchOperation != null) try { searchOperation.cancel(); } catch (RuntimeException ignored) { }
+        if (pageOperation != null) try { pageOperation.cancel(); } catch (RuntimeException ignored) { }
+    }
+
+    private void finishConfigurationCancellation(Session session) {
+        Future<?> work = session.work;
+        if (work != null) work.cancel(true);
+        Future<?> pageWork = session.pageWork;
+        if (pageWork != null) pageWork.cancel(true);
+        if (!session.finished) {
+            Object manager = session.manager.get();
+            if (manager != null) try {
+                host.receive.invoke(manager, host.cancelEvent.newInstance(session.conversationId, session.rank));
+            } catch (Exception ignored) { safeLog("comment_ai_cancel_dispatch_failed"); }
+            safeLog("comment_ai_model_cancelled; notify_host=true");
+        }
+    }
+
     public boolean isActive() { return !closed && hooks.isActive(); }
 
     @Override public void close() {
         if (closed) return;
         closed = true;
+        configurationActions.cancel();
         hooks.close();
         cancelAll(true, true);
         onMain(() -> {
+            configurationPrefetchPending = false;
+            drainConfigurationCancellations(() -> { }, true);
             if (suggestionRows != null) suggestionRows.close();
             if (videoPaging != null) videoPaging.close();
         });

@@ -12,6 +12,7 @@ import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.ConfigurationApplyAction;
 import com.douai.module.scan.HostScanReport;
 import io.github.libxposed.api.XposedInterface;
 
@@ -96,6 +97,8 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     }
     private MediaLoader mediaLoader = AutomationReplyMedia::comment;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final RetainedConfigurationAction.Owner configurationActions = new RetainedConfigurationAction.Owner();
+    private ConfigurationTimers pendingConfigurationTimers;
     private final Object stateLock = new Object();
     private Task activeGeneratingTask;
     private final AtomicLong generation = new AtomicLong();
@@ -220,12 +223,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     public void setOptions(LocalOptions next) {
         boolean changed;
         synchronized (stateLock) {
-            LocalOptions before = options;
-            changed = before.enabled(LocalOptions.COMMENT_REPLY_ENABLED) != next.enabled(LocalOptions.COMMENT_REPLY_ENABLED)
-                    || before.enabled("native_auto_reply") != next.enabled("native_auto_reply")
-                    || !before.samePrefix(next, "reply_") || !before.samePrefix(next, "tts_")
-                    || !before.text("auto_message_text", "").equals(next.text("auto_message_text", ""))
-                    || !AiModelSettings.sameAutomationSelection(before, next, AutomationHistoryStore.REPLY);
+            changed = configurationChanged(options, next);
             options = next;
             if (changed) invalidate();
         }
@@ -239,6 +237,60 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 }
             } else diagnostic = "未启用";
         });
+    }
+
+    private static boolean configurationChanged(LocalOptions before, LocalOptions next) {
+        return before.enabled(LocalOptions.COMMENT_REPLY_ENABLED) != next.enabled(LocalOptions.COMMENT_REPLY_ENABLED)
+                || before.enabled("native_auto_reply") != next.enabled("native_auto_reply")
+                || !before.samePrefix(next, "reply_") || !before.samePrefix(next, "tts_")
+                || !before.text("auto_message_text", "").equals(next.text("auto_message_text", ""))
+                || !AiModelSettings.sameAutomationSelection(before, next, AutomationHistoryStore.REPLY);
+    }
+
+    public ConfigurationApplyAction prepareOptions(LocalOptions next) {
+        return new RetainedConfigurationAction(main, () -> !closed, configurationActions) {
+            private boolean accepted;
+            @Override void advance(Attempt attempt) {
+                if (!accepted) synchronized (stateLock) {
+                    attempt.check();
+                    if (configurationChanged(options, next)) pendingConfigurationTimers = new ConfigurationTimers();
+                    options = next;
+                    accepted = true;
+                }
+                ConfigurationTimers timers = pendingConfigurationTimers;
+                if (timers == null) { attempt.success(); return; }
+                if (!timers.invalidated) {
+                    once(attempt, CommentReplyHook.this::invalidate);
+                    timers.invalidated = true;
+                    attempt.later(0L);
+                    return;
+                }
+                if (!timers.callbacksRemoved) {
+                    attempt.check(); main.removeCallbacks(poll);
+                    attempt.check(); main.removeCallbacks(scanSignal);
+                    timers.callbacksRemoved = true;
+                }
+                if (enabled() && foregroundSession) {
+                    if (!timers.pollScheduled) {
+                        attempt.check();
+                        if (!main.postDelayed(poll, POLL_MILLIS)) throw new IllegalStateException("Reply poll callback rejected");
+                        timers.pollScheduled = true;
+                    }
+                    if (!timers.scanScheduled && foreground) {
+                        attempt.check(); main.removeCallbacks(scanSignal);
+                        attempt.check();
+                        if (!main.postDelayed(scanSignal, 1_000)) throw new IllegalStateException("Reply scan callback rejected");
+                        timers.scanScheduled = true;
+                    }
+                } else if (!enabled()) diagnostic = "未启用";
+                pendingConfigurationTimers = null;
+                attempt.success();
+            }
+        };
+    }
+
+    private static final class ConfigurationTimers {
+        boolean invalidated, callbacksRemoved, pollScheduled, scanScheduled;
     }
 
     private boolean enabled() {
@@ -713,6 +765,8 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     @Override public void close() {
         if (closed) return;
         closed = true;
+        configurationActions.cancel();
+        pendingConfigurationTimers = null;
         foreground = false;
         invalidate();
         main.removeCallbacksAndMessages(null);

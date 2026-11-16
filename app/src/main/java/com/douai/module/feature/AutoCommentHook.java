@@ -13,6 +13,7 @@ import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.ConfigurationApplyAction;
 import com.douai.module.config.SubmissionLedger;
 import com.douai.module.scan.HostScanReport;
 import io.github.libxposed.api.XposedInterface;
@@ -45,6 +46,9 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     private final Consumer<String> log;
     private final Supplier<MediaReadCancellation> mediaReads;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final RetainedConfigurationAction.Owner configurationActions = new RetainedConfigurationAction.Owner();
+    private boolean configurationInvalidationPending;
+    private boolean configurationSelectionPending;
     private static final long GENERATION_TIMEOUT_MILLIS = 120_000;
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
     private final ChatCompletionClient ai = new ChatCompletionClient(null,
@@ -163,6 +167,14 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     public void setOptions(LocalOptions next) {
         LocalOptions before = options;
         options = next;
+        boolean changed = configurationChanged(before, next);
+        if (!changed) return;
+        invalidateConfiguration();
+        main.post(() -> { Object selected = holder.get(); if (!closed && selected != null) selected(selected); });
+        safeLog("Automatic comment configuration changed; queue reset");
+    }
+
+    private static boolean configurationChanged(LocalOptions before, LocalOptions next) {
         boolean changed = !AiModelSettings.sameAutomationSelection(before, next, AutomationHistoryStore.COMMENT);
         for (String key : new String[]{"native_auto_comment", "comment_mode", "comment_prompt",
                 "comment_delay_seconds", "comment_daily_limit", "comment_user_cooldown_minutes",
@@ -182,7 +194,10 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 break;
             }
         }
-        if (!changed) return;
+        return changed;
+    }
+
+    private void invalidateConfiguration() {
         generation.incrementAndGet();
         GenerationAttempt active = activeGeneration;
         if (active != null) markCancelled(active.task);
@@ -190,8 +205,37 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         worker.getQueue().clear();
         queue.reset();
         dispatcher.cancelKind(AutomationHistoryStore.COMMENT);
-        main.post(() -> { Object selected = holder.get(); if (!closed && selected != null) selected(selected); });
-        safeLog("Automatic comment configuration changed; queue reset");
+    }
+
+    public ConfigurationApplyAction prepareOptions(LocalOptions next) {
+        return new RetainedConfigurationAction(main, () -> !closed, configurationActions) {
+            private boolean accepted, selectedDone;
+            @Override void advance(Attempt attempt) {
+                if (!accepted) {
+                    attempt.check();
+                    if (configurationChanged(options, next)) {
+                        configurationInvalidationPending = true;
+                        configurationSelectionPending = true;
+                    }
+                    options = next;
+                    accepted = true;
+                }
+                if (!configurationInvalidationPending && !configurationSelectionPending) { attempt.success(); return; }
+                if (configurationInvalidationPending) {
+                    once(attempt, AutoCommentHook.this::invalidateConfiguration);
+                    configurationInvalidationPending = false;
+                    attempt.later(0L);
+                    return;
+                }
+                if (configurationSelectionPending && !selectedDone) {
+                    once(attempt, () -> { Object selected = holder.get(); if (selected != null) selected(selected); });
+                    selectedDone = true;
+                    configurationSelectionPending = false;
+                }
+                safeLog("Automatic comment configuration changed; queue reset");
+                attempt.success();
+            }
+        };
     }
 
     private boolean enabled() { return !closed && options.enabled("native_auto_comment"); }
@@ -708,6 +752,9 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     @Override public void close() {
         if (closed) return;
         closed = true;
+        configurationActions.cancel();
+        configurationInvalidationPending = false;
+        configurationSelectionPending = false;
         try { followListUpdates.close(); } catch (Exception ignored) { }
         generation.incrementAndGet();
         GenerationAttempt active = activeGeneration;

@@ -84,21 +84,31 @@ public final class NativeFollowLists implements AutoCloseable {
                                           Consumer<String> log) {
         NativeFollowLists service = new NativeFollowLists(() -> readAccount(loader),
                 new NativeFetcher(loader, report), log);
-        NativeFollowLists previous = active;
-        if (previous != null) previous.close();
-        active = service;
-        service.syncAccount(service.accounts.current());
-        try { service.userProfiles = NativeUserProfiles.install(new NativeUserProfileSource(loader, report)); }
-        catch (Throwable unavailable) {
-            service.log.accept("Native user profiles unavailable: " + unavailable.getClass().getSimpleName());
+        try {
+            NativeFollowLists previous = active;
+            if (previous != null) previous.close();
+            active = service;
+            service.syncAccount(service.accounts.current());
+            try { service.userProfiles = NativeUserProfiles.install(new NativeUserProfileSource(loader, report)); }
+            catch (Throwable unavailable) {
+                service.log.accept("Native user profiles unavailable: " + unavailable.getClass().getSimpleName());
+            }
+            try { service.userSearch = NativeUserSearch.install(new NativeUserSearchSource(loader, report)); }
+            catch (Throwable unavailable) {
+                service.log.accept("Native user search unavailable: " + unavailable.getClass().getSimpleName());
+            }
+            service.setOptions(options);
+            service.start();
+            return service;
+        } catch (Throwable failure) {
+            try { service.close(); }
+            catch (Throwable cleanupFailure) {
+                if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
+            } finally {
+                if (active == service) { active = null; FollowListSnapshot.activateAccount(""); }
+            }
+            throw failure;
         }
-        try { service.userSearch = NativeUserSearch.install(new NativeUserSearchSource(loader, report)); }
-        catch (Throwable unavailable) {
-            service.log.accept("Native user search unavailable: " + unavailable.getClass().getSimpleName());
-        }
-        service.setOptions(options);
-        service.start();
-        return service;
     }
 
     synchronized void start() {

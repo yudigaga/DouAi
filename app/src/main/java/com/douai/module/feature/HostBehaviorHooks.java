@@ -9,6 +9,7 @@ import android.view.View;
 import android.view.ViewTreeObserver;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.ConfigurationApplyAction;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
@@ -37,7 +38,9 @@ public final class HostBehaviorHooks implements AutoCloseable {
     private final Map<View, HiddenView> hidden = new WeakHashMap<>();
     private final Map<View, String> observed = new WeakHashMap<>();
     private final Map<String, Map<View, Boolean>> observedByKey = new LinkedHashMap<>();
+    private final java.util.Set<String> pendingObservedKeys = new java.util.LinkedHashSet<>();
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final RetainedConfigurationAction.Owner configurationActions = new RetainedConfigurationAction.Owner();
     private final Consumer<String> log;
     private final AtomicLong hiddenCurrentHits = new AtomicLong();
     private final AtomicLong hiddenCurrentBlocked = new AtomicLong();
@@ -49,6 +52,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
     private volatile boolean hiddenSkipReady;
     private volatile LocalOptions options;
     private FeedVideoFraming videoFraming;
+    private VideoPageEntryHook videoPageEntry;
     private volatile boolean closed;
 
     private HostBehaviorHooks(LocalOptions options, Consumer<String> log) {
@@ -113,6 +117,14 @@ public final class HostBehaviorHooks implements AutoCloseable {
                 hooks.log.accept("41 video framing unavailable: " + unavailable.getClass().getSimpleName());
             }
         }
+        if (com.douai.module.scan.HostAdaptation.currentProfile() == com.douai.module.scan.HostAdaptation.PROFILE_410) {
+            try {
+                hooks.videoPageEntry = VideoPageEntryHook.install(framework, report, loader,
+                        options != null && options.enabled("hide_video_black_edges"), hooks.log);
+            } catch (Exception | LinkageError unavailable) {
+                hooks.log.accept("41 entry cover unavailable: " + unavailable.getClass().getSimpleName());
+            }
+        }
         hooks.installPublishButton(framework, report, loader);
         return hooks;
     }
@@ -141,6 +153,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
         LocalOptions previous = this.options;
         this.options = options;
         if (videoFraming != null) videoFraming.setEnabled(options != null && options.enabled("hide_video_black_edges"));
+        if (videoPageEntry != null) videoPageEntry.setEnabled(options != null && options.enabled("hide_video_black_edges"));
         java.util.Set<String> changedKeys = new java.util.LinkedHashSet<>();
         for (String key : new String[]{"hide_video_black_edges", "hide_camera_plus"}) {
             if (previous == null || options == null || previous.enabled(key) != options.enabled(key)) {
@@ -152,6 +165,72 @@ public final class HostBehaviorHooks implements AutoCloseable {
         if (changedKeys.isEmpty()) return;
         long generation = observedRefreshGeneration.incrementAndGet();
         onMain(() -> refreshObservedViews(generation, changedKeys));
+    }
+
+    public ConfigurationApplyAction prepareOptions(LocalOptions next) {
+        return new RetainedConfigurationAction(main, () -> !closed, configurationActions) {
+            // Startup gates must be accepted before Instrumentation proceeds into Application.onCreate.
+            @Override boolean inlineOnMainThread() { return true; }
+            private final ArrayList<String> keys = new ArrayList<>();
+            private final java.util.Set<View> done = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            private boolean accepted, framingDone, entryDone;
+            private long generation;
+            private int keyCursor;
+            private Iterator<Map.Entry<View, Boolean>> iterator;
+            private View pending;
+            @Override void advance(Attempt attempt) {
+                if (!accepted) {
+                    attempt.check();
+                    LocalOptions before = options;
+                    for (String key : new String[]{"hide_video_black_edges", "hide_camera_plus"})
+                        if (before == null || next == null || before.enabled(key) != next.enabled(key)) pendingObservedKeys.add(key);
+                    // Accepted options can outlive a cancelled frame tail; its successor still owns these keys.
+                    keys.addAll(pendingObservedKeys);
+                    options = next;
+                    generation = keys.isEmpty() ? observedRefreshGeneration.get() : observedRefreshGeneration.incrementAndGet();
+                    accepted = true;
+                }
+                if (!framingDone) {
+                    once(attempt, () -> { if (videoFraming != null) videoFraming.setEnabled(next != null && next.enabled("hide_video_black_edges")); });
+                    framingDone = true;
+                }
+                if (!entryDone) {
+                    once(attempt, () -> { if (videoPageEntry != null) videoPageEntry.setEnabled(next != null && next.enabled("hide_video_black_edges")); });
+                    entryDone = true;
+                }
+                long started = android.os.SystemClock.uptimeMillis();
+                int count = 0;
+                while (keyCursor < keys.size()) {
+                    attempt.check();
+                    if (generation != observedRefreshGeneration.get()) throw new java.util.concurrent.CancellationException();
+                    String key = keys.get(keyCursor);
+                    try {
+                        if (iterator == null) {
+                            Map<View, Boolean> views = observedByKey.get(key);
+                            iterator = views == null ? java.util.Collections.emptyIterator() : views.entrySet().iterator();
+                        }
+                        if (pending == null) {
+                            if (!iterator.hasNext()) {
+                                pendingObservedKeys.remove(key);
+                                keyCursor++; iterator = null; done.clear(); continue;
+                            }
+                            pending = iterator.next().getKey();
+                        }
+                        if (!done.contains(pending)) {
+                            attempt.check();
+                            updateView(pending, key);
+                            done.add(pending);
+                        }
+                        pending = null;
+                        count++;
+                        if (count >= MAX_VIEW_UPDATES_PER_FRAME || android.os.SystemClock.uptimeMillis() - started
+                                >= MAX_VIEW_UPDATE_NANOS_PER_FRAME / 1_000_000L) { attempt.later(16L); return; }
+                    } catch (ConcurrentModificationException changed) { iterator = null; attempt.later(16L); return; }
+                }
+                attempt.success();
+            }
+            @Override void release() { keys.clear(); done.clear(); iterator = null; pending = null; }
+        };
     }
 
     private void refreshObservedViews(long generation, java.util.Set<String> changedKeys) {
@@ -441,8 +520,8 @@ public final class HostBehaviorHooks implements AutoCloseable {
         HiddenView state = hidden.get(view);
         if (!enabled(key)) {
             if (state != null) {
-                hidden.remove(view);
                 state.restore();
+                hidden.remove(view);
             }
             return;
         }
@@ -473,7 +552,9 @@ public final class HostBehaviorHooks implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        configurationActions.cancel();
         if (videoFraming != null) videoFraming.close();
+        if (videoPageEntry != null) videoPageEntry.close();
         hiddenSkipReady = false;
         for (BehaviorHookGroup group : groups.values()) group.close();
         onMain(() -> {
@@ -481,6 +562,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
             hidden.clear();
             observed.clear();
             observedByKey.clear();
+            pendingObservedKeys.clear();
         });
     }
 

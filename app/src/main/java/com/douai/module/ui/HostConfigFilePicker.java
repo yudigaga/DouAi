@@ -14,13 +14,14 @@ import java.util.WeakHashMap;
 import java.util.function.Consumer;
 
 /** Host-owned SAF document selection using the general contract retained by the host. */
-final class HostConfigFilePicker implements AutoCloseable {
+public final class HostConfigFilePicker implements AutoCloseable {
     private static final Map<Activity, HostConfigFilePicker> PENDING = new WeakHashMap<>();
     private final Activity activity;
     private Object launcher;
     private Class<?> launcherType;
     private boolean closed;
     private boolean resultReceived;
+    private Consumer<Uri> abandonedCleanup;
     private final DouAiLog.Operation trace = DouAiLog.begin("media_picker", "HostConfigFilePicker");
 
     private HostConfigFilePicker(Activity activity) { this.activity = activity; }
@@ -42,7 +43,7 @@ final class HostConfigFilePicker implements AutoCloseable {
         return launch(activity, intent, selected, loader);
     }
 
-    static HostConfigFilePicker launch(Activity activity, Intent intent, Consumer<Uri> selected) {
+    public static HostConfigFilePicker launch(Activity activity, Intent intent, Consumer<Uri> selected) {
         return launch(activity, intent, selected, activity == null ? null : activity.getClass().getClassLoader());
     }
 
@@ -88,7 +89,7 @@ final class HostConfigFilePicker implements AutoCloseable {
                 // No persistent grant is needed: the operation consumes this document immediately.
                 if (!parseFailed) picker.trace.finish(uri != null && "content".equalsIgnoreCase(uri.getScheme()) ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.CANCELLED,
                         "selection_result", "content_uri=" + (uri != null && "content".equalsIgnoreCase(uri.getScheme())) + ";document_io_verified=false");
-                picker.trace.wrapConsumer(selected).accept(uri != null && "content".equalsIgnoreCase(uri.getScheme()) ? uri : null);
+                picker.trace.wrapConsumer(picker.abandonedCleanup==null?selected:picker.abandonedCleanup).accept(uri != null && "content".equalsIgnoreCase(uri.getScheme()) ? uri : null);
                 return null;
             });
             picker.launcher = registryType.getMethod("register", String.class, contract, callback)
@@ -105,6 +106,13 @@ final class HostConfigFilePicker implements AutoCloseable {
     }
 
     static boolean isPending(Activity activity) { return PENDING.containsKey(activity); }
+
+    public void abandon(Consumer<Uri> cleanup) {
+        if(closed)return;
+        abandonedCleanup=java.util.Objects.requireNonNull(cleanup);
+        if(PENDING.get(activity)==this)PENDING.remove(activity);
+        trace.stage("selection_abandoned","late_uri_cleanup_only=true");
+    }
 
     @Override public void close() {
         if (closed) return;

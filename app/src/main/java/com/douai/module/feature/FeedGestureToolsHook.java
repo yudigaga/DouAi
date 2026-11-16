@@ -60,15 +60,21 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private static WeakReference<FeedGestureToolsHook> currentTools = new WeakReference<>(null);
     public static final String[] ACTION_IDS = { "none", "menu", "copy_text", "save_media",
             "open_comments", "toggle_components", "speed", "view_finder", "seek_back_10", "seek_forward_10",
-            "bookmark_add", "reading_search", "comment_search", "bookmark_list", "like" };
+            "bookmark_add", "reading_search", "comment_search", "bookmark_list", "like", "loop_a", "loop_b", "loop_cancel", "resume_settings", "stop_budget", "author_speed", "author_speed_rules",
+            "comment_bookmarks", "subtitle_export", "subtitle_ask", "filter_author_temp", "filter_music_temp", "temporary_feed_rules" };
     public static final String[] ACTION_LABELS = { "无", "快捷菜单", "复制文案", "保存媒体",
             "打开评论", "隐藏/显示组件", "倍速", "视图查找", "后退 10 秒", "快进 10 秒",
-            "记下这一刻", "搜章节和字幕", "查找评论", "我的书签", "点赞" };
+            "记下这一刻", "搜章节和字幕", "查找评论", "我的书签", "点赞", "设置循环 A", "设置循环 B", "取消 A-B", "断点续播", "观看暂停", "设置作者倍速", "作者倍速规则",
+            "评论收藏", "导出字幕", "用字幕提问", "临时过滤作者", "临时过滤配乐", "临时过滤规则" };
     private static final String[] QUICK_MENU_ACTIONS = { "copy_text", "save_media", "open_comments",
             "toggle_components", "speed", "view_finder", "select_model", "module_settings", "quick_features",
-            "bookmark_add", "bookmark_list", "reading_search", "comment_search" };
+            "bookmark_add", "bookmark_list", "reading_search", "comment_search", "loop_a", "loop_b", "loop_cancel",
+            "resume_settings", "stop_budget", "comment_bookmarks", "subtitle_export", "subtitle_ask",
+            "filter_author_temp", "filter_music_temp", "temporary_feed_rules", "author_speed", "author_speed_rules" };
     private static final String[] QUICK_MENU_LABELS = { "复制文案", "保存媒体", "打开评论",
-            "隐藏/显示组件", "倍速", "视图查找", "切换模型", "模块设置", "功能快捷", "记下这一刻", "我的书签", "搜章节和字幕", "查找评论" };
+            "隐藏/显示组件", "倍速", "视图查找", "切换模型", "模块设置", "功能快捷", "记下这一刻", "我的书签", "搜章节和字幕", "查找评论",
+            "设置循环 A", "设置循环 B", "取消 A-B", "断点续播", "观看暂停", "评论收藏", "导出字幕", "用字幕提问",
+            "临时过滤作者", "临时过滤配乐", "临时过滤规则", "设置作者倍速", "作者倍速规则" };
     public static final String[] REGION_IDS = { "top_left", "top_center", "top_right",
             "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right" };
     public static final String[] REGION_LABELS = { "左上", "上中", "右上", "左中", "中央", "右中",
@@ -91,6 +97,12 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private final Class<?> touchType;
     private Method playerAccessor;
     private PlaybackPositionAccess positions;
+    private PlaybackExpansionRuntime expansion;
+    private final java.util.Set<Method> explicitSeekMethods=new java.util.HashSet<>();
+    private final ThreadLocal<Boolean> internalPositionSeek=ThreadLocal.withInitial(()->false);
+    private volatile long expansionEpoch;
+    private Runnable playbackStopListener=()->{};
+    public void setPlaybackStopListener(Runnable listener){playbackStopListener=listener==null?()->{}:listener;}
     private final PlaybackBookmarks.Navigator bookmarkNavigation = this::openBookmark;
     private final BookmarkJump bookmarkJump = new BookmarkJump();
     private long jumpToken;
@@ -136,6 +148,13 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private float originalSpeed;
     private float appliedSpeed;
     private boolean manualSpeedEnabled;
+    private boolean explicitManualSpeed;
+    private boolean speedTargetInvalidated;
+    private WeakReference<Object> retiredAutomaticPlayer=new WeakReference<>(null);
+    private float retiredAutomaticBaseline;
+    private float retiredAutomaticTarget;
+    private String speedAccount="";
+    private final Runnable authorSpeedWatch=new Runnable(){public void run(){if(closed)return;if(authorSpeedEnabled()&&!explicitManualSpeed)applyPersistentSpeed();main.postDelayed(this,500);}};
     private GestureSpeedOverride speedOverride;
     private boolean exclusiveSpeedSession;
     private WeakReference<Object> manualSpeedHolder = new WeakReference<>(null);
@@ -212,6 +231,9 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             Class<?> touch = HostTargets.type(report, "adv_gesture_touch_layout", loader);
             hook = new FeedGestureToolsHook((Application) app, options, sink, aweme, root, params, panel, touch);
             hook.framework = framework;
+            AuthorSpeedRules.initialize(app);
+            AuthorSpeedRules.listen(hook::authorRulesChanged);
+            hook.main.postDelayed(hook.authorSpeedWatch,500);
             FeedGestureToolsHook installed = hook;
             BehaviorHookGroup lifecycle = hook.newGroup("toolbar_enabled");
             for (Method target : new Method[] { selected, resume }) {
@@ -244,6 +266,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             if (PlaybackBookmarks.enabled()) {
                 try { hook.positions = new PlaybackPositionAccess(report, loader); }
                 catch (Exception | LinkageError failure) { hook.safeLog("Playback position unavailable: " + failure.getClass().getSimpleName()); }
+                hook.installPlaybackExpansion(framework, report, loader);
                 PlaybackBookmarks.attach(hook.bookmarkNavigation);
                 currentTools = new WeakReference<>(hook);
             }
@@ -258,6 +281,81 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             if (failure instanceof Exception) throw (Exception) failure;
             throw failure;
         }
+    }
+
+    public boolean onVerifiedCompletion(String aid,long epoch) {
+        return expansion!=null && expansion.completion(aid,epoch);
+    }
+    public boolean blocksAutomaticPlayback(String aid) {
+        return expansion!=null && expansion.blocks(aid);
+    }
+    private void installPlaybackExpansion(XposedInterface framework,HostScanReport report,ClassLoader loader) {
+        if(!PlaybackBookmarks.enabled()||positions==null)return;
+        BehaviorHookGroup group=newGroup("playback_expansion");
+        try {
+            Method completed=HostTargets.method(report,"auto_slide_completed",loader);
+            Method progress=completed.getDeclaringClass().getDeclaredMethod("onPlayProgressChange",String.class,long.class,long.class);
+            expansion=new PlaybackExpansionRuntime(new PlaybackExpansionRuntime.Host(){
+                public PlaybackPositionAccess.Snapshot snapshot(){return playbackSnapshot(selectedHolder.get(),activeRoot());}
+                public Activity owner(){return activeOwner(activeRoot());}
+                public void stopped(){playbackStopListener.run();}
+                public String mode(){String value=options==null?"off":options.text("resume_playback_mode","off");return "prompt".equals(value)||"auto".equals(value)?value:"off";}
+                public boolean explicitlyPaused(PlaybackPositionAccess.Snapshot s){return !Boolean.FALSE.equals(pausedState.apply(s.aid));}
+                public boolean paused(PlaybackPositionAccess.Snapshot s){
+                    try{return isPlaying==null||!Boolean.TRUE.equals(isPlaying.invoke(s.player))||Boolean.TRUE.equals(pausedState.apply(s.aid));}
+                    catch(Exception failure){return true;}
+                }
+                public boolean seek(PlaybackPositionAccess.Snapshot s,long ms){return seekAutomatic(selectedHolder.get(),activeRoot(),s,ms);}
+                public void pause(PlaybackPositionAccess.Snapshot s){
+                    PlaybackPositionAccess.Snapshot current=snapshot();
+                    if(current!=null&&current.player==s.player&&current.aid.equals(s.aid)&&managerPause!=null)
+                        try{managerPause.invoke(current.player);}catch(Exception failure){notice("暂停命令未成功");}
+                }
+                public void notice(String text){Activity owner=owner();if(owner!=null)toast(owner,text);}
+                public void mode(String mode){HostSettingsStore store=new HostSettingsStore(application);store.putString("resume_playback_mode",mode);
+                    options=new LocalOptions(store.snapshot());
+                }
+            },new java.io.File(application.getNoBackupFilesDir(),"douai-resume-progress"));
+            group.add(framework,progress,chain->{
+                long token=expansionEpoch;String id=(String)chain.getArg(0);Object dispatcher=chain.getThisObject();Object result=chain.proceed();
+                onMain(()->{if(expansion==null||closed||token!=expansionEpoch)return;
+                    try{Object panel=panel(selectedHolder.get());
+                        if(id!=null&&id.equals(lastSelectedAid)&&HostTargets.read(HostTargets.read(panel,"V"),"m")==dispatcher)expansion.progress();
+                    }catch(Exception ignored){}
+                });return result;
+            });
+            Method playing=HostTargets.method(report,"component_player_playing",loader);
+            Method pause=HostTargets.method(report,"component_player_pause",loader);
+            for(Method event:new Method[]{playing,pause}) {
+                boolean isPause=event==pause;
+                group.add(framework,event,chain->{
+                    long token=expansionEpoch,stopToken=expansion==null?-1:expansion.stopGeneration();
+                    String id=(String)chain.getArg(0);Object dispatcher=chain.getThisObject();Object result=chain.proceed();
+                    onMain(()->{try{if(expansion!=null&&token==expansionEpoch&&id!=null&&id.equals(lastSelectedAid)
+                        &&HostTargets.read(HostTargets.read(panel(selectedHolder.get()),"V"),"m")==dispatcher){
+                        if(isPause)expansion.paused(stopToken);else expansion.playing(stopToken);
+                    }}catch(Exception ignored){}});return result;
+                });
+            }
+        }catch(Exception|LinkageError failure){group.fail(failure);if(expansion!=null){expansion.close();expansion=null;}}
+    }
+
+    private void ensureExplicitSeekObserver(Object observedPlayer,Method contract) {
+        if(observedPlayer==null||contract==null)return;
+        Method target=concreteImplementation(observedPlayer.getClass(),contract);
+        if(target==null||!explicitSeekMethods.add(target))return;
+        BehaviorHookGroup group=groups.get("playback_explicit_seek");
+        if(group==null)group=newGroup("playback_explicit_seek");
+        try {
+            group.add(framework,target,chain->{
+                if(!internalPositionSeek.get()){Object player=chain.getThisObject();Object value=chain.getArg(0);long token=expansionEpoch;String uid=PlaybackBookmarks.account();
+                    onMain(()->{PlaybackPositionAccess.Snapshot s=playbackSnapshot(selectedHolder.get(),activeRoot());
+                        if(expansion!=null&&token==expansionEpoch&&java.util.Objects.equals(uid,PlaybackBookmarks.account())&&s!=null&&s.player==player&&value instanceof Number)
+                            expansion.explicit(s.aid,(long)(((Number)value).doubleValue()*s.duration/100));
+                    });}
+                return chain.proceed();
+            });
+        }catch(Exception failure){group.fail(failure);}
     }
 
     public void setComponentVisibility(Consumer<Boolean> setter,
@@ -352,6 +450,9 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             if (closed || owner == null || owner != resumed.get() || owner.isFinishing() || owner.isDestroyed()) return;
             if (!PlaybackBookmarks.enabled()) { toast(owner, "当前抖音版本暂不支持此动作"); return; }
             if ("bookmark_list".equals(action)) { PlaybackBookmarks.show(owner); return; }
+            if ("comment_bookmarks".equals(action)) { CommentBookmarks.show(owner); return; }
+            if ("temporary_feed_rules".equals(action)) { TemporaryFeedRules.show(owner); return; }
+            if ("author_speed_rules".equals(action)) { AuthorSpeedRules.show(owner); return; }
             View root = activeRoot(); Object holder = selectedHolder.get();
             if (root == null || holder == null || activity(root.getContext()) != owner) {
                 toast(owner, "请先打开要操作的作品"); return;
@@ -365,22 +466,18 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         return group != null && group.isActive();
     }
 
+    public void configurationReplaced(){onMain(()->{cancelJump();if(expansion!=null)expansion.configurationReplaced();PlaybackReadingDialog.dismiss();playbackStopListener.run();});}
+
     public void setOptions(LocalOptions options) {
         if (closed) return;
+        boolean reconcileAuthorSpeed=authorSpeedEnabled() || (options!=null && options.enabled("author_speed_enabled"));
         this.options = options;
+        if(expansion!=null)onMain(expansion::optionsChanged);
         safeLog("Feed gesture configuration changed: " + configuredRegions());
         onMain(() -> {
             dismissDialog(); refreshToolbar();
-            syncModuleOnlySpeedMode();
-            if (speedOverride != null) {
-                try {
-                    float desired = manualSpeedEnabled ? PlaybackBehaviorHooks.playbackSpeed(options) : 1f;
-                    speedOverride.apply(desired, () -> { });
-                } catch (ReflectiveOperationException | RuntimeException failure) {
-                    safeLog("Could not update persistent speed: " + failure.getClass().getSimpleName());
-                }
-                applyPersistentSpeed();
-            }
+            if(reconcileAuthorSpeed && !explicitManualSpeed) speedTargetInvalidated=true;
+            applyPersistentSpeed();
         });
     }
 
@@ -457,8 +554,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     }
     private String assignedAction(String prefix,int region) {
         String action=regionAction(options,prefix,region);
-        if (("bookmark_add".equals(action)||"reading_search".equals(action)||"comment_search".equals(action)
-                ||"bookmark_list".equals(action)||"like".equals(action)) && !PlaybackBookmarks.enabled()) return "none";
+        if ((com.douai.module.config.SidebarSettings.isFeedAction(action)||"like".equals(action))
+                && !PlaybackBookmarks.enabled()) return "none";
         if (("seek_back_10".equals(action)||"seek_forward_10".equals(action))
                 && (!PlaybackBookmarks.enabled()||positions==null)) return "none";
         return action;
@@ -1081,6 +1178,13 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         return params == null ? null : feedContext.get(params);
     }
 
+    private boolean stableReadingWork(String account,Object holder,View root,String aid){
+        if(closed||!PlaybackBookmarkStore.id(account)||!account.equals(PlaybackBookmarks.account())||holder==null||root==null||aid==null)return false;
+        try{Object panel=panel(holder);return rootField.get(holder)==root&&panel!=null&&speedHolderAccessor!=null
+                &&speedHolderAccessor.invoke(panel)==holder&&aid.equals(readAid(awemeAccessor.invoke(holder)));}
+        catch(ReflectiveOperationException|RuntimeException failure){return false;}
+    }
+
     private boolean sameWork(Object holder,View root,String aid) {
         return !closed && aid!=null && holder==selectedHolder.get() && root!=null && root==activeRoot() && aid.equals(currentAid());
     }
@@ -1099,13 +1203,20 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         if (positions==null || holder==null || root==null || root!=activeRoot() || holder!=selectedHolder.get()) return null;
         try {
             Object work=awemeAccessor.invoke(holder);
-            return positions.snapshot(panel(holder),holder,work,readAid(work));
+            PlaybackPositionAccess.Snapshot snapshot=positions.snapshot(panel(holder),holder,work,readAid(work));
+            if(snapshot!=null)ensureExplicitSeekObserver(snapshot.player,positions.seek);
+            return snapshot;
         } catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable) { return null; }
     }
     private boolean seekCaptured(Object holder,View root,PlaybackPositionAccess.Snapshot expected,long millis) {
+        if (expansion!=null && expected!=null) expansion.explicit(expected.aid,millis);
+        return seekAutomatic(holder,root,expected,millis);
+    }
+    private boolean seekAutomatic(Object holder,View root,PlaybackPositionAccess.Snapshot expected,long millis) {
         if (expected==null || positions==null) return false;
-        try { return PlaybackPositionAccess.seek(expected,playbackSnapshot(holder,root),millis,positions.seek); }
+        try { internalPositionSeek.set(true); return PlaybackPositionAccess.seek(expected,playbackSnapshot(holder,root),millis,positions.seek); }
         catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable) { return false; }
+        finally { internalPositionSeek.remove(); }
     }
     private static boolean isDetail(Activity owner) {
         for(Class<?> type=owner==null?null:owner.getClass();type!=null;type=type.getSuperclass())
@@ -1115,6 +1226,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private boolean openBookmark(Activity owner,String account,PlaybackBookmarkStore.Entry entry) {
         if (closed || positions==null || !PlaybackBookmarks.enabled() || !account.equals(PlaybackBookmarks.account()))return false;
         cancelJump();
+        if(expansion!=null)expansion.explicit(entry.aid,entry.millis);
         Object holder=selectedHolder.get();
         View root=activeRoot();
         boolean here=isDetail(owner) && resumed.get()==owner && root!=null && entry.aid.equals(currentAid());
@@ -1192,19 +1304,25 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                 if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
                 String selectedAid = readAid(awemeAccessor.invoke(holder));
                 if (!java.util.Objects.equals(selectedAid,lastSelectedAid) || activity!=lastSelectedOwner.get()) {
+                    expansionEpoch++;
                     clearSidebarPause();
                     commentSelectionEpoch++; lastSelectedAid=selectedAid; lastSelectedOwner=new WeakReference<>(activity);
                 }
                 pausedHolder.clear();
                 recoverForeground(root, activity);
                 if (selectedHolder.get() == holder && selectedRoot.get() == root) {
+                    if(expansion!=null){playbackSnapshot(holder,root);expansion.enter(selectedAid,holder,activity);}
+                    updateCommentAuthor(holder,selectedAid);
                     applyPersistentSpeed();
                     return;
                 }
                 dismissDialog();
-                if (selectedHolder.get() != holder) detachSpeedTarget();
+                if (selectedHolder.get() != holder) cancelSpeedReadback();
                 selectedHolder = new WeakReference<>(holder);
                 selectedRoot = new WeakReference<>(root);
+                expansionEpoch++;
+                if(expansion!=null){playbackSnapshot(holder,root);expansion.enter(selectedAid,holder,activity);}
+                updateCommentAuthor(holder,selectedAid);
                 safeLog("Feed gesture holder selected: foreground=" + (resumed.get() == activity)
                         + ", attached=" + root.isAttachedToWindow()
                         + ", touchMatches=" + touchCount(root));
@@ -1224,6 +1342,14 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         });
     }
 
+    private void updateCommentAuthor(Object holder,String aid) {
+        try {Object panel=panel(holder);Object work=awemeAccessor.invoke(holder);
+            if(positions!=null&&positions.holder.invoke(panel)==holder&&aid!=null&&aid.equals(readAid(work))) {
+                Object author=HostTargets.invoke(work,"getAuthorUid");
+                LoadedCommentSearchHook.setWorkAuthor(PlaybackBookmarks.account(),aid,author instanceof String?(String)author:"");
+            }
+        }catch(Exception ignored){LoadedCommentSearchHook.setWorkAuthor("","","");}
+    }
     private View activeRoot() {
         View root = selectedRoot.get();
         if (root != null) recoverForeground(root, activity(root.getContext()));
@@ -1302,6 +1428,9 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                     case "select_model": showModelPicker(root); break;
                     case "module_settings": openModuleSettings(root); break;
                     case "quick_features": showQuickFeatures(root); break;
+                    case "loop_a": case "loop_b": case "loop_cancel": case "resume_settings": case "stop_budget":
+                        if(expansion!=null)expansion.action(action);
+                        break;
                     case "seek_back_10": case "seek_forward_10":
                         if (PlaybackBookmarks.enabled()) {
                             PlaybackPositionAccess.Snapshot at = playbackSnapshot(holder,root);
@@ -1320,11 +1449,32 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                     case "bookmark_list":
                         if (PlaybackBookmarks.enabled()) PlaybackBookmarks.show(activeOwner(root));
                         break;
-                    case "reading_search":
+                    case "comment_bookmarks": CommentBookmarks.show(activeOwner(root));break;
+                    case "temporary_feed_rules": TemporaryFeedRules.show(activeOwner(root));break;
+                    case "filter_author_temp": case "filter_music_temp": {
+                        String id=readAid(aweme), account=PlaybackBookmarks.account();
+                        TemporaryFeedRules.add(activeOwner(root),aweme,"filter_music_temp".equals(action),
+                                ()->account.equals(PlaybackBookmarks.account())&&sameWork(holder,root,id));
+                        break;
+                    }
+                    case "author_speed":
+                        new MiuixDialogBuilder(root.getContext(),true).setTitle("作者独立倍速").setItems(new String[]{"设置此作者规则","取消手动锁速，恢复自动规则"},(d,n)->{
+                            if(!sameWork(holder,root,readAid(aweme)))return;
+                            if(n==0)AuthorSpeedRules.add(activeOwner(root),aweme,()->sameWork(holder,root,readAid(aweme)));
+                            else {explicitManualSpeed=false;manualSpeedEnabled=false;speedTargetInvalidated=true;applyPersistentSpeed();}
+                        }).setNegativeButton("取消",null).show();break;
+                    case "author_speed_rules": AuthorSpeedRules.show(activeOwner(root));break;
+                    case "reading_search": case "subtitle_export": case "subtitle_ask":
                         if (PlaybackBookmarks.enabled()) {
                             String id=readAid(aweme);
-                            PlaybackReadingDialog.show(activeOwner(root),aweme,()->sameWork(holder,root,id),
-                                    ms->sameWork(holder,root,id)&&seekCaptured(holder,root,playbackSnapshot(holder,root),ms));
+                            final PlaybackPositionAccess.Snapshot at=playbackSnapshot(holder,root);
+                            final String readAccount=PlaybackBookmarks.account();
+                            java.util.function.BooleanSupplier foreground=()->sameWork(holder,root,id);
+                            java.util.function.BooleanSupplier stable=()->stableReadingWork(readAccount,holder,root,id);
+                            java.util.function.LongPredicate seek=ms->java.util.Objects.equals(readAccount,PlaybackBookmarks.account())&&sameWork(holder,root,id)&&seekCaptured(holder,root,at,ms);
+                            if("subtitle_export".equals(action))PlaybackReadingDialog.showExport(activeOwner(root),aweme,foreground,stable,seek);
+                            else if("subtitle_ask".equals(action))PlaybackReadingDialog.showAsk(activeOwner(root),aweme,foreground,stable,seek);
+                            else PlaybackReadingDialog.show(activeOwner(root),aweme,foreground,stable,seek);
                         }
                         break;
                     default: break;
@@ -1682,9 +1832,13 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         submitPersistentSpeed(root, holder, player, aid, currentSpeed, requested, operation, true);
     }
 
+    private void authorRulesChanged(){if(closed)return;if(!explicitManualSpeed&&authorSpeedEnabled())speedTargetInvalidated=true;applyPersistentSpeed();}
+
+    private boolean authorSpeedEnabled(){return options!=null&&options.enabled("author_speed_enabled")&&HostAdaptation.currentProfile()==HostAdaptation.PROFILE_410;}
+
     private void applyPersistentSpeed() {
         syncModuleOnlySpeedMode();
-        if (closed || submittingSpeed || speedOverride == null || playerAccessor == null || speedReader == null || setSpeed == null) return;
+        if (closed || submittingSpeed || (!authorSpeedEnabled() && speedOverride == null) || playerAccessor == null || speedReader == null || setSpeed == null) return;
         Object holder = selectedHolder.get();
         View root = activeRoot();
         if (holder == null || root == null) return;
@@ -1694,8 +1848,37 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             Object player = playerAccessor.invoke(currentPanel);
             if (player == null || !setSpeed.getDeclaringClass().isInstance(player)) return;
             String aid = readAid(awemeAccessor.invoke(holder));
-            float requested = manualSpeedEnabled ? PlaybackBehaviorHooks.playbackSpeed(options) : 1f;
+            String account=PlaybackBookmarks.account();
+            Object author=HostTargets.invoke(awemeAccessor.invoke(holder),"getAuthorUid");
+            Float authorTarget=authorSpeedEnabled()?AuthorSpeedRules.findSpeed(account,author instanceof String?(String)author:""):null;
+            Float target=AuthorSpeedRuleStore.choose(explicitManualSpeed?(manualSpeedEnabled?PlaybackBehaviorHooks.playbackSpeed(options):1f):null,
+                    authorTarget,options!=null&&options.enabled("auto_speed")?PlaybackBehaviorHooks.playbackSpeed(options):null,
+                    options!=null&&options.moduleOnlySpeedControl());
+            if(target==null){if(!explicitManualSpeed&&speedOverride!=null)restoreOwnedSpeed();return;}
+            float requested=target;
+            boolean same=sameManualTarget(holder,aid,player)&&java.util.Objects.equals(speedAccount,account)&&sameSpeed(appliedSpeed,requested);
+            if(!explicitManualSpeed&&same&&!speedTargetInvalidated){
+                try{if(sameSpeed(speedReader.readEffective(player),requested))return;}catch(ReflectiveOperationException|RuntimeException ignored){}
+                if(speedReadback!=null)return;
+            }
             float baseline = readCurrentSpeed(player);
+            if(speedOverride==null && retiredAutomaticPlayer.get()==player){
+                float effective=Float.NaN;
+                try{effective=speedReader.readEffective(player);}catch(ReflectiveOperationException|RuntimeException ignored){}
+                baseline=!validSpeed(effective)||sameSpeed(effective,retiredAutomaticTarget)
+                        ||sameSpeed(effective,retiredAutomaticBaseline)?retiredAutomaticBaseline:effective;
+            }
+            retiredAutomaticPlayer.clear();
+            if((authorSpeedEnabled()||speedTargetInvalidated)&&!explicitManualSpeed&&(!same||speedTargetInvalidated)&&speedOverride!=null){
+                if(ownedSpeedPlayer.get()==player){
+                    baseline=speedOverride.restorationSpeed(player,originalSpeed);
+                    cancelSpeedReadback();speedOverride.close();speedOverride=null;
+                    ownedSpeedPlayer.clear();manualSpeedHolder.clear();manualSpeedAid=null;
+                    speedReadbackConfirmed=false;exclusiveSpeedSession=false;
+                }else restoreOwnedSpeed();
+            }
+            speedTargetInvalidated=false;
+            speedAccount=account;
             // A holder or manager can be reused. Re-submit on its selection/resume even
             // if its identity is unchanged; the host may have reset its engine to 1x.
             DouAiLog.Operation operation = DouAiLog.begin("gesture", "inherit_speed_choice");
@@ -1709,10 +1892,13 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         if (closed) return;
         boolean moduleOnly = options != null && options.moduleOnlySpeedControl();
         if (!moduleOnly) {
-            if (exclusiveSpeedSession) restoreOwnedSpeed();
+            if (exclusiveSpeedSession) {
+                if(authorSpeedEnabled()){exclusiveSpeedSession=false;speedTargetInvalidated=true;}
+                else restoreOwnedSpeed();
+            }
             return;
         }
-        if (exclusiveSpeedSession || playerAccessor == null || speedReader == null || setSpeed == null) return;
+        if (exclusiveSpeedSession || authorSpeedEnabled() || playerAccessor == null || speedReader == null || setSpeed == null) return;
         cancelSpeedReadback();
         if (speedOverride == null) speedOverride = new GestureSpeedOverride();
         // Keep a previous manual session alive so its queued SDK requests also
@@ -1723,6 +1909,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             return;
         }
         manualSpeedEnabled = false;
+        explicitManualSpeed = false;
         manualSpeedHolder.clear();
         manualSpeedAid = null;
         speedReadbackConfirmed = false;
@@ -1735,8 +1922,12 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                                        boolean announce) {
         com.douai.module.analytics.LocalAnalytics.FlowOperation speedFlow = com.douai.module.analytics.LocalAnalytics.get(root.getContext()).beginOperation(aid, "speed");
         if (speedFlow != null) speedFlow.stage(announce ? (sameSpeed(requested,1f) ? "restore" : "manual_select") : "inherited");
+        if(announce && authorSpeedEnabled() && !explicitManualSpeed && speedOverride!=null){
+            currentSpeed=speedOverride.restorationSpeed(player,currentSpeed);
+            speedOverride.close();speedOverride=null;
+        }
         boolean newSession = speedOverride == null;
-        if (newSession) speedOverride = new GestureSpeedOverride();
+        if (newSession) speedOverride = new GestureSpeedOverride(authorSpeedEnabled()&&!explicitManualSpeed&&!announce);
         if (ownedSpeedPlayer.get() != player || !sameManualTarget(holder, aid, player)) {
             originalSpeed = speedOverride.restorationSpeed(player, validSpeed(currentSpeed) ? currentSpeed : 1f);
         } else if (validSpeed(currentSpeed) && !sameSpeed(currentSpeed, appliedSpeed)
@@ -1751,10 +1942,13 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         appliedSpeed = requested;
         speedReadbackConfirmed = false;
         boolean previousEnabled = manualSpeedEnabled;
-        if (announce) manualSpeedEnabled = !manualSpeedEnabled;
+        boolean previousManual=explicitManualSpeed;
+        if (announce) { manualSpeedEnabled = !manualSpeedEnabled; explicitManualSpeed=true; }
+        speedAccount=PlaybackBookmarks.account();
         submittingSpeed = true;
         try {
-            speedOverride.registerGlobal();
+            if(explicitManualSpeed || !authorSpeedEnabled()) speedOverride.registerGlobal();
+            else speedOverride.unregisterGlobal();
             speedOverride.apply(requested, () -> setSpeed.invoke(player, requested));
             if (speedFlow != null) speedFlow.stage("requested");
             if (announce) {
@@ -1772,6 +1966,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             operation.finish(DouAiLog.Outcome.FAILED, "setter_failed", "restoration_attempted=true");
             speedOperation = null;
             manualSpeedEnabled = previousEnabled;
+            explicitManualSpeed=previousManual;
             if (newSession) restoreOwnedSpeed();
             safeLog("Gesture speed failed: " + failure.getMessage());
             if (announce) toast(root.getContext(), "倍速设置失败");
@@ -1820,13 +2015,16 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         WeakReference<Object> expectedHolder = new WeakReference<>(holder);
         WeakReference<View> expectedRoot = new WeakReference<>(root);
         WeakReference<Object> expectedPlayer = new WeakReference<>(player);
+        String expectedAccount=speedAccount;
+        String expectedAid=manualSpeedAid;
         speedReadback = operation.wrap(() -> {
             operation.attempt(attempt + 1);
             speedReadback = null;
             Object currentHolder = expectedHolder.get();
             View currentRoot = expectedRoot.get();
             Object currentPlayer = expectedPlayer.get();
-            if (closed || revision != speedRevision || currentHolder == null || currentRoot == null
+            if (closed || !java.util.Objects.equals(expectedAccount,PlaybackBookmarks.account())
+                    || !java.util.Objects.equals(expectedAid,currentAid()) || revision != speedRevision || currentHolder == null || currentRoot == null
                     || currentPlayer == null || selectedHolder.get() != currentHolder
                     || activeRoot() != currentRoot || ownedSpeedPlayer.get() != currentPlayer) {
                 operation.finish(DouAiLog.Outcome.CANCELLED, "readback_target_changed", "requested=" + requested);
@@ -1933,7 +2131,9 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private void restoreOwnedSpeed() {
         cancelSpeedReadback();
         exclusiveSpeedSession = false;
+        speedTargetInvalidated = false;
         manualSpeedEnabled = false;
+        explicitManualSpeed = false;
         manualSpeedHolder.clear();
         manualSpeedAid = null;
         Object player = ownedSpeedPlayer.get();
@@ -1948,6 +2148,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                     || (!speedReadbackConfirmed && (sameSpeed(actual, originalSpeed) || !validSpeed(actual)))) {
                 float baseline = override == null ? originalSpeed : override.restorationSpeed(player, originalSpeed);
                 float restored = validSpeed(baseline) ? baseline : 1f;
+                if(override!=null && override.replaceableRestoration()){retiredAutomaticPlayer=new WeakReference<>(player);retiredAutomaticBaseline=restored;retiredAutomaticTarget=appliedSpeed;}
                 if (override == null) setSpeed.invoke(player, restored);
                 else override.restore(() -> setSpeed.invoke(player, restored));
                 safeLog("Gesture speed restored=" + restored + "; player=" + player.getClass().getName());
@@ -1960,6 +2161,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     }
 
     private void detachSpeedTarget() {
+        if(!explicitManualSpeed && authorSpeedEnabled())restoreOwnedSpeed();
         cancelSpeedReadback();
         manualSpeedHolder.clear();
         manualSpeedAid = null;
@@ -1969,6 +2171,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     }
 
     private void clearSelected() {
+        expansionEpoch++;
+        if(expansion!=null)expansion.suspend();
         dismissToolbar(); dismissDialog(); dismissViewFinder(); detachSpeedTarget();
         detachRootMonitor();
         selectedHolder.clear(); selectedRoot.clear();
@@ -2073,6 +2277,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             }
             pausedActivity = new WeakReference<>(activity);
             if (resumed.get() == activity) {
+                if(expansion!=null)expansion.suspend();
+                expansionEpoch++;
                 clearSidebarPause();
                 commentSelectionEpoch++;
                 resumed.clear(); dismissToolbar(); dismissDialog(); dismissViewFinder(); detachSpeedTarget();
@@ -2092,14 +2298,18 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     @Override public void close() {
         if (currentTools.get() == this) currentTools.clear();
         if (closed) return;
+        if(expansion!=null){expansion.close();expansion=null;}
         closed = true;
         PlaybackBookmarks.detach(bookmarkNavigation);
         application.unregisterActivityLifecycleCallbacks(this);
         for (BehaviorHookGroup group : groups.values()) group.close();
         onMain(() -> {
             cancelJump();
+            PlaybackReadingDialog.dismiss();
             clearSidebarPause();bookmarkPlaybackSync=null;
             resumed.clear(); pausedActivity.clear(); pausedHolder.clear(); clearSelected();
+            main.removeCallbacks(authorSpeedWatch);
+            AuthorSpeedRules.listen(null);
             restoreOwnedSpeed();
             if (nativeSpeedGate != null) nativeSpeedGate.close();
             nativeSpeedGate = null;

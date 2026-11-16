@@ -33,12 +33,13 @@ import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.ConfigurationCatalog;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.LiquidGlassSettings;
+import com.douai.module.config.HomeUiCustomizationSettings;
 import com.douai.module.config.CommentAiSettings;
 import com.douai.module.config.SidebarSettings;
 import com.douai.module.config.PlaybackSpeedPresets;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.feature.FeedGestureToolsHook;
-import com.douai.module.feature.TopTabFilterHook;
 import com.douai.module.feature.ProfileListEntry;
 import com.douai.module.feature.NativeFollowLists;
 import com.douai.module.feature.NativeMessagingHooks;
@@ -78,6 +79,7 @@ public final class ModuleSettingsScreen {
     private Dialog categoryDialog;
     private HostDownloadDirectoryPicker downloadDirectoryPicker;
     private AutomationMessageSettingsPage automationMessagePage;
+    private HomeIconSettingsDialog homeIconSettingsPage;
     private final List<Dialog> optionDialogs = new ArrayList<>();
     private final java.util.Map<Dialog, Runnable> optionDismissActions = new java.util.HashMap<>();
     private final List<EnabledControl> feedFilterControls = new ArrayList<>();
@@ -96,6 +98,8 @@ public final class ModuleSettingsScreen {
     private View.OnLayoutChangeListener searchFocusLayout;
     private long searchFocusGeneration;
     private static final SearchEntry[] FEATURE_SEARCH = {
+            new SearchEntry("home-icons", "首页图标", "界面相关 > 首页图标", "WebP 静态 图标 替换 导入 恢复 点赞 收藏 评论 分享 上导航 下导航", SearchDestination.GESTURES, "settings.option.首页图标"),
+            new SearchEntry("navigation-labels", "隐藏导航文字", "界面相关 > 隐藏导航文字", "上导航 下导航 文字 图标 液态玻璃 胶囊", SearchDestination.GESTURES, "settings.toggle.隐藏导航文字"),
             new SearchEntry("ai", "AI 模型与接口", "扩展功能 > AI 模型设置", "模型 API Key 密钥 提示词 OpenAI Claude Gemini DeepSeek 流式 推理", SearchDestination.AI),
             new SearchEntry("speech", "文本转语音与 MiniMax", "扩展功能 > 文本转语音设置", "TTS MiniMax 语音 音色 合成 语速 音量 音调 发音字典", SearchDestination.SPEECH),
             new SearchEntry("download-mode", "下载方式", "下载相关 > 下载方式", "下载 官方 第三方 解析 API", SearchDestination.DOWNLOAD, "settings.option.下载方式"),
@@ -566,6 +570,7 @@ public final class ModuleSettingsScreen {
                 addLocalSwitch("去除青少年弹窗", "", "remove_teen_dialog");
                 break;
             case INTERFACE:
+                addThemeSettings();
                 addLocalSwitch("悬浮条", "", "toolbar_enabled");
                 addLocalSwitch("隐藏拍摄+号图标", "", "hide_camera_plus");
                 addLocalSwitch("隐藏上下黑边", "", "hide_video_black_edges");
@@ -577,20 +582,22 @@ public final class ModuleSettingsScreen {
                 addOption("长按事件", "", null, true, () -> showGestureSettings("长按事件", "long_press"));
                 addOption("双击事件", "", null, true, () -> showGestureSettings("双击事件", "double_tap"));
                 addOption("沉浸式全屏", "", null, true, this::showSystemBarSettings);
-                addDependentSwitch("隐藏顶部Tab开关", "",
-                        repository.getBoolean("hide_top_tabs", false),
-                        value -> repository.putBoolean("hide_top_tabs", value),
-                        () -> addOption("设置顶部Tab", "", repository.getString("hidden_top_tabs", ""),
-                                true, this::showTopTabs));
                 addSwitch("首页刷新确认", "",
                         repository.getBoolean("confirm_refresh", false), true,
                         value -> repository.putBoolean("confirm_refresh", value));
                 addDependentSwitch("首页右滑打开侧边栏", "",
                         repository.getBoolean(SidebarSettings.ENABLED, false),
                         value -> repository.putBoolean(SidebarSettings.ENABLED, value), () -> {
-                            OptionRow[] sidebarItems = new OptionRow[1];
-                            sidebarItems[0] = addOption("侧边栏显示项", "", sidebarSelectionPreview(), true,
-                                    () -> showSidebarSelection(sidebarItems[0]));
+                            addDependentSwitch("侧边栏显示项", "",repository.getBoolean(SidebarSettings.ITEMS_ENABLED,true),
+                                    value->repository.putBoolean(SidebarSettings.ITEMS_ENABLED,value),()->{
+                                        OptionRow[] sidebarItems = new OptionRow[1];
+                                        sidebarItems[0] = addOption("选择模块显示项", "", sidebarSelectionPreview(), true,
+                                                () -> showSidebarSelection(sidebarItems[0]));
+                                        addDependentSwitch("保留常用功能", "",repository.getBoolean(SidebarSettings.KEEP_COMMON,false),
+                                                value->repository.putBoolean(SidebarSettings.KEEP_COMMON,value),()->{
+                                                    addOption("常用功能显示项", "",null,true,this::showSidebarCommonSelection);
+                                                });
+                                    });
                         });
                 break;
             case FILTER:
@@ -609,6 +616,15 @@ public final class ModuleSettingsScreen {
                                     value -> repository.putBoolean("smart_swipe", value));
                         });
                 buildPlaybackSpeedControls();
+                if (reading41()) {
+                    addChoiceOption("断点续播", "resume_playback_mode", new String[]{"关闭", "提示恢复", "自动恢复"},
+                            new String[]{"off", "prompt", "auto"}, "off");
+                    addOption("定时或看完后暂停", "", null, true,
+                            () -> com.douai.module.feature.FeedGestureToolsHook.launchCurrentAction(context,"stop_budget"));
+                    addLocalSwitch("作者独立倍速", "", "author_speed_enabled");
+                    addOption("作者倍速规则", "", null, true,
+                            () -> com.douai.module.feature.FeedGestureToolsHook.launchCurrentAction(context,"author_speed_rules"));
+                }
                 addLocalSwitch("锁定最高画质", "", LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY);
                 addOption("互动自动化", "", null, true, this::showAutomationSettings);
                 break;
@@ -692,6 +708,8 @@ public final class ModuleSettingsScreen {
             case EXTENSION:
                 if (reading41()) addOption("我的时间点书签", "", null, true,
                         () -> com.douai.module.feature.PlaybackBookmarks.show(findOwnerActivity(context)));
+                if (reading41()) addOption("评论收藏", "", null, true,
+                        () -> com.douai.module.feature.CommentBookmarks.show(findOwnerActivity(context)));
                 addOption("AI 模型设置", "", null, true, this::showAiModelSettings);
                 addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
                 addOption("本地数据分析", "", null, true, this::showLocalAnalytics);
@@ -732,6 +750,21 @@ public final class ModuleSettingsScreen {
                     for (int index = 0; index < checked.length; index++) if (checked[index]) ids.add(entries.get(index).id);
                     repository.putString(SidebarSettings.ITEMS, SidebarSettings.serializeSelection(repository, ids));
                     preview.setValue(sidebarSelectionPreview());
+                }).create());
+    }
+
+    private void showSidebarCommonSelection() {
+        java.util.List<SidebarSettings.Entry> entries=SidebarSettings.commonEntries();
+        if(entries.isEmpty()){toast("请先打开抖音侧边栏，再从抖音内设置选择常用功能");return;}
+        String prior=repository.getString(SidebarSettings.COMMON_ITEMS,"*");
+        String[] labels=new String[entries.size()];boolean[] checked=new boolean[entries.size()];
+        for(int i=0;i<entries.size();i++){labels[i]=entries.get(i).title;checked[i]=SidebarSettings.commonVisible(prior,entries.get(i).id);}
+        showOptionDialog(new MiuixDialogBuilder(context,miuixHome!=null).setTitle("常用功能显示项")
+                .setMultiChoiceItems(labels,checked,(ignored,index,value)->checked[index]=value)
+                .setNegativeButton("取消",null).setPositiveButton("保存",(ignored,which)->{
+                    java.util.List<String> selected=new java.util.ArrayList<>();
+                    for(int i=0;i<checked.length;i++)if(checked[i])selected.add(entries.get(i).id);
+                    repository.putString(SidebarSettings.COMMON_ITEMS,SidebarSettings.serializeCommonSelection(prior,selected));
                 }).create());
     }
 
@@ -928,6 +961,8 @@ public final class ModuleSettingsScreen {
             if (reading41()) {
                 addSwitch("减少已看作品", "", repository.getBoolean("hide_seen_works", false),
                         settings.feedFilterEnabled, true, value -> repository.putBoolean("hide_seen_works", value));
+                addSwitch("作者和配乐临时过滤", "", repository.getBoolean("temporary_feed_rules_enabled", false),
+                        settings.feedFilterEnabled, true, value -> repository.putBoolean("temporary_feed_rules_enabled", value));
                 OptionRow[] days = new OptionRow[1];
                 days[0] = addOption("已看记录保留天数", "", repository.getString("seen_work_days", "3") + " 天", true, () ->
                         new MiuixDialogBuilder(context, true).setTitle("已看记录保留天数")
@@ -936,6 +971,8 @@ public final class ModuleSettingsScreen {
                                     repository.putString("seen_work_days", value);
                                     days[0].setValue(value + " 天");
                                 }).setNegativeButton("取消", null).show());
+                addOption("临时过滤规则", "", null, true,
+                        () -> com.douai.module.feature.TemporaryFeedRules.show(findOwnerActivity(context)));
             }
             addSwitch("去广告开关", "", settings.hideAds, settings.feedFilterEnabled,
                     true, value -> update(s -> withFilter(s, value, Filter.AD)));
@@ -1014,6 +1051,53 @@ public final class ModuleSettingsScreen {
 
     private void addUnavailableSwitch(String title, String summary) {
         addSwitch(title, summary, false, false, value -> { });
+    }
+
+    private void addThemeSettings() {
+        LiquidGlassSettings theme = themeSettings();
+        String[] labels = {"原版", "液态玻璃"};
+        String[] values = {LiquidGlassSettings.ORIGINAL, LiquidGlassSettings.LIQUID_GLASS};
+        ToggleControl[] gravity = new ToggleControl[1];
+        ToggleControl[] hideLabels = new ToggleControl[1];
+        OptionRow[] icons = new OptionRow[1];
+        OptionRow[] choice = new OptionRow[1];
+        choice[0] = addOption("界面主题", "", labels[theme.enabled ? 1 : 0], true, () ->
+                showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("界面主题")
+                        .setSingleChoiceItems(labels, themeSettings().enabled ? 1 : 0, (dialog, which) -> {
+                            repository.putString(LiquidGlassSettings.STYLE, values[which]);
+                            choice[0].setValue(labels[which]);
+                            gravity[0].setEnabled(which == 1);
+                            hideLabels[0].setEnabled(which == 1);
+                            icons[0].setEnabled(which == 1);
+                            dialog.dismiss();
+                        }).setNegativeButton("取消", null).create()));
+        gravity[0] = addSwitch("重力感应", "", theme.gravity, theme.enabled, false, value -> {
+            if (themeSettings().enabled) repository.putBoolean(LiquidGlassSettings.GRAVITY, value);
+        });
+        boolean hidden;
+        try { hidden=repository.getBoolean(HomeUiCustomizationSettings.HIDE_LABELS,false); }
+        catch (ClassCastException ignored) { hidden=false; }
+        hideLabels[0]=addSwitch("隐藏导航文字", "无图标的位置保留文字", hidden,theme.enabled,false,value->{
+            if(themeSettings().enabled)repository.putBoolean(HomeUiCustomizationSettings.HIDE_LABELS,value);
+        });
+        icons[0]=addOption("首页图标", "", "SVG / WebP · 单项导入与恢复",theme.enabled,()->{
+            if(!themeSettings().enabled)return;
+            if(homeIconSettingsPage!=null)homeIconSettingsPage.close();
+            HomeIconSettingsDialog page=new HomeIconSettingsDialog(context,repository,miuixHome!=null,this::showOptionDialog);
+            homeIconSettingsPage=page;
+            showOptionDialog(page.dialog(),()->{page.close();if(homeIconSettingsPage==page)homeIconSettingsPage=null;});
+        });
+    }
+
+    private LiquidGlassSettings themeSettings() {
+        String style;
+        boolean gravity;
+        try { style = repository.getString(LiquidGlassSettings.STYLE, LiquidGlassSettings.ORIGINAL); }
+        catch (ClassCastException ignored) { style = LiquidGlassSettings.ORIGINAL; }
+        try { gravity = repository.getBoolean(LiquidGlassSettings.GRAVITY, true); }
+        catch (ClassCastException ignored) { gravity = false; }
+        return LiquidGlassSettings.read(new LocalOptions(java.util.Map.of(
+                LiquidGlassSettings.STYLE, style, LiquidGlassSettings.GRAVITY, gravity)));
     }
 
     private void addLocalSwitch(String title, String summary, String key) {
@@ -1624,38 +1708,6 @@ public final class ModuleSettingsScreen {
         cell.setContentDescription(label + "，" + value);
     }
 
-    private void showTopTabs() {
-        java.util.Map<String, String> tabs = TopTabFilterHook.availableTabs();
-        if (tabs.isEmpty()) {
-            LinearLayout form = form();
-            EditText input = formInput(form, "要隐藏的标签名称", repository.getString("hidden_top_tabs", ""), false);
-            showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("设置顶部Tab").setView(form)
-                    .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) ->
-                            repository.putString("hidden_top_tabs", input.getText().toString().trim())).create());
-            return;
-        }
-        String[] ids = tabs.keySet().toArray(new String[0]);
-        String[] titles = tabs.values().toArray(new String[0]);
-        java.util.Set<String> hidden = new java.util.HashSet<>();
-        for (String value : repository.getString("hidden_top_tabs", "").split("[,，\\n]+")) hidden.add(value.trim());
-        boolean[] checked = new boolean[ids.length];
-        for (int index = 0; index < ids.length; index++) checked[index] = hidden.contains(ids[index]) || hidden.contains(titles[index]);
-        AlertDialog dialog = new MiuixDialogBuilder(context, miuixHome != null).setTitle("设置顶部Tab")
-                .setMultiChoiceItems(titles, checked, (ignored, which, value) -> checked[which] = value)
-                .setNegativeButton("取消", null).setPositiveButton("保存", null).create();
-        showOptionDialog(dialog);
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
-            List<String> selected = new ArrayList<>();
-            for (int index = 0; index < ids.length; index++) if (checked[index]) selected.add(ids[index]);
-            if (selected.size() == ids.length) {
-                android.widget.Toast.makeText(context, "至少保留一个顶部标签", android.widget.Toast.LENGTH_SHORT).show();
-                return;
-            }
-            repository.putString("hidden_top_tabs", String.join(",", selected));
-            dialog.dismiss();
-        });
-    }
-
     private void addSectionLabel(String title) {
         TextView label = text(title, 13, MUTED, false);
         label.setPadding(0, dp(18), 0, dp(8));
@@ -1850,6 +1902,8 @@ public final class ModuleSettingsScreen {
         clearSearchFocus();
         closeAutomationMessagePage();
         closeDownloadDirectoryPicker();
+        if(homeIconSettingsPage!=null)homeIconSettingsPage.close();
+        homeIconSettingsPage=null;
         dismissOptionDialogs();
         if (miuixComponentHidePage != null) miuixComponentHidePage.dismiss();
         miuixComponentHidePage = null;

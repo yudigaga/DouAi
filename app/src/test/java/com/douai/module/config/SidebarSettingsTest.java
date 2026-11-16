@@ -9,6 +9,29 @@ import com.douai.module.scan.HostAdaptation;
 import static org.junit.Assert.*;
 
 public final class SidebarSettingsTest {
+    @Test public void sidebarDisplaySwitchAndNativeCommonChoicesHaveIndependentTransferDefaults() {
+        for(String key:List.of("home_sidebar_items_enabled","home_sidebar_keep_common")) {
+            assertEquals("boolean",ConfigurationCatalog.transferableTypes().get(key));
+            assertTrue(ConfigurationChanges.between(Collections.emptyMap(),Map.of(key,true)).affects(ConfigurationCatalog.Feature.SIDEBAR));
+        }
+        assertEquals("string",ConfigurationCatalog.transferableTypes().get("home_sidebar_common_items"));
+        assertEquals(true,ConfigurationCatalog.settings().get("home_sidebar_items_enabled").defaultValue);
+        assertEquals(false,ConfigurationCatalog.settings().get("home_sidebar_keep_common").defaultValue);
+        assertEquals("*",ConfigurationCatalog.settings().get("home_sidebar_common_items").defaultValue);
+    }
+
+    @Test public void nativeCommonSelectionsKeepUnknownIdsAndNewItemsVisibleWithoutUsingTheirTitlesAsIds() {
+        SidebarSettings.rememberCommonEntries(List.of(SidebarSettings.commonEntry("history","观看历史"),SidebarSettings.commonEntry("favorite","我的收藏")));
+        String selection=SidebarSettings.serializeCommonSelection("hide:unavailable",List.of("favorite"));
+        assertFalse(SidebarSettings.commonVisible(selection,"history"));
+        assertTrue(SidebarSettings.commonVisible(selection,"favorite"));
+        assertFalse(SidebarSettings.commonVisible(selection,"unavailable"));
+        assertTrue(SidebarSettings.commonVisible(selection,"new_host_item"));
+        assertEquals("*",SidebarSettings.normalizeCommonSelection("malformed input"));
+        assertEquals(selection,ConfigurationCatalog.normalizedTransferValue(SidebarSettings.COMMON_ITEMS,selection));
+        assertNull(SidebarSettings.commonEntry("bad,id","title"));
+        assertNull(SidebarSettings.commonEntry("","title"));
+    }
     @Test public void absentValuesUseTheSixReviewableDefaultsWhileExplicitEmptyRemainsEmpty() {
         LocalOptions absent = new LocalOptions(Collections.emptyMap());
         assertFalse(absent.enabled(SidebarSettings.ENABLED));
@@ -23,8 +46,8 @@ public final class SidebarSettingsTest {
                 List.of("analytics", "unknown", "module", "comment_history", "analytics")));
         List<SidebarSettings.Entry> selected = SidebarSettings.parse("analytics, unknown, module，comment_history\nmodule");
         assertEquals(List.of("module", "comment_history", "analytics"), selected.stream().map(item -> item.id).toList());
-        assertEquals(27, SidebarSettings.ENTRIES.size());
-        assertEquals(27, SidebarSettings.ENTRIES.stream().map(item -> item.id).distinct().count());
+        assertEquals(40, SidebarSettings.ENTRIES.size());
+        assertEquals(40, SidebarSettings.ENTRIES.stream().map(item -> item.id).distinct().count());
         assertThrows(UnsupportedOperationException.class, () -> selected.clear());
     }
 

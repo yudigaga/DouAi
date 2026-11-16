@@ -2,6 +2,7 @@ package com.douai.module.diagnostics;
 
 import com.douai.module.config.ConfigurationCatalog;
 import com.douai.module.config.ConfigurationCatalog.Feature;
+import com.douai.module.config.LiquidGlassSettings;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -37,6 +38,18 @@ public final class FeatureLogCatalog {
         add(entries, "comment_reply", "评论回复", "CommentReplyHook", Feature.COMMENT_REPLY, "comment_reply_hook_installed", "comment_reply_enabled");
         add(entries, "feed_ui", "视频图文组件隐藏及透明度", "FeedUiHideHook", Feature.FEED_UI, "feed_ui_hook_installed", "feed_ui_active");
         add(entries, "auto_speed", "自动倍速", "PlaybackBehaviorHooks", Feature.PLAYBACK, "feature.auto_speed.installed", "auto_speed");
+        add(entries, "author_speed", "作者独立倍速", "AuthorSpeedRules/FeedGestureToolsHook", Feature.PLAYBACK,
+                "feature.author_speed.installed", "author_speed_enabled");
+        add(entries, "playback_expansion", "A-B循环及观看暂停", "PlaybackExpansionRuntime/AutoPlayHook", Feature.GESTURE,
+                "feature.playback_expansion.installed", "always");
+        add(entries, "resume_playback", "断点续播", "ResumeProgressStore/PlaybackExpansionRuntime", Feature.GESTURE,
+                "feature.playback_expansion.installed", "resume_playback_enabled");
+        add(entries, "temporary_feed_rules", "作者及配乐临时过滤", "SeenWorkHook/TemporaryFeedRules", Feature.FEED_FILTER,
+                "feature.temporary_feed_rules.installed", "temporary_feed_rules_enabled");
+        add(entries, "comment_bookmarks", "评论收藏夹", "CommentToolsHook/CommentBookmarks", Feature.COMMENT_TOOLS,
+                "feature.comment_bookmarks.installed", "always");
+        add(entries, "subtitle_notes", "字幕导出及问答", "PlaybackReadingDialog/PlaybackSubtitleDocument", Feature.GESTURE,
+                "feature.subtitle_notes.installed", "always");
         add(entries, "video_quality", "锁定最高画质", "VideoQualityHook", Feature.VIDEO_QUALITY,
                 "feature.video_quality.installed", "lock_highest_video_quality");
         add(entries, "auto_play", "连播及评论暂停", "AutoPlayHook", Feature.AUTO_PLAY, "auto_play_hook_installed", "auto_play_enabled");
@@ -65,12 +78,13 @@ public final class FeatureLogCatalog {
         add(entries, "comment_tools", "评论复制及媒体工具", "CommentToolsHook", Feature.COMMENT_TOOLS, "comment_tools_hook_installed", "comment_tools_enabled");
         add(entries, "immersive", "状态栏及导航栏沉浸", "ImmersiveModeController", Feature.IMMERSIVE, "immersive_hook_installed", "immersive_enabled");
         add(entries, "version", "版本显示伪装", "VersionInfoHook", Feature.VERSION, "version_hook_installed", "version_spoof_enabled");
-        add(entries, "top_tabs", "顶部标签隐藏", "TopTabFilterHook", Feature.TOP_TABS, "top_tab_hook_installed", "top_tab_filter_enabled");
         add(entries, "refresh_confirm", "刷新确认", "RefreshConfirmHook", Feature.REFRESH, "refresh_hook_installed", "refresh_confirm_enabled");
         add(entries, "diagnostics", "诊断及日志管理", "DebugLogChannel/DebugLogDialog", Feature.DIAGNOSTICS, "diagnostics_installed", "always");
         add(entries, "local_analytics", "本地浏览及行为分析", "LocalAnalyticsHook/LocalAnalytics", null, "feature.local_analytics.installed", "local_analytics_enabled");
         add(entries, "recall_background", "撤回消息背景", "RecallHighlightHook", Feature.MESSAGE_RECALL, "feature.recall_background.installed", "prevent_message_recall");
         add(entries, "home_navigation", "首页导航组件隐藏", "HomeNavigationHideController", Feature.FEED_UI, "home_navigation_hook_installed", "home_navigation_enabled");
+        add(entries, "liquid_glass", "首页图标与液态玻璃主题", "LiquidGlassController/LiquidGlassWindowHooks/HomeUiCustomization",
+                Feature.THEME, "feature.liquid_glass.installed", LiquidGlassSettings.STYLE);
         add(entries, "short_progress", "短视频进度条", "ShortVideoProgressHook", Feature.FEED_UI, "short_progress_installed", "short_progress_enabled");
         add(entries, "hash_long_press_voice", "井号长按语音", "HashLongPressVoiceHook", null, "feature.hash_long_press_voice.installed", "hash_long_press_voice");
         // Explicit entries for module-owned UI actions; readiness is observed at their actual entry point.
@@ -153,6 +167,10 @@ public final class FeatureLogCatalog {
     static State state(Entry entry, Map<String, ?> configuration, Map<String, ?> runtime, boolean configurationReady) {
         boolean enabled = "always".equals(entry.enabledKey) || Boolean.TRUE.equals(runtime.get(entry.enabledKey))
                 || !runtime.containsKey(entry.enabledKey) && Boolean.TRUE.equals(configuration.get(entry.enabledKey));
+        if(LiquidGlassSettings.STYLE.equals(entry.enabledKey)) {
+            Object style=runtime.containsKey(entry.enabledKey)?runtime.get(entry.enabledKey):configuration.get(entry.enabledKey);
+            enabled=LiquidGlassSettings.LIQUID_GLASS.equals(style);
+        }
         boolean known = !entry.installedKey.isEmpty() && runtime.containsKey(entry.installedKey);
         boolean installed = known && Boolean.TRUE.equals(runtime.get(entry.installedKey));
         Object failure = entry.installedKey.isEmpty() ? null : runtime.get(entry.installedKey
@@ -192,7 +210,7 @@ public final class FeatureLogCatalog {
             case "download": case "native_auto_reply": case "streak": case "auto_comment": case "comment_reply":
             case "follow_lists": case "auto_like": case "auto_follow": case "dm_speech": case "comment_voice":
             case "comment_tts": case "hash_long_press_voice": case "ai_chat": case "portrait":
-            case "media_picker": case "report_export": case "speech_settings": case "third_party_settings":
+            case "media_picker": case "report_export": case "speech_settings": case "third_party_settings": case "liquid_glass":
                 return "unknown";
             default: return entry.installedKey.isEmpty() ? "unknown" : "not_required";
         }
@@ -222,6 +240,7 @@ public final class FeatureLogCatalog {
             if ("native_reply".equals(name)) return "native_auto_reply";
             if (name.startsWith("local_analytics_")) return "local_analytics";
             if (name.startsWith("short_progress_")) return "short_progress";
+            if ("liquid_glass_touch".equals(name)) return "liquid_glass";
             if ("long_press_action".equals(name) || "double_tap_action".equals(name) || "toolbar_enabled".equals(name)
                     || "gesture_current_holder".equals(name) || "finder_pause_guard".equals(name)) return "gesture";
             return name;
@@ -230,7 +249,7 @@ public final class FeatureLogCatalog {
                 {"DouAi.Automation.Message", "auto_message"}, {"DouAi.AutoComment", "auto_comment"},
                 {"DouAi.CommentReply", "comment_reply"}, {"DouAi.Feed.Response", "feed_filter"},
                 {"DouAi.FeedUi", "feed_ui"}, {"DouAi.AutoPlay", "auto_play"}, {"DouAi.Download", "download"},
-                {"DouAi.HomeTab.Filter", "top_tabs"}, {"DouAi.HomeTab.Refresh", "refresh_confirm"},
+                {"DouAi.HomeTab.Refresh", "refresh_confirm"},
                 {"DouAi.VersionInfo", "version"}, {"DouAi.HashLongPress", "hash_long_press_voice"},
                 {"DouAi.Comment.Request", "comment_enhancements"}, {"DouAi.Comment.Tools", "comment_tools"},
                 {"DouAi.CommentVoice", "comment_voice"}, {"DouAi.CommentSpeech", "comment_tts"},

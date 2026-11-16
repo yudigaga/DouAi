@@ -82,8 +82,8 @@ public final class ComponentHideSettingsPageTest {
         assertTrue(store.getBoolean("remove_black_edges", false));
         assertTrue(store.getBoolean("hide_navigation_bar", false));
         barsDialog.dismiss();
-        ((Switch) interfaceRoot.findViewWithTag("settings.toggle.隐藏顶部Tab开关")).setChecked(true);
-        assertTrue(store.getBoolean("hide_top_tabs", false));
+        assertNull(interfaceRoot.findViewWithTag("settings.toggle.隐藏顶部Tab开关"));
+        assertNull(interfaceRoot.findViewWithTag("settings.option.设置顶部Tab"));
         findDescription(interfaceRoot, "返回设置分类").performClick();
         assertFalse(interfaceDialog.isShowing());
 

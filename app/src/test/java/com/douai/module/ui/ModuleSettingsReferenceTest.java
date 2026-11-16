@@ -64,7 +64,10 @@ public final class ModuleSettingsReferenceTest {
         assertFalse(enabled.isChecked());
         enabled.setChecked(true);
         assertEquals(true, store.values.get(SidebarSettings.ENABLED));
-        option(page, "侧边栏显示项").performClick();
+        Switch showItems = toggle(page, "侧边栏显示项");
+        assertTrue(showItems.isChecked());
+        assertFalse(toggle(page, "保留常用功能").isChecked());
+        option(page, "选择模块显示项").performClick();
         AlertDialog selection = (AlertDialog) ShadowDialog.getLatestDialog();
         bindDialogChoices(selection);
         ListView list = selection.getListView();
@@ -75,6 +78,12 @@ public final class ModuleSettingsReferenceTest {
         selection.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         ShadowLooper.idleMainLooper();
         assertEquals("", store.getString(SidebarSettings.ITEMS, "fallback"));
+        assertTrue(SidebarSettings.selected(store).isEmpty());
+        showItems.setChecked(false);
+        assertEquals(false, store.values.get(SidebarSettings.ITEMS_ENABLED));
+        assertEquals("", store.getString(SidebarSettings.ITEMS, "fallback"));
+        showItems.setChecked(true);
+        assertEquals(true, store.values.get(SidebarSettings.ITEMS_ENABLED));
         assertTrue(SidebarSettings.selected(store).isEmpty());
     }
 
@@ -118,10 +127,10 @@ public final class ModuleSettingsReferenceTest {
     public void referenceSubpagesHaveExactItemOrderAndNoExtraInlineInputRows() {
         String[][] references = {
                 {"BASIC", "去除启动和闪屏广告", "去除更新弹窗", "去除青少年弹窗"},
-                {"INTERFACE", "悬浮条", "隐藏拍摄+号图标", "隐藏上下黑边", "禁用双击点赞",
+                {"INTERFACE", "界面主题", "重力感应", "隐藏导航文字", "首页图标", "悬浮条", "隐藏拍摄+号图标", "隐藏上下黑边", "禁用双击点赞",
                         "不允许系统跳过已隐藏视频", "不允许中途插入视频", "拦截长按倍数启用场景",
-                        "拦截系统长按手势", "长按事件", "双击事件", "沉浸式全屏", "隐藏顶部Tab开关",
-                        "设置顶部Tab", "首页刷新确认", "首页右滑打开侧边栏", "侧边栏显示项"},
+                        "拦截系统长按手势", "长按事件", "双击事件", "沉浸式全屏",
+                        "首页刷新确认", "首页右滑打开侧边栏", "侧边栏显示项", "选择模块显示项", "保留常用功能", "常用功能显示项"},
                 {"FILTER", "过滤总开关", "整页筛空时保留原列表", "去广告开关", "去直播开关", "去推荐卡片开关",
                         "去推荐商家开关", "去商品/购物卡片开关", "去热点榜单卡开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
                         "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},
@@ -282,7 +291,9 @@ public final class ModuleSettingsReferenceTest {
                 for (int index = 0; index < labels.getChildCount(); index++) {
                     if (labels.getChildAt(index).getVisibility() == View.VISIBLE) visibleLabels++;
                 }
-                assertEquals(category + ": " + control.getContentDescription(), 1, visibleLabels);
+                boolean navigationLabels = "隐藏导航文字".contentEquals(control.getContentDescription());
+                assertEquals(category + ": " + control.getContentDescription(), navigationLabels ? 2 : 1, visibleLabels);
+                if (navigationLabels) assertEquals("无图标的位置保留文字", ((TextView) labels.getChildAt(1)).getText().toString());
             }
             if ("AUTOPLAY".equals(category)) {
                 assertEquals("1.5x", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());

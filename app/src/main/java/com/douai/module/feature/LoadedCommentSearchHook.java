@@ -12,6 +12,7 @@ import android.os.SystemClock;
 import android.widget.Toast;
 import com.douai.module.ui.miuix.MiuixCommentSearch;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
+import com.douai.module.config.ConfigurationApplyAction;
 import io.github.libxposed.api.XposedInterface;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.*;
@@ -25,14 +26,22 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
     private static final String C="com.ss.android.ugc.aweme.comment.";
     private static final String K="com.douyin.kmp.comment.comment.commentpanellist.list.";
     private static volatile LoadedCommentSearchHook active;
+    private static volatile String[] workAuthor={"","",""};
+    public static void setWorkAuthor(String account,String aid,String authorUid){
+        workAuthor=new String[]{account==null?"":account,aid==null?"":aid,authorUid==null?"":authorUid};
+    }
     private final List<XposedInterface.HookHandle> handles=new ArrayList<>();
     private final LoadedCommentIndex index=new LoadedCommentIndex();
     private final Handler main=new Handler(Looper.getMainLooper());
+    private final ArrayDeque<AlertDialog> configurationDialogs=new ArrayDeque<>();
+    private boolean configurationTranscriptRefresh;
+    private final RetainedConfigurationAction.Owner configurationActions=new RetainedConfigurationAction.Owner();
     interface Types { Class<?> get(String name) throws ClassNotFoundException; }
     private final Types types;
     private final Method service, uid, extract;
     private final Field cid, aid, body, parent, root;
-    private volatile boolean enabled,transcripts;
+    private volatile boolean enabled,transcripts,closed;
+    private boolean reading(){return enabled||CommentBookmarks.enabled();}
     private WeakReference<Object> panel=new WeakReference<>(null);
     private Panel current;
     private String account="",work="";
@@ -50,7 +59,7 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
     private PageState renderedPage;
     private final Runnable drain=() -> { synchronized(this){
         pending=false;
-        if(enabled && sample(reset) && redraw!=null)redraw.run();
+        if(reading() && sample(reset) && redraw!=null)redraw.run();
         reset=false;
     } };
     private final Runnable checkDialog=new Runnable(){public void run(){synchronized(LoadedCommentSearchHook.this){
@@ -112,6 +121,49 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
         }
         enabled=searchEnabled;transcripts=transcriptEnabled;
     }
+    public ConfigurationApplyAction prepareOptions(boolean searchEnabled,boolean transcriptEnabled) {
+        return new RetainedConfigurationAction(main,()->!closed,configurationActions) {
+            private boolean accepted,transcriptChange,drainQueued;
+            private AlertDialog previousDialog;
+            private int phase;
+            @Override void advance(Attempt attempt) { synchronized(LoadedCommentSearchHook.this) {
+                if(!accepted) {
+                    attempt.check();
+                    boolean disable=enabled&&!searchEnabled;
+                    transcriptChange=enabled&&searchEnabled&&transcripts!=transcriptEnabled;
+                    if((disable||transcriptChange) && dialog!=null && !configurationDialogs.contains(dialog)) configurationDialogs.addLast(dialog);
+                    configurationTranscriptRefresh |= transcriptChange;
+                    if(disable)once(attempt,()->{cancelRequest();clearState();});
+                    else if(transcriptChange)once(attempt,()->{
+                        search=null;loadDeadline=0;pageTimedOut=false;
+                        index.open(account,work);
+                        redraw=null;main.removeCallbacks(checkDialog);
+                        main.removeCallbacks(drain);pending=false;reset=false;
+                    });
+                    enabled=searchEnabled;transcripts=transcriptEnabled;
+                    accepted=true;
+                }
+                if(phase==0) {
+                    attempt.check();
+                    while(!configurationDialogs.isEmpty()) {
+                        attempt.check();
+                        previousDialog=configurationDialogs.peekFirst();
+                        previousDialog.dismiss();
+                        if(dialog==previousDialog)dialog=null;
+                        configurationDialogs.removeFirst();previousDialog=null;
+                    }
+                    phase++;
+                }
+                if(!searchEnabled)configurationTranscriptRefresh=false;
+                if(configurationTranscriptRefresh&&phase==1) {
+                    if(!drainQueued) { drainQueued=true;attempt.later(0L);return; }
+                    attempt.check();reset=true;drain.run();configurationTranscriptRefresh=false;phase++;
+                }
+                attempt.success();
+            }}
+            @Override void release() { previousDialog=null; }
+        };
+    }
     private Class<?> type(String name)throws Exception{return types.get(name);}
     private static Method method(Class<?> c,String name,Class<?> result,Class<?>...args)throws Exception{
         Method m=c.getDeclaredMethod(name,args);
@@ -128,8 +180,8 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
         XposedInterface.HookHandle h=api.hook(m).setId("DouAi.ReadComments."+m.getDeclaringClass().getName()+"."+m.getName())
                 .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(chain->{
                     Object result=chain.proceed();
-                    if(enabled && Looper.myLooper()==Looper.getMainLooper()) {
-                        try {synchronized(this){if(enabled)callback.run(chain.getThisObject(),chain.getArgs());}}
+                    if(reading() && Looper.myLooper()==Looper.getMainLooper()) {
+                        try {synchronized(this){if(reading())callback.run(chain.getThisObject(),chain.getArgs());}}
                         catch(Exception | LinkageError ignored){}
                     }
                     return result;
@@ -138,13 +190,16 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
     }
     private String owner() throws Exception { return (String)uid.invoke(service.invoke(null)); }
     private void clear() {
+        clearState();
+        if(dialog!=null) {AlertDialog d=dialog;dialog=null;main.post(d::dismiss);}
+    }
+    private void clearState() {
         search=null;loadDeadline=0;pageTimedOut=false;sampledAdapterCount=-1;renderedPage=null;
         if(requests.bound(panel.get()))cancelRequest();
         emptyRefresh=false;
         main.removeCallbacks(drain);pending=false;reset=false;index.close();
         redraw=null;main.removeCallbacks(checkDialog);
         current=null;panel.clear();account="";work="";
-        if(dialog!=null) {AlertDialog d=dialog;dialog=null;main.post(d::dismiss);}
     }
     private void schedule(boolean replace) {
         reset|=replace;
@@ -163,14 +218,14 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
     private void afterRender(XposedInterface api,Method m,Function<Object,Boolean> emptyResult,After callback) {
         XposedInterface.HookHandle h=api.hook(m).setId("DouAi.ReadComments."+m.getDeclaringClass().getName()+"."+m.getName())
                 .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(chain->{
-                    if(!enabled)return chain.proceed();
+                    if(!reading())return chain.proceed();
                     long token,request;synchronized(this){token=index.token();request=loadDeadline==0?0:pageRequest;}
                     Object result=chain.proceed();
-                    if(enabled){
+                    if(reading()){
                         Object receiver=chain.getThisObject();
                         Boolean empty=emptyResult==null?null:emptyResult.apply(chain.getArg(0));
                         Runnable read=()->{synchronized(this){try{
-                            if(enabled && token==index.token() && valid())callback.run(receiver,Arrays.asList(empty,request));
+                            if(reading() && token==index.token() && valid())callback.run(receiver,Arrays.asList(empty,request));
                         }catch(Exception|LinkageError ignored){}}};
                         if(Looper.myLooper()==Looper.getMainLooper())read.run();else main.post(read);
                     }
@@ -341,7 +396,7 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
         }
     }
     private boolean valid() throws Exception {
-        Object f=panel.get();return enabled && f!=null && current!=null && work.equals(current.id.invoke(f))
+        Object f=panel.get();return reading() && f!=null && current!=null && work.equals(current.id.invoke(f))
                 && account.equals(owner()) && Boolean.TRUE.equals(current.visible.invoke(f));
     }
     private boolean sample(boolean replace) {
@@ -364,7 +419,17 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
                 if(!LoadedCommentIndex.id(parentId)||ident.equals(parentId))parentId="";
                 String txt=(String)body.get(c), speech=transcripts?CommentTranscript.read(c):null;
                 partial|=(txt!=null && txt.length()>LoadedCommentIndex.TEXT_LIMIT)||(speech!=null && speech.length()>LoadedCommentIndex.TEXT_LIMIT);
-                result.add(new LoadedCommentIndex.Row(ident,parentId,txt,speech,i));
+                Object user=HostTargets.read(c,"user");
+                String authorUid=string(HostTargets.invoke(user,"getUid"));
+                String[] author=workAuthor;
+                String verifiedAuthor=account.equals(author[0])&&work.equals(author[1])?author[2]:"";
+                Object model=HostTargets.read(c,"awemeOfFavoriteComment");
+                if(work.equals(HostTargets.invoke(model,"getAid")))verifiedAuthor=string(HostTargets.invoke(model,"getAuthorUid"));
+                Boolean published=LoadedCommentIndex.id(verifiedAuthor)&&LoadedCommentIndex.id(authorUid)?verifiedAuthor.equals(authorUid):null;
+                Object digged=HostTargets.read(c,"isAuthorDigged");
+                int media=(presentList(HostTargets.read(c,"imageList"))?1:0)|(CommentToolsHook.mapped(c,"comment_audio")!=null?2:0)|(presentList(HostTargets.read(c,"videoList"))?4:0);
+                result.add(new LoadedCommentIndex.Row(ident,parentId,txt,speech,i,media,authorUid,published,
+                        digged instanceof Boolean?(Boolean)digged:null,number(HostTargets.read(c,"diggCount")),LoadedCommentIndex.timestamp(HostTargets.read(c,"createTime"))));
                 if(result.size()>LoadedCommentIndex.LIMIT){partial=true;break;}
             }
             if(replace)index.refresh(index.token());
@@ -373,10 +438,21 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
             return true;
         }catch(Exception | LinkageError ignored){return false;}
     }
+    private static boolean presentList(Object value){return value instanceof List<?> && !((List<?>)value).isEmpty();}
+    private static Long number(Object value){return value instanceof Number && ((Number)value).longValue()>=0?((Number)value).longValue():null;}
+    private static String string(Object value){return value instanceof String?(String)value:"";}
     public static void show(Context context) {
         LoadedCommentSearchHook hook=active;
         if(hook==null){toast(context,"当前版本没有可用的评论面板");return;}
         synchronized(hook){hook.cancelRequest();hook.open(context);}
+    }
+    static boolean locateBookmark(Context ctx,String uid,String aid,String cid){
+        LoadedCommentSearchHook hook=active;if(hook==null)return false;
+        synchronized(hook){try{
+            if(!uid.equals(hook.account)||!aid.equals(hook.work)||!hook.sample(false))return false;
+            for(LoadedCommentIndex.Row row:hook.index.find(""))if(cid.equals(row.id)&&row.position>=0)
+                return hook.current.jump(hook.panel.get(),row.position);
+        }catch(Exception|LinkageError ignored){}return false;}
     }
 
     /** Opens the existing comment button once, then searches only this screen/account/work's rendered rows. */
@@ -483,7 +559,7 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
         redraw=()->{synchronized(this){
             if(token!=index.token()||search!=view||dialog!=d)return;
             String q=view.query().trim();
-            List<LoadedCommentIndex.Row> matches=index.find(q);
+            List<LoadedCommentIndex.Row> matches=index.find(q,view.mediaMask(),view.authorOnly(),view.diggedOnly(),view.sortOrder());
             ArrayList<MiuixCommentSearch.Entry> entries=new ArrayList<>(matches.size());
             for(LoadedCommentIndex.Row row:matches) entries.add(new MiuixCommentSearch.Entry(row.id,
                     row.root.isEmpty()?"评论":row.position<0?"楼中楼回复（已收起）":"楼中楼回复",row.match(q)));
@@ -522,7 +598,13 @@ public final class LoadedCommentSearchHook implements AutoCloseable {
     }
     private static void toast(Context ctx,String s){Toast.makeText(ctx,s,Toast.LENGTH_SHORT).show();}
     @Override public synchronized void close(){
-        enabled=false;cancelRequest();clear();if(active==this)active=null;
+        AlertDialog closingDialog=dialog;
+        List<AlertDialog> pendingDialogs=new ArrayList<>(configurationDialogs);
+        configurationDialogs.clear();configurationTranscriptRefresh=false;
+        closed=true;configurationActions.cancel();enabled=false;cancelRequest();clear();if(active==this)active=null;
+        for(AlertDialog pendingDialog:pendingDialogs)if(pendingDialog!=closingDialog)main.post(()->{
+            try{pendingDialog.dismiss();}catch(RuntimeException ignored){}
+        });
         for(XposedInterface.HookHandle h:handles)try{h.unhook();}catch(RuntimeException ignored){}
         handles.clear();
     }

@@ -181,18 +181,6 @@ public final class MainActivity extends ComponentActivity {
                         hasFailure = true;
                     } else pendingHook = true;
                 }
-                if (snapshot.getBoolean("top_tab_hook_installed", false)) {
-                    detail += snapshot.getBoolean("top_tab_filter_enabled", false)
-                            ? "\n顶部标签筛选已启用。"
-                            : "\n顶部标签 Hook 已安装，当前设置为关闭。";
-                } else {
-                    String hookFailure = snapshot.getString("top_tab_hook_failure");
-                    detail += "\n顶部标签 Hook 未安装。";
-                    if (hookFailure != null && !hookFailure.isEmpty()) {
-                        detail += "\n" + hookFailure;
-                        hasFailure = true;
-                    } else pendingHook = true;
-                }
                 if (snapshot.getBoolean("feed_ui_hook_installed", false)) {
                     if (snapshot.getBoolean("feed_ui_active", false)) {
                         detail += (snapshot.getBoolean("component_hide_configured", false)
@@ -367,7 +355,6 @@ public final class MainActivity extends ComponentActivity {
                                 : hasFailure ? "部分功能未接入" : "Hook 已接入，行为待验证", detail,
                         adaptationVerified && !hasFailure && (feedInstalled || downloadInstalled
                                 || snapshot.getBoolean("version_hook_installed", false)
-                                || snapshot.getBoolean("top_tab_hook_installed", false)
                                 || snapshot.getBoolean("feed_ui_hook_installed", false)
                                 || snapshot.getBoolean("refresh_hook_installed", false)
                                 || snapshot.getBoolean("auto_like_hook_installed", false)

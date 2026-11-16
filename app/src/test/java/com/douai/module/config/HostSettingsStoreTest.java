@@ -15,7 +15,7 @@ import static org.junit.Assert.*;
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.ss.android.ugc.aweme")
 public final class HostSettingsStoreTest {
     @Test
-    public void hostPanelReadsAndWritesTheTargetApplicationsPrivatePreferences() {
+    public void retiredTabPreferencesRemainReadableAlongsideActiveComponentSettings() {
         Context host = RuntimeEnvironment.getApplication();
         SharedPreferences preferences = host.getSharedPreferences(
                 SettingsRepository.PREFERENCES_NAME, Context.MODE_PRIVATE);

@@ -20,7 +20,7 @@ public final class ConfigurationCatalog {
         PLAYBACK, VIDEO_QUALITY, AUTO_PLAY, GESTURE, MESSAGE_RECALL, SPOOF, FOLLOW_LISTS, AUTOMATION_DISPATCH,
         HOST_BEHAVIOR, DIRECT_MESSAGE_SPEECH, MEDIA_MODEL, COMMENT_ENHANCEMENTS,
         COMMENT_VOICE, NATIVE_COMMENT_SPEECH, AUTO_LIKE, AUTO_FOLLOW, AUTO_MESSAGE, SIDEBAR,
-        COMMENT_TOOLS, IMMERSIVE, VERSION, TOP_TABS, REFRESH, DIAGNOSTICS, MANUAL_AI
+        COMMENT_TOOLS, IMMERSIVE, VERSION, REFRESH, DIAGNOSTICS, MANUAL_AI, THEME
     }
 
     /** A missing default means the owning domain still resolves a context-dependent/legacy default. */
@@ -80,10 +80,19 @@ public final class ConfigurationCatalog {
         add(keys, "boolean", LocalOptions.MODULE_ONLY_SPEED);
         add(keys, "boolean", LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY);
         add(keys, "boolean", "hide_seen_works loaded_comment_search_enabled comment_transcript_enabled");
+        add(keys, "boolean", "temporary_feed_rules_enabled author_speed_enabled");
+        add(keys, "string", "resume_playback_mode");
         add(keys, "string", "seen_work_days");
         add(keys, "boolean", CommentAiSettings.TAKEOVER + " " + CommentAiSettings.SEARCH);
         add(keys, "boolean", SidebarSettings.ENABLED);
         add(keys, "string", SidebarSettings.ITEMS);
+        add(keys, "boolean", SidebarSettings.ITEMS_ENABLED + " " + SidebarSettings.KEEP_COMMON);
+        add(keys, "string", SidebarSettings.COMMON_ITEMS);
+        add(keys, "string", LiquidGlassSettings.STYLE);
+        add(keys, "boolean", LiquidGlassSettings.GRAVITY);
+        add(keys, "string", HomeUiCustomizationSettings.ICONS);
+        add(keys, "string", HomeUiCustomizationSettings.HIDDEN_NAVIGATION);
+        add(keys, "boolean", HomeUiCustomizationSettings.HIDE_LABELS);
         add(keys, "boolean", LocalOptions.REPLY_RECOGNIZE_IMAGES + " " + LocalOptions.REPLY_RECOGNIZE_VIDEO);
         add(keys, "boolean", LocalOptions.COMMENT_REPLY_ENABLED
                 + " comment_reply_tip_enabled comment_reply_failure_notify");
@@ -128,16 +137,16 @@ public final class ConfigurationCatalog {
         }
         TRANSFER_TYPES = Collections.unmodifiableMap(keys);
         // These groups replace updateConfiguration's inline lists. Prefixes retain future/legacy keys.
-        depend(Feature.FEED_FILTER, "feed_filter_enabled hide_ads hide_lives hide_image_posts hide_recommendation_cards hide_recommendation_merchants keyword_filter_enabled keyword minimum_duration_enabled minimum_duration_seconds minimum_likes_enabled minimum_like_count filter_interrupt hide_mini_games hide_long_videos hide_product_cards hide_hotspot_rank_cards maximum_duration_seconds hide_seen_works seen_work_days", "");
+        depend(Feature.FEED_FILTER, "feed_filter_enabled hide_ads hide_lives hide_image_posts hide_recommendation_cards hide_recommendation_merchants keyword_filter_enabled keyword minimum_duration_enabled minimum_duration_seconds minimum_likes_enabled minimum_like_count filter_interrupt hide_mini_games hide_long_videos hide_product_cards hide_hotspot_rank_cards maximum_duration_seconds hide_seen_works seen_work_days temporary_feed_rules_enabled", "");
         depend(Feature.DOWNLOAD, "download_enabled remove_watermark download_custom_name download_name_template remove_download_limits download_method download_directory_uri", "third_party_");
         depend(Feature.REPLY, "automation_enabled native_auto_reply reply_global reply_targets reply_mode reply_prompt reply_model_id reply_delay_seconds auto_message_text reply_daily_limit reply_user_cooldown_minutes reply_recognize_images reply_recognize_video reply_keywords reply_scope_mode reply_scope_relations reply_scope_fields reply_scope_keywords reply_scope_users reply_filter_mode reply_filter_keywords reply_filter_fields reply_private_chats reply_group_chats reply_group_scope_mode reply_group_targets reply_group_mode reply_group_members reply_random ai_model_settings_v2 streak_enabled streak_targets streak_content streak_content_api streak_start streak_end streak_tip streak_reset_token streak_retry_unknown_token reply_voice", "tts_ voice_catalog_");
         depend(Feature.COMMENT_AUTOMATION, "automation_enabled native_auto_comment comment_mode comment_prompt comment_model_id comment_delay_seconds auto_comment_text comment_daily_limit comment_user_cooldown_minutes comment_recognize_images comment_recognize_video comment_scope_mode comment_scope_relations comment_scope_fields comment_scope_keywords comment_scope_users comment_filter_mode comment_filter_keywords comment_filter_fields ai_model_settings_v2 comment_voice", "tts_ voice_catalog_");
         depend(Feature.COMMENT_REPLY, "native_comment_reply", "");
         depend(Feature.FEED_UI, "hide_interface video_right_alpha component_hide_enabled component_hide_uniform_enabled component_hide_uniform_alpha component_hide_on_switch component_hide_open_comments_on_show component_hide_show_on_pause component_hide_custom_views", "component_alpha_");
-        depend(Feature.PLAYBACK, "auto_speed playback_speed " + LocalOptions.MODULE_ONLY_SPEED, "");
+        depend(Feature.PLAYBACK, "auto_speed playback_speed author_speed_enabled " + LocalOptions.MODULE_ONLY_SPEED, "");
         depend(Feature.VIDEO_QUALITY, LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY, "");
         depend(Feature.AUTO_PLAY, "auto_play smart_swipe pause_auto_on_comments", "");
-        depend(Feature.GESTURE, "playback_speed toolbar_enabled long_press_action double_tap_action intercept_native_long_press remove_watermark download_custom_name download_name_template remove_download_limits download_method download_directory_uri " + LocalOptions.MODULE_ONLY_SPEED, "long_press_ double_tap_ toolbar_ third_party_");
+        depend(Feature.GESTURE, "playback_speed toolbar_enabled long_press_action double_tap_action intercept_native_long_press remove_watermark download_custom_name download_name_template remove_download_limits download_method download_directory_uri resume_playback_mode author_speed_enabled " + LocalOptions.MODULE_ONLY_SPEED, "long_press_ double_tap_ toolbar_ third_party_");
         depend(Feature.MESSAGE_RECALL, "prevent_message_recall recall_self recall_other recall_background", "");
         depend(Feature.SPOOF, "spoof_version fake_version_name fake_version_code spoof_profile profile_like_count profile_following_count profile_follower_count profile_mutual_count", "");
         depend(Feature.FOLLOW_LISTS, "reply_scope_mode comment_scope_mode reply_private_chats reply_global reply_scope_relations reply_targets reply_group_targets reply_group_members comment_scope_relations comment_scope_users relation_lists_refresh_token", "");
@@ -154,13 +163,17 @@ public final class ConfigurationCatalog {
         depend(Feature.COMMENT_TOOLS, "copy_comment_text comment_media_tools copy_source_data loaded_comment_search_enabled comment_transcript_enabled", "");
         depend(Feature.IMMERSIVE, "remove_black_edges hide_navigation_bar", "");
         depend(Feature.VERSION, "spoof_version fake_version_name fake_version_code", "");
-        depend(Feature.TOP_TABS, "hide_top_tabs hidden_top_tabs", "");
         depend(Feature.REFRESH, "confirm_refresh", "");
 
         depend(Feature.DIAGNOSTICS, LocalOptions.DEBUG_LOGGING, "");
         depend(Feature.MANUAL_AI, CommentAiSettings.TAKEOVER + " " + CommentAiSettings.SEARCH
                 + " " + CommentAiSettings.MODEL_ID + " " + AiModelSettings.KEY, "");
-        depend(Feature.SIDEBAR, SidebarSettings.ENABLED + " " + SidebarSettings.ITEMS, "");
+        depend(Feature.SIDEBAR, SidebarSettings.ENABLED + " " + SidebarSettings.ITEMS + " "
+                + SidebarSettings.ITEMS_ENABLED + " " + SidebarSettings.KEEP_COMMON + " " + SidebarSettings.COMMON_ITEMS
+                + " " + LiquidGlassSettings.STYLE + " " + LiquidGlassSettings.GRAVITY, "");
+        depend(Feature.THEME, LiquidGlassSettings.STYLE + " " + LiquidGlassSettings.GRAVITY
+                + " " + HomeUiCustomizationSettings.ICONS + " " + HomeUiCustomizationSettings.HIDE_LABELS
+                + " " + HomeUiCustomizationSettings.HIDDEN_NAVIGATION, "");
         Map<String, Object> defaults = new LinkedHashMap<>();
         defaults.put(LocalOptions.DEBUG_LOGGING, false);
         defaults.put(LocalOptions.HASH_LONG_PRESS_VOICE, false);
@@ -171,8 +184,19 @@ public final class ConfigurationCatalog {
         defaults.put(CommentAiSettings.MODEL_ID, "");
         defaults.put(SidebarSettings.ENABLED, false);
         defaults.put(SidebarSettings.ITEMS, SidebarSettings.DEFAULT_ITEMS);
+        defaults.put(SidebarSettings.ITEMS_ENABLED, true);
+        defaults.put(SidebarSettings.KEEP_COMMON, false);
+        defaults.put(SidebarSettings.COMMON_ITEMS, "*");
+        defaults.put(LiquidGlassSettings.STYLE, LiquidGlassSettings.ORIGINAL);
+        defaults.put(LiquidGlassSettings.GRAVITY, true);
+        defaults.put(HomeUiCustomizationSettings.ICONS, "{}");
+        defaults.put(HomeUiCustomizationSettings.HIDE_LABELS, false);
+        defaults.put(HomeUiCustomizationSettings.HIDDEN_NAVIGATION, "[]");
         defaults.put("hide_product_cards", false);
         defaults.put("hide_seen_works", false);
+        defaults.put("temporary_feed_rules_enabled", false);
+        defaults.put("author_speed_enabled", false);
+        defaults.put("resume_playback_mode", "off");
         defaults.put("seen_work_days", "3");
         defaults.put("loaded_comment_search_enabled", false);
         defaults.put("comment_transcript_enabled", false);
@@ -232,12 +256,22 @@ public final class ConfigurationCatalog {
 
     /** Transfer keeps its existing type/size checks so legacy range values remain importable. */
     static void validateTransfer(String key, Object value) {
+        if (LiquidGlassSettings.STYLE.equals(key) && !LiquidGlassSettings.ORIGINAL.equals(value)
+                && !LiquidGlassSettings.LIQUID_GLASS.equals(value)) throw ConfigJson.invalid();
         if ("seen_work_days".equals(key) && !java.util.Arrays.asList("1", "3", "7").contains(value)) throw ConfigJson.invalid();
         String expected = TRANSFER_TYPES.get(key);
         if (expected == null || !("boolean".equals(expected) && value instanceof Boolean
                 || "string".equals(expected) && value instanceof String
                 || "int".equals(expected) && value instanceof Integer)) throw ConfigJson.invalid();
         if (value instanceof String && ((String) value).length() > ConfigTransfer.MAX_BYTES) throw ConfigJson.invalid();
+        if (HomeUiCustomizationSettings.ICONS.equals(key) && !"{}".equals(value)) {
+            try { HomeUiCustomizationSettings.normalize((String)value); }
+            catch (IllegalArgumentException failure) { throw ConfigJson.invalid(); }
+        }
+        if (HomeUiCustomizationSettings.HIDDEN_NAVIGATION.equals(key)) {
+            try { HomeUiCustomizationSettings.normalizeHiddenNavigation((String)value); }
+            catch (IllegalArgumentException failure) { throw ConfigJson.invalid(); }
+        }
     }
 
     public static String validatePlaybackSpeed(String value) {
@@ -256,6 +290,13 @@ public final class ConfigurationCatalog {
 
     /** Type validation stays separate so version-1 backups can migrate old custom strings. */
     static Object normalizedTransferValue(String key, Object value) {
+        if (HomeUiCustomizationSettings.HIDDEN_NAVIGATION.equals(key) && value instanceof String)
+            return HomeUiCustomizationSettings.normalizeHiddenNavigation((String)value);
+        if (HomeUiCustomizationSettings.ICONS.equals(key) && value instanceof String && !"{}".equals(value)) {
+            return HomeUiCustomizationSettings.normalize((String)value);
+        }
+        if (SidebarSettings.COMMON_ITEMS.equals(key) && value instanceof String)
+            return SidebarSettings.normalizeCommonSelection((String)value);
         if (SidebarSettings.ITEMS.equals(key) && value instanceof String) {
             java.util.List<String> selected = new java.util.ArrayList<>();
             for (SidebarSettings.Entry entry : SidebarSettings.parse((String) value)) selected.add(entry.id);

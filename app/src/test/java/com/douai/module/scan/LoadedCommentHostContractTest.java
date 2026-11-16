@@ -55,7 +55,12 @@ public class LoadedCommentHostContractTest {
         fields.put(pvm,Arrays.asList("l:"+lvm));fields.put(lvm,Arrays.asList("M:LX/0Mff;"));
         fields.put("LX/0Mff;",Arrays.asList("LIZJ:LX/0MAN;"));fields.put("LX/0Mh4;",Arrays.asList("LIZIZ:LX/0Mbe;"));
         fields.put("LX/0MXK;",Arrays.asList("u:Z","z:Z"));
-        fields.put(comment,Arrays.asList("cid:"+str,"awemeId:"+str,"text:"+str,"rootCommentId:"+str,"replyId:"+str));
+        String user="Lcom/ss/android/ugc/aweme/profile/model/User;",aweme="Lcom/ss/android/ugc/aweme/feed/model/Aweme;";
+        fields.put(comment,Arrays.asList("cid:"+str,"awemeId:"+str,"text:"+str,"rootCommentId:"+str,"replyId:"+str,
+                "imageList:"+list,"videoList:"+list,"user:"+user,"diggCount:I","createTime:J","isAuthorDigged:Z",
+                "replyToReplyId:"+str,"replyToUserId:"+str,"replyToUserName:"+str,"replyToReplyCommentText:"+str,"awemeOfFavoriteComment:"+aweme));
+        methods.put(user,List.of("getUid()"+str,"getNickname()"+str));
+        methods.put(aweme,List.of("getAid()"+str,"getAuthorUid()"+str));
         Set<String> wanted=new HashSet<>(methods.keySet());wanted.addAll(fields.keySet());wanted.add(audio);wanted.add("LX/0MhE;");
         try(ZipFile zip=new ZipFile(apk)){
             for(var e:HostApkTestProfile.dexEntries(zip)){

@@ -4,6 +4,10 @@ import android.content.Context
 import android.view.View
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -30,6 +34,7 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /** One persistent editor and list: new pages update rows without recreating input or the dialog. */
+@OptIn(ExperimentalLayoutApi::class)
 class MiuixCommentSearch(
     context: Context,
     private val changed: Consumer<String>,
@@ -45,6 +50,11 @@ class MiuixCommentSearch(
     private var caption by mutableStateOf("加载更多评论")
     private var transcripts by mutableStateOf(false)
     private var closed = false
+    private var filters by mutableStateOf(false)
+    private var media by mutableStateOf(0)
+    private var onlyAuthor by mutableStateOf(false)
+    private var onlyDigged by mutableStateOf(false)
+    private var order by mutableStateOf(0)
     val view: View = ComposeView(context.formComposeContext()).apply {
         tag = "comment.search.root"
         id = View.generateViewId()
@@ -75,6 +85,21 @@ class MiuixCommentSearch(
                     )
                     Text(status, fontSize = 13.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         modifier = Modifier.fillMaxWidth().testTag("comment.search.status"))
+                    TextButton(text=if(filters) "收起筛选" else "筛选与排序",onClick={filters=!filters},
+                        modifier=Modifier.testTag("comment.search.filters"))
+                    if(filters) {
+                        FlowRow(Modifier.weight(1f,fill=false).fillMaxWidth().heightIn(max=160.dp).verticalScroll(rememberScrollState())) {
+                            listOf(1 to "图片",2 to "语音",4 to "视频").forEach { (bit,label)->
+                                TextButton(text=label+if(media and bit!=0)" ✓" else "",onClick={media=media xor bit;changed.accept(draft)})
+                            }
+                            TextButton(text="作者发布"+if(onlyAuthor)" ✓" else "",onClick={onlyAuthor=!onlyAuthor;changed.accept(draft)})
+                            TextButton(text="作者赞过"+if(onlyDigged)" ✓" else "",onClick={onlyDigged=!onlyDigged;changed.accept(draft)})
+                            listOf("原顺序","点赞最多","最新","最早").forEachIndexed { index,label->
+                                TextButton(text=label+if(order==index)" ✓" else "",onClick={order=index;changed.accept(draft)})
+                            }
+                        }
+                        Text("媒体多选任一命中；其他条件同时满足。未知点赞/时间排末尾。",fontSize=12.sp)
+                    }
                     LazyColumn(
                         Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 300.dp)
                             .testTag("comment.search.results"),
@@ -107,6 +132,10 @@ class MiuixCommentSearch(
     }
 
     fun query(): String = draft
+    fun mediaMask(): Int = media
+    fun authorOnly(): Boolean = onlyAuthor
+    fun diggedOnly(): Boolean = onlyDigged
+    fun sortOrder(): Int = order
     fun setTranscriptSearch(value: Boolean) { transcripts = value }
     fun render(status: String, rows: List<Entry>, canLoadMore: Boolean, loading: Boolean, loadCaption: String) {
         if (closed) return

@@ -34,6 +34,8 @@ import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.ConfigurationChanges;
 import com.douai.module.config.ConfigurationCatalog.Feature;
 import com.douai.module.config.ConfigurationSnapshot;
+import com.douai.module.config.ConfigurationApplyAction;
+import com.douai.module.config.ConfigurationPublication;
 import com.douai.module.config.ConfigImportTransaction;
 import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.FrameworkConfigSync;
@@ -71,7 +73,6 @@ import com.douai.module.feature.DebugHookTrace;
 import com.douai.module.feature.FeedAdFilterHook;
 import com.douai.module.feature.DownloadActionHook;
 import com.douai.module.feature.VersionInfoHook;
-import com.douai.module.feature.TopTabFilterHook;
 import com.douai.module.feature.FeedUiHideHook;
 import com.douai.module.feature.RefreshConfirmHook;
 import com.douai.module.feature.AutoLikeHook;
@@ -119,7 +120,20 @@ public final class DouAiModule extends XposedModule {
     private volatile FeatureSettings currentSettings = FeatureSettings.defaults();
     private volatile ExtendedSettings extendedSettings;
     private volatile LocalOptions localOptions = new LocalOptions(java.util.Collections.emptyMap());
+    // Last accepted desired values; consumer completion is recorded separately in the publication ledger.
     private Map<String, ?> lastConfigurationValues;
+    private volatile ConfigurationSnapshot desiredConfigurationSnapshot;
+    private volatile ConfigurationPublication<ConfigurationSnapshot> configurationPublication;
+    private volatile ConfigurationPublication.Snapshot configurationPublicationState;
+    private enum ConfigurationReadStatus { NOT_READ, DEFERRED, READY, FAILED }
+    private volatile ConfigurationReadStatus configurationReadStatus = ConfigurationReadStatus.NOT_READ;
+    private volatile String configurationReadFailureClass;
+    private final java.util.concurrent.ConcurrentMap<String, ConfigurationConsumerOwner> configurationConsumerOwners = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final class ConfigurationConsumerOwner {
+        final Object receiver;
+        final java.util.concurrent.atomic.AtomicReference<ConfigurationApplyAction.PermanentFailure> failure = new java.util.concurrent.atomic.AtomicReference<>();
+        ConfigurationConsumerOwner(Object receiver) { this.receiver = receiver; }
+    }
     private boolean configurationUpdatePending;
     private volatile HostBehaviorHooks hostBehaviorHooks;
     private volatile PlaybackBehaviorHooks playbackBehaviorHooks;
@@ -148,7 +162,6 @@ public final class DouAiModule extends XposedModule {
     private volatile FeedAdFilterHook feedAdFilterHook;
     private volatile DownloadActionHook downloadActionHook;
     private volatile VersionInfoHook versionInfoHook;
-    private volatile TopTabFilterHook topTabFilterHook;
     private volatile FeedUiHideHook feedUiHideHook;
     private volatile RefreshConfirmHook refreshConfirmHook;
     private volatile AutoLikeHook autoLikeHook;
@@ -163,6 +176,8 @@ public final class DouAiModule extends XposedModule {
     private volatile SeenWorkHook seenWorkHook;
     private volatile ImmersiveModeController immersiveModeController;
     private volatile HomeNavigationHideController homeNavigationHideController;
+    private volatile com.douai.module.feature.LiquidGlassController liquidGlassController;
+    private volatile com.douai.module.feature.LiquidGlassWindowHooks liquidGlassWindowHooks;
     private volatile HostUiController hostUiController;
     private volatile HomeSidebarGestureHook homeSidebarGestureHook;
     private volatile HomeSidebarModuleHook homeSidebarModuleHook;
@@ -175,7 +190,6 @@ public final class DouAiModule extends XposedModule {
     private volatile String feedHookFailure;
     private volatile String downloadHookFailure;
     private volatile String versionHookFailure;
-    private volatile String topTabHookFailure;
     private volatile String feedUiHookFailure;
     private volatile String refreshHookFailure;
     private volatile String autoLikeHookFailure;
@@ -281,6 +295,7 @@ public final class DouAiModule extends XposedModule {
             hostScanReport = report;
             hostBehaviorHooks = HostBehaviorHooks.install(hookFramework(), report, hostClassLoader, null,
                     localOptions, message -> moduleLog(3, TAG, message));
+            refreshConfigurationBindings();
             moduleLog(3, TAG, "Validated startup cache; basic host gates registered before Application.onCreate");
         } catch (Exception failure) {
             moduleLog(5, TAG, "Startup cache unavailable; asynchronous scan retained: " + failure.getClass().getSimpleName());
@@ -294,6 +309,7 @@ public final class DouAiModule extends XposedModule {
                     localOptions, message -> moduleLog(3, TAG, message));
             if (includePlayer) videoQualityHook.installPlayer(hookFramework());
             videoQualityFailure = null;
+            refreshConfigurationBindings();
         } catch (Exception | LinkageError unavailable) {
             videoQualityFailure = HostAdaptationDiagnostics.installationFailure(unavailable);
             if (videoQualityHook != null) { videoQualityHook.close(); videoQualityHook = null; }
@@ -417,10 +433,8 @@ public final class DouAiModule extends XposedModule {
                                 try {
                                     SharedPreferences preferences = ((Application) application).getSharedPreferences(
                                             SettingsRepository.PREFERENCES_NAME, Context.MODE_PRIVATE);
-                                    localOptions = LocalOptions.readFrom(preferences);
-                                    if (hostBehaviorHooks != null) hostBehaviorHooks.setOptions(localOptions);
+                                    updateConfiguration(preferences);
                                     ensureVideoQualityHook(false);
-                                    if (videoQualityHook != null) videoQualityHook.setOptions(localOptions);
                                 } catch (RuntimeException failure) {
                                     moduleLog(5, TAG, "Could not read startup options: " + failure.getClass().getSimpleName());
                                 }
@@ -433,6 +447,7 @@ public final class DouAiModule extends XposedModule {
                                 }
                                 try {
                                     ensureHostUiController((Application) application);
+                                    ensureLiquidGlassController((Application) application);
                                     ExtendedSettings startupSettings = extendedSettings;
                                     if (startupSettings == null) {
                                         startupSettings = ExtendedSettings.readSystemBars(
@@ -469,6 +484,9 @@ public final class DouAiModule extends XposedModule {
                                     HostUiController controller = ensureHostUiController(
                                             ((Activity) activity).getApplication());
                                     if (controller != null) controller.onActivityResumed((Activity) activity);
+                                    ensureLiquidGlassController(((Activity) activity).getApplication());
+                                    com.douai.module.feature.LiquidGlassController glass = liquidGlassController;
+                                    if (glass != null) glass.onActivityResumed((Activity) activity);
                                 } catch (Throwable failure) {
                                     moduleLog(5, TAG, "Could not attach controls to resumed Activity: "
                                             + failure.getMessage());
@@ -505,6 +523,43 @@ public final class DouAiModule extends XposedModule {
         }
     }
 
+    private synchronized void ensureLiquidGlassController(Context context) {
+        if (liquidGlassController != null || context == null || hostProfile != HostAdaptation.PROFILE_410) return;
+        com.douai.module.feature.LiquidGlassController controller = null;
+        com.douai.module.feature.LiquidGlassWindowHooks windowHooks = null;
+        try {
+            if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+                if (!new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> ensureLiquidGlassController(context))) {
+                    throw new IllegalStateException("Main looper rejected liquid glass installation");
+                }
+                return;
+            }
+            controller = new com.douai.module.feature.LiquidGlassController(context, localOptions,
+                    message -> DouAiLog.event("liquid_glass", "runtime", "observation", message));
+            windowHooks = new com.douai.module.feature.LiquidGlassWindowHooks(hookFramework(), controller,
+                    hostClassLoader,message -> DouAiLog.event("liquid_glass", "window_hook", "observation", message));
+            HostUiController ui = hostUiController;
+            Activity activity = ui == null ? null : ui.getResumedActivity();
+            if (activity != null) controller.onActivityResumed(activity);
+            liquidGlassWindowHooks = windowHooks;
+            liquidGlassController = controller;
+            refreshConfigurationBindings();
+        } catch (Throwable failure) {
+            if (liquidGlassController == controller) liquidGlassController = null;
+            if (liquidGlassWindowHooks == windowHooks) liquidGlassWindowHooks = null;
+            if (windowHooks != null) {
+                try { windowHooks.close(); }
+                catch (Throwable cleanupFailure) { if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure); }
+            }
+            if (controller != null) {
+                try { controller.close(); }
+                catch (Throwable cleanupFailure) { if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure); }
+            }
+            DouAiLog.failure("liquid_glass", "installation", failure);
+            moduleLog(5, TAG, "Liquid glass installation unavailable: " + failure.getClass().getSimpleName());
+        }
+    }
+
     private synchronized void ensureImmersiveModeController(Context context, ExtendedSettings settings) {
         if (immersiveModeController != null || context == null) return;
         try {
@@ -514,6 +569,7 @@ public final class DouAiModule extends XposedModule {
                         return ui == null ? null : ui.getResumedActivity();
                     });
             immersiveModeFailure = null;
+            refreshConfigurationBindings();
             moduleLog(3, TAG, "Reversible status-bar controller installed; enabled="
                     + (settings != null && settings.removeBlackEdges));
         } catch (Throwable failure) {
@@ -636,6 +692,7 @@ public final class DouAiModule extends XposedModule {
 
     private synchronized void registerSettingsListener(SharedPreferences preferences) {
         if (hostPreferences == preferences && settingsListener != null) return;
+        if (hostPreferences != null && hostPreferences != preferences) closeConfigurationPublication();
         if (configurationPublicationRegistration != null) configurationPublicationRegistration.close();
         if (hostPreferences != null && settingsListener != null) {
             try { hostPreferences.unregisterOnSharedPreferenceChangeListener(settingsListener); }
@@ -643,7 +700,7 @@ public final class DouAiModule extends XposedModule {
         }
         hostPreferences = preferences;
         configurationPublicationRegistration = ConfigImportTransaction.observe(
-                preferences, this, this::scheduleConfigurationUpdate);
+                preferences, this, this::onConfigurationImportSettled);
         SharedPreferences.OnSharedPreferenceChangeListener listener = (sharedPreferences, key) ->
                 scheduleConfigurationUpdate();
         try {
@@ -655,6 +712,16 @@ public final class DouAiModule extends XposedModule {
         }
     }
 
+    private void onConfigurationImportSettled() {
+        // A replacement ends transient sessions even if its values equal the current snapshot.
+        FeedGestureToolsHook tools = feedGestureToolsHook;
+        try { if (tools != null) tools.configurationReplaced(); }
+        catch (RuntimeException | LinkageError failure) {
+            DouAiLog.failure("configuration", "replacement_session_invalidation", failure);
+        }
+        scheduleConfigurationUpdate();
+    }
+
     private void scheduleConfigurationUpdate() {
         if (hostPreferences != null && ConfigImportTransaction.deferUntilSettled(
                 hostPreferences, this, this::scheduleConfigurationUpdate)) return;
@@ -662,7 +729,8 @@ public final class DouAiModule extends XposedModule {
             if (configurationUpdatePending) return;
             configurationUpdatePending = true;
         }
-        new Handler(Looper.getMainLooper()).post(() -> {
+        try {
+            if (!new Handler(Looper.getMainLooper()).post(() -> {
             hostWorkQueue.submit(() -> {
                 synchronized (hostWorkStateLock) { configurationUpdatePending = false; }
                 if (hostPreferences != null) updateConfiguration(hostPreferences);
@@ -671,7 +739,11 @@ public final class DouAiModule extends XposedModule {
                 synchronized (hostWorkStateLock) { configurationUpdatePending = false; }
                 DouAiLog.failure("configuration", "scheduled_publication", failure);
             });
-        });
+            })) throw new java.util.concurrent.RejectedExecutionException("Configuration reload callback rejected");
+        } catch (RuntimeException failure) {
+            synchronized (hostWorkStateLock) { configurationUpdatePending = false; }
+            DouAiLog.failure("configuration", "schedule_publication", failure);
+        }
     }
 
     private synchronized void updateConfiguration(SharedPreferences preferences) {
@@ -681,152 +753,313 @@ public final class DouAiModule extends XposedModule {
     }
 
     private void updateConfigurationNow(SharedPreferences preferences) {
-        DouAiLog.Operation configurationOperation = null;
+        ConfigurationSnapshot snapshot;
         try {
-            ConfigurationSnapshot snapshot = ConfigurationSnapshot.readForPublication(
-                    preferences, this, this::scheduleConfigurationUpdate);
-            if (snapshot == null) return;
-            Map<String, ?> values = snapshot.values;
-            FeatureSettings settings = snapshot.features;
-            ExtendedSettings extended = snapshot.extended;
-            LocalOptions options = snapshot.options;
+            snapshot = ConfigurationSnapshot.readForPublication(preferences, this, this::scheduleConfigurationUpdate);
+        } catch (RuntimeException | LinkageError failure) {
+            configurationReadStatus = ConfigurationReadStatus.FAILED;
+            configurationReadFailureClass = failure.getClass().getName();
+            DouAiLog.failure("configuration", "read_snapshot", failure);
+            moduleLog(5, TAG, "Configuration read failed; last desired snapshot retained", failure);
+            return;
+        }
+        if (snapshot == null) {
+            configurationReadStatus = ConfigurationReadStatus.DEFERRED;
+            configurationReadFailureClass = null;
+            return;
+        }
+        boolean initial = desiredConfigurationSnapshot == null;
+        ConfigurationChanges changes = ConfigurationChanges.between(lastConfigurationValues, snapshot.values);
+        if (initial || !changes.isEmpty()) {
+            // These references express desired state, independently of each consumer's actual completion.
+            desiredConfigurationSnapshot = snapshot;
+            currentSettings = snapshot.features;
+            extendedSettings = snapshot.extended;
+            localOptions = snapshot.options;
+            lastConfigurationValues = snapshot.values;
+        } else snapshot = desiredConfigurationSnapshot;
+        configurationReadStatus = ConfigurationReadStatus.READY;
+        configurationReadFailureClass = null;
+        DouAiLog.configRevision(DouAiLog.configurationRevision(snapshot.values));
+        DouAiLog.Operation operation = DouAiLog.begin("configuration", initial ? "initial_snapshot" : "preference_publication");
+        try {
+            operation.stage("desired_snapshot_accepted", "initial=" + initial + ";key_count=" + snapshot.values.size());
+            publishConfiguration(snapshot, changes, initial);
+            ConfigurationPublication.Snapshot state = configurationPublication.snapshot();
+            operation.finish(state.summary == ConfigurationPublication.Summary.SUCCESS
+                            ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED,
+                    "configuration_desired_published", "revision=" + state.revision + ";consumers=" + state.summary
+                            + ";result_scope=local_configuration;feature_business_results=separate");
+        } catch (RuntimeException | LinkageError failure) {
+            // A publication setup failure is distinct from a read failure and cannot roll back prior consumers.
+            operation.error("publication_setup", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "configuration_publication_unavailable", "desired_snapshot_retained=true");
+            DouAiLog.failure("configuration", "publication_setup", failure);
+        }
+    }
 
-            boolean initial = lastConfigurationValues == null;
-            ConfigurationChanges changes = ConfigurationChanges.between(lastConfigurationValues, values);
-            if (!initial && changes.isEmpty()) return;
-            DouAiLog.configRevision(DouAiLog.configurationRevision(values));
-            configurationOperation = DouAiLog.begin("configuration", initial ? "initial_snapshot" : "preference_publication");
-            configurationOperation.stage("read_committed_snapshot", "initial=" + initial + ";key_count=" + values.size());
+    /** Rebind late-installed/replaced receivers without rereading mutable preferences or replaying successes. */
+    private synchronized void refreshConfigurationBindings() {
+        ConfigurationSnapshot snapshot = desiredConfigurationSnapshot;
+        if (snapshot == null) return;
+        try { publishConfiguration(snapshot, ConfigurationChanges.between(snapshot.values, snapshot.values), false); }
+        catch (RuntimeException | LinkageError failure) {
+            DouAiLog.failure("configuration", "registration_refresh", failure);
+        }
+    }
+
+    private void publishConfiguration(ConfigurationSnapshot snapshot, ConfigurationChanges changes, boolean initial) {
+        if (configurationPublication == null) {
+            Handler main = new Handler(Looper.getMainLooper());
+            java.util.concurrent.atomic.AtomicReference<ConfigurationPublication<ConfigurationSnapshot>> owner = new java.util.concurrent.atomic.AtomicReference<>();
+            ConfigurationPublication<ConfigurationSnapshot> publication = new ConfigurationPublication<>((task, delay) -> {
+                if (!main.postDelayed(task, delay)) throw new java.util.concurrent.RejectedExecutionException("Configuration timer rejected");
+                return () -> main.removeCallbacks(task);
+            }, ignored -> configurationConsumersChanged(owner.get()));
+            owner.set(publication);
+            configurationPublication = publication;
+        }
+        configurationPublication.publish(snapshot.values, snapshot, configurationBindings(changes, initial));
+    }
+
+    private void configurationConsumersChanged(ConfigurationPublication<ConfigurationSnapshot> source) {
+        ConfigurationPublication.Snapshot state, previous;
+        synchronized (this) {
+            if (source == null || source != configurationPublication) return;
+            previous = configurationPublicationState;
+            state = source.snapshot();
+            configurationPublicationState = state;
+        }
+        int applied = 0, failed = 0, waiting = 0, applying = 0;
+        for (ConfigurationPublication.NodeSnapshot node : state.nodes.values()) {
+            if (node.status == ConfigurationPublication.Status.APPLIED) applied++;
+            else if (node.status == ConfigurationPublication.Status.FAILED || node.status == ConfigurationPublication.Status.CLOSED) failed++;
+            else if (node.status == ConfigurationPublication.Status.APPLYING) applying++;
+            else waiting++;
+            ConfigurationPublication.NodeSnapshot before = previous == null ? null : previous.nodes.get(node.id);
+            if (before == null || before.desiredRevision != node.desiredRevision || before.appliedRevision != node.appliedRevision
+                    || before.status != node.status || before.reason != node.reason || before.attempts != node.attempts) {
+                DouAiLog.event("configuration", "consumer_state", node.reason.name(), "consumer=" + node.id
+                        + ";desired_revision=" + node.desiredRevision + ";applied_revision=" + node.appliedRevision
+                        + ";status=" + node.status + ";attempts=" + node.attempts + ";failure_class=" + node.failureClass);
+            }
+        }
+        DouAiLog.event("configuration", "consumer_publication", state.summary.name(),
+                "revision=" + state.revision + ";applied=" + applied + ";applying=" + applying
+                        + ";waiting=" + waiting + ";failed=" + failed + ";closed=" + state.closed
+                        + ";scope=local_configuration_not_business_results");
+    }
+
+    private List<ConfigurationPublication.Binding<ConfigurationSnapshot>> configurationBindings(ConfigurationChanges changes, boolean initial) {
+        List<ConfigurationPublication.Binding<ConfigurationSnapshot>> nodes = new ArrayList<>();
+        boolean feed = initial || changes.affects(Feature.FEED_FILTER);
+        boolean downloads = initial || changes.affects(Feature.DOWNLOAD);
+        boolean comments = initial || changes.affects(Feature.COMMENT_TOOLS);
+        boolean feedUi = initial || changes.affects(Feature.FEED_UI);
+        boolean recall = initial || changes.affects(Feature.MESSAGE_RECALL);
+        addConfiguration(nodes, "debug_logging", this, initial || changes.contains(LocalOptions.DEBUG_LOGGING), false, true, s -> {
             boolean wasDebug = DebugLog.isEnabled();
-            DebugLog.setEnabled(options.enabled(LocalOptions.DEBUG_LOGGING));
-            if (initial || changes.contains(LocalOptions.DEBUG_LOGGING) || wasDebug != DebugLog.isEnabled()) {
+            DebugLog.setEnabled(s.options.enabled(LocalOptions.DEBUG_LOGGING));
+            if (initial || wasDebug != DebugLog.isEnabled() || changes.contains(LocalOptions.DEBUG_LOGGING)) {
                 DebugHookTrace.reset(tracedFramework);
                 moduleLog(3, TAG, "Debug logging " + (DebugLog.isEnabled() ? "enabled; comment_json=automatic; message_json=automatic" : "disabled; mode=basic"));
             }
+        });
+        addConfiguration(nodes, "configuration_audit", this, initial || !changes.isEmpty(), false, true,
+                s -> { logDebugConfiguration(s.values, changes); publishFeatureLogState(); });
+        com.douai.module.feature.LiquidGlassController glass = liquidGlassController;
+        nodes.add(configurationBinding("liquid_glass", glass, initial || changes.affects(Feature.THEME), s -> {
+            ConfigurationApplyAction prefetch = configurationAction(false, true, () -> {
+                    if (com.douai.module.config.LiquidGlassSettings.read(s.options).enabled) {
+                        try { com.douai.module.config.HomeUiCustomizationSettings.readEncodedIcons(s.options.text(
+                                com.douai.module.config.HomeUiCustomizationSettings.ICONS, "{}")); }
+                        catch (RuntimeException | LinkageError ignored) { /* Existing material consumer retains valid icons. */ }
+                    }
+                });
+            ConfigurationApplyAction reconcile = configurationAction(true, true, () -> glass.setOptions(s.options));
+            return current -> prefetch.apply(current).thenCompose(ignored -> reconcile.apply(current));
+        }));
+        NativeFollowLists lists = nativeFollowLists;
+        addConfiguration(nodes, "follow_lists", lists, initial || changes.affects(Feature.FOLLOW_LISTS), false, false, s -> lists.setOptions(s.options));
+        AutomationDispatcher dispatcher = automationDispatcher;
+        addConfiguration(nodes, "automation_dispatcher", dispatcher, initial || changes.affects(Feature.AUTOMATION_DISPATCH), true, false, s -> dispatcher.setOptions(s.options));
+        FeedAdFilterHook filter = feedAdFilterHook;
+        addConfiguration(nodes, "feed_filter.settings", filter, feed, false, true, s -> filter.setSettings(s.features));
+        addConfiguration(nodes, "feed_filter.options", filter, feed, false, true, s -> filter.setOptions(s.options));
+        SeenWorkHook seen = seenWorkHook;
+        addConfiguration(nodes, "seen_work", seen, feed, false, false, s -> seen.setOptions(s.features.feedFilterEnabled, s.options));
+        HostBehaviorHooks behavior = hostBehaviorHooks;
+        nodes.add(configurationBinding("host_behavior", behavior, initial || changes.affects(Feature.HOST_BEHAVIOR), s -> behavior.prepareOptions(s.options)));
+        FeedGestureToolsHook gesture = feedGestureToolsHook;
+        addConfiguration(nodes, "gesture", gesture, initial || changes.affects(Feature.GESTURE), true, false, s -> gesture.setOptions(s.options));
+        HomeSidebarGestureHook sidebarGesture = homeSidebarGestureHook;
+        addConfiguration(nodes, "sidebar_gesture", sidebarGesture, initial || changes.affects(Feature.SIDEBAR), false, true, s -> sidebarGesture.setOptions(s.options));
+        HomeSidebarModuleHook sidebarModule = homeSidebarModuleHook;
+        addConfiguration(nodes, "sidebar_module", sidebarModule, initial || changes.affects(Feature.SIDEBAR), true, true, s -> sidebarModule.setOptions(s.options));
+        VideoQualityHook quality = videoQualityHook;
+        addConfiguration(nodes, "video_quality", quality, initial || changes.affects(Feature.VIDEO_QUALITY), true, true, s -> quality.setOptions(s.options));
+        CommentAiAnalysisHook ai = commentAiAnalysisHook;
+        nodes.add(configurationBinding("manual_ai", ai, initial || changes.affects(Feature.MANUAL_AI), s -> ai.prepareOptions(s.options)));
+        PlaybackBehaviorHooks playback = playbackBehaviorHooks;
+        addConfiguration(nodes, "playback", playback, initial || changes.affects(Feature.PLAYBACK), true, true, s -> playback.setOptions(s.options));
+        ProfileSpoofHook spoof = profileSpoofHook;
+        addConfiguration(nodes, "profile_spoof", spoof, initial || changes.affects(Feature.SPOOF), true, true, s -> spoof.setOptions(s.options));
+        NativeMessagingHooks messaging = nativeMessagingHooks;
+        // Its optional owned dispatcher is reconciled inline on main; the shared dispatcher is not a hard installation gate.
+        addConfiguration(nodes, "native_messaging", messaging, initial || changes.affects(Feature.REPLY) || recall, true, false, s -> messaging.setOptions(s.options));
+        RecallHighlightHook highlight = recallHighlightHook;
+        nodes.add(configurationBinding("recall_highlight", highlight, recall, s -> highlight.prepareOptions(s.options)));
+        DirectMessageSpeechHook directSpeech = directMessageSpeechHook;
+        addConfiguration(nodes, "direct_message_speech", directSpeech, initial || changes.affects(Feature.DIRECT_MESSAGE_SPEECH), false, false, s -> directSpeech.setOptions(s.options));
+        MediaModelHook media = mediaModelHook;
+        addConfiguration(nodes, "media_model", media, initial || changes.affects(Feature.MEDIA_MODEL), false, true, s -> media.setOptions(s.options));
+        CommentEnhancementsHook enhancements = commentEnhancementsHook;
+        addConfiguration(nodes, "comment_enhancements", enhancements, initial || changes.affects(Feature.COMMENT_ENHANCEMENTS), false, true, s -> enhancements.setOptions(s.options));
+        CommentVoiceHook voice = commentVoiceHook;
+        addConfiguration(nodes, "comment_voice", voice, initial || changes.affects(Feature.COMMENT_VOICE), false, false, s -> voice.setOptions(s.options));
+        NativeCommentSpeechHook nativeSpeech = nativeCommentSpeechHook;
+        addConfiguration(nodes, "native_comment_speech", nativeSpeech, initial || changes.affects(Feature.NATIVE_COMMENT_SPEECH), true, false, s -> nativeSpeech.setOptions(s.options));
+        HashLongPressVoiceHook hash = hashLongPressVoiceHook;
+        addConfiguration(nodes, "hash_long_press_voice", hash, initial || changes.contains(LocalOptions.HASH_LONG_PRESS_VOICE), true, true, s -> hash.setOptions(s.options));
+        AutoLikeHook like = autoLikeHook;
+        addConfiguration(nodes, "auto_like", like, initial || changes.affects(Feature.AUTO_LIKE), false, false, s -> like.setSettings(s.features));
+        AutoFollowHook follow = autoFollowHook;
+        addConfiguration(nodes, "auto_follow", follow, initial || changes.affects(Feature.AUTO_FOLLOW), false, false, s -> follow.setSettings(s.features));
+        AutoPlayHook autoPlay = autoPlayHook;
+        addConfiguration(nodes, "auto_play", autoPlay, initial || changes.affects(Feature.AUTO_PLAY), true, false, s -> autoPlay.setSettings(s.extended, s.options));
+        AutoCommentHook autoComment = autoCommentDraftHook;
+        nodes.add(configurationBinding("auto_comment", autoComment, initial || changes.affects(Feature.COMMENT_AUTOMATION), s -> autoComment.prepareOptions(s.options), "automation_dispatcher"));
+        CommentReplyHook reply = commentReplyHook;
+        nodes.add(configurationBinding("comment_reply", reply, initial || changes.affects(Feature.COMMENT_REPLY), s -> reply.prepareOptions(s.options), "automation_dispatcher"));
+        AutoMessageDraftHook autoMessage = autoMessageDraftHook;
+        addConfiguration(nodes, "auto_message", autoMessage, initial || changes.affects(Feature.AUTO_MESSAGE), false, true, s -> autoMessage.setSettings(s.features, s.extended));
+        CommentToolsHook tools = commentToolsHook;
+        addConfiguration(nodes, "comment_tools.settings", tools, comments, true, false, s -> tools.setSettings(s.extended));
+        addConfiguration(nodes, "comment_tools.reading", tools, comments, true, false, s -> {
+            boolean reading41 = HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile());
+            tools.setReadingOptions(reading41 && s.options.enabled("comment_transcript_enabled"), reading41 && s.options.enabled("loaded_comment_search_enabled"));
+        });
+        LoadedCommentSearchHook search = loadedCommentSearchHook;
+        nodes.add(configurationBinding("loaded_comment_search", search, comments,
+                s -> search.prepareOptions(s.options.enabled("loaded_comment_search_enabled"), s.options.enabled("comment_transcript_enabled"))));
+        ImmersiveModeController immersive = immersiveModeController;
+        addConfiguration(nodes, "immersive", immersive, initial || changes.affects(Feature.IMMERSIVE), true, true, s -> immersive.setSettings(s.extended));
+        HomeNavigationHideController navigation = homeNavigationHideController;
+        addConfiguration(nodes, "home_navigation", navigation, feedUi, true, true, s -> navigation.setSettings(s.extended));
+        DownloadActionHook download = downloadActionHook;
+        addConfiguration(nodes, "download.settings", download, downloads, true, true, s -> download.setSettings(s.features));
+        addConfiguration(nodes, "download.options", download, downloads, true, false, s -> download.setOptions(s.options));
+        VersionInfoHook version = versionInfoHook;
+        addConfiguration(nodes, "version_info", version, initial || changes.affects(Feature.VERSION), false, true, s -> version.setSettings(s.extended));
+        FeedUiHideHook ui = feedUiHideHook;
+        nodes.add(configurationBinding("feed_ui", ui, feedUi, s -> ui.prepareSettings(s.extended)));
+        RefreshConfirmHook refresh = refreshConfirmHook;
+        addConfiguration(nodes, "refresh", refresh, initial || changes.affects(Feature.REFRESH), false, true, s -> refresh.setSettings(s.extended));
+        return nodes;
+    }
 
-            currentSettings = settings;
-            extendedSettings = extended;
-            localOptions = options;
-            DouAiLog.Operation selectedOperation = configurationOperation;
-            selectedOperation.wrap(() -> logDebugConfiguration(values, changes)).run();
-            lastConfigurationValues = values;
-            configurationOperation.stage("dispatch_hot_updates", "snapshot_references_published=true");
+    private ConfigurationPublication.Binding<ConfigurationSnapshot> configurationBinding(String id, Object receiver,
+            boolean affected, java.util.function.Function<ConfigurationSnapshot, ConfigurationApplyAction> prepare, String... dependencies) {
+        ConfigurationConsumerOwner owner = configurationConsumerOwner(id, receiver);
+        return new ConfigurationPublication.Binding<>(id, receiver, affected, java.util.Arrays.asList(dependencies), snapshot -> {
+            if (owner.failure.get() != null) return current -> failedConfiguration(owner.failure.get());
+            ConfigurationApplyAction action = prepare.apply(snapshot);
+            return current -> {
+                if (owner.failure.get() != null) return failedConfiguration(owner.failure.get());
+                java.util.concurrent.CompletionStage<Void> completion;
+                try { completion = action.apply(current); }
+                catch (Throwable failure) { completion = failedConfiguration(failure); }
+                completion.whenComplete((ignored, failure) -> {
+                    while ((failure instanceof java.util.concurrent.CompletionException || failure instanceof java.util.concurrent.ExecutionException)
+                            && failure.getCause() != null && failure.getCause() != failure) failure = failure.getCause();
+                    if (failure instanceof ConfigurationApplyAction.PermanentFailure) {
+                        owner.failure.compareAndSet(null, (ConfigurationApplyAction.PermanentFailure) failure);
+                    }
+                });
+                return completion;
+            };
+        });
+    }
 
-            boolean feedFilterChanged = initial || changes.affects(Feature.FEED_FILTER);
-            boolean downloadChanged = initial || changes.affects(Feature.DOWNLOAD);
-            boolean replyChanged = initial || changes.affects(Feature.REPLY);
-            boolean commentAutomationChanged = initial || changes.affects(Feature.COMMENT_AUTOMATION);
-            boolean commentReplyChanged = initial || changes.affects(Feature.COMMENT_REPLY);
-            boolean feedUiChanged = initial || changes.affects(Feature.FEED_UI);
-            boolean playbackChanged = initial || changes.affects(Feature.PLAYBACK);
-            boolean autoPlayChanged = initial || changes.affects(Feature.AUTO_PLAY);
-            boolean gestureChanged = initial || changes.affects(Feature.GESTURE);
-            boolean messageRecallChanged = initial || changes.affects(Feature.MESSAGE_RECALL);
-            boolean spoofChanged = initial || changes.affects(Feature.SPOOF);
+    private void addConfiguration(List<ConfigurationPublication.Binding<ConfigurationSnapshot>> nodes, String id,
+            Object receiver, boolean affected, boolean main, boolean retrySafe,
+            java.util.function.Consumer<ConfigurationSnapshot> apply) {
+        ConfigurationConsumerOwner owner = configurationConsumerOwner(id, receiver);
+        nodes.add(configurationBinding(id, receiver, affected, snapshot -> configurationAction(main, retrySafe, () -> {
+            if (owner.failure.get() != null) throw owner.failure.get();
+            try { apply.accept(snapshot); }
+            catch (RuntimeException | Error failure) {
+                if (retrySafe) throw failure;
+                ConfigurationApplyAction.PermanentFailure unknown = failure instanceof ConfigurationApplyAction.PermanentFailure
+                        ? (ConfigurationApplyAction.PermanentFailure) failure
+                        : new ConfigurationApplyAction.PermanentFailure("Local consumer effect is unresolved", failure);
+                // Record at the mutation boundary even if the original attempt future was already cancelled.
+                owner.failure.compareAndSet(null, unknown);
+                throw unknown;
+            }
+        })));
+    }
 
-            if (nativeFollowLists != null && (initial || changes.affects(Feature.FOLLOW_LISTS))) {
-                nativeFollowLists.setOptions(options);
-            }
-            if (automationDispatcher != null && (initial || changes.affects(Feature.AUTOMATION_DISPATCH))) {
-                automationDispatcher.setOptions(options);
-            }
-            FeedAdFilterHook hook = feedAdFilterHook;
-            if (hook != null && feedFilterChanged) {
-                hook.setSettings(settings);
-                hook.setOptions(options);
-            }
-            if (seenWorkHook != null && feedFilterChanged) seenWorkHook.setOptions(settings.feedFilterEnabled, options);
-            if (hostBehaviorHooks != null && (initial || changes.affects(Feature.HOST_BEHAVIOR))) hostBehaviorHooks.setOptions(options);
-            if (feedGestureToolsHook != null && gestureChanged) feedGestureToolsHook.setOptions(options);
-            if (initial || changes.affects(Feature.SIDEBAR)) {
-                if (homeSidebarGestureHook != null) homeSidebarGestureHook.setOptions(options);
-                if (homeSidebarModuleHook != null) homeSidebarModuleHook.setOptions(options);
-            }
-            if (videoQualityHook != null && (initial || changes.affects(Feature.VIDEO_QUALITY))) {
-                videoQualityHook.setOptions(options);
-            }
-            if (commentAiAnalysisHook != null && (initial || changes.affects(Feature.MANUAL_AI))) {
-                commentAiAnalysisHook.setOptions(options);
-            }
-            if (playbackBehaviorHooks != null && playbackChanged) playbackBehaviorHooks.setOptions(options);
-            if (profileSpoofHook != null && spoofChanged) profileSpoofHook.setOptions(options);
-            if (nativeMessagingHooks != null && (replyChanged || messageRecallChanged)) nativeMessagingHooks.setOptions(options);
-            if (recallHighlightHook != null && messageRecallChanged) recallHighlightHook.setOptions(options);
-            if (directMessageSpeechHook != null && (initial || changes.affects(Feature.DIRECT_MESSAGE_SPEECH))) {
-                directMessageSpeechHook.setOptions(options);
-            }
-            if (mediaModelHook != null && (initial || changes.affects(Feature.MEDIA_MODEL))) mediaModelHook.setOptions(options);
-            if (commentEnhancementsHook != null && (initial || changes.affects(Feature.COMMENT_ENHANCEMENTS))) commentEnhancementsHook.setOptions(options);
-            if (commentVoiceHook != null && (initial || changes.affects(Feature.COMMENT_VOICE))) {
-                commentVoiceHook.setOptions(options);
-            }
-            if (nativeCommentSpeechHook != null && (initial || changes.affects(Feature.NATIVE_COMMENT_SPEECH))) nativeCommentSpeechHook.setOptions(options);
-            if (hashLongPressVoiceHook != null && (initial || changes.contains(LocalOptions.HASH_LONG_PRESS_VOICE))) {
-                hashLongPressVoiceHook.setOptions(options);
-            }
-            AutoLikeHook autoLike = autoLikeHook;
-            if (autoLike != null && (initial || changes.affects(Feature.AUTO_LIKE))) {
-                autoLike.setSettings(settings);
-            }
-            AutoFollowHook autoFollow = autoFollowHook;
-            if (autoFollow != null && (initial || changes.affects(Feature.AUTO_FOLLOW))) {
-                autoFollow.setSettings(settings);
-            }
-            AutoPlayHook autoPlay = autoPlayHook;
-            if (autoPlay != null && autoPlayChanged) autoPlay.setSettings(extended, options);
-            AutoCommentHook autoComment = autoCommentDraftHook;
-            if (autoComment != null && commentAutomationChanged) autoComment.setOptions(options);
-            if (commentReplyHook != null && commentReplyChanged) commentReplyHook.setOptions(options);
-            AutoMessageDraftHook autoMessage = autoMessageDraftHook;
-            if (autoMessage != null && (initial || changes.affects(Feature.AUTO_MESSAGE))) {
-                autoMessage.setSettings(settings, extended);
-            }
-            CommentToolsHook commentHook = commentToolsHook;
-            if (commentHook != null && (initial || changes.affects(Feature.COMMENT_TOOLS))) {
-                commentHook.setSettings(extended);
-                boolean reading41 = HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile());
-                commentHook.setReadingOptions(reading41 && options.enabled("comment_transcript_enabled"),
-                        reading41 && options.enabled("loaded_comment_search_enabled"));
-            }
-            if (loadedCommentSearchHook != null && (initial || changes.affects(Feature.COMMENT_TOOLS))) {
-                loadedCommentSearchHook.setOptions(options.enabled("loaded_comment_search_enabled"), options.enabled("comment_transcript_enabled"));
-            }
-            ImmersiveModeController immersive = immersiveModeController;
-            if (immersive != null && (initial || changes.affects(Feature.IMMERSIVE))) {
-                immersive.setSettings(extended);
-            }
-            HomeNavigationHideController navigation = homeNavigationHideController;
-            if (navigation != null && feedUiChanged) navigation.setSettings(extended);
-            DownloadActionHook downloadHook = downloadActionHook;
-            if (downloadHook != null && downloadChanged) {
-                downloadHook.setSettings(settings);
-                downloadHook.setOptions(options);
-            }
-            VersionInfoHook versionHook = versionInfoHook;
-            if (versionHook != null && (initial || changes.affects(Feature.VERSION))) {
-                versionHook.setSettings(extended);
-            }
-            TopTabFilterHook topTabHook = topTabFilterHook;
-            if (topTabHook != null && (initial || changes.affects(Feature.TOP_TABS))) topTabHook.setSettings(extended);
-            FeedUiHideHook uiHook = feedUiHideHook;
-            if (uiHook != null && feedUiChanged) uiHook.setSettings(extended);
-            RefreshConfirmHook refreshHook = refreshConfirmHook;
-            if (refreshHook != null && (initial || changes.affects(Feature.REFRESH))) refreshHook.setSettings(extended);
-            moduleLog(3, TAG, "Configuration updated: feedFilter=" + settings.feedFilterEnabled
-                    + ", hideAds=" + settings.hideAds);
-            selectedOperation.wrap(this::publishFeatureLogState).run();
-            configurationOperation.finish(DouAiLog.Outcome.SUCCESS, "configuration_snapshot_published",
-                    "snapshot_references_current=" + (currentSettings == settings && extendedSettings == extended && localOptions == options)
-                            + ";result_scope=configuration_publication;feature_business_results=separate");
-        } catch (RuntimeException exception) {
-            if (configurationOperation != null) {
-                configurationOperation.error("read_or_apply", exception);
-                configurationOperation.finish(DouAiLog.Outcome.FAILED, "configuration_dispatch_failed",
-                        "partial_hot_update_possible=true;feature_state_review_required=true");
-            }
-            DouAiLog.failure("configuration", "read_or_apply", exception);
-            moduleLog(5, TAG, "Configuration read failed; previous settings remain active", exception);
-        }
+    private ConfigurationConsumerOwner configurationConsumerOwner(String id, Object receiver) {
+        return configurationConsumerOwners.compute(id, (ignored, old) ->
+                old != null && old.receiver == receiver ? old : new ConfigurationConsumerOwner(receiver));
+    }
+
+    private static java.util.concurrent.CompletableFuture<Void> failedConfiguration(Throwable failure) {
+        // CompletableFuture.failedFuture is Android 31+, while this module also supports Android 28–30.
+        java.util.concurrent.CompletableFuture<Void> completion = new java.util.concurrent.CompletableFuture<>();
+        completion.completeExceptionally(failure);
+        return completion;
+    }
+
+    /** Thread handoff is pending until the guarded local body actually returns; no business work is awaited. */
+    private ConfigurationApplyAction configurationAction(boolean mainThread, boolean retrySafe, Runnable mutation) {
+        java.util.concurrent.atomic.AtomicBoolean applied = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicReference<ConfigurationApplyAction.PermanentFailure> permanent = new java.util.concurrent.atomic.AtomicReference<>();
+        return current -> {
+            java.util.concurrent.CompletableFuture<Void> completion = new java.util.concurrent.CompletableFuture<>();
+            Runnable task = () -> {
+                if (completion.isDone() || !current.getAsBoolean()) { completion.cancel(false); return; }
+                try {
+                    if (permanent.get() != null) throw permanent.get();
+                    if (!applied.get()) {
+                        mutation.run();
+                        // An ACK deadline may expire after a successful body; do not replay that local effect.
+                        applied.set(true);
+                    }
+                    if (current.getAsBoolean()) completion.complete(null); else completion.cancel(false);
+                } catch (Throwable failure) {
+                    if (!retrySafe && !(failure instanceof ConfigurationApplyAction.PermanentFailure)) {
+                        ConfigurationApplyAction.PermanentFailure unknown = new ConfigurationApplyAction.PermanentFailure(
+                                "Local configuration mutation has an unknown partial effect", failure);
+                        permanent.compareAndSet(null, unknown);
+                        failure = unknown;
+                    }
+                    completion.completeExceptionally(failure);
+                }
+            };
+            try {
+                if (mainThread) {
+                    if (Looper.myLooper() == Looper.getMainLooper()) task.run();
+                    else {
+                        Handler main = new Handler(Looper.getMainLooper());
+                        completion.whenComplete((ignored, failure) -> { if (completion.isCancelled()) main.removeCallbacks(task); });
+                        if (!main.post(task)) completion.completeExceptionally(new java.util.concurrent.RejectedExecutionException("Main configuration callback rejected"));
+                    }
+                } else if (hostWorkQueue.isWorkerThread()) task.run();
+                else hostWorkQueue.submit(task).whenComplete((ignored, failure) -> {
+                    if (failure != null) completion.completeExceptionally(failure);
+                });
+            } catch (Throwable failure) { completion.completeExceptionally(failure); }
+            return completion;
+        };
+    }
+
+    private void closeConfigurationPublication() {
+        ConfigurationPublication<ConfigurationSnapshot> publication = configurationPublication;
+        if (publication != null) publication.close();
+        configurationPublication = null;
+        desiredConfigurationSnapshot = null;
     }
 
     private java.util.concurrent.CompletableFuture<Void> installFeatureHooksIfReady() {
@@ -855,22 +1088,24 @@ public final class DouAiModule extends XposedModule {
             return;
         }
         if (HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile())) {
-            if (seenWorkHook == null) {
-                try {
+            try {
+                if (seenWorkHook == null) {
                     seenWorkHook = SeenWorkHook.install(hookFramework(), hostScanReport, hostClassLoader, targetContext,
                             () -> hostUiController == null ? null : hostUiController.getResumedActivity(),
                             message -> moduleLog(3, TAG, message));
-                } catch (Throwable failure) { DouAiLog.failure("feed_filter", "seen_work_installation", failure); }
-            }
-            if (seenWorkHook != null) seenWorkHook.setOptions(currentSettings.feedFilterEnabled, localOptions);
-            if (loadedCommentSearchHook == null) {
-                try {
+                }
+                if (seenWorkHook != null && desiredConfigurationSnapshot == null) {
+                    seenWorkHook.setOptions(currentSettings.feedFilterEnabled, localOptions);
+                }
+            } catch (Throwable failure) { DouAiLog.failure("feed_filter", "seen_work_installation", failure); }
+            try {
+                if (loadedCommentSearchHook == null) {
                     loadedCommentSearchHook = LoadedCommentSearchHook.install(hookFramework(), hostClassLoader,
                             message -> moduleLog(3, TAG, message));
-                } catch (Throwable failure) { DouAiLog.failure("comment_tools", "loaded_search_installation", failure); }
-            }
-            if (loadedCommentSearchHook != null) loadedCommentSearchHook.setOptions(
-                    localOptions.enabled("loaded_comment_search_enabled"), localOptions.enabled("comment_transcript_enabled"));
+                }
+                if (loadedCommentSearchHook != null && desiredConfigurationSnapshot == null) loadedCommentSearchHook.setOptions(
+                        localOptions.enabled("loaded_comment_search_enabled"), localOptions.enabled("comment_transcript_enabled"));
+            } catch (Throwable failure) { DouAiLog.failure("comment_tools", "loaded_search_installation", failure); }
         }
         if (localAnalyticsHook == null) {
             try {
@@ -881,9 +1116,10 @@ public final class DouAiModule extends XposedModule {
                 if (resumed != null) {
                     LocalAnalyticsHook installed = localAnalyticsHook;
                     new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                        if (hostUiController != null && hostUiController.getResumedActivity() == resumed) {
-                            installed.onActivityResumed(resumed);
-                        }
+                        try {
+                            if (localAnalyticsHook == installed && hostUiController != null
+                                    && hostUiController.getResumedActivity() == resumed) installed.onActivityResumed(resumed);
+                        } catch (Throwable failure) { DouAiLog.failure("local_analytics", "activity_resume", failure); }
                     });
                 }
             } catch (Throwable failure) {
@@ -893,20 +1129,37 @@ public final class DouAiModule extends XposedModule {
             }
         }
         if (nativeFollowLists == null) {
-            nativeFollowLists = NativeFollowLists.install(hostClassLoader, hostScanReport, localOptions,
-                    message -> moduleLog(3, TAG, message));
+            try {
+                nativeFollowLists = NativeFollowLists.install(hostClassLoader, hostScanReport, localOptions,
+                        message -> moduleLog(3, TAG, message));
+            } catch (Throwable failure) { DouAiLog.failure("follow_lists", "installation", failure); }
         }
         if (automationDispatcher == null) {
-            automationDispatcher = new AutomationDispatcher(targetContext, message -> moduleLog(3, TAG, message));
-            automationDispatcher.setOptions(localOptions);
-            Activity resumed = hostUiController == null ? null : hostUiController.getResumedActivity();
-            if (resumed != null) {
-                AutomationDispatcher dispatcher = automationDispatcher;
-                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                    if (hostUiController != null && hostUiController.getResumedActivity() == resumed) {
-                        dispatcher.onActivityResumed(resumed);
+            AutomationDispatcher candidate = null;
+            try {
+                candidate = new AutomationDispatcher(targetContext, message -> moduleLog(3, TAG, message));
+                if (desiredConfigurationSnapshot == null) candidate.setOptions(localOptions);
+                automationDispatcher = candidate;
+                refreshConfigurationBindings();
+                Activity resumed = hostUiController == null ? null : hostUiController.getResumedActivity();
+                if (resumed != null) {
+                    AutomationDispatcher installed = candidate;
+                    if (!new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                        try {
+                            if (automationDispatcher == installed && hostUiController != null
+                                    && hostUiController.getResumedActivity() == resumed) installed.onActivityResumed(resumed);
+                        } catch (Throwable failure) { DouAiLog.failure("automation_dispatch", "activity_resume", failure); }
+                    })) {
+                        throw new IllegalStateException("Main looper rejected automation dispatcher resume");
                     }
-                });
+                }
+            } catch (Throwable failure) {
+                if (automationDispatcher == candidate) automationDispatcher = null;
+                if (candidate != null) {
+                    try { candidate.close(); }
+                    catch (Throwable cleanupFailure) { if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure); }
+                }
+                DouAiLog.failure("automation_dispatch", "installation", failure);
             }
         }
         HostUiController ui = hostUiController;
@@ -966,20 +1219,6 @@ public final class DouAiModule extends XposedModule {
                         ? failure.getClass().getSimpleName() : failure.getMessage();
                 DouAiLog.failure("version", "installation", failure);
                 moduleLog(6, TAG, "PackageManager version hook installation failed", failure);
-            }
-        }
-        if (topTabFilterHook == null) {
-            try {
-                topTabFilterHook = TopTabFilterHook.install(hookFramework(), hostScanReport, hostClassLoader,
-                        extendedSettings, message -> moduleLog(3, TAG, message));
-                topTabHookFailure = null;
-                moduleLog(3, TAG, "Home tab filter hook installed; enabled="
-                        + (extendedSettings != null && extendedSettings.hideTopTabs));
-            } catch (Throwable failure) {
-                topTabHookFailure = failure.getMessage() == null
-                        ? failure.getClass().getSimpleName() : failure.getMessage();
-                DouAiLog.failure("top_tabs", "installation", failure);
-                moduleLog(6, TAG, "Home tab filter hook installation failed", failure);
             }
         }
         if (feedUiHideHook == null) {
@@ -1053,7 +1292,10 @@ public final class DouAiModule extends XposedModule {
             }
         }
         if (autoCommentDraftHook == null) {
-            try {
+            if (automationDispatcher == null) {
+                autoCommentDraftHookFailure = "dispatcher_unavailable";
+                DouAiLog.event("auto_comment", "installation", "dependency_unavailable", "dependency=automation_dispatcher");
+            } else try {
                 autoCommentDraftHook = AutoCommentHook.install(hookFramework(), hostScanReport,
                         hostClassLoader, targetContext, localOptions, automationDispatcher,
                         message -> moduleLog(3, TAG, message));
@@ -1068,7 +1310,10 @@ public final class DouAiModule extends XposedModule {
             }
         }
         if (commentReplyHook == null) {
-            try {
+            if (automationDispatcher == null) {
+                commentReplyHookFailure = "dispatcher_unavailable";
+                DouAiLog.event("comment_reply", "installation", "dependency_unavailable", "dependency=automation_dispatcher");
+            } else try {
                 commentReplyHook = CommentReplyHook.install(hookFramework(), hostScanReport, hostClassLoader,
                         targetContext, localOptions, automationDispatcher, message -> moduleLog(3, TAG, message));
                 commentReplyHookFailure = null;
@@ -1076,7 +1321,10 @@ public final class DouAiModule extends XposedModule {
                 if (resumed != null) {
                     CommentReplyHook installed = commentReplyHook;
                     new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                        if (hostUiController != null && hostUiController.getResumedActivity() == resumed) installed.onActivityResumed(resumed);
+                        try {
+                            if (commentReplyHook == installed && hostUiController != null
+                                    && hostUiController.getResumedActivity() == resumed) installed.onActivityResumed(resumed);
+                        } catch (Throwable failure) { DouAiLog.failure("comment_reply", "activity_resume", failure); }
                     });
                 }
             } catch (Throwable failure) {
@@ -1105,7 +1353,8 @@ public final class DouAiModule extends XposedModule {
                 commentToolsHook = CommentToolsHook.install(hookFramework(), hostScanReport, hostClassLoader,
                         extendedSettings, message -> moduleLog(3, TAG, message));
                 boolean reading41 = HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile());
-                commentToolsHook.setReadingOptions(reading41 && localOptions.enabled("comment_transcript_enabled"),
+                if (desiredConfigurationSnapshot == null) commentToolsHook.setReadingOptions(
+                        reading41 && localOptions.enabled("comment_transcript_enabled"),
                         reading41 && localOptions.enabled("loaded_comment_search_enabled"));
                 commentToolsHookFailure = null;
                 moduleLog(3, TAG, "Comment long-press tools hook installed");
@@ -1138,7 +1387,16 @@ public final class DouAiModule extends XposedModule {
     }
 
     private void installAdditionalHooks() {
-        if (downloadActionHook != null) downloadActionHook.setOptions(localOptions);
+        ensureLiquidGlassController(targetContext);
+        if (downloadActionHook != null && desiredConfigurationSnapshot == null) {
+            try {
+                downloadActionHook.setOptions(localOptions);
+                downloadHookFailure = null;
+            } catch (Throwable failure) {
+                downloadHookFailure = HostAdaptationDiagnostics.installationFailure(failure);
+                DouAiLog.failure("download", "installation_options", failure);
+            }
+        }
         if (HostAdaptation.currentProfile() == HostAdaptation.PROFILE_410) {
             if (!manualAiSearchResolved) {
                 try {
@@ -1294,6 +1552,11 @@ public final class DouAiModule extends XposedModule {
                     feedUiHideHook::areComponentsTemporarilyShown);
             feedGestureToolsHook.setBookmarkPlaybackSync(feedUiHideHook::syncBookmarkPlayback);
         }
+        if (feedGestureToolsHook != null && autoPlayHook != null) {
+            feedGestureToolsHook.setPlaybackStopListener(autoPlayHook::cancelPendingAdvance);
+            autoPlayHook.setPlaybackGuard(feedGestureToolsHook::onVerifiedCompletion,
+                    feedGestureToolsHook::blocksAutomaticPlayback);
+        }
         if (directMessageSpeechHook == null) {
             DirectMessageSpeechHook candidate = null;
             try {
@@ -1325,6 +1588,7 @@ public final class DouAiModule extends XposedModule {
         }
         if (!additionalInitialized) moduleLog(3, TAG, "Host features ready; installation failures are reported separately");
         additionalInitialized = true;
+        refreshConfigurationBindings();
         publishFeatureLogState();
     }
 
@@ -1351,6 +1615,9 @@ public final class DouAiModule extends XposedModule {
             runtime.put("comment_enhancements_enabled", localOptions.enabled("comment_append_suffix") || localOptions.enabled("colored_comment"));
             runtime.put("comment_tools_enabled", extendedSettings != null && (extendedSettings.copyCommentText
                     || extendedSettings.commentMediaTools || extendedSettings.copySourceData));
+            runtime.put("resume_playback_enabled", !"off".equals(localOptions.text("resume_playback_mode", "off")));
+            runtime.put("temporary_feed_rules_enabled", currentSettings != null && currentSettings.feedFilterEnabled
+                    && localOptions.enabled("temporary_feed_rules_enabled"));
             boolean gestures = localOptions.enabled("toolbar_enabled") || localOptions.interceptNativeLongPress();
             for (String prefix : new String[]{"long_press", "double_tap"}) {
                 for (int region = 0; region < FeedGestureToolsHook.REGION_IDS.length; region++) {
@@ -1365,6 +1632,25 @@ public final class DouAiModule extends XposedModule {
 
     private Bundle diagnosticsSnapshot() {
         Bundle snapshot = new Bundle(scanDiagnostics);
+        snapshot.putString("configuration.read_status", configurationReadStatus.name());
+        snapshot.putString("configuration.read_failure_class", configurationReadFailureClass);
+        ConfigurationPublication<ConfigurationSnapshot> publication = configurationPublication;
+        ConfigurationPublication.Snapshot configuration = publication == null ? configurationPublicationState : publication.snapshot();
+        if (configuration != null) {
+            snapshot.putLong("configuration.revision", configuration.revision);
+            snapshot.putBoolean("configuration.closed", configuration.closed);
+            snapshot.putString("configuration.summary", configuration.summary.name());
+            for (ConfigurationPublication.NodeSnapshot node : configuration.nodes.values()) {
+                String prefix = "configuration.consumer." + node.id + ".";
+                snapshot.putBoolean(prefix + "installed", node.installed);
+                snapshot.putLong(prefix + "desired_revision", node.desiredRevision);
+                snapshot.putLong(prefix + "applied_revision", node.appliedRevision);
+                snapshot.putString(prefix + "status", node.status.name());
+                snapshot.putString(prefix + "reason", node.reason.name());
+                snapshot.putInt(prefix + "attempts", node.attempts);
+                snapshot.putString(prefix + "failure_class", node.failureClass);
+            }
+        }
         snapshot.putBoolean("feature.comment_ai.installed", commentAiAnalysisHook != null && commentAiAnalysisHook.isActive());
         snapshot.putBoolean("feature.home_sidebar.installed", homeSidebarGestureHook != null && homeSidebarGestureHook.isActive()
                 && homeSidebarModuleHook != null && homeSidebarModuleHook.isActive());
@@ -1377,6 +1663,14 @@ public final class DouAiModule extends XposedModule {
         snapshot.putString("module_version", BuildConfig.VERSION_NAME);
         snapshot.putBoolean("additional_initialized", additionalInitialized);
         snapshot.putBoolean("feature.local_analytics.installed", localAnalyticsHook != null);
+        boolean reading41 = HostAdaptation.currentProfile() == HostAdaptation.PROFILE_410;
+        snapshot.putBoolean("feature.playback_expansion.installed", reading41 && feedGestureToolsHook != null
+                && feedGestureToolsHook.supports("playback_expansion"));
+        snapshot.putBoolean("feature.author_speed.installed", reading41 && feedGestureToolsHook != null
+                && playbackBehaviorHooks != null && playbackBehaviorHooks.supports("auto_speed"));
+        snapshot.putBoolean("feature.temporary_feed_rules.installed", reading41 && seenWorkHook != null);
+        snapshot.putBoolean("feature.comment_bookmarks.installed", reading41 && commentToolsHook != null);
+        snapshot.putBoolean("feature.subtitle_notes.installed", reading41 && feedGestureToolsHook != null);
         snapshot.putString("feature.local_analytics.failure", localAnalyticsHookFailure);
         for (String key : new String[]{"remove_splash_ads", "remove_update_dialog", "remove_teen_dialog",
                 "hide_video_black_edges", "hide_camera_plus", "disable_double_tap_like",
@@ -1429,9 +1723,6 @@ public final class DouAiModule extends XposedModule {
         snapshot.putBoolean("version_hook_installed", versionInfoHook != null);
         snapshot.putBoolean("version_spoof_enabled", extendedSettings != null && extendedSettings.spoofVersion);
         if (versionHookFailure != null) snapshot.putString("version_hook_failure", versionHookFailure);
-        snapshot.putBoolean("top_tab_hook_installed", topTabFilterHook != null);
-        snapshot.putBoolean("top_tab_filter_enabled", extendedSettings != null && extendedSettings.hideTopTabs);
-        if (topTabHookFailure != null) snapshot.putString("top_tab_hook_failure", topTabHookFailure);
         snapshot.putBoolean("feed_ui_hook_installed", feedUiHideHook != null);
         snapshot.putBoolean("feed_ui_video_hook_installed", feedUiHideHook != null
                 && feedUiHideHook.isVideoLifecycleInstalled());
@@ -1580,7 +1871,8 @@ public final class DouAiModule extends XposedModule {
                 || settings.minimumDurationEnabled || settings.minimumLikesEnabled
                 || localOptions.enabled("hide_product_cards")
                 || localOptions.enabled("hide_hotspot_rank_cards")
-                || HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile()) && localOptions.enabled("hide_seen_works")
+                || HostAdaptation.PROFILE_410.equals(HostAdaptation.currentProfile())
+                    && (localOptions.enabled("hide_seen_works") || localOptions.enabled("temporary_feed_rules_enabled"))
                 || localOptions.enabled("hide_mini_games") || localOptions.enabled("hide_long_videos"));
     }
 

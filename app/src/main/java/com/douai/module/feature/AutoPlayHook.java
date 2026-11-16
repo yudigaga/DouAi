@@ -109,6 +109,17 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         this.dialogField = dialogField;
     }
 
+    private java.util.function.BiPredicate<String,Long> completionGuard=(aid,token)->false;
+    private java.util.function.Predicate<String> advanceGuard=aid->false;
+    public void setPlaybackGuard(java.util.function.BiPredicate<String,Long> complete,
+                                 java.util.function.Predicate<String> advance) {
+        completionGuard=complete==null?(aid,token)->false:complete;
+        advanceGuard=advance==null?aid->false:advance;
+    }
+
+    public void cancelPendingAdvance() {
+        onMain(()->{generation++;pendingAdvance=false;dismissTransitionFrame(false);});
+    }
     public boolean isPausedFor(String aid) {
         return aid != null && aid.equals(selectedAid) && paused;
     }
@@ -477,6 +488,16 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         if (token == generation && aid != null && aid.equals(selectedAid)) observePlayback("ended");
         ExtendedSettings current = settings;
         View root = activeRoot();
+        // Settlement is independent of auto-play, but still belongs to this foreground holder.
+        if (!closed && group.isActive() && generation==token && !paused
+                && root!=null && root.hasWindowFocus() && aid!=null && aid.equals(selectedAid)) {
+            try {Object panel=panel();Object holder=selectedHolder.get();
+                if(panel!=null && holder!=null && currentHolder.invoke(panel)==holder && aid.equals(aid(holder))
+                        && completionGuard.test(aid,token)) {cancelPendingAdvance();return;}
+            }catch(ReflectiveOperationException | RuntimeException failure){
+                skipped("playback_guard_failed","播放状态无法确认，暂不翻页");return;
+            }
+        }
         if (closed || !group.isActive() || current == null || !current.autoPlay) {
             DouAiLog.event("auto_play", "decision", "disabled_or_not_ready", "advance_invoked=false");
             return;
@@ -571,7 +592,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             Object currentPagerContext = panel == null ? null : pagerContextField.get(panel);
             Object currentScrollState = currentPager == null ? null : scrollState.invoke(currentPager);
             if (closed || !group.isActive() || settings == null || !settings.autoPlay
-                    || generation != token || paused || touching || attempted || !ownsDispatcher(panel,dispatcher)
+                    || generation != token || paused || touching || attempted || advanceGuard.test(aid) || !ownsDispatcher(panel,dispatcher)
                     || !aid.equals(selectedAid) || selectedHolder.get() == null
                     || activeRoot() != root || currentHolder != selectedHolder.get()
                     || currentPagerContext != pagerContext || !(currentScrollState instanceof Number)

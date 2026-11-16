@@ -14,6 +14,17 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.Assert.*;
 
 public final class HostWorkQueueTest {
+    @Test public void workerIdentityIsTrueOnlyInsideItsOwnSerialLane() throws Exception {
+        try (HostWorkQueue queue = new HostWorkQueue(); HostWorkQueue other = new HostWorkQueue()) {
+            assertFalse(queue.isWorkerThread());
+            queue.submit(() -> {
+                assertTrue(queue.isWorkerThread());
+                assertFalse(other.isWorkerThread());
+            }).get(5, TimeUnit.SECONDS);
+            assertFalse(queue.isWorkerThread());
+        }
+    }
+
     @Test public void installationAndLaterConfigurationRunInOrderWithoutBlockingTheCaller() throws Exception {
         try (HostWorkQueue queue = new HostWorkQueue()) {
             CountDownLatch installing = new CountDownLatch(1), release = new CountDownLatch(1);

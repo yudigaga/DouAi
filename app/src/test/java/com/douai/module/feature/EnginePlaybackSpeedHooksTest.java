@@ -86,6 +86,7 @@ public final class EnginePlaybackSpeedHooksTest {
         FakeMedia media;
         FakeParams lastParams;
         int paramsCalls;
+        long delayMillis=100;
         FakeEngine(Harness harness, FakeMedia media) { this.harness = harness; this.media = media; }
         public void setPlaybackParams(FakeParams params) {
             setPlaybackParamsBody(params);
@@ -94,7 +95,7 @@ public final class EnginePlaybackSpeedHooksTest {
             paramsCalls++;
             lastParams = params;
             // The APK caches params and can enqueue the same object before media/native dispatch.
-            main.postDelayed(() -> harness.callUnchecked(MEDIA_PARAMS, media, params), 100);
+            main.postDelayed(() -> harness.callUnchecked(MEDIA_PARAMS, media, params), delayMillis);
         }
     }
 
@@ -139,6 +140,42 @@ public final class EnginePlaybackSpeedHooksTest {
         public String play() {
             try { return (String) harness.invoke(method(FakeFacade.class, "play"), facade); }
             catch (Throwable failure) { throw new AssertionError(failure); }
+        }
+    }
+
+    @Test public void staleAuthorPacketCannotOverwriteNewAuthorOneAtNative()throws Throwable { staleAuthorPacket(false); }
+    @Test public void staleAuthorPacketCannotOverwriteNewManualOneAtNative()throws Throwable { staleAuthorPacket(true); }
+    private void staleAuthorPacket(boolean manualChoice)throws Throwable{
+        try(Fixture f=new Fixture();GestureSpeedOverride next=new GestureSpeedOverride()){
+            f.engine.delayMillis=300;
+            f.manual.apply(1.5f,()->f.harness.call(FACADE_SET,f.facade,1.5f));
+            f.manual.close();
+            f.engine.delayMillis=100;
+            if(manualChoice)next.registerGlobal();
+            next.apply(1f,()->f.harness.call(FACADE_SET,f.facade,1f));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));
+            assertEquals(1f,f.nativePlayer.actualSpeed,0f);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(200));
+            assertEquals("Expired author's delayed SDK packet must respect the newer native owner",1f,f.nativePlayer.actualSpeed,0f);
+            assertEquals(2,f.nativePlayer.calls);
+        }
+    }
+    @Test public void staleForwardedTokenCannotOverwriteNewNativeOwner()throws Throwable{
+        try(Fixture f=new Fixture();GestureSpeedOverride next=new GestureSpeedOverride()){
+            GestureSpeedOverride.ScopeToken[] old=new GestureSpeedOverride.ScopeToken[1];
+            f.manual.apply(1.5f,()->{old[0]=GestureSpeedOverride.captureScope();f.harness.call(FACADE_SET,f.facade,1.5f);});
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));f.manual.close();
+            next.apply(1f,()->f.harness.call(FACADE_SET,f.facade,1f));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));
+            old[0].withScope(()->f.harness.invoke(NATIVE_OPTION,f.nativePlayer,60,1.5f));
+            assertEquals(1f,f.nativePlayer.actualSpeed,0f);
+        }
+    }
+    @Test public void expiredPacketWithoutReplacementOwnerStillPassesThrough()throws Throwable{
+        try(Fixture f=new Fixture()){
+            f.manual.apply(1.5f,()->f.harness.call(FACADE_SET,f.facade,1.5f));f.manual.close();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));
+            assertEquals(1.5f,f.nativePlayer.actualSpeed,0f);
         }
     }
 
@@ -342,7 +379,7 @@ public final class EnginePlaybackSpeedHooksTest {
         }
     }
 
-    private static final class Fixture implements AutoCloseable {
+    static final class Fixture implements AutoCloseable {
         final Handler main = new Handler(Looper.getMainLooper());
         final Harness harness = new Harness();
         final FakeNative nativePlayer = new FakeNative();
@@ -403,7 +440,7 @@ public final class EnginePlaybackSpeedHooksTest {
         catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
     }
 
-    private static final class Harness {
+    static final class Harness {
         final Map<Method, XposedInterface.Hooker> interceptors = new HashMap<>();
         final List<Method> deoptimized = new ArrayList<>();
         final List<String> optimizationCalls = new ArrayList<>();

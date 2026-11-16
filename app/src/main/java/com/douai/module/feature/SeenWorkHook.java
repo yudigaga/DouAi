@@ -33,6 +33,8 @@ public final class SeenWorkHook implements AutoCloseable {
     private final Class<?> recommendFragment;
     private final Field panelField, requestModel, requestFragment, items, aid;
     private volatile boolean enabled;
+    private volatile boolean filtering,temporaryEnabled;
+    private volatile long optionEpoch;
     private volatile boolean allowEmpty;
     private volatile boolean closed;
     private SeenWorkProbe pending;
@@ -71,6 +73,7 @@ public final class SeenWorkHook implements AutoCloseable {
                 || !source.getType().isAssignableFrom(fragment) || !List.class.isAssignableFrom(items.getType())
                 || !panel.getType().getName().equals(PREFIX+"panel.FullFeedFragmentPanel") || id.getType() != String.class)
             throw new IllegalStateException("Seen-work recommendation request contract changed");
+        TemporaryFeedRules.initialize(context);
         SeenWorkHook hook = new SeenWorkHook(store(context), resumedActivity, log, fragment, panel, owner, source, items, id);
         try {
             hook.group.add(framework, call, hook::request);
@@ -96,10 +99,12 @@ public final class SeenWorkHook implements AutoCloseable {
     public synchronized void setOptions(boolean feedFilterEnabled, LocalOptions options) {
         if (closed) return;
         boolean on = feedFilterEnabled && options != null && options.enabled("hide_seen_works");
-        enabled = false;
+        enabled = false;filtering=false;optionEpoch++;
         allowEmpty = options != null && !options.enabled("filter_interrupt", true);
         store.configure(on, options == null ? 3 : options.integer("seen_work_days", 3));
         enabled = on;
+        temporaryEnabled=feedFilterEnabled&&options!=null&&options.enabled("temporary_feed_rules_enabled");
+        filtering=on||temporaryEnabled;
         if (!on) cancelPending();
     }
 
@@ -108,26 +113,39 @@ public final class SeenWorkHook implements AutoCloseable {
         catch (RuntimeException unavailable) { return ""; }
     }
 
-    private long requestToken(Object request) {
-        if (!enabled || closed) return 0;
+    private static final class RequestContext {
+        final String uid;final long epoch,seen;final TemporaryFeedRules.Snapshot rules;
+        RequestContext(String uid,long epoch,long seen,TemporaryFeedRules.Snapshot rules){this.uid=uid;this.epoch=epoch;this.seen=seen;this.rules=rules;}
+    }
+    private RequestContext requestToken(Object request) {
+        if (!filtering || closed) return null;
         try {
             Object model = requestModel.get(request);
             Object fragment = model == null ? null : requestFragment.get(model);
             if (!recommendFragment.isInstance(fragment)
-                    || !"homepage_hot".equals(HostTargets.invoke(panelField.get(fragment),"getEventType"))) return 0;
-            return store.token(uid());
-        } catch (IllegalAccessException | RuntimeException unavailable) { return 0; }
+                    || !"homepage_hot".equals(HostTargets.invoke(panelField.get(fragment),"getEventType"))) return null;
+            String owner=uid();if(!PlaybackBookmarkStore.id(owner))return null;
+            return new RequestContext(owner,optionEpoch,enabled?store.token(owner):0,
+                    temporaryEnabled?TemporaryFeedRules.snapshot(owner):null);
+        } catch (IllegalAccessException | RuntimeException unavailable) { return null; }
+    }
+
+    private boolean current(RequestContext token){
+        return token!=null&&!closed&&filtering&&token.epoch==optionEpoch&&token.uid.equals(uid())
+                &&(token.seen==0||token.seen==store.token(token.uid))
+                &&(token.rules==null||TemporaryFeedRules.current(token.rules,token.uid));
     }
 
     private Object request(XposedInterface.Chain chain) throws Throwable {
-        long requestToken = requestToken(chain.getThisObject());
+        RequestContext requestToken = requestToken(chain.getThisObject());
         Object page = chain.proceed();
-        if (requestToken == 0 || !enabled || closed || !items.getDeclaringClass().isInstance(page)) return page;
+        if (!current(requestToken) || !items.getDeclaringClass().isInstance(page)) return page;
         try {
-            if (requestToken != store.token(uid())) return page;
             @SuppressWarnings("unchecked") List<Object> before = (List<Object>) items.get(page);
-            List<Object> after = store.filter(requestToken, before, this::id, allowEmpty);
-            if (before != after && enabled && !closed && requestToken == store.token(uid())
+            long now=System.currentTimeMillis();
+            List<Object> after = FeedResponseFilter.filter(before,true,work->
+                    store.hides(requestToken.seen,id(work))||requestToken.rules!=null&&requestToken.rules.hides(work,now),allowEmpty);
+            if (before != after && current(requestToken)
                     && items.get(page) == before) items.set(page, after);
         } catch (IllegalAccessException | RuntimeException unavailable) { /* retain native response */ }
         return page;
@@ -197,6 +215,6 @@ public final class SeenWorkHook implements AutoCloseable {
         } catch (IllegalAccessException | RuntimeException ignored) { }
     }
     @Override public synchronized void close() {
-        closed = true; enabled = false; cancelPending(); store.configure(false,3); main.removeCallbacksAndMessages(null); group.close();
+        closed = true; enabled = false;filtering=false;optionEpoch++; cancelPending(); store.configure(false,3); main.removeCallbacksAndMessages(null); group.close();
     }
 }

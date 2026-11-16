@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.scan.HostScanReport;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -520,6 +521,95 @@ public final class NativeFollowListsTest {
             assertTrue(timer.getQueue().isEmpty());
             assertEquals("", FollowListSnapshot.current().accountUid);
         } finally { release.countDown(); service.close(); timer.shutdownNow(); }
+    }
+
+    @Test public void failedInstallationClosesItsPublishedCandidateAndRetainsTheOriginalFailure() throws Exception {
+        NoClassDefFoundError failure = new NoClassDefFoundError("fixture account binding unavailable");
+        AtomicReference<NativeFollowLists> candidate = new AtomicReference<>();
+
+        assertSame(failure, assertThrows(NoClassDefFoundError.class, () -> NativeFollowLists.install(
+                accountFailureLoader(candidate::set, failure), emptyReport(), new LocalOptions(Collections.emptyMap()),
+                ignored -> { })));
+
+        service = candidate.get();
+        assertNotNull(service);
+        assertTrue((Boolean) HostTargets.field(NativeFollowLists.class, "closed").get(service));
+        assertTrue(((java.util.concurrent.ScheduledThreadPoolExecutor)
+                HostTargets.field(NativeFollowLists.class, "worker").get(service)).isShutdown());
+        assertFalse(NativeFollowLists.isAvailable());
+        assertNull(HostTargets.field(NativeFollowLists.class, "active").get(null));
+        assertTrue("Absence must retain the existing optional-service account behavior",
+                NativeFollowLists.ensureAccount("42"));
+    }
+
+    @Test public void rollbackCleanupFailureIsSuppressedAndCannotLeaveTheCandidateActive() throws Exception {
+        NoClassDefFoundError failure = new NoClassDefFoundError("fixture account binding unavailable");
+        IllegalStateException cleanupFailure = new IllegalStateException("fixture worker cleanup failure");
+        AtomicReference<NativeFollowLists> candidate = new AtomicReference<>();
+        java.util.concurrent.ScheduledThreadPoolExecutor timer = new java.util.concurrent.ScheduledThreadPoolExecutor(1) {
+            @Override public List<Runnable> shutdownNow() { throw cleanupFailure; }
+        };
+        try {
+            assertSame(failure, assertThrows(NoClassDefFoundError.class, () -> NativeFollowLists.install(
+                    accountFailureLoader(value -> {
+                        candidate.set(value);
+                        try {
+                            java.lang.reflect.Field worker = HostTargets.field(NativeFollowLists.class, "worker");
+                            ((java.util.concurrent.ScheduledThreadPoolExecutor) worker.get(value)).shutdownNow();
+                            worker.set(value, timer);
+                        } catch (ReflectiveOperationException unavailable) { throw new AssertionError(unavailable); }
+                    }, failure), emptyReport(), new LocalOptions(Collections.emptyMap()), ignored -> { })));
+
+            service = candidate.get();
+            assertNotNull(service);
+            assertArrayEquals(new Throwable[]{cleanupFailure}, failure.getSuppressed());
+            assertNull(HostTargets.field(NativeFollowLists.class, "active").get(null));
+            assertFalse(NativeFollowLists.isAvailable());
+        } finally { timer.shutdown(); }
+    }
+
+    @Test public void failedOlderInstallationDoesNotClearAReplacementService() throws Exception {
+        NoClassDefFoundError failure = new NoClassDefFoundError("fixture superseded account binding");
+        AtomicReference<NativeFollowLists> candidate = new AtomicReference<>();
+        AtomicReference<NativeFollowLists> replacement = new AtomicReference<>();
+        try {
+            assertSame(failure, assertThrows(NoClassDefFoundError.class, () -> NativeFollowLists.install(
+                    accountFailureLoader(value -> {
+                        candidate.set(value);
+                        replacement.set(NativeFollowLists.install(getClass().getClassLoader(), emptyReport(),
+                                new LocalOptions(Collections.emptyMap()), ignored -> { }));
+                    }, failure), emptyReport(), new LocalOptions(Collections.emptyMap()), ignored -> { })));
+
+            service = replacement.get();
+            assertNotNull(candidate.get());
+            assertNotNull(service);
+            assertNotSame(candidate.get(), service);
+            assertSame(service, HostTargets.field(NativeFollowLists.class, "active").get(null));
+            assertTrue(NativeFollowLists.isAvailable());
+        } finally {
+            if (candidate.get() != null) candidate.get().close();
+            if (replacement.get() != null) replacement.get().close();
+        }
+    }
+
+    private ClassLoader accountFailureLoader(java.util.function.Consumer<NativeFollowLists> beforeFailure,
+                                             NoClassDefFoundError failure) {
+        return new ClassLoader(getClass().getClassLoader()) {
+            @Override protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                if ("com.ss.android.ugc.aweme.account.AccountProxyService".equals(name)) {
+                    try {
+                        beforeFailure.accept((NativeFollowLists)
+                                HostTargets.field(NativeFollowLists.class, "active").get(null));
+                    } catch (ReflectiveOperationException unavailable) { throw new AssertionError(unavailable); }
+                    throw failure;
+                }
+                return super.loadClass(name, resolve);
+            }
+        };
+    }
+
+    private static HostScanReport emptyReport() {
+        return new HostScanReport("fixture", Collections.emptyList(), false);
     }
 
     private static LocalOptions options(Object... pairs) {

@@ -177,7 +177,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         this.log = log == null ? ignored -> { } : log;
         ownsDispatcher = dispatcher == null;
         this.dispatcher = ownsDispatcher ? new AutomationDispatcher(context, this.log) : dispatcher;
-        this.dispatcher.setOptions(options);
+        if (ownsDispatcher) this.dispatcher.setOptions(options);
         state = context.getSharedPreferences("douai_message_state", Context.MODE_PRIVATE);
         streakLedger = new StreakSendLedger(state);
         replyLedger = new SubmissionLedger(context.getSharedPreferences(SubmissionLedger.REPLY_FILE, Context.MODE_PRIVATE), SubmissionLedger.DEFAULT_CAPACITY);

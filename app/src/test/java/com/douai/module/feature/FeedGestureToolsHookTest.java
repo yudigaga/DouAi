@@ -67,6 +67,8 @@ public final class FeedGestureToolsHookTest {
     public static final class Aweme {
         final String aid;
         public String share_url;
+        public String authorUid="10";
+        public String getAuthorUid(){return authorUid;}
         public DownloadActionHookTest.VideoFixture video;
         public List<DownloadActionHookTest.ImageFixture> images;
         Aweme(String aid) { this.aid = aid; }
@@ -149,7 +151,9 @@ public final class FeedGestureToolsHookTest {
     }
 
     @Test public void readingActionsKeepStableIdsAndAreIndividuallyAssignable() {
-        String[] ids={"bookmark_add","reading_search","comment_search","bookmark_list","like"};
+        String[] ids={"bookmark_add","reading_search","comment_search","bookmark_list","like",
+                "loop_a","loop_b","loop_cancel","resume_settings","stop_budget","author_speed","author_speed_rules",
+                "comment_bookmarks","subtitle_export","subtitle_ask","filter_author_temp","filter_music_temp","temporary_feed_rules"};
         for(String id:ids) {
             assertTrue(Arrays.asList(FeedGestureToolsHook.ACTION_IDS).contains(id));
             assertEquals(id,FeedGestureToolsHook.regionAction(new LocalOptions(Map.of("double_tap_top_left",id)),"double_tap",0));
@@ -158,6 +162,22 @@ public final class FeedGestureToolsHookTest {
         assertEquals("view_finder",FeedGestureToolsHook.ACTION_IDS[7]);
         assertEquals("seek_back_10",FeedGestureToolsHook.ACTION_IDS[8]);
         assertEquals("seek_forward_10",FeedGestureToolsHook.ACTION_IDS[9]);
+    }
+
+    @Test public void temporaryAuthorGestureOpensExpiryChooserAndRejectsReboundWork() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        Object previous=HostTargets.field(NativeFollowLists.class,"active").get(null);
+        NativeFollowLists service=new NativeFollowLists(()->new NativeFollowLists.Account("42","sec"),
+                (kind,q)->{throw new IllegalStateException();},null);
+        HostTargets.field(NativeFollowLists.class,"active").set(null,service);
+        try(Fixture f=new Fixture(Map.of("long_press_top_left","filter_author_temp"),false,true)) {
+            f.holder.aid="123";f.select();f.longPress(0,0);ShadowLooper.idleMainLooper();
+            android.app.AlertDialog chooser=ShadowAlertDialog.getLatestAlertDialog();
+            assertNotNull(chooser);assertTrue(chooser.isShowing());
+            assertEquals("今天",chooser.getListView().getAdapter().getItem(0));
+            f.holder.aid="456";f.select();chooser.getListView().performItemClick(null,0,0);
+            assertEquals("作品或账号已切换",ShadowToast.getTextOfLatestToast());
+        } finally {service.close();HostTargets.field(NativeFollowLists.class,"active").set(null,previous);}
     }
 
     @Test public void commentRequestSurvivesCoveredHolderButNotDifferentWorkOrBackground() throws Throwable {
@@ -1261,6 +1281,123 @@ public final class FeedGestureToolsHookTest {
                     "child:1", "legacy:1", "video:1"), f.nativeDispatchOrder);
             assertEquals(1.25f, f.player.getSpeed(), 0f);
         }
+    }
+
+    @Test public void sameValueSnapshotImportCancelsLivePlaybackThroughModuleObserver()throws Throwable{
+        NativeFollowLists service=new NativeFollowLists(()->new NativeFollowLists.Account("42","sec"),(k,q)->{throw new IllegalStateException();},null);
+        HostTargets.field(NativeFollowLists.class,"active").set(null,service);
+        com.douai.module.DouAiModule module=new com.douai.module.DouAiModule();
+        module.attachFramework((XposedInterface)Proxy.newProxyInstance(XposedInterface.class.getClassLoader(),new Class<?>[]{XposedInterface.class},(p,m,a)->null),()->{});
+        android.content.SharedPreferences prefs=org.robolectric.RuntimeEnvironment.getApplication().getSharedPreferences("same-import-transient",Context.MODE_PRIVATE);
+        prefs.edit().clear().putBoolean("author_speed_enabled",false).commit();
+        try(Fixture f=new Fixture(Map.of())){
+            PlaybackExpansionRuntimeTest.Fake host=new PlaybackExpansionRuntimeTest.Fake();
+            PlaybackExpansionRuntime runtime=new PlaybackExpansionRuntime(host,new java.io.File(f.activity.getCacheDir(),"same-import-resume"));
+            HostTargets.field(FeedGestureToolsHook.class,"expansion").set(f.hook,runtime);
+            runtime.enter("2",f.holder,host.owner);host.position=30000;runtime.action("loop_a");host.position=60000;runtime.action("loop_b");runtime.budget.startCount("42",5);
+            assertTrue(runtime.loop.isActiveFor("42","2",host.player));assertTrue(runtime.budget.isActive());
+            HostTargets.field(com.douai.module.DouAiModule.class,"feedGestureToolsHook").set(module,f.hook);
+            HostTargets.field(com.douai.module.DouAiModule.class,"lastConfigurationValues").set(module,new HashMap<>(prefs.getAll()));
+            Method register=com.douai.module.DouAiModule.class.getDeclaredMethod("registerSettingsListener",android.content.SharedPreferences.class);register.setAccessible(true);register.invoke(module,prefs);
+            new com.douai.module.config.SettingsRepository(prefs).replaceSnapshot(prefs.getAll(),new HashMap<>(prefs.getAll()));
+            ShadowLooper.idleMainLooper();
+            ((com.douai.module.scan.HostWorkQueue)HostTargets.field(com.douai.module.DouAiModule.class,"hostWorkQueue").get(module)).submit(()->{}).get(5,java.util.concurrent.TimeUnit.SECONDS);
+            ShadowLooper.idleMainLooper();
+            assertFalse(runtime.loop.isActiveFor("42","2",host.player));assertFalse(runtime.budget.isActive());assertEquals(0,host.seeks);assertFalse(host.paused);
+        }finally{
+            Object registration=HostTargets.field(com.douai.module.DouAiModule.class,"configurationPublicationRegistration").get(module);if(registration instanceof AutoCloseable)((AutoCloseable)registration).close();
+            Object listener=HostTargets.field(com.douai.module.DouAiModule.class,"settingsListener").get(module);if(listener instanceof android.content.SharedPreferences.OnSharedPreferenceChangeListener)prefs.unregisterOnSharedPreferenceChangeListener((android.content.SharedPreferences.OnSharedPreferenceChangeListener)listener);
+            ((com.douai.module.scan.HostWorkQueue)HostTargets.field(com.douai.module.DouAiModule.class,"hostWorkQueue").get(module)).close();
+            service.close();HostTargets.field(NativeFollowLists.class,"active").set(null,null);
+        }
+    }
+
+    public static final class SdkSpeedManager implements IPlayerManager {
+        final EnginePlaybackSpeedHooksTest.Fixture sdk;
+        SdkSpeedManager(EnginePlaybackSpeedHooksTest.Fixture sdk){this.sdk=sdk;}
+        public float getSpeed(){return sdk.nativePlayer.actualSpeed;}
+        public void setSpeed(float value){
+            sdk.engine.delayMillis=value==1.25f?300:100;
+            try{sdk.harness.call(EnginePlaybackSpeedHooksTest.FakeFacade.class.getMethod("setSpeed",float.class),sdk.facade,value);}
+            catch(ReflectiveOperationException e){throw new IllegalStateException(e);}
+        }
+        public void resumePlay(){} public String play(){return "video";}
+    }
+    @Test public void authorMigrationDoesNotQueueLateRestorationOverNewSdkSpeed()throws Throwable{authorSdkTransition("work");}
+    @Test public void authorRuleRefreshDoesNotQueueLateRestorationOverNewSdkSpeed()throws Throwable{authorSdkTransition("rules");}
+    @Test public void authorOptionsRefreshDoesNotQueueLateRestorationOverNewSdkSpeed()throws Throwable{authorSdkTransition("options");}
+    @Test public void reusedPlayerOnNewHolderDoesNotQueueLateRestorationOverNewSdkSpeed()throws Throwable{authorSdkTransition("holder");}
+    @Test public void authorBackgroundResumeDoesNotReplayRetiredRestorationOverNewSdkSpeed()throws Throwable{authorSdkTransition("background");}
+    @Test public void reenabledAuthorUsesIndependentNativeSpeedAfterRetirementCompletes()throws Throwable{
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        NativeFollowLists service=new NativeFollowLists(()->new NativeFollowLists.Account("42","sec"),(k,q)->{throw new IllegalStateException();},null);
+        HostTargets.field(NativeFollowLists.class,"active").set(null,service);
+        Map<String,Object> opts=Map.of("author_speed_enabled",true);
+        try(EnginePlaybackSpeedHooksTest.Fixture sdk=new EnginePlaybackSpeedHooksTest.Fixture();Fixture f=new Fixture(opts,false,true)){
+            f.panel.currentPlayer=new SdkSpeedManager(sdk);
+            HostTargets.field(AuthorSpeedRules.class,"account").set(null,"42");
+            HostTargets.field(AuthorSpeedRules.class,"cached").set(null,List.of(new AuthorSpeedRuleStore.Rule("10","甲",1.5f)));
+            f.holder.downloadAweme=new Aweme("100");f.select();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));assertEquals(1.5f,sdk.nativePlayer.actualSpeed,0f);
+            f.hook.setOptions(new LocalOptions(Map.of("author_speed_enabled",false)));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(350));assertEquals(1.25f,sdk.nativePlayer.actualSpeed,0f);
+            sdk.harness.invoke(EnginePlaybackSpeedHooksTest.FakeNative.class.getMethod("setFloatOption",int.class,float.class),sdk.nativePlayer,60,1.75f);
+            assertEquals(1.75f,sdk.nativePlayer.actualSpeed,0f);
+            f.hook.setOptions(new LocalOptions(opts));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));assertEquals(1.5f,sdk.nativePlayer.actualSpeed,0f);
+            f.hook.setOptions(new LocalOptions(Map.of("author_speed_enabled",false)));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(350));
+            assertEquals("A completed retirement must not erase a later independent native choice",1.75f,sdk.nativePlayer.actualSpeed,0f);
+        }finally{service.close();HostTargets.field(NativeFollowLists.class,"active").set(null,null);}
+    }
+
+    private void authorSdkTransition(String transition)throws Throwable{
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        NativeFollowLists service=new NativeFollowLists(()->new NativeFollowLists.Account("42","sec"),(k,q)->{throw new IllegalStateException();},null);
+        HostTargets.field(NativeFollowLists.class,"active").set(null,service);
+        Map<String,Object> opts=Map.of("author_speed_enabled",true,"long_press_bottom_right","speed");
+        try(EnginePlaybackSpeedHooksTest.Fixture sdk=new EnginePlaybackSpeedHooksTest.Fixture();Fixture f=new Fixture(opts,false,true)){
+            f.panel.currentPlayer=new SdkSpeedManager(sdk);
+            HostTargets.field(AuthorSpeedRules.class,"account").set(null,"42");
+            HostTargets.field(AuthorSpeedRules.class,"cached").set(null,List.of(new AuthorSpeedRuleStore.Rule("10","甲",1.5f)));
+            f.holder.downloadAweme=new Aweme("100");f.select();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));assertEquals(1.5f,sdk.nativePlayer.actualSpeed,0f);
+            HostTargets.field(AuthorSpeedRules.class,"cached").set(null,List.of(new AuthorSpeedRuleStore.Rule("10","甲",1f)));
+            if(transition.equals("background")){f.hook.onActivityPaused(f.activity);f.hook.onActivityResumed(f.activity);f.select();}
+            else if(transition.equals("rules")){Method m=FeedGestureToolsHook.class.getDeclaredMethod("authorRulesChanged");m.setAccessible(true);m.invoke(f.hook);}
+            else if(transition.equals("options"))f.hook.setOptions(new LocalOptions(opts));
+            else if(transition.equals("holder")){
+                ModernHolder next=new ModernHolder();next.w=f.root;next.A2=f.holder.A2;next.B2=((ModernHolder)f.holder).B2;next.downloadAweme=new Aweme("200");f.panel.current=next;
+                f.harness.invoke(ModernHolder.class.getMethod("selected"),next);
+            }else{f.holder.downloadAweme=new Aweme("200");f.select();}
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(150));assertEquals(1f,sdk.nativePlayer.actualSpeed,0f);
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(175));
+            assertEquals("Feed takeover must not enqueue an old baseline restoration behind new native 1x",1f,sdk.nativePlayer.actualSpeed,0f);
+            f.hook.setOptions(new LocalOptions(Map.of("author_speed_enabled",false)));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(350));
+            assertEquals("Retiring the replacement must restore the original native baseline",1.25f,sdk.nativePlayer.actualSpeed,0f);
+        }finally{service.close();HostTargets.field(NativeFollowLists.class,"active").set(null,null);}
+    }
+
+    @Test public void authorRulesOverrideSyntheticOneButExplicitManualOneWinsAcrossWorks() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        NativeFollowLists service=new NativeFollowLists(()->new NativeFollowLists.Account("42","sec"),(kind,q)->{throw new IllegalStateException();},null);
+        HostTargets.field(NativeFollowLists.class,"active").set(null,service);
+        try (Fixture f=new Fixture(Map.of(LocalOptions.MODULE_ONLY_SPEED,true,"author_speed_enabled",true,"auto_speed",true,"playback_speed","2","long_press_bottom_right","speed"),false,true)) {
+            AuthorSpeedRules.initialize(f.root.getContext());
+            HostTargets.field(AuthorSpeedRules.class,"account").set(null,"42");
+            HostTargets.field(AuthorSpeedRules.class,"cached").set(null,List.of(new AuthorSpeedRuleStore.Rule("10","甲",1.5f),new AuthorSpeedRuleStore.Rule("20","乙",1f)));
+            f.holder.downloadAweme=new Aweme("100");f.select();
+            assertEquals(1.5f,f.player.delegate.getSpeed(),0f);
+            GestureSpeedOverride.ScopeToken[] old=new GestureSpeedOverride.ScopeToken[1]; ((GestureSpeedOverride)HostTargets.field(FeedGestureToolsHook.class,"speedOverride").get(f.hook)).apply(1.5f,()->old[0]=GestureSpeedOverride.captureScope());
+            f.holder.downloadAweme=new Aweme("200");f.holder.downloadAweme.authorUid="20";f.select();
+            assertEquals(1f,f.player.delegate.getSpeed(),0f);assertNull(old[0].desired());
+            f.holder.downloadAweme=new Aweme("300");f.holder.downloadAweme.authorUid="30";f.select();
+            assertEquals(2f,f.player.delegate.getSpeed(),0f);
+            f.longPress(2,2);f.longPress(2,2);
+            f.holder.downloadAweme=new Aweme("400");f.select();
+            assertEquals(1f,f.player.delegate.getSpeed(),0f);
+        } finally {service.close();HostTargets.field(NativeFollowLists.class,"active").set(null,null);}
     }
 
     @Test public void moduleOnlyModeStartsAtNormalAndKeepsItsPresetAcrossVideos() throws Throwable {
@@ -2488,6 +2625,24 @@ public final class FeedGestureToolsHookTest {
 
     private static String select(LocalOptions options, String prefix, float x, float y) {
         return FeedGestureToolsHook.selectedAction(options, prefix, x, y, 0, 0, 300, 600);
+    }
+
+    @Test public void sameHolderAidRoundTripInvalidatesEarlierPlaybackCallbackLease() throws Throwable {
+        try(Fixture f=new Fixture(Collections.emptyMap())) {
+            java.lang.reflect.Field epoch=HostTargets.field(FeedGestureToolsHook.class,"expansionEpoch");
+            long old=epoch.getLong(f.hook);f.holder.aid="456";f.select();f.holder.aid="123";f.select();
+            assertTrue(epoch.getLong(f.hook)>old);
+        }
+    }
+    public interface SeekContract {void seek(float value);}
+    public static final class SeekPlayer implements SeekContract {public void seek(float value){}}
+    @Test public void explicitSeekObserverResolvesConcreteMethodInsteadOfAbstractContract() throws Exception {
+        try(Fixture f=new Fixture(Collections.emptyMap())) {
+            Method install=FeedGestureToolsHook.class.getDeclaredMethod("ensureExplicitSeekObserver",Object.class,Method.class);install.setAccessible(true);
+            install.invoke(f.hook,new SeekPlayer(),SeekContract.class.getMethod("seek",float.class));
+            assertTrue(f.harness.interceptors.containsKey(SeekPlayer.class.getMethod("seek",float.class)));
+            assertFalse(f.harness.interceptors.containsKey(SeekContract.class.getMethod("seek",float.class)));
+        }
     }
 
     private static final class Fixture implements AutoCloseable {

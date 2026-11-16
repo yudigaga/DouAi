@@ -11,6 +11,14 @@ import static com.douai.module.config.ConfigurationCatalog.Feature.*;
 import static org.junit.Assert.*;
 
 public final class ConfigurationCatalogTest {
+    @Test public void expansionAutomaticSettingsDefaultOffAndRefreshOnlyTheirOwners() {
+        assertEquals(false,ConfigurationCatalog.settings().get("temporary_feed_rules_enabled").defaultValue);
+        assertEquals(false,ConfigurationCatalog.settings().get("author_speed_enabled").defaultValue);
+        assertEquals("off",ConfigurationCatalog.settings().get("resume_playback_mode").defaultValue);
+        assertConsumers("temporary_feed_rules_enabled",EnumSet.of(FEED_FILTER));
+        assertConsumers("author_speed_enabled",EnumSet.of(PLAYBACK,GESTURE));
+        assertConsumers("resume_playback_mode",EnumSet.of(GESTURE));
+    }
     @Test public void readingFlagsAreOffAndRefreshOnlyTheirOwners() {
         for (String key : new String[]{"loaded_comment_search_enabled", "comment_transcript_enabled"}) {
             assertEquals(false, ConfigurationCatalog.settings().get(key).defaultValue);

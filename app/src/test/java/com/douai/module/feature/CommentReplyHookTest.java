@@ -84,6 +84,83 @@ public final class CommentReplyHookTest {
         ShadowLooper.idleMainLooper();
     }
 
+    @Test public void preparedConfigurationAcknowledgesTimerReconcileWithoutScanningOrRepeatingInvalidation() throws Exception {
+        values.put("reply_delay_seconds", "9");
+        com.douai.module.config.ConfigurationApplyAction action = hook.prepareOptions(new LocalOptions(values));
+        java.util.concurrent.CompletableFuture<Void> applied = action.apply(() -> true).toCompletableFuture();
+        assertFalse(applied.isDone());
+        ShadowLooper.idleMainLooper();
+        assertTrue(applied.isDone());
+        assertFalse(applied.isCompletedExceptionally());
+        long generation = ((AtomicLong) ConfigurationReconciliationActionTest.field(hook, "generation")).get();
+        action.apply(() -> true);
+        ShadowLooper.idleMainLooper();
+        assertEquals(generation, ((AtomicLong) ConfigurationReconciliationActionTest.field(hook, "generation")).get());
+        assertTrue(source.scans.isEmpty());
+        assertTrue(sender.sent.isEmpty());
+    }
+
+    @Test public void preparedConfigurationCannotRunAfterClose() throws Exception {
+        LocalOptions before = ConfigurationReconciliationActionTest.field(hook, "options");
+        values.put("reply_delay_seconds", "9");
+        java.util.concurrent.CompletableFuture<Void> applied = hook.prepareOptions(new LocalOptions(values))
+                .apply(() -> true).toCompletableFuture();
+        hook.close();
+        ShadowLooper.idleMainLooper();
+        assertTrue(applied.isCompletedExceptionally());
+        assertSame(before, ConfigurationReconciliationActionTest.field(hook, "options"));
+    }
+
+    @Test public void preparedSuccessorRetainsTimerReconcileWithoutRepeatingInvalidation() throws Exception {
+        configure(LocalOptions.COMMENT_REPLY_ENABLED, false);
+        hook.onActivityResumed(activity);
+        values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        AtomicLong generation = ConfigurationReconciliationActionTest.field(hook, "generation");
+        long before = generation.get();
+        java.util.concurrent.CompletableFuture<Void> old = hook.prepareOptions(new LocalOptions(values))
+                .apply(() -> generation.get() == before).toCompletableFuture();
+        ShadowLooper.idleMainLooper();
+        assertTrue(old.isCancelled());
+        android.os.Handler main = ConfigurationReconciliationActionTest.field(hook, "main");
+        Runnable poll = ConfigurationReconciliationActionTest.field(hook, "poll");
+        Runnable scan = ConfigurationReconciliationActionTest.field(hook, "scanSignal");
+        assertFalse(main.hasCallbacks(poll)); assertFalse(main.hasCallbacks(scan));
+        values.put("voice_catalog_revision", "2");
+        java.util.concurrent.CompletableFuture<Void> latest = hook.prepareOptions(new LocalOptions(values))
+                .apply(() -> true).toCompletableFuture();
+        ShadowLooper.idleMainLooper();
+        assertTrue(latest.isDone()); assertFalse(latest.isCompletedExceptionally());
+        assertTrue(main.hasCallbacks(poll)); assertTrue(main.hasCallbacks(scan));
+        assertEquals(before + 1L, generation.get());
+        assertTrue(source.scans.isEmpty()); assertTrue(sender.sent.isEmpty());
+    }
+
+    @Test public void preparedSuccessorPerformsInvalidationCancelledAfterOptionsAcceptance() throws Exception {
+        configure(LocalOptions.COMMENT_REPLY_ENABLED, false); hook.onActivityResumed(activity);
+        values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        AtomicLong generation = ConfigurationReconciliationActionTest.field(hook, "generation");
+        long before = generation.get();
+        LocalOptions accepted = new LocalOptions(values);
+        java.util.concurrent.CompletableFuture<Void> old = hook.prepareOptions(accepted).apply(() -> {
+            try { return ConfigurationReconciliationActionTest.field(hook, "options") != accepted; }
+            catch (Exception failure) { throw new AssertionError(failure); }
+        }).toCompletableFuture();
+        ShadowLooper.idleMainLooper();
+        assertTrue(old.isCancelled());
+        assertSame(accepted, ConfigurationReconciliationActionTest.field(hook, "options"));
+        assertEquals(before, generation.get());
+        values.put("voice_catalog_revision", "2");
+        java.util.concurrent.CompletableFuture<Void> latest = hook.prepareOptions(new LocalOptions(values))
+                .apply(() -> true).toCompletableFuture();
+        ShadowLooper.idleMainLooper();
+        assertTrue(latest.isDone()); assertFalse(latest.isCompletedExceptionally());
+        android.os.Handler main = ConfigurationReconciliationActionTest.field(hook, "main");
+        assertTrue(main.hasCallbacks(ConfigurationReconciliationActionTest.field(hook, "poll")));
+        assertTrue(main.hasCallbacks(ConfigurationReconciliationActionTest.field(hook, "scanSignal")));
+        assertEquals(before + 1L, generation.get());
+        assertTrue(source.scans.isEmpty()); assertTrue(sender.sent.isEmpty());
+    }
+
     @Test public void firstOpenBaselinesExistingIdsWithoutReplyingAndStillAcceptsANewReplyInThatSecond() {
         source.baselineIds = List.of("old-in-same-second");
         source.events.put(100L, List.of(event("older", "root", "200", 999),

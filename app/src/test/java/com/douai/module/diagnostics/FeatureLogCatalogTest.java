@@ -1,6 +1,8 @@
 package com.douai.module.diagnostics;
 
 import com.douai.module.config.ConfigurationCatalog;
+import com.douai.module.config.HomeUiCustomizationSettings;
+import com.douai.module.config.LiquidGlassSettings;
 import org.junit.Test;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -8,6 +10,50 @@ import java.util.Set;
 import static org.junit.Assert.*;
 
 public final class FeatureLogCatalogTest {
+    @Test public void themeUsesItsOwnStyleAndConfigurationWithoutInventingRuntimeReadiness() {
+        FeatureLogCatalog.Entry theme=entry("liquid_glass");
+        assertEquals(ConfigurationCatalog.Feature.THEME,theme.consumer);
+        assertEquals(LiquidGlassSettings.STYLE,theme.enabledKey);
+        assertEquals("feature.liquid_glass.installed",theme.installedKey);
+        assertTrue(theme.source.contains("LiquidGlassController"));assertTrue(theme.source.contains("HomeUiCustomization"));
+        assertEquals(Set.of(LiquidGlassSettings.STYLE,LiquidGlassSettings.GRAVITY,HomeUiCustomizationSettings.ICONS,
+                HomeUiCustomizationSettings.HIDE_LABELS,HomeUiCustomizationSettings.HIDDEN_NAVIGATION),new HashSet<>(theme.configurationKeys()));
+        FeatureLogCatalog.State original=FeatureLogCatalog.state(theme,
+                java.util.Map.of(LiquidGlassSettings.STYLE,LiquidGlassSettings.ORIGINAL,LiquidGlassSettings.GRAVITY,true,
+                        HomeUiCustomizationSettings.HIDDEN_NAVIGATION,"[\"nav_top:homepage_hot\"]"),java.util.Map.of(),true);
+        assertFalse(original.enabled);assertEquals("not_observed",original.hookState);assertEquals("unknown",original.availability);
+        FeatureLogCatalog.State requested=FeatureLogCatalog.state(theme,
+                java.util.Map.of(LiquidGlassSettings.STYLE,LiquidGlassSettings.LIQUID_GLASS),java.util.Map.of(),true);
+        assertTrue(requested.enabled);assertEquals("not_observed",requested.hookState);assertEquals("unknown",requested.availability);
+        FeatureLogCatalog.State registered=FeatureLogCatalog.state(theme,
+                java.util.Map.of(LiquidGlassSettings.STYLE,LiquidGlassSettings.LIQUID_GLASS),
+                java.util.Map.of("feature.liquid_glass.installed",true),true);
+        assertEquals("installed",registered.hookState);assertEquals("partial",registered.availability);assertEquals("unknown",registered.dependencyEvidence);
+        FeatureLogCatalog.State runtimeDisabled=FeatureLogCatalog.state(theme,
+                java.util.Map.of(LiquidGlassSettings.STYLE,LiquidGlassSettings.LIQUID_GLASS),
+                java.util.Map.of(LiquidGlassSettings.STYLE,LiquidGlassSettings.ORIGINAL,"feed_ui_active",true,"home_navigation_enabled",true),true);
+        assertFalse(runtimeDisabled.enabled);
+        assertFalse(FeatureLogCatalog.state(theme,java.util.Map.of(LiquidGlassSettings.STYLE,true),java.util.Map.of(),true).enabled);
+        assertFalse(FeatureLogCatalog.state(theme,java.util.Map.of(LiquidGlassSettings.STYLE,"unknown-style"),java.util.Map.of(),true).enabled);
+        assertEquals("pending",FeatureLogCatalog.state(theme,
+                java.util.Map.of(LiquidGlassSettings.STYLE,LiquidGlassSettings.LIQUID_GLASS),java.util.Map.of(),false).availability);
+    }
+
+    @Test public void themeWindowAndTouchHooksShareTheActualCapabilityWithoutRestoringTheRetiredFilter() {
+        assertEquals("liquid_glass",FeatureLogCatalog.forHook("DouAi.Advanced.liquid_glass.0"));
+        assertEquals("liquid_glass",FeatureLogCatalog.forHook("DouAi.Advanced.liquid_glass_touch.3"));
+        assertEquals("liquid_glass_touch_future",FeatureLogCatalog.forHook("DouAi.Advanced.liquid_glass_touch_future.0"));
+        assertEquals("unmapped_hook",FeatureLogCatalog.forHook("DouAi.HomeTab.Filter"));
+        assertEquals(ConfigurationCatalog.Feature.FEED_UI,entry("home_navigation").consumer);
+    }
+
+    @Test public void retiredTabFilteringIsNotAdvertisedOrMappedToAnActiveCapability() {
+        assertTrue(FeatureLogCatalog.entries().stream().noneMatch(entry -> "top_tabs".equals(entry.id)));
+        assertEquals("unmapped_hook", FeatureLogCatalog.forHook("DouAi.HomeTab.Filter"));
+        assertEquals("refresh_confirm", FeatureLogCatalog.forHook("DouAi.HomeTab.RefreshConfirm"));
+        assertEquals(ConfigurationCatalog.Feature.FEED_UI, entry("home_navigation").consumer);
+    }
+
     @Test public void disabledAndUnsupportedRemainIndependentFacts() {
         FeatureLogCatalog.Entry download = FeatureLogCatalog.entries().stream()
                 .filter(entry -> "download".equals(entry.id)).findFirst().orElseThrow();

@@ -11,6 +11,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTextInputSelection
 import androidx.compose.ui.test.performImeAction
@@ -66,6 +67,22 @@ class CommentSearchMiuixTest {
         compose.onNodeWithTag("comment.search.row.22").performClick()
         compose.runOnIdle { assertEquals("22", selected) }
         save("comment-search")
+    }
+
+    @Test fun filterControlsPersistAcrossRenderedPages() {
+        compose.runOnUiThread {
+            surface=MiuixCommentSearch(compose.activity, {}, {}, {})
+            dialog=MiuixDialogBuilder(compose.activity,true).setTitle("查找评论").setView(surface!!.view).show()
+        }
+        compose.onNodeWithTag("comment.search.filters").performClick()
+        compose.onNodeWithText("图片").performScrollTo().performClick()
+        compose.onNodeWithText("作者发布").performScrollTo().performClick()
+        compose.onNodeWithText("点赞最多").performScrollTo().performClick()
+        compose.runOnUiThread { surface!!.render("新一页",emptyList(),true,false,"加载更多评论") }
+        compose.onNodeWithText("图片 ✓").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("作者发布 ✓").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("点赞最多 ✓").performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { assertEquals(1,surface!!.mediaMask());assertTrue(surface!!.authorOnly());assertEquals(1,surface!!.sortOrder()) }
     }
 
     @Test @Config(qualifiers = "w360dp-h720dp-night-mdpi")

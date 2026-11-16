@@ -22,7 +22,15 @@ public final class GestureSpeedOverride implements AutoCloseable {
     private volatile Float deferredRestoration;
     private volatile boolean closed;
 
-    public GestureSpeedOverride() { }
+    private final boolean replaceableRestoration;
+
+    public GestureSpeedOverride() { this(false); }
+
+    GestureSpeedOverride(boolean replaceableRestoration) {
+        this.replaceableRestoration = replaceableRestoration;
+    }
+
+    boolean replaceableRestoration() { return replaceableRestoration; }
 
     /** Opts this session into future players; ordinary apply calls remain local. */
     public void registerGlobal() {
@@ -141,10 +149,12 @@ public final class GestureSpeedOverride implements AutoCloseable {
     static final class ScopeToken {
         private final WeakReference<GestureSpeedOverride> owner;
         private final boolean restoring;
+        private final boolean replaceableRestoration;
 
         private ScopeToken(GestureSpeedOverride owner, boolean restoring) {
             this.owner = new WeakReference<>(owner);
             this.restoring = restoring;
+            this.replaceableRestoration = restoring && owner.replaceableRestoration;
         }
 
         Float desired() {
@@ -153,6 +163,7 @@ public final class GestureSpeedOverride implements AutoCloseable {
         }
 
         boolean restoring() { return restoring; }
+        boolean replaceableRestoration() { return replaceableRestoration; }
 
         Object withScope(ThrowingCall action) throws Throwable {
             Scope previous = CURRENT.get();
@@ -160,8 +171,8 @@ public final class GestureSpeedOverride implements AutoCloseable {
             GestureSpeedOverride current = owner.get();
             if (current == null) CURRENT.remove();
             else CURRENT.set(new Scope(current, restoring));
-            // Even a closed/collected request retains its pass-through provenance, so
-            // a different bound owner cannot rewrite a delayed restoration packet.
+            // Ordinary explicit restorations retain pass-through provenance. Author-auto
+            // retirement tokens separately permit takeover by a newer exact SDK owner.
             FORWARDED.set(this);
             try { return action.run(); }
             finally {

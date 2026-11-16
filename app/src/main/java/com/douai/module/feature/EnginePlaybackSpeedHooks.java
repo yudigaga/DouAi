@@ -190,7 +190,7 @@ final class EnginePlaybackSpeedHooks implements AutoCloseable {
         if (!parameter(params)) return chain.proceed();
         GestureSpeedOverride.ScopeToken token = GestureSpeedOverride.captureScope();
         if (token == null) token = paramsTokens.get(params);
-        if (token == null) token = mediaTokens.get(chain.getThisObject());
+        token = preferLiveBinding(token, mediaTokens.get(chain.getThisObject()));
         if (token == null) return chain.proceed();
         float requested = readSpeed(params);
         Float desired = token.desired();
@@ -211,7 +211,7 @@ final class EnginePlaybackSpeedHooks implements AutoCloseable {
         if (closed || !(chain.getArg(0) instanceof Integer)
                 || ((Integer) chain.getArg(0)) != PLAYBACK_SPEED_OPTION) return chain.proceed();
         GestureSpeedOverride.ScopeToken token = GestureSpeedOverride.captureScope();
-        if (token == null) token = nativeTokens.get(chain.getThisObject());
+        token = preferLiveBinding(token, nativeTokens.get(chain.getThisObject()));
         if (token == null || !(chain.getArg(1) instanceof Number)) return chain.proceed();
         float requested = ((Number) chain.getArg(1)).floatValue();
         Float desired = token.desired();
@@ -224,6 +224,15 @@ final class EnginePlaybackSpeedHooks implements AutoCloseable {
         record("native_speed_option_forwarded", "native", requested, desired, token.restoring(), true,
                 result instanceof Number ? ((Number) result).intValue() : null);
         return result;
+    }
+
+    /** An expired queued request cannot displace the newer owner of this exact SDK object. */
+    private static GestureSpeedOverride.ScopeToken preferLiveBinding(GestureSpeedOverride.ScopeToken request,
+                                                                     GestureSpeedOverride.ScopeToken bound) {
+        if (request == null) return bound;
+        if ((!request.restoring() || request.replaceableRestoration()) && request.desired() == null
+                && bound != null && !bound.restoring() && bound.desired() != null) return bound;
+        return request;
     }
 
     private boolean parameter(Object value) {

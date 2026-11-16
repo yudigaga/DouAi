@@ -7,12 +7,17 @@ import java.util.concurrent.TimeUnit;
 
 /** Serializes host feature installation and configuration publication without blocking the UI thread. */
 public final class HostWorkQueue implements AutoCloseable {
+    private volatile Thread workerThread;
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(0, 1, 15L, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(32), action -> {
                 Thread thread = new Thread(action, "DouAi-host-work");
                 thread.setDaemon(true);
+                workerThread = thread;
                 return thread;
             });
+
+    /** Allows local configuration tails to reuse this lane without enqueueing behind themselves. */
+    public boolean isWorkerThread() { return Thread.currentThread() == workerThread; }
 
     public CompletableFuture<Void> submit(Runnable action) {
         CompletableFuture<Void> completed = new CompletableFuture<>();

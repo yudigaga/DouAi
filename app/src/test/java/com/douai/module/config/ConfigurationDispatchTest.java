@@ -321,6 +321,12 @@ public final class ConfigurationDispatchTest {
         Method update = DouAiModule.class.getDeclaredMethod("updateConfiguration", SharedPreferences.class);
         update.setAccessible(true);
         update.invoke(module, preferences);
+        // Configuration now acknowledges real main continuations, rather than the initial setter enqueue.
+        for (int pass = 0; pass < 3; pass++) {
+            ((com.douai.module.scan.HostWorkQueue) field(module, "hostWorkQueue")).submit(() -> { })
+                    .get(5, java.util.concurrent.TimeUnit.SECONDS);
+            ShadowLooper.idleMainLooper();
+        }
     }
 
     private static LocalOptions options(Object target) throws Exception {

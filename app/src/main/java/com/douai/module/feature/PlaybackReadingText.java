@@ -24,7 +24,6 @@ final class PlaybackReadingText {
         if (!normalized.matches("(?s)^WEBVTT(?:[ \\t][^\\n]*|)\\n.*")) throw new IllegalArgumentException("字幕不是 WebVTT 格式");
         List<Line> result = new ArrayList<>();
         for (String block : normalized.split("\n[ \\t]*\n")) {
-            if (result.size() >= MAX_LINES) throw new IllegalArgumentException("字幕超过 5000 句");
             String[] lines = block.split("\n");
             if (lines.length < 2 || lines[0].startsWith("WEBVTT") || lines[0].startsWith("NOTE")
                     || lines[0].equals("STYLE") || lines[0].equals("REGION")) continue;
@@ -36,15 +35,18 @@ final class PlaybackReadingText {
             long end = timestamp(range[1].split("[ \\t]+", 2)[0]);
             if (begin < 0 || end <= begin) begin = -1;
             StringBuilder text = new StringBuilder();
-            for (int i = at + 1; i < lines.length && text.length() < 4000; i++) {
+            for (int i = at + 1; i < lines.length; i++) {
                 if (text.length() > 0) text.append('\n');
-                text.append(lines[i], 0, Math.min(lines[i].length(), 4000 - text.length()));
+                text.append(lines[i]);
             }
             String plain = text.toString().replaceAll("<[^>]*>", "")
                     .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
                     .replace("&nbsp;", " ").replace("&lrm;", "\u200e").replace("&rlm;", "\u200f").trim();
-            if (plain.length() > 4000) plain = plain.substring(0, 4000);
-            if (!plain.isEmpty()) result.add(new Line(begin, plain));
+            if (plain.length() > 4000) plain = plain.substring(0, 4000) + " [原句截断]";
+            if (!plain.isEmpty()) {
+                if (result.size() >= MAX_LINES) throw new IllegalArgumentException("字幕超过 5000 句");
+                result.add(new Line(begin, plain));
+            }
         }
         return Collections.unmodifiableList(result);
     }

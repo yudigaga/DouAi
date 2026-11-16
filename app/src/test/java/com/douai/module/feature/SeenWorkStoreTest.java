@@ -67,4 +67,16 @@ public final class SeenWorkStoreTest {
         store.configure(false,3);
         assertEquals(0,store.token("accountA"));
     }
+
+    @Test public void combinedTemporaryAndSeenRulesShareOneEmptyPageGuard()throws Exception {
+        SeenWorkStore store=store(folder.newFolder());long token=store.token("accountA");drain();
+        store.visible(token,"A");drain();assertTrue(store.hides(token,"A"));
+        List<String> page=Arrays.asList("A","B","C");
+        assertEquals(Collections.singletonList("C"),FeedResponseFilter.filter(page,true,
+                x->store.hides(token,x)||x.equals("B"),false));
+        List<String> all=Arrays.asList("A","B");
+        assertSame(all,FeedResponseFilter.filter(all,true,x->store.hides(token,x)||x.equals("B"),false));
+        assertTrue(FeedResponseFilter.filter(all,true,x->store.hides(token,x)||x.equals("B"),true).isEmpty());
+        store.clear("accountA",ok->assertTrue(ok));assertFalse(store.hides(token,"A"));drain();
+    }
 }

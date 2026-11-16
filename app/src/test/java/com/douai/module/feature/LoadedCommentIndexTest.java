@@ -6,6 +6,32 @@ import java.util.Collections;
 import org.junit.Test;
 
 public class LoadedCommentIndexTest {
+    @Test public void absentAndZeroTimestampsAreUnknown(){
+        assertNull(LoadedCommentIndex.timestamp(null));assertNull(LoadedCommentIndex.timestamp(0L));
+        assertNull(LoadedCommentIndex.timestamp(-1L));assertEquals(Long.valueOf(123L),LoadedCommentIndex.timestamp(123L));
+    }
+    @Test public void filtersKeepIdentityUnknownsAndFoldedMetadata() {
+        LoadedCommentIndex ix=new LoadedCommentIndex();long token=ix.open("11","21");
+        LoadedCommentIndex.Row a=new LoadedCommentIndex.Row("1","","hello","",0,1,"9",true,false,7L,20L);
+        LoadedCommentIndex.Row b=new LoadedCommentIndex.Row("2","1","hello","",1,2,"8",false,true,null,null);
+        ix.update(token,Arrays.asList(a,b),false);
+        assertEquals("1",ix.find("hello",3,true,false,0).get(0).id);
+        assertEquals("2",ix.find("hello",3,false,true,0).get(0).id);
+        assertEquals("1",ix.find("",0,false,false,1).get(0).id);
+        ix.update(token,Collections.singletonList(a),false);
+        assertEquals(-1,ix.find("",2,false,true,0).get(0).position);
+        assertNull(ix.find("",2,false,true,0).get(0).likes);
+        assertEquals("8",ix.find("",2,false,true,0).get(0).authorUid);
+    }
+    @Test public void equalSortKeysKeepOriginalOrderAndUnknownsLast() {
+        LoadedCommentIndex ix=new LoadedCommentIndex();long token=ix.open("11","21");
+        ix.update(token,Arrays.asList(new LoadedCommentIndex.Row("3","","","",0,0,"",null,null,null,null),
+                new LoadedCommentIndex.Row("2","","","",1,0,"",null,null,4L,8L),
+                new LoadedCommentIndex.Row("1","","","",2,0,"",null,null,4L,8L)),false);
+        assertEquals("2",ix.find("",0,false,false,1).get(0).id);
+        assertEquals("1",ix.find("",0,false,false,1).get(1).id);
+        assertEquals("3",ix.find("",0,false,false,3).get(2).id);
+    }
     private static LoadedCommentIndex.Row row(String id, String root, String text, String asr, int pos) {
         return new LoadedCommentIndex.Row(id, root, text, asr, pos);
     }

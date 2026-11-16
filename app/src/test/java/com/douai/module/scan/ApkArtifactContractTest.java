@@ -27,6 +27,61 @@ import static org.junit.Assert.*;
 
 /** Optional packaged-artifact checks, run with DOUAI_VERIFY_RELEASE_APK after building Release. */
 public final class ApkArtifactContractTest {
+    @Test public void releaseContainsTheFourStateIconPipelineAndNavigationSelectionFeedback() throws Exception {
+        DexFacts release=dexFacts("DOUAI_VERIFY_RELEASE_APK");
+        String state="Lcom/douai/module/config/HomeUiCustomizationSettings$IconState;";
+        ClassDef variants=release.classes.get(state);assertNotNull("The requested APK must include the new four-state format",variants);
+        Set<String> actual=new HashSet<>();
+        for(com.android.tools.smali.dexlib2.iface.Field field:variants.getFields())
+            if(field.getType().equals(state))actual.add(field.getName());
+        assertEquals(Set.of("DAY_NORMAL","DAY_SELECTED","NIGHT_NORMAL","NIGHT_SELECTED"),actual);
+        assertMethod(release,"Lcom/douai/module/config/HomeUiCustomizationSettings;",
+                "readIcon(Ljava/lang/String;Ljava/lang/String;"+state+")[B",AccessFlags.PUBLIC.getValue(),true);
+        assertMethod(release,"Lcom/douai/module/config/HomeUiCustomizationSettings;",
+                "readEncodedIcons(Ljava/lang/String;)Ljava/util/Map;",AccessFlags.PUBLIC.getValue(),true);
+        assertMethod(release,"Lcom/douai/module/config/HomeUiCustomizationSettings;",
+                "canonicalNavigationKey(Ljava/lang/String;)Ljava/lang/String;",AccessFlags.PUBLIC.getValue(),true);
+        assertNotNull("The verified APK must contain the real preview bitmap owner",
+                release.classes.get("Lcom/douai/module/ui/HomeIconPreview;"));
+        assertNotNull("The requested APK must retain navigation metadata across host settings windows",
+                release.classes.get("Lcom/douai/module/feature/HomeNavigationMetadata;"));
+        assertNotNull("The requested APK must include bounded validated icon metadata reuse",
+                release.classes.get("Lcom/douai/module/config/HomeUiCustomizationSettings$ValidatedIcons;"));
+        assertNotNull("Navigation hiding must use a real visibility/interaction owner",
+                release.classes.get("Lcom/douai/module/feature/NavigationItemVisibility;"));
+        assertMethod(release,"Lcom/douai/module/config/HomeUiCustomizationSettings;",
+                "readHiddenNavigation(Ljava/lang/String;)Ljava/util/Set;",AccessFlags.PUBLIC.getValue(),true);
+        assertMethod(release,"Lcom/douai/module/ui/BuiltInNavigationIcons;",
+                "entryForPosition(Ljava/lang/String;)Lcom/douai/module/ui/BuiltInNavigationIcons$Entry;",0,true);
+        assertFalse("The retired list-provider filter must not be packaged as an active feature",
+                release.classes.containsKey("Lcom/douai/module/feature/TopTabFilterHook;"));
+        assertNotNull("Retiring a tab filter must preserve the unrelated whole-navigation controls",
+                release.classes.get("Lcom/douai/module/feature/HomeNavigationHideController;"));
+        assertFalse("Built-in selection must not route through the removed second confirmation dialog",
+                release.classes.containsKey("Lcom/douai/module/ui/HomeIconSettingsDialog$Confirmation;"));
+        String feedback="Lcom/douai/module/feature/NavigationSelectionFeedback;";
+        assertMethod(release,feedback,"update(ZI)V",0,false);
+        assertMethod(release,feedback,"close()V",0,false);
+        String indicator="Lcom/douai/module/feature/NavigationSelectionIndicator;";
+        assertMethod(release,indicator,"<init>(Landroid/view/ViewGroup;)V",0,false);
+        assertMethod(release,indicator,"update(Landroid/view/View;I)V",0,false);
+        assertMethod(release,indicator,"close()V",AccessFlags.PUBLIC.getValue(),false);
+        for(String key:new String[]{"day_normal","day_selected","night_normal","night_selected"})
+            assertTrue("The APK must retain the persisted four-state key: "+key,release.strings.contains(key));
+        assertTrue("The APK must include the separate navigation visibility setting",release.strings.contains("theme_hidden_navigation"));
+    }
+
+    @Test public void releaseContainsAllBuiltInNavigationSvgsWithoutChangingTheirSourceBytes() throws Exception {
+        String prefix="META-INF/douai/navigation-icons/";
+        try(ZipFile release=archive("DOUAI_VERIFY_RELEASE_APK")) {
+            var icons=release.stream().filter(entry->entry.getName().startsWith(prefix) && entry.getName().endsWith(".svg")).toList();
+            assertEquals("15 designs in four static appearances",60,icons.size());
+            for(var icon:icons)try(var expected=ApkArtifactContractTest.class.getResourceAsStream("/"+icon.getName())) {
+                assertNotNull("The release resource corresponds to a module-owned source: "+icon.getName(),expected);
+                assertArrayEquals(icon.getName(),expected.readAllBytes(),read(release,icon.getName()));
+            }
+        }
+    }
     @Test public void releaseMetadataAndHostRulesMatchTheirContracts() throws Exception {
         try (ZipFile release = archive("DOUAI_VERIFY_RELEASE_APK")) {
             assertEquals("com.douai.module.DouAiModule",

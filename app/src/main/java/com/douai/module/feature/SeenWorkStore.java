@@ -74,6 +74,12 @@ final class SeenWorkStore {
         synchronized (this) { return current(token) ? result : input; }
     }
 
+    synchronized boolean hides(long token,String id) {
+        if(!current(token)||entries==null||!validId(id))return false;
+        Long at=entries.get(hex(digest(account+":"+id)));long now=clock.getAsLong();
+        return at!=null&&at>now-days*DAY&&at<=now;
+    }
+
     synchronized void clear(String uid, Consumer<Boolean> complete) {
         if (uid == null || uid.isEmpty() || uid.length() > 160) { complete.accept(false); return; }
         if (uid.equals(account)) { ++generation; account = ""; entries = null; }

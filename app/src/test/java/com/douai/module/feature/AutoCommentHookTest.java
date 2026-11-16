@@ -96,6 +96,96 @@ public final class AutoCommentHookTest {
         FollowListSnapshot.reset();
     }
 
+    @Test public void preparedOptionsWaitForTheSelectedHandoffAndDoNotReplayIt() throws Throwable {
+        Map<String, Object> disabled = baseOptions(false);
+        disabled.put("native_auto_comment", false);
+        setOptions(new LocalOptions(disabled));
+        selectWork();
+        LocalOptions next = options(true);
+        dispatcher.setOptions(next);
+        com.douai.module.config.ConfigurationApplyAction action = hook.prepareOptions(next);
+        java.util.concurrent.CompletableFuture<Void> applied = action.apply(() -> true).toCompletableFuture();
+        assertFalse(applied.isDone());
+        assertNull(notice());
+        ShadowLooper.idleMainLooper();
+        assertTrue(applied.isDone());
+        assertFalse(applied.isCompletedExceptionally());
+        View ring = notice();
+        assertNotNull(ring);
+        long generation = ((java.util.concurrent.atomic.AtomicLong)
+                ConfigurationReconciliationActionTest.field(hook, "generation")).get();
+        action.apply(() -> true);
+        ShadowLooper.idleMainLooper();
+        assertSame(ring, notice());
+        assertEquals(generation, ((java.util.concurrent.atomic.AtomicLong)
+                ConfigurationReconciliationActionTest.field(hook, "generation")).get());
+        assertEquals(0, Request.attempts);
+    }
+
+    @Test public void preparedOptionsCancelledBeforeMainLeaveGenerationAndOptionsAlone() throws Exception {
+        LocalOptions before = ConfigurationReconciliationActionTest.field(hook, "options");
+        long generation = ((java.util.concurrent.atomic.AtomicLong)
+                ConfigurationReconciliationActionTest.field(hook, "generation")).get();
+        Map<String, Object> next = baseOptions(true);
+        next.put("comment_delay_seconds", "9");
+        hook.prepareOptions(new LocalOptions(next)).apply(() -> true).toCompletableFuture().cancel(false);
+        ShadowLooper.idleMainLooper();
+        assertSame(before, ConfigurationReconciliationActionTest.field(hook, "options"));
+        assertEquals(generation, ((java.util.concurrent.atomic.AtomicLong)
+                ConfigurationReconciliationActionTest.field(hook, "generation")).get());
+    }
+
+    @Test public void preparedSuccessorRetainsSelectedHandoffWithoutRepeatingInvalidation() throws Throwable {
+        Map<String, Object> disabled = baseOptions(false);
+        disabled.put("native_auto_comment", false);
+        setOptions(new LocalOptions(disabled));
+        selectWork();
+        java.util.concurrent.atomic.AtomicLong generation = ConfigurationReconciliationActionTest.field(hook, "generation");
+        long before = generation.get();
+        dispatcher.setOptions(options(true));
+        java.util.concurrent.CompletableFuture<Void> old = hook.prepareOptions(options(true))
+                .apply(() -> generation.get() == before).toCompletableFuture();
+        ShadowLooper.idleMainLooper();
+        assertTrue(old.isCancelled());
+        assertNull(notice());
+        Map<String, Object> latestValues = baseOptions(true);
+        latestValues.put("voice_catalog_revision", "2");
+        com.douai.module.config.ConfigurationApplyAction latestAction = hook.prepareOptions(new LocalOptions(latestValues));
+        java.util.concurrent.CompletableFuture<Void> latest = latestAction.apply(() -> true).toCompletableFuture();
+        ShadowLooper.idleMainLooper();
+        assertTrue(latest.isDone()); assertFalse(latest.isCompletedExceptionally());
+        View ring = notice(); assertNotNull(ring);
+        assertEquals(before + 1L, generation.get());
+        latestAction.apply(() -> true); ShadowLooper.idleMainLooper();
+        assertSame(ring, notice());
+        assertEquals(0, Request.attempts);
+    }
+
+    @Test public void preparedSuccessorPerformsInvalidationCancelledAfterOptionsAcceptance() throws Throwable {
+        Map<String, Object> disabled = baseOptions(false);
+        disabled.put("native_auto_comment", false);
+        setOptions(new LocalOptions(disabled)); selectWork();
+        java.util.concurrent.atomic.AtomicLong generation = ConfigurationReconciliationActionTest.field(hook, "generation");
+        long before = generation.get();
+        LocalOptions accepted = options(true);
+        dispatcher.setOptions(accepted);
+        java.util.concurrent.CompletableFuture<Void> old = hook.prepareOptions(accepted).apply(() -> {
+            try { return ConfigurationReconciliationActionTest.field(hook, "options") != accepted; }
+            catch (Exception failure) { throw new AssertionError(failure); }
+        }).toCompletableFuture();
+        ShadowLooper.idleMainLooper();
+        assertTrue(old.isCancelled());
+        assertSame(accepted, ConfigurationReconciliationActionTest.field(hook, "options"));
+        assertEquals(before, generation.get());
+        Map<String, Object> latestValues = baseOptions(true); latestValues.put("voice_catalog_revision", "2");
+        java.util.concurrent.CompletableFuture<Void> latest = hook.prepareOptions(new LocalOptions(latestValues))
+                .apply(() -> true).toCompletableFuture();
+        ShadowLooper.idleMainLooper();
+        assertTrue(latest.isDone()); assertFalse(latest.isCompletedExceptionally());
+        assertEquals(before + 1L, generation.get()); assertNotNull(notice());
+        assertEquals(0, Request.attempts);
+    }
+
     @Test public void ringAppearsAtSelectionBeforeDelayOrGeneration() throws Throwable {
         setOptions(options(true));
         selectWork();

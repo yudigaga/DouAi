@@ -19,6 +19,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SidebarSettings;
+import com.douai.module.config.LiquidGlassSettings;
 import com.douai.module.diagnostics.DouAiLog;
 import io.github.libxposed.api.XposedInterface;
 import java.lang.ref.WeakReference;
@@ -178,9 +179,9 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
             Object value = owner == null ? null : owner.value.get();
             home = value != null && owner.access.showsHome(value);
         } catch (IllegalAccessException unavailable) { preserved("scope", unavailable); }
-        boolean active = enabled(options) && home && !binding.notificationCard;
+        boolean active = enabled(options) && SidebarSettings.itemsEnabled(options) && home && !binding.notificationCard;
         if (!active) binding.restorePosition();
-        binding.update(active, SidebarSettings.selected(options));
+        binding.update(active, SidebarSettings.selected(options), options);
     }
 
     private void refresh(Owner reference, String source) throws ReflectiveOperationException {
@@ -231,7 +232,7 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
             Binding binding = weak.get();
             if (binding != null && !binding.restored && binding.view().getParent() == list) attached.add(binding);
         }
-        int visible = reconcile(attached, list, notifications, enabled(options), SidebarSettings.selected(options));
+        int visible = reconcile(attached, list, notifications, enabled(options) && SidebarSettings.itemsEnabled(options), SidebarSettings.selected(options), options);
         event("module_unique", "cards=" + attached.size() + ";visible=" + visible
                 + ";notifications=" + notifications.size() + ";source=" + source);
         event("module_scan", "source=" + source + ";components=" + components.size()
@@ -271,6 +272,10 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
     /** Applies one display decision to the physical main list, after native children are attached. */
     static int reconcile(List<Binding> candidates, ViewGroup list, Set<? extends View> notifications,
                          boolean enabled, List<SidebarSettings.Entry> entries) {
+        return reconcile(candidates,list,notifications,enabled,entries,null);
+    }
+    private static int reconcile(List<Binding> candidates, ViewGroup list, Set<? extends View> notifications,
+                         boolean enabled, List<SidebarSettings.Entry> entries,LocalOptions options) {
         Binding primary = null;
         View notification = lastNotification(list, notifications);
         int noticeIndex = notification == null ? -1 : list.indexOfChild(notification);
@@ -301,7 +306,7 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
             binding.primary = binding == primary;
             boolean active = enabled && !binding.notificationCard;
             if (!active) binding.restorePosition();
-            binding.update(active, entries);
+            binding.update(active, entries,options);
         }
         return primary == null ? 0 : 1;
     }
@@ -442,7 +447,8 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
 
     private void openEntry(String id, Activity activity) {
         LocalOptions current = options;
-        if (closed || !enabled(current) || SidebarSettings.selected(current).stream().noneMatch(entry -> entry.id.equals(id))) return;
+        if (closed || !enabled(current) || !SidebarSettings.itemsEnabled(current)
+                || SidebarSettings.selected(current).stream().noneMatch(entry -> entry.id.equals(id))) return;
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
             event("entry_unavailable", "reason=no_current_activity");
             return;
@@ -490,6 +496,11 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
         private int positionIndex;
         private Boolean appliedEnabled;
         private List<SidebarSettings.Entry> appliedEntries;
+        private boolean keepCommon,gravity,motionActive,nativeHidden;
+        private long motionSignature;
+        private String commonSelection="*";
+        private final SidebarNativeCommon common=new SidebarNativeCommon();
+        private final LiquidGlassMotion motion;
 
         Binding(ViewGroup nativeView, boolean dark, Consumer<String> selected) {
             this.nativeView = nativeView; this.dark = dark; this.selected = selected;
@@ -497,11 +508,13 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
             nativeVisibility = originalVisibility;
             originalParams = nativeView.getLayoutParams();
             Context context = nativeView.getContext();
+            motion=new LiquidGlassMotion(context);
             wrapper = new Section(context, this);
             wrapper.setTag(nativeView.getTag());
             if (nativeView.getLayoutParams() != null) wrapper.setLayoutParams(nativeView.getLayoutParams());
             module = new LinearLayout(context);
             module.setOrientation(LinearLayout.VERTICAL);
+            module.setClipToPadding(false);
             module.setPadding(dp(context, 16), dp(context, 12), dp(context, 16), dp(context, 12));
             GradientDrawable background = new GradientDrawable();
             background.setColor(dark ? 0x08FFFFFF : 0xFFFFFFFF);
@@ -546,22 +559,31 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
         ViewGroup view() { return wrapper; }
 
         void update(boolean enabled, List<SidebarSettings.Entry> entries) {
+            update(enabled,entries,null);
+        }
+        void update(boolean enabled,List<SidebarSettings.Entry> entries,LocalOptions options) {
             if (restored) return;
+            keepCommon=enabled && SidebarSettings.keepCommon(options);
+            commonSelection=options==null?"*":options.text(SidebarSettings.COMMON_ITEMS,"*");
+            LiquidGlassSettings theme=LiquidGlassSettings.read(options);
+            gravity=enabled && theme.enabled && theme.gravity;
+            int space=gravity?dp(wrapper.getContext(),10):0;
+            if(wrapper.getPaddingLeft()!=space || wrapper.getPaddingTop()!=space)
+                wrapper.setPadding(space,space,space,space);
             if (enabled) {
-                if (!Boolean.TRUE.equals(appliedEnabled)) nativeVisibility = nativeView.getVisibility();
-                hideNative();
+                if(keepCommon)restoreNative();else hideNative();
             } else if (Boolean.TRUE.equals(appliedEnabled)) {
-                if (nativeView.getVisibility() != View.GONE) nativeVisibility = nativeView.getVisibility();
-                nativeView.setVisibility(nativeVisibility);
+                restoreNative();
             }
             module.setVisibility(enabled && primary ? View.VISIBLE : View.GONE);
-            wrapper.setVisibility(enabled && !primary ? View.GONE : View.VISIBLE);
-            if (Boolean.valueOf(enabled).equals(appliedEnabled) && entries.equals(appliedEntries)) return;
+            wrapper.setVisibility(enabled && !primary && !keepCommon ? View.GONE : View.VISIBLE);
+            common.update(nativeView,keepCommon,commonSelection);
+            if (Boolean.valueOf(enabled).equals(appliedEnabled) && entries.equals(appliedEntries)){refreshMotion(true);return;}
             appliedEnabled = enabled;
             appliedEntries = List.copyOf(entries);
             clearListeners(module);
             module.removeAllViews();
-            if (!enabled) return;
+            if (!enabled){refreshMotion(true);return;}
             Context context = wrapper.getContext();
             TextView title = new TextView(context);
             title.setText("模块功能");
@@ -578,6 +600,7 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
                 empty.setMinHeight(dp(context, 48));
                 empty.setGravity(Gravity.CENTER_VERTICAL);
                 module.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+                refreshMotion(true);
                 return;
             }
             for (SidebarSettings.Entry entry : entries) {
@@ -599,19 +622,19 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
                 row.setOnClickListener(view -> { if (!restored && module.getVisibility() == View.VISIBLE) selected.accept(entry.id); });
                 module.addView(row, new LinearLayout.LayoutParams(-1, -2));
             }
+            refreshMotion(true);
         }
 
         void restore() {
             if (restored) return;
+            motion.close();common.restore();wrapper.setPadding(0,0,0,0);
             restorePosition();
-            if (Boolean.TRUE.equals(appliedEnabled) && nativeView.getVisibility() != View.GONE)
-                nativeVisibility = nativeView.getVisibility();
             restored = true;
             clearListeners(module);
             module.removeAllViews();
             module.setVisibility(View.GONE);
             wrapper.setVisibility(View.VISIBLE);
-            if (Boolean.TRUE.equals(appliedEnabled)) nativeView.setVisibility(nativeVisibility);
+            if (Boolean.TRUE.equals(appliedEnabled)) restoreNative();
         }
         void rollback() {
             restore();
@@ -622,10 +645,43 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
 
         private void hideNative() {
             int visibility = nativeView.getVisibility();
+            if(!nativeHidden || visibility!=View.GONE)nativeVisibility=visibility;
+            nativeHidden=true;
             if (visibility != View.GONE) {
-                nativeVisibility = visibility;
                 nativeView.setVisibility(View.GONE);
             }
+        }
+        private void restoreNative() {
+            if(nativeHidden && nativeView.getVisibility()==View.GONE)nativeView.setVisibility(nativeVisibility);
+            else nativeVisibility=nativeView.getVisibility();
+            nativeHidden=false;
+        }
+        void refreshMotion(boolean targetsChanged) {
+            if(restored)return;
+            android.graphics.Rect visible=new android.graphics.Rect();
+            boolean active=gravity && wrapper.isAttachedToWindow() && wrapper.hasWindowFocus()
+                    && visiblyShown(wrapper) && wrapper.getGlobalVisibleRect(visible) && !visible.isEmpty();
+            if(active) {
+                List<View> targets=new ArrayList<>();
+                if(keepCommon && nativeView.getVisibility()==View.VISIBLE)targets.add(nativeView);
+                if(module.getVisibility()==View.VISIBLE)for(int i=0;i<module.getChildCount();i++)targets.add(module.getChildAt(i));
+                View root=wrapper.getRootView();long signature=31L*root.getWidth()+root.getHeight();
+                for(java.util.Iterator<View> iterator=targets.iterator();iterator.hasNext();) {
+                    View target=iterator.next();android.graphics.RectF box=motion.restingBounds(target,root);
+                    if(!visiblyShown(target) || !target.getGlobalVisibleRect(visible) || visible.isEmpty() || box==null){iterator.remove();continue;}
+                    signature=31*signature+System.identityHashCode(target);signature=31*signature+Math.round(box.left);
+                    signature=31*signature+Math.round(box.top);signature=31*signature+Math.round(box.right);signature=31*signature+Math.round(box.bottom);
+                }
+                if(!motionActive || targetsChanged || signature!=motionSignature){motion.setTargets(targets,root,null);motionSignature=signature;}
+            } else if(motionActive){motion.setTargets(Collections.emptyList(),wrapper.getRootView(),null);motionSignature=0;}
+            motion.setActive(active);motionActive=active;
+        }
+        private static boolean visiblyShown(View view) {
+            for(int depth=0;view!=null && depth<64;depth++) {
+                if(view.getVisibility()!=View.VISIBLE || !Float.isFinite(view.getAlpha()) || view.getAlpha()<=0)return false;
+                view=view.getParent() instanceof View?(View)view.getParent():null;
+            }
+            return true;
         }
         void rollbackAttached() {
             restorePosition();
@@ -692,13 +748,27 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
     }
 
     /** Keeps the binding alive with its view without consuming the host's default tag. */
-    private static final class Section extends FrameLayout {
+    private static final class Section extends LinearLayout implements android.view.ViewTreeObserver.OnPreDrawListener {
         final Binding binding;
-        Section(Context context, Binding binding) { super(context); this.binding = binding; }
+        Section(Context context, Binding binding) {
+            super(context);this.binding=binding;setOrientation(VERTICAL);setClipToPadding(false);
+        }
+        @Override protected void onAttachedToWindow(){super.onAttachedToWindow();getViewTreeObserver().addOnPreDrawListener(this);binding.refreshMotion(true);}
+        @Override protected void onDetachedFromWindow(){getViewTreeObserver().removeOnPreDrawListener(this);binding.motion.setActive(false);binding.motionActive=false;super.onDetachedFromWindow();}
+        @Override public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);binding.refreshMotion(false);}
+        @Override public boolean onPreDraw(){binding.refreshMotion(false);return true;}
+        @Override public boolean dispatchTouchEvent(android.view.MotionEvent event) {
+            int action=event.getActionMasked();
+            if(!binding.restored && action==android.view.MotionEvent.ACTION_DOWN)binding.motion.setInteracting(true);
+            boolean handled=super.dispatchTouchEvent(event);
+            if(!binding.restored && (action==android.view.MotionEvent.ACTION_UP || action==android.view.MotionEvent.ACTION_CANCEL))binding.motion.setInteracting(false);
+            return handled;
+        }
         @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
             // Combined first-page rendering can asynchronously reveal this same native root.
             boolean active = !binding.restored && Boolean.TRUE.equals(binding.appliedEnabled);
-            if (active) binding.hideNative();
+            if (active && !binding.keepCommon) binding.hideNative();
+            if(active && binding.keepCommon)binding.common.update(binding.nativeView,true,binding.commonSelection);
             // Let the outer sidebar scroll all selected rows despite the native card's fixed height.
             super.onMeasure(widthMeasureSpec, active
                     ? MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED) : heightMeasureSpec);

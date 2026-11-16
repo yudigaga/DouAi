@@ -108,6 +108,129 @@ public final class HostBehaviorViewTest {
         public RecallHolder(Context context) { itemView = new View(context); }
     }
 
+    @Test public void preparedBlackSpacesWaitForEveryExistingFrameBatch() throws Throwable {
+        Harness harness = new Harness();
+        Method spaces = Panel.class.getMethod("spaces");
+        HostBehaviorHooks hooks = HostBehaviorHooks.install(harness.framework, report(Map.of(
+                "adv_ui_black_spaces", spaces)), getClass().getClassLoader(), null,
+                new LocalOptions(Collections.emptyMap()), ignored -> { });
+        Map<View, Boolean> views = new LinkedHashMap<>();
+        for (int i = 0; i < 70; i++) views.put(new View(RuntimeEnvironment.getApplication()), true);
+        Map<String, Map<View, Boolean>> byKey = ConfigurationReconciliationActionTest.field(hooks, "observedByKey");
+        byKey.put("hide_video_black_edges", views);
+        java.util.concurrent.CompletableFuture<Void> applied = hooks.prepareOptions(
+                new LocalOptions(Map.of("hide_video_black_edges", true))).apply(() -> true).toCompletableFuture();
+        assertFalse(applied.isDone());
+        org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertFalse(applied.isDone());
+        org.robolectric.shadows.ShadowLooper.shadowMainLooper().idleFor(java.time.Duration.ofMillis(32));
+        assertTrue(applied.isDone());
+        assertFalse(applied.isCompletedExceptionally());
+        for (View view : views.keySet()) assertEquals(View.GONE, view.getVisibility());
+        hooks.close();
+    }
+
+    @Test public void preparedStartupOptionsAreAcceptedOnMainBeforeApplicationProceeds() throws Exception {
+        java.lang.reflect.Constructor<HostBehaviorHooks> constructor = HostBehaviorHooks.class.getDeclaredConstructor(
+                LocalOptions.class, java.util.function.Consumer.class);
+        constructor.setAccessible(true);
+        try (HostBehaviorHooks hooks = constructor.newInstance(new LocalOptions(Collections.emptyMap()),
+                (java.util.function.Consumer<String>) ignored -> { })) {
+            LocalOptions next = new LocalOptions(Map.of("prevent_skip_hidden", true));
+            java.util.concurrent.CompletableFuture<Void> result = hooks.prepareOptions(next).apply(() -> true).toCompletableFuture();
+            assertSame(next, ConfigurationReconciliationActionTest.field(hooks, "options"));
+            assertTrue("No observed view tail exists, so actual local completion is already known", result.isDone());
+            assertFalse(result.isCompletedExceptionally());
+        }
+    }
+
+    @Test public void preparedBlackSpacesRetryResumesTheFailedViewWithoutRepeatingSuccessfulViews() throws Throwable {
+        Harness harness = new Harness();
+        Method spaces = Panel.class.getMethod("spaces");
+        HostBehaviorHooks hooks = HostBehaviorHooks.install(harness.framework, report(Map.of(
+                "adv_ui_black_spaces", spaces)), getClass().getClassLoader(), null,
+                new LocalOptions(Collections.emptyMap()), ignored -> { });
+        CountingVisibility first = new CountingVisibility(false), failed = new CountingVisibility(true);
+        Map<View, Boolean> views = new LinkedHashMap<>(); views.put(first, true); views.put(failed, true);
+        Map<String, Map<View, Boolean>> byKey = ConfigurationReconciliationActionTest.field(hooks, "observedByKey");
+        byKey.put("hide_video_black_edges", views);
+        com.douai.module.config.ConfigurationApplyAction action = hooks.prepareOptions(
+                new LocalOptions(Map.of("hide_video_black_edges", true)));
+        java.util.concurrent.CompletableFuture<Void> attempt = action.apply(() -> true).toCompletableFuture();
+        org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertTrue(attempt.isCompletedExceptionally());
+        java.util.concurrent.CompletableFuture<Void> retry = action.apply(() -> true).toCompletableFuture();
+        org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        assertTrue(retry.isDone()); assertFalse(retry.isCompletedExceptionally());
+        assertEquals(1, first.hides); assertEquals(2, failed.hides);
+        assertEquals(View.GONE, failed.getVisibility());
+        hooks.close();
+    }
+
+    @Test public void preparedBlackSpacesCancellationBetweenFramesStopsTheRemainingViews() throws Throwable {
+        Harness harness = new Harness();
+        Method spaces = Panel.class.getMethod("spaces");
+        HostBehaviorHooks hooks = HostBehaviorHooks.install(harness.framework, report(Map.of(
+                "adv_ui_black_spaces", spaces)), getClass().getClassLoader(), null,
+                new LocalOptions(Collections.emptyMap()), ignored -> { });
+        Map<View, Boolean> views = new LinkedHashMap<>();
+        for (int i = 0; i < 70; i++) views.put(new View(RuntimeEnvironment.getApplication()), true);
+        Map<String, Map<View, Boolean>> byKey = ConfigurationReconciliationActionTest.field(hooks, "observedByKey");
+        byKey.put("hide_video_black_edges", views);
+        java.util.concurrent.CompletableFuture<Void> attempt = hooks.prepareOptions(
+                new LocalOptions(Map.of("hide_video_black_edges", true))).apply(() -> true).toCompletableFuture();
+        org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        long hidden = views.keySet().stream().filter(view -> view.getVisibility() == View.GONE).count();
+        assertEquals(64, hidden); assertFalse(attempt.isDone());
+        attempt.cancel(false);
+        org.robolectric.shadows.ShadowLooper.shadowMainLooper().idleFor(java.time.Duration.ofMillis(32));
+        assertEquals(hidden, views.keySet().stream().filter(view -> view.getVisibility() == View.GONE).count());
+        hooks.close();
+    }
+
+    @Test public void preparedSuccessorFinishesAnInterruptedObservedKeyUsingLatestOptions() throws Throwable {
+        for (boolean hiddenAtLatestRevision : new boolean[]{true, false}) {
+            Harness harness = new Harness();
+            HostBehaviorHooks hooks = HostBehaviorHooks.install(harness.framework, report(Map.of(
+                    "adv_ui_black_spaces", Panel.class.getMethod("spaces"))), getClass().getClassLoader(), null,
+                    new LocalOptions(Collections.emptyMap()), ignored -> { });
+            Map<View, Boolean> views = new LinkedHashMap<>();
+            for (int i = 0; i < 70; i++) views.put(new View(RuntimeEnvironment.getApplication()), true);
+            Map<String, Map<View, Boolean>> byKey = ConfigurationReconciliationActionTest.field(hooks, "observedByKey");
+            byKey.put("hide_video_black_edges", views);
+            java.util.concurrent.atomic.AtomicBoolean oldCurrent = new java.util.concurrent.atomic.AtomicBoolean(true);
+            java.util.concurrent.CompletableFuture<Void> old = hooks.prepareOptions(new LocalOptions(
+                    Map.of("hide_video_black_edges", true))).apply(oldCurrent::get).toCompletableFuture();
+            org.robolectric.shadows.ShadowLooper.idleMainLooper();
+            assertEquals(64, views.keySet().stream().filter(view -> view.getVisibility() == View.GONE).count());
+            assertFalse(old.isDone());
+            oldCurrent.set(false);
+            java.util.concurrent.CompletableFuture<Void> latest = hooks.prepareOptions(new LocalOptions(Map.of(
+                    "hide_video_black_edges", hiddenAtLatestRevision, "remove_splash_ads", true)))
+                    .apply(() -> true).toCompletableFuture();
+            assertTrue(old.isCancelled());
+            assertFalse("The accepted old options must not erase its unfinished view tail", latest.isDone());
+            org.robolectric.shadows.ShadowLooper.shadowMainLooper().idleFor(java.time.Duration.ofMillis(48));
+            assertTrue(latest.isDone());
+            assertFalse(latest.isCompletedExceptionally());
+            for (View view : views.keySet()) assertEquals(hiddenAtLatestRevision ? View.GONE : View.VISIBLE, view.getVisibility());
+            hooks.close();
+        }
+    }
+
+    private static final class CountingVisibility extends View {
+        boolean fail;
+        int hides;
+        CountingVisibility(boolean fail) { super(RuntimeEnvironment.getApplication()); this.fail = fail; }
+        @Override public void setVisibility(int value) {
+            if (value == View.GONE) {
+                hides++;
+                if (fail) { fail = false; throw new IllegalStateException("hide failed"); }
+            }
+            super.setVisibility(value);
+        }
+    }
+
     @Test public void blackSpacesApplyLiveAndRestoreOwnedVisibility() throws Throwable {
         Harness harness = new Harness();
         Method spaces = Panel.class.getMethod("spaces");

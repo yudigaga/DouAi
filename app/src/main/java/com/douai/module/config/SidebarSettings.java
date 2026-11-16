@@ -12,6 +12,10 @@ import com.douai.module.scan.HostAdaptation;
 public final class SidebarSettings {
     public static final String ENABLED = "home_sidebar_enabled";
     public static final String ITEMS = "home_sidebar_items";
+    public static final String ITEMS_ENABLED = "home_sidebar_items_enabled";
+    public static final String KEEP_COMMON = "home_sidebar_keep_common";
+    public static final String COMMON_ITEMS = "home_sidebar_common_items";
+    private static volatile List<Entry> commonEntries = Collections.emptyList();
     public static final String DEFAULT_ITEMS = "module,comment_history,reply_history,ai_chat,download_tasks,analytics";
 
     public static final class Entry {
@@ -48,7 +52,14 @@ public final class SidebarSettings {
             new Entry("bookmark_add", "记下这一刻"),
             new Entry("reading_search", "搜章节和字幕"),
             new Entry("comment_search", "查找评论"),
-            new Entry("bookmark_list", "我的书签")
+            new Entry("bookmark_list", "我的书签"),
+            new Entry("loop_a", "设循环起点 A"),new Entry("loop_b", "设循环终点 B"),new Entry("loop_cancel", "取消片段循环"),
+            new Entry("resume_settings", "断点续播"),new Entry("stop_budget", "定时或看完后暂停"),
+            new Entry("comment_bookmarks", "评论收藏"),
+            new Entry("subtitle_export", "导出字幕"),new Entry("subtitle_ask", "用字幕提问"),
+            new Entry("filter_author_temp", "临时过滤作者"),new Entry("filter_music_temp", "临时过滤配乐"),
+            new Entry("temporary_feed_rules", "临时过滤规则"),
+            new Entry("author_speed", "当前作者倍速"),new Entry("author_speed_rules", "作者倍速规则")
     );
     public static final List<Entry> ENTRIES;
     static {
@@ -58,6 +69,40 @@ public final class SidebarSettings {
     }
 
     private SidebarSettings() { }
+
+    public static boolean itemsEnabled(LocalOptions options) { return options==null || options.enabled(ITEMS_ENABLED,true); }
+    public static boolean keepCommon(LocalOptions options) { return options!=null && options.enabled(KEEP_COMMON); }
+    public static Entry commonEntry(String id,String title) {
+        if(id==null || title==null)return null;
+        id=id.trim();title=title.trim();
+        if(id.isEmpty() || id.length()>128 || id.indexOf(',')>=0 || id.indexOf('\n')>=0 || title.isEmpty())return null;
+        return new Entry(id,title.substring(0,Math.min(80,title.length())));
+    }
+    public static void rememberCommonEntries(Collection<Entry> entries) {
+        java.util.Map<String,Entry> known=new java.util.LinkedHashMap<>();
+        for(Entry entry:commonEntries)known.put(entry.id,entry);
+        for(Entry entry:entries)if(entry!=null && known.size()<96)known.put(entry.id,entry);
+        commonEntries=List.copyOf(known.values());
+    }
+    public static List<Entry> commonEntries() { return commonEntries; }
+    public static boolean commonVisible(String selection,String id) { return !hiddenCommon(selection).contains(id); }
+    public static String serializeCommonSelection(String prior,Collection<String> checked) {
+        Set<String> hidden=hiddenCommon(prior);
+        for(Entry entry:commonEntries)if(checked.contains(entry.id))hidden.remove(entry.id);else hidden.add(entry.id);
+        return hidden.isEmpty()?"*":"hide:"+String.join(",",new java.util.TreeSet<>(hidden));
+    }
+    public static String normalizeCommonSelection(String source) {
+        Set<String> hidden=hiddenCommon(source);
+        return hidden.isEmpty()?"*":"hide:"+String.join(",",new java.util.TreeSet<>(hidden));
+    }
+    private static Set<String> hiddenCommon(String source) {
+        Set<String> hidden=new HashSet<>();
+        if(source==null || !source.startsWith("hide:"))return hidden;
+        for(String id:source.substring(5,Math.min(source.length(),4096)).split(",")) {
+            Entry entry=commonEntry(id,id);if(entry!=null && hidden.size()<96)hidden.add(entry.id);
+        }
+        return hidden;
+    }
 
     public static List<Entry> availableEntries() {
         return HostAdaptation.currentProfile() == HostAdaptation.PROFILE_410 ? ENTRIES : SETTINGS;

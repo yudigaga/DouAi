@@ -109,6 +109,16 @@ public final class HostConfigFilePickerTest {
         } finally { if (picker != null) picker.close(); controller.close(); activity.finish(); }
     }
 
+    @Test public void abandonedSubtitlePickerDeliversLateUriOnlyToCleanup() {
+        PickerActivity activity=Robolectric.buildActivity(PickerActivity.class).setup().get();
+        AtomicReference<Uri> selected=new AtomicReference<>(),cleaned=new AtomicReference<>();
+        HostConfigFilePicker picker=HostConfigFilePicker.launch(activity,new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("text/plain"),selected::set);
+        assertNotNull(picker);picker.abandon(cleaned::set);
+        Uri late=Uri.parse("content://backup/abandoned.txt");
+        activity.registry.dispatchResult(activity.registry.code,Activity.RESULT_OK,new Intent().setData(late));
+        assertNull(selected.get());assertEquals(late,cleaned.get());assertFalse(HostConfigFilePicker.isPending(activity));activity.finish();
+    }
+
     public static final class PickerActivity extends Activity {
         final Registry registry = new Registry();
         public ActivityResultRegistry getActivityResultRegistry() { return registry; }

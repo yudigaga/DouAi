@@ -65,6 +65,60 @@ public final class FeedUiHideHookTest {
         public void onPlaying(String aid) { }
     }
 
+    @Test public void preparedSettingsFinishOnlyAfterTheCurrentCardReconcile() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        TextView digg = new TextView(activity); digg.setId(2131374327); root.addView(digg);
+        activity.setContentView(root);
+        FeedHolderFixture holder = new FeedHolderFixture(); holder.w = root; holder.f = root;
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = FeedUiHideHook.install(createFramework(hooks), createReport(),
+                getClass().getClassLoader(), settings(false, 100), ignored -> { });
+        try {
+            intercept(hooks.get("DouAi.FeedUi.HideVideoActions"), holder); idleMainLooper();
+            java.util.concurrent.CompletableFuture<Void> applied = hook.prepareSettings(enabledSettings())
+                    .apply(() -> true).toCompletableFuture();
+            assertFalse(applied.isDone());
+            assertEquals(View.VISIBLE, digg.getVisibility());
+            idleMainLooper();
+            assertTrue(applied.isDone()); assertFalse(applied.isCompletedExceptionally());
+            assertEquals(View.INVISIBLE, digg.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test public void preparedRestoreRetryKeepsTheOriginalUntilTheViewAcceptsIt() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FailingRestoreText digg = new FailingRestoreText(activity); digg.setId(2131374327); root.addView(digg);
+        activity.setContentView(root);
+        FeedHolderFixture holder = holder(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, enabledSettings());
+        try {
+            intercept(hooks.get("DouAi.FeedUi.HideVideoActions"), holder); idleMainLooper();
+            assertEquals(View.INVISIBLE, digg.getVisibility());
+            digg.failRestore = true;
+            com.douai.module.config.ConfigurationApplyAction action = hook.prepareSettings(settings(false, 100));
+            java.util.concurrent.CompletableFuture<Void> failed = action.apply(() -> true).toCompletableFuture();
+            idleMainLooper(); assertTrue(failed.isCompletedExceptionally());
+            java.util.concurrent.CompletableFuture<Void> retry = action.apply(() -> true).toCompletableFuture();
+            idleMainLooper(); assertTrue(retry.isDone()); assertFalse(retry.isCompletedExceptionally());
+            assertEquals(View.VISIBLE, digg.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    private static final class FailingRestoreText extends TextView {
+        boolean failRestore;
+        FailingRestoreText(android.content.Context context) { super(context); }
+        @Override public void setVisibility(int value) {
+            if (failRestore && value == View.VISIBLE) {
+                failRestore = false;
+                throw new IllegalStateException("restore failed");
+            }
+            super.setVisibility(value);
+        }
+    }
+
     @Test
     public void matchesThe40_6FeedActionAndAuthorViewIds() {
         int[] resourceIds = {

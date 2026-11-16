@@ -579,6 +579,40 @@ public final class AutoPlayHookTest {
         }
     }
 
+    @Test public void completionBudgetRunsWithAutoplayDisabledAndStopsBeforeAdvance() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap(), false)) {
+            PlaybackStopBudget budget=new PlaybackStopBudget(); budget.startCount("1",1);
+            f.hook.setPlaybackGuard((id,token)->budget.onVerifiedCompletion("1","2",token), id->false);
+            f.hook.setSettings(f.settings(false), f.options);
+            f.completed("one");
+            assertEquals("未启动",budget.status(0));
+            assertEquals(0,f.panel.B3.nextCalls);
+        }
+    }
+    @Test public void loopGuardPreventsAutomaticAdvance() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap(), false)) {
+            f.hook.setPlaybackGuard((id,token)->true,id->true);
+            f.completed("one");
+            assertEquals(0,f.panel.B3.nextCalls);
+        }
+    }
+
+    @Test public void advanceRechecksStopEvenWhenCompletionInitiallyAllowsIt() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap(), false)) {
+            f.hook.setPlaybackGuard((id,token)->false,id->true);
+            f.completed("one");assertEquals(0,f.panel.B3.nextCalls);
+        }
+    }
+
+    @Test public void stationaryFingerDoesNotDiscardVerifiedCompletionBudget() throws Throwable {
+        try(Fixture f=new Fixture(Collections.emptyMap())) {
+            PlaybackStopBudget b=new PlaybackStopBudget();b.startCount("1",1);
+            f.hook.setPlaybackGuard((id,token)->b.onVerifiedCompletion("1","2",token),id->false);
+            f.hook.setSettings(f.settings(false),f.options);
+            f.touch(MotionEvent.ACTION_DOWN,100,300);f.completed("one");
+            assertEquals("未启动",b.status(0));assertEquals(0,f.panel.B3.nextCalls);
+        }
+    }
     private static final class Fixture implements AutoCloseable {
         final Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         final FeedRoot root = new FeedRoot(activity);

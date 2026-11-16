@@ -25,8 +25,8 @@ android {
         applicationId = "io.github.yudigaga.douai"
         minSdk = 28
         targetSdk = 35
-        versionCode = 172
-        versionName = "0.2.71"
+        versionCode = 190
+        versionName = "0.2.89"
         require(versionName.orEmpty().matches(Regex("""[0-9]+\.[0-9]\.(?:0|[1-9][0-9]?)"""))) {
             "Version must carry at patch 100 and minor 10 (0.1.99 -> 0.2.0; 0.9.99 -> 1.0.0)."
         }
@@ -119,6 +119,7 @@ dependencies {
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")
     implementation("com.android.tools.smali:smali-dexlib2:3.0.9")
+    implementation("com.caverock:androidsvg-aar:1.4")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
@@ -126,6 +127,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.constraintlayout:constraintlayout:2.2.1")
+    debugImplementation("androidx.appcompat:appcompat:1.7.0")
     testImplementation("androidx.compose.ui:ui-test-junit4-android:1.12.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.12.0")
     testImplementation("io.github.libxposed:api:102.0.0")

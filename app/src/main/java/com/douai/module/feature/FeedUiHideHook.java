@@ -14,6 +14,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.config.ConfigurationApplyAction;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.CustomViewLocator;
@@ -87,6 +88,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private final Set<View> knownCards = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<View> windowRoots = Collections.newSetFromMap(new WeakHashMap<>());
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final RetainedConfigurationAction.Owner configurationActions = new RetainedConfigurationAction.Owner();
     Consumer<View> requestStructureFrame = View::postInvalidateOnAnimation;
     private final AtomicInteger selectedCallbacks = new AtomicInteger();
     private final AtomicInteger cardScans = new AtomicInteger();
@@ -199,6 +201,57 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             reconcileTargets();
             scheduleProgressDiagnostics("settings");
         });
+    }
+
+    public ConfigurationApplyAction prepareSettings(ExtendedSettings settings) {
+        return new RetainedConfigurationAction(mainHandler, () -> !closed, configurationActions) {
+            private int phase, cursor;
+            private ArrayList<View> roots;
+            private boolean rootHidden;
+            @Override void advance(Attempt attempt) {
+                if (phase == 0) {
+                    attempt.check();
+                    enabled = settings != null && settings.hideInterface;
+                    actionAlphaPercent = settings == null ? 100 : settings.videoRightAlpha;
+                    components = settings == null ? null : settings.components;
+                    if (shortProgress != null) shortProgress.setSettings(settings);
+                    phase++;
+                }
+                if (phase == 1) {
+                    attempt.check();
+                    ComponentHideSettings current = components;
+                    if (!usesPlaybackPolicy(current)) clearPendingPlayback();
+                    if (componentsShown && (current == null || !current.enabled || !current.showOnPause)) {
+                        componentsShown = false;
+                        notifyVisibility();
+                    }
+                    roots = hasAnyEffect() ? new ArrayList<>(activeCards) : new ArrayList<>();
+                    phase++;
+                }
+                if (phase == 2) {
+                    while (cursor < roots.size()) {
+                        attempt.check();
+                        View root = roots.get(cursor);
+                        if (!rootHidden) {
+                            if (root.isAttachedToWindow()) hiddenViews.addAndGet(hideMatchingViews(root));
+                            rootHidden = true;
+                        }
+                        once(attempt, () -> installHideMonitor(root));
+                        roots.set(cursor++, null);
+                        rootHidden = false;
+                    }
+                    if (!hasAnyEffect()) {
+                        attempt.check(); removeAllHideMonitors(); fixedTargets.clear();
+                    }
+                    phase++;
+                }
+                if (phase == 3) { once(attempt, FeedUiHideHook.this::refreshWindows); phase++; }
+                if (phase == 4) { attempt.check(); reconcileTargets(); phase++; }
+                if (phase == 5) { attempt.check(); scheduleProgressDiagnostics("settings"); phase++; }
+                attempt.success();
+            }
+            @Override void release() { roots = null; }
+        };
     }
 
     private boolean hasAnyEffect() {
@@ -840,8 +893,9 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
         for (View view : new ArrayList<>(originalStates.keySet())) {
             if (!targets.containsKey(view)) {
-                ViewState original = originalStates.remove(view);
+                ViewState original = originalStates.get(view);
                 if (view != null && original != null) restore(view, original);
+                originalStates.remove(view);
             }
         }
         int changed = 0;
@@ -1625,6 +1679,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     public void close() {
         if (closed) return;
         closed = true;
+        configurationActions.cancel();
         enabled = false;
         if (shortProgress != null) shortProgress.close();
         if (application != null) application.unregisterActivityLifecycleCallbacks(this);
