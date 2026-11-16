@@ -1,4 +1,16 @@
+<p align="center">
+  <img src="docs/assets/readme-banner.svg" alt="DouAi · 播放、内容与工具，各按你的习惯。" width="100%" />
+</p>
+
 # DouAi
+
+[下载正式版](https://github.com/yudigaga/DouAi/releases/latest) · [问题反馈](https://github.com/yudigaga/DouAi/issues) · [文档目录](docs/README.md)
+
+| 播放与手势 | 内容与下载 | AI 与数据 |
+| --- | --- | --- |
+| 速度、书签、章节字幕搜索与画面裁切 | 内容筛选、组件设置与下载任务管理 | 模型配置、语音工具与本地分析 |
+
+---
 
 [☕ 请我喝杯咖啡](#赞助)
 
