@@ -409,6 +409,10 @@ public final class SpeechHttpClient {
                         || failure.getMessage().startsWith("Breeze Blue 语音")
                         || failure.getMessage().startsWith("Fish Audio 语音"))) throw failure;
                 throw new IllegalArgumentException(operation + " 请求无效");
+            } catch (RuntimeException failure) {
+                // Disconnect can make a blocked HttpURLConnection read throw an unchecked exception.
+                ensureActive();
+                throw failure;
             } finally {
                 synchronized (this) { connection = null; inProgress = false; }
                 if (opened != null) opened.disconnect();
