@@ -132,8 +132,26 @@ public class HomeUiCustomizationSettingsTest {
         String invalid=new JSONObject().put("nav_bottom:HOME","broken").put("nav_bottom:homepage_home",encoded).toString();
         assertThrows(IllegalArgumentException.class,()->HomeUiCustomizationSettings.normalize(invalid));
         byte[] padded=HomeUiIconFixtures.chunk(icon,"JUNK",32768-icon.length-8);String large=Base64.getEncoder().encodeToString(padded);
-        JSONObject oversized=new JSONObject();for(int i=0;i<3;i++){oversized.put("nav_bottom:"+raw[i],large);oversized.put("nav_bottom:"+ids[i],large);}
-        assertThrows(IllegalArgumentException.class,()->HomeUiCustomizationSettings.normalize(oversized.toString()));
+        // Count every persisted payload, including shadowed aliases, before resolving five logical positions.
+        assertEquals(32768,padded.length);assertEquals(43692,large.length());
+        JSONObject oversized=new JSONObject();
+        for(int i=0;i<raw.length;i++) {
+            JSONObject rawStates=new JSONObject(),canonicalStates=new JSONObject();
+            for(IconState state:IconState.values()){rawStates.put(state.key,large);canonicalStates.put(state.key,large);}
+            oversized.put("nav_bottom:"+raw[i],rawStates);oversized.put("nav_bottom:"+ids[i],canonicalStates);
+        }
+        JSONObject extraStates=new JSONObject();for(IconState state:IconState.values())extraStates.put(state.key,large);
+        oversized.put("nav_top:capacity_fixture",extraStates);
+        assertEquals(9,oversized.length());assertEquals(1572912,9*4*large.length());
+        assertTrue(9*4*large.length()>HomeUiCustomizationSettings.MAX_TOTAL_BASE64);
+        assertTrue(oversized.toString().length()<HomeUiCustomizationSettings.MAX_JSON_LENGTH);
+        assertTrue(5<HomeUiCustomizationSettings.MAX_ICONS);
+        JSONObject withinBound=new JSONObject(oversized.toString());
+        withinBound.getJSONObject("nav_top:capacity_fixture").put(IconState.DAY_NORMAL.key,encoded);
+        assertEquals(5,HomeUiCustomizationSettings.readEncodedIcons(withinBound.toString()).size());
+        IllegalArgumentException rejected=assertThrows(IllegalArgumentException.class,
+                ()->HomeUiCustomizationSettings.normalize(oversized.toString()));
+        assertTrue("Only the total payload bound rejects this otherwise valid fixture",rejected.getMessage().contains("容量"));
     }
     @Test public void fourStatesPreserveLegacyDefaultsAndExplicitNullBlocksEveryLegacyFallback() throws Exception {
         byte[] normal=HomeUiIconFixtures.webp(8,8,Color.BLUE),selected=HomeUiIconFixtures.webp(8,8,Color.GREEN);
@@ -184,7 +202,7 @@ public class HomeUiCustomizationSettingsTest {
         String aliasRemoved=HomeUiCustomizationSettings.removeIcon(full,"feed_like_selected");
         assertArrayEquals(icon,HomeUiCustomizationSettings.readIcon(aliasRemoved,"feed_like"));
     }
-    @Test public void nestedValuesRetainStrictDuplicateUnknownAndCombinedImageValidation() {
+    @Test public void nestedValuesRetainStrictDuplicateUnknownAndCombinedImageValidation() throws Exception {
         byte[] icon=HomeUiIconFixtures.webp(2,2,Color.BLUE);String encoded=Base64.getEncoder().encodeToString(icon);
         for(String json:new String[]{"{\"feed_like\":{\"unknown\":\""+encoded+"\"}}",
                 "{\"feed_like\":{\"default\":null}}","{\"feed_like\":{\"day_normal\":false}}",
@@ -192,10 +210,32 @@ public class HomeUiCustomizationSettingsTest {
                 "{\"feed_like\":{\"night_selected\":\"not_base64\"}}"})
             assertThrows(IllegalArgumentException.class,()->HomeUiCustomizationSettings.normalize(json));
         byte[] padded=HomeUiIconFixtures.chunk(icon,"JUNK",32768-icon.length-8);
-        Map<IconState,byte[]> four=new EnumMap<>(IconState.class);for(IconState state:IconState.values())four.put(state,padded);
-        String previous=HomeUiCustomizationSettings.putIcons("{}","feed_like",four);
-        assertThrows(IllegalArgumentException.class,()->HomeUiCustomizationSettings.putIcons(previous,"feed_collect",four));
-        assertEquals(1,HomeUiCustomizationSettings.readEncodedIcons(previous).size());
+        byte[] near=HomeUiIconFixtures.chunk(icon,"JUNK",32730-icon.length-8);
+        String large=Base64.getEncoder().encodeToString(padded),shorter=Base64.getEncoder().encodeToString(near);
+        assertEquals(32768,padded.length);assertEquals(32730,near.length);
+        assertEquals(43692,large.length());assertEquals(43640,shorter.length());
+        assertEquals(HomeUiCustomizationSettings.MAX_TOTAL_BASE64-4,35*large.length()+shorter.length());
+        assertEquals(HomeUiCustomizationSettings.MAX_TOTAL_BASE64+48,36*large.length());
+        JSONObject oversized=new JSONObject();
+        for(int i=0;i<9;i++) {
+            JSONObject states=new JSONObject();for(IconState state:IconState.values())states.put(state.key,large);
+            oversized.put("nav_top:channel_"+i,states);
+        }
+        JSONObject withinBound=new JSONObject(oversized.toString());
+        withinBound.getJSONObject("nav_top:channel_8").put(IconState.NIGHT_SELECTED.key,shorter);
+        String within=withinBound.toString(),over=oversized.toString();
+        assertEquals(9,oversized.length());assertTrue(oversized.length()<HomeUiCustomizationSettings.MAX_ICONS);
+        assertTrue(within.length()<HomeUiCustomizationSettings.MAX_JSON_LENGTH);
+        assertTrue(over.length()<HomeUiCustomizationSettings.MAX_JSON_LENGTH);
+        String accepted=HomeUiCustomizationSettings.normalize(within);
+        assertEquals(9,HomeUiCustomizationSettings.readEncodedIcons(accepted).size());
+        assertArrayEquals(near,HomeUiCustomizationSettings.readIcon(accepted,"nav_top:channel_8",IconState.NIGHT_SELECTED));
+        IllegalArgumentException rejected=assertThrows(IllegalArgumentException.class,
+                ()->HomeUiCustomizationSettings.normalize(over));
+        assertTrue("Only the total payload bound rejects this otherwise valid nested input",rejected.getMessage().contains("容量"));
+        IllegalArgumentException parserRejected=assertThrows(IllegalArgumentException.class,
+                ()->HomeUiCustomizationSettings.readEncodedIcons(over));
+        assertTrue("The parser must enforce the same total payload bound",parserRejected.getMessage().contains("容量"));
     }
     @Test public void preservesOtherIconsAndRoundTripsTheActualWebpBytes() throws Exception {
         byte[] red = HomeUiIconFixtures.webp(8,8, Color.RED);
@@ -245,12 +285,27 @@ public class HomeUiCustomizationSettingsTest {
     @Test public void enforcesTheCombinedBase64BudgetBeforeAcceptingMoreImages() {
         byte[] small=HomeUiIconFixtures.webp(2,2,Color.GREEN);
         byte[] padded=HomeUiIconFixtures.chunk(small,"JUNK",32768-small.length-8);
-        assertEquals(32768,padded.length);
+        byte[] near=HomeUiIconFixtures.chunk(small,"JUNK",32730-small.length-8);
+        String large=Base64.getEncoder().encodeToString(padded);
+        String shorter=Base64.getEncoder().encodeToString(near);
+        assertEquals(32768,padded.length);assertEquals(32730,near.length);
+        assertEquals(43692,large.length());assertEquals(43640,shorter.length());
+        assertEquals(HomeUiCustomizationSettings.MAX_TOTAL_BASE64-4,35*large.length()+shorter.length());
+        assertEquals(HomeUiCustomizationSettings.MAX_TOTAL_BASE64+48,36*large.length());
+        assertTrue(9<HomeUiCustomizationSettings.MAX_ICONS);
+        Map<IconState,byte[]> four=new EnumMap<>(IconState.class);
+        for(IconState state:IconState.values())four.put(state,padded);
         String json="{}";
-        for(int i=0;i<5;i++)json=HomeUiCustomizationSettings.putIcon(json,"nav_top:channel_"+i,padded);
-        String previous=json;
-        assertThrows(IllegalArgumentException.class,
-                ()->HomeUiCustomizationSettings.putIcon(previous,"nav_top:overflow",padded));
+        for(int i=0;i<8;i++)json=HomeUiCustomizationSettings.putIcons(json,"nav_top:channel_"+i,four);
+        four.put(IconState.NIGHT_SELECTED,near);
+        String previous=HomeUiCustomizationSettings.putIcons(json,"nav_top:channel_8",four);
+        assertTrue(previous.length()<HomeUiCustomizationSettings.MAX_JSON_LENGTH);
+        assertEquals(9,HomeUiCustomizationSettings.readEncodedIcons(previous).size());
+        assertArrayEquals(near,HomeUiCustomizationSettings.readIcon(previous,"nav_top:channel_8",IconState.NIGHT_SELECTED));
+        IllegalArgumentException rejected=assertThrows(IllegalArgumentException.class,
+                ()->HomeUiCustomizationSettings.putIcon(previous,"nav_top:channel_8",IconState.NIGHT_SELECTED,padded));
+        assertTrue("Only the total payload bound rejects this otherwise valid update",rejected.getMessage().contains("容量"));
+        assertArrayEquals(near,HomeUiCustomizationSettings.readIcon(previous,"nav_top:channel_8",IconState.NIGHT_SELECTED));
     }
     @Test public void catalogAcceptsValidWebpAndBackupRejectsInvalidIconsWithoutPublication() throws Exception {
         byte[] icon=HomeUiIconFixtures.webp(8,8,Color.BLUE);

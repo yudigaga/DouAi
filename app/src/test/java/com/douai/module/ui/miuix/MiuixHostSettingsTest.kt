@@ -75,6 +75,30 @@ class MiuixHostSettingsTest {
     }
 
     @Test
+    fun settingsHomeOmitsRecentConfigurationStatusWithoutChangingSettings() {
+        val before = store.snapshot()
+        compose.onNodeWithTag("settings.status.configuration").assertDoesNotExist()
+        compose.onNodeWithTag("settings.search").assertExists()
+        compose.onNodeWithTag("settings.category.0").assertExists()
+        compose.runOnIdle { assertEquals(before, store.snapshot()) }
+    }
+
+    @Test
+    fun settingsSearchOmitsSidebarBrowseLaunchers() {
+        for ((query, id) in listOf(
+            "下载任务" to "download-tasks",
+            "本地数据分析" to "analytics",
+            "AI 测试对话" to "ai-chat",
+        )) {
+            compose.onNodeWithTag("settings.search").performTextReplacement(query)
+            compose.onNodeWithTag("settings.search.result.$id").assertDoesNotExist()
+            if (query == "本地数据分析") {
+                compose.onNodeWithTag("settings.category.12").assertDoesNotExist()
+            }
+        }
+    }
+
+    @Test
     @Config(sdk = [28])
     fun playbackUsesSevenMiuixChoicesAndSelectsTheNearestLegacyPresetWithoutAnEditor() {
         compose.runOnUiThread { store.putString("playback_speed", "2.75") }
@@ -216,7 +240,7 @@ class MiuixHostSettingsTest {
     @Test
     @Config(sdk = [28])
     fun searchFindsCategoriesAndDownloadSwitchesKeepTheirDependency() {
-        for (query in listOf("本地数据分析", "配置备份", "数据备份")) {
+        for (query in listOf("配置备份", "数据备份")) {
             compose.onNodeWithTag("settings.search").performTextReplacement(query)
             compose.onNodeWithText("基本功能").assertDoesNotExist()
             compose.onNodeWithText("扩展功能").assertIsDisplayed()
@@ -259,7 +283,6 @@ class MiuixHostSettingsTest {
             listOf("私信自动回复", "auto-reply", "自动回复 > 私聊与群聊", "settings.toggle.开启自动回复"),
             listOf("评论回复", "comment-reply", "自动回复 > 接收评论回复", "settings.toggle.接收评论回复"),
             listOf("导入配置", "backup", "扩展功能 > 配置备份", "config.backup.import"),
-            listOf("PDF", "analytics", "扩展功能 > 本地数据分析", "analytics.root"),
         )
         cases.forEach { (query, id, path, option) ->
             compose.onNodeWithTag("settings.search").performTextReplacement(query)
@@ -289,7 +312,8 @@ class MiuixHostSettingsTest {
             assertEquals("settings.target.download-watermark", row.getTag(com.douai.module.R.id.settings_search_target))
             assertTrue(row.isActivated)
             assertNotNull(row.foreground)
-            assertTrue(findNativeScroll(decor)!!.scrollY > 0)
+            assertTrue("The focused row remains visible whether or not this page needs scrolling",
+                row.getGlobalVisibleRect(android.graphics.Rect()))
             screen.dismissChildPages()
             assertFalse(row.isActivated)
             assertNull(row.foreground)
@@ -318,16 +342,12 @@ class MiuixHostSettingsTest {
             LocalPortraitContext.clear(hostActivity)
         }
         try {
-            compose.onNodeWithTag("settings.search").performTextReplacement("本地数据分析")
-            compose.onNodeWithText("扩展功能").assertIsDisplayed().performClick()
-            val extensions = ShadowDialog.getLatestDialog()
-            compose.onNodeWithTag("settings.option.本地数据分析").assertIsDisplayed().performClick()
+            compose.runOnUiThread { screen.openSidebarEntry("analytics") }
             val report = ShadowDialog.getLatestDialog()
             waitForAnalyticsLoad(report, "记录已关闭")
             compose.runOnIdle {
                 val decor = report.window!!.decorView
                 assertTrue(report.isShowing)
-                assertTrue("The extension page stays open beneath its report", extensions.isShowing)
                 assertNotNull(decor.findViewWithTag<View>("miuix.dialog.root"))
                 assertNull("The report must use the shared dialog header", decor.findViewWithTag<View>("analytics.back"))
                 assertNotNull(decor.findViewWithTag<View>("analytics.empty"))
@@ -407,9 +427,8 @@ class MiuixHostSettingsTest {
             compose.onAllNodesWithTag("miuix.dialog.button.${Dialog.BUTTON_NEGATIVE}").onLast().performClick()
             compose.runOnIdle {
                 assertFalse(report.isShowing)
-                assertTrue(extensions.isShowing)
             }
-            compose.onNodeWithTag("settings.option.本地数据分析").assertIsDisplayed().performClick()
+            compose.runOnUiThread { screen.openSidebarEntry("analytics") }
             val reopened = ShadowDialog.getLatestDialog()
             waitForAnalyticsLoad(reopened, "正在本地记录")
             scrollAnalyticsViewIntoView(reopened, "analytics.manage")
@@ -418,7 +437,6 @@ class MiuixHostSettingsTest {
             compose.runOnUiThread {
                 screen.close()
                 assertFalse("Closing settings also closes the active analytics page", reopened.isShowing)
-                assertFalse(extensions.isShowing)
             }
         } finally {
             runAnalyticsIo {
@@ -608,6 +626,7 @@ class MiuixHostSettingsTest {
     @Test
     @Config(sdk = [28], qualifiers = "w320dp-h640dp-mdpi")
     fun organizedAutomationPagesRenderAndCommentInputCanTakeFocus() {
+        compose.onNodeWithTag("settings.category.5").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("settings.category.5").performClick()
         compose.onNodeWithTag("settings.option.回复内容").assertIsDisplayed()
         compose.onNodeWithTag("settings.option.回复预设内容").assertDoesNotExist()
@@ -618,6 +637,7 @@ class MiuixHostSettingsTest {
         compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
         saveDialogPreview("reply-private")
         compose.runOnUiThread { privateSettings.dismiss(); screen.dismissChildPages() }
+        compose.onNodeWithTag("settings.category.6").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("settings.category.6").performClick()
         compose.onNodeWithTag("settings.option.评论内容").assertIsDisplayed()
         compose.onNodeWithTag("settings.option.素材识别").assertIsEnabled()
@@ -652,7 +672,7 @@ class MiuixHostSettingsTest {
 
     @Test
     fun nestedReplyModeAndTargetIdPagesUseMiuixChoiceAndActionShells() {
-        compose.onNodeWithTag("settings.category.5").performClick()
+        compose.onNodeWithTag("settings.category.5").performScrollTo().assertIsDisplayed().performClick()
         compose.onNodeWithTag("settings.option.回复模式").performClick()
         val choices = ShadowDialog.getLatestDialog() as android.app.AlertDialog
         compose.runOnIdle {
@@ -684,7 +704,7 @@ class MiuixHostSettingsTest {
 
     @Test
     fun scopeRelationAndKeywordFieldPickersPersistMiuixMultiSelections() {
-        compose.onNodeWithTag("settings.category.5").performClick()
+        compose.onNodeWithTag("settings.category.5").performScrollTo().assertIsDisplayed().performClick()
         compose.onNodeWithTag("settings.option.私聊范围").performClick()
         compose.onNodeWithTag("settings.option.关注关系").performClick()
         compose.onNodeWithTag("miuix.dialog.choice.0").performClick()

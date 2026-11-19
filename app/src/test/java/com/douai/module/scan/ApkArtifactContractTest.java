@@ -27,10 +27,10 @@ import static org.junit.Assert.*;
 
 /** Optional packaged-artifact checks, run with DOUAI_VERIFY_RELEASE_APK after building Release. */
 public final class ApkArtifactContractTest {
-    @Test public void releaseContainsTheFourStateIconPipelineAndNavigationSelectionFeedback() throws Exception {
+    @Test public void releaseRetainsLegacyIconStateCompatibilityAndNavigationSelectionFeedback() throws Exception {
         DexFacts release=dexFacts("DOUAI_VERIFY_RELEASE_APK");
         String state="Lcom/douai/module/config/HomeUiCustomizationSettings$IconState;";
-        ClassDef variants=release.classes.get(state);assertNotNull("The requested APK must include the new four-state format",variants);
+        ClassDef variants=release.classes.get(state);assertNotNull("The requested APK must retain the legacy four-key compatibility enum",variants);
         Set<String> actual=new HashSet<>();
         for(com.android.tools.smali.dexlib2.iface.Field field:variants.getFields())
             if(field.getType().equals(state))actual.add(field.getName());
@@ -67,21 +67,36 @@ public final class ApkArtifactContractTest {
         assertMethod(release,indicator,"update(Landroid/view/View;I)V",0,false);
         assertMethod(release,indicator,"close()V",AccessFlags.PUBLIC.getValue(),false);
         for(String key:new String[]{"day_normal","day_selected","night_normal","night_selected"})
-            assertTrue("The APK must retain the persisted four-state key: "+key,release.strings.contains(key));
+            assertTrue("The APK must retain the persisted legacy compatibility key: "+key,release.strings.contains(key));
         assertTrue("The APK must include the separate navigation visibility setting",release.strings.contains("theme_hidden_navigation"));
     }
 
-    @Test public void releaseContainsAllBuiltInNavigationSvgsWithoutChangingTheirSourceBytes() throws Exception {
+    @Test public void releaseContainsExactlyTheSuppliedWebpsWithIndependentOriginalBytesAndNoOldSvgs() throws Exception {
         String prefix="META-INF/douai/navigation-icons/";
+        String[] paths={"top/01-recommend","top/02-following","top/03-featured","top/04-trending","top/05-nearby",
+                "top/06-live","top/07-shop","top/08-drama","top/09-search","top/10-menu",
+                "bottom/01-home","bottom/02-friends","bottom/03-create","bottom/04-messages","bottom/05-profile",
+                "feed/01-like","feed/02-comment","feed/03-collect","feed/04-share","feed/05-follow","feed/06-mute","feed/07-sound"};
+        Set<String> expectedNames=new HashSet<>();
+        for(String path:paths)for(String suffix:new String[]{"","-active"})expectedNames.add(prefix+path+suffix+".webp");
+        assertEquals(44,expectedNames.size());
         try(ZipFile release=archive("DOUAI_VERIFY_RELEASE_APK")) {
-            var icons=release.stream().filter(entry->entry.getName().startsWith(prefix) && entry.getName().endsWith(".svg")).toList();
-            assertEquals("15 designs in four static appearances",60,icons.size());
-            for(var icon:icons)try(var expected=ApkArtifactContractTest.class.getResourceAsStream("/"+icon.getName())) {
-                assertNotNull("The release resource corresponds to a module-owned source: "+icon.getName(),expected);
-                assertArrayEquals(icon.getName(),expected.readAllBytes(),read(release,icon.getName()));
+            Set<String> actualNames=new HashSet<>();
+            for(var icon:release.stream().filter(entry->entry.getName().startsWith(prefix) && !entry.isDirectory()).toList()) {
+                assertFalse("Retired SVG must not remain active: "+icon.getName(),icon.getName().endsWith(".svg"));
+                assertTrue("Duplicate active resource: "+icon.getName(),actualNames.add(icon.getName()));
+            }
+            assertEquals("Only the 44 supplied raw WebPs belong in the active prefix",expectedNames,actualNames);
+            for(String name:expectedNames) {
+                String fixture="/META-INF/douai/supplied-icon-fixtures/"+name.substring(prefix.length());
+                try(var expected=ApkArtifactContractTest.class.getResourceAsStream(fixture)) {
+                    assertNotNull("Independent supplied fixture: "+fixture,expected);
+                    assertArrayEquals(name,expected.readAllBytes(),read(release,name));
+                }
             }
         }
     }
+
     @Test public void releaseMetadataAndHostRulesMatchTheirContracts() throws Exception {
         try (ZipFile release = archive("DOUAI_VERIFY_RELEASE_APK")) {
             assertEquals("com.douai.module.DouAiModule",

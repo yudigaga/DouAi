@@ -134,7 +134,7 @@ public final class ModuleSettingsReferenceTest {
                 {"FILTER", "过滤总开关", "整页筛空时保留原列表", "去广告开关", "去直播开关", "去推荐卡片开关",
                         "去推荐商家开关", "去商品/购物卡片开关", "去热点榜单卡开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
                         "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},
-                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
+                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "打开评论时,不滑动视频", "滑动智能判断上下",
                         "仅模块控制倍速", "自动倍速播放", "倍速数值", "锁定最高画质", "互动自动化"},
                 {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "素材识别", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
@@ -148,7 +148,7 @@ public final class ModuleSettingsReferenceTest {
                 {"MESSAGE", "消息防撤回", "自己撤回的消息", "对方撤回的消息", "撤回的背景色", "替换私聊语音",
                         "私聊语音文件", "自动文本转语音", "文本转语音设置"},
                 {"SPOOF", "个人资料数量伪装", "获赞数量", "关注数量", "粉丝数量", "互关数量", "版本信息"},
-                {"EXTENSION", "AI 模型设置", "文本转语音设置", "本地数据分析", "配置备份"}
+                {"EXTENSION", "AI 模型设置", "文本转语音设置", "配置备份"}
         };
         for (String[] reference : references) {
             View page = openCategory(reference[0]);
@@ -172,7 +172,6 @@ public final class ModuleSettingsReferenceTest {
                 {"私信自动回复", "auto-reply", "自动回复 > 私聊与群聊", "settings.toggle.开启自动回复"},
                 {"评论回复", "comment-reply", "自动回复 > 接收评论回复", "settings.toggle.接收评论回复"},
                 {"导入配置", "backup", "扩展功能 > 配置备份", "config.backup.import"},
-                {"PDF", "analytics", "扩展功能 > 本地数据分析", "analytics.root"},
                 {"调试", "debug-logs", "关于 > 调试与日志", "debug.logs.enabled"},
                 {"#长按", "hash-long-press-voice", "评论相关 > #长按发送转语音（全局）", "settings.toggle.#长按发送转语音（全局）"},
                 {"仅模块控制倍速", "module-only-speed", "自动播放 > 仅模块控制倍速", "settings.toggle.仅模块控制倍速"},
@@ -200,7 +199,6 @@ public final class ModuleSettingsReferenceTest {
         EditText search = home.findViewWithTag("settings.search");
         String[][] targets = {{"download-mode", "settings.option.下载方式"},
                 {"download-directory", "settings.option.保存位置"},
-                {"download-tasks", "settings.option.下载任务"},
                 {"download-name", "settings.option.文件名模板"},
                 {"download-watermark", "settings.toggle.无水印下载图集或者视频"}};
         Map<String, Object> saved = new HashMap<>(store.values);
@@ -374,7 +372,7 @@ public final class ModuleSettingsReferenceTest {
         store.putString(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
         store.putString(ThirdPartyDownloadSettings.SIGNATURE_MODE, ThirdPartyDownloadSettings.SIGNATURE_NONE);
         View page = openCategory("DOWNLOAD");
-        assertEquals(Arrays.asList("启用下载菜单", "下载方式", "保存位置", "下载任务", "直接保存全部媒体",
+        assertEquals(Arrays.asList("启用下载菜单", "下载方式", "保存位置", "直接保存全部媒体",
                 "GET 请求", "请求参数", "签名方式", "请求头", "响应样本", "下载字段", "文件命名字段", "测试 GET"),
                 settingTitles(page));
         Switch direct = toggle(page, "直接保存全部媒体");
@@ -1946,14 +1944,13 @@ public final class ModuleSettingsReferenceTest {
     }
 
     @Test
-    public void historyDetailsAreReadableAndClosingTheCategoryClosesTheirChildWindow() throws InterruptedException {
+    public void historyDetailsRemainReadableFromTheSidebar() throws InterruptedException {
         com.douai.module.config.AutomationHistoryStore history = new com.douai.module.config.AutomationHistoryStore(activity);
         history.upsert(new com.douai.module.config.AutomationHistoryStore.Entry("ui-history", "reply", "target-id",
                 "目标用户", "收到消息", "生成回复", "model", "sent", System.currentTimeMillis(), System.currentTimeMillis()));
-        View reply = openCategory("AUTO_REPLY");
-        option(reply, "发送与记录").performClick();
-        option(ShadowDialog.getLatestDialog().getWindow().getDecorView(), "回复历史记录").performClick();
+        screen.openSidebarEntry("reply_history");
         Dialog list = ShadowDialog.getLatestDialog();
+        assertTrue(list.isShowing());
         ListView historyRows = list.getWindow().getDecorView().findViewWithTag("automation.history");
         long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
         View row = null;
@@ -2136,7 +2133,7 @@ public final class ModuleSettingsReferenceTest {
         assertTrue(store.getBoolean("reply_tip", false));
         assertEquals("10", store.getString("reply_notice_seconds", ""));
         assertEquals("5", store.getString("reply_delay_seconds", ""));
-        assertNotNull(delivery.findViewWithTag("settings.option.回复历史记录"));
+        assertNull(delivery.findViewWithTag("settings.option.回复历史记录"));
         assertNull(delivery.findViewWithTag("settings.option.评论回复记录"));
         assertFalse(store.values.containsKey("comment_reply_tip_enabled"));
         assertFalse(store.values.containsKey("comment_reply_tip_seconds"));
@@ -2290,7 +2287,7 @@ public final class ModuleSettingsReferenceTest {
         assertFalse(automation.isShowing());
     }
 
-    @Test public void downloadTasksNavigationClosesWithItsParentAndDoesNotChangeSettings() throws Exception {
+    @Test public void downloadTasksRemainAvailableFromTheSidebarWithoutChangingSettings() throws Exception {
         // Full-suite download fixtures retain up to 50 terminal tasks; this case owns an empty-history fixture.
         assertFalse(com.douai.module.feature.DownloadTasks.snapshots().stream().anyMatch(t -> t.cancellable));
         java.lang.reflect.Field tasksField = com.douai.module.feature.DownloadTasks.class.getDeclaredField("TASKS");
@@ -2298,9 +2295,7 @@ public final class ModuleSettingsReferenceTest {
         Map<?, ?> retainedTasks = (Map<?, ?>) tasksField.get(null);
         synchronized (retainedTasks) { retainedTasks.clear(); }
         Map<String, Object> original = new HashMap<>(store.values);
-        View page = openCategory("DOWNLOAD");
-        Dialog category = ShadowDialog.getLatestDialog();
-        option(page, "下载任务").performClick();
+        screen.openSidebarEntry("download_tasks");
         Dialog tasks = ShadowDialog.getLatestDialog();
         ShadowLooper.idleMainLooper();
         assertTrue(tasks.isShowing());
@@ -2316,12 +2311,12 @@ public final class ModuleSettingsReferenceTest {
         assertNull(tasksList.getAdapter().getItem(0));
         assertNotNull(tasksList.findViewWithTag("download.tasks.empty"));
         assertTrue(containsText(tasksRoot, "暂无下载任务"));
-        category.dismiss();
+        screen.dismissChildPages();
         ShadowLooper.idleMainLooper();
         assertFalse(tasks.isShowing());
         assertEquals(original, store.values);
 
-        option(openCategory("DOWNLOAD"), "下载任务").performClick();
+        screen.openSidebarEntry("download_tasks");
         Dialog reopened = ShadowDialog.getLatestDialog();
         assertTrue(reopened.isShowing());
         screen.dismissChildPages();

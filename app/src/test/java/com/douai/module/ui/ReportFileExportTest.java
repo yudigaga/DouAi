@@ -18,6 +18,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import static org.junit.Assert.*;
 
@@ -168,8 +169,55 @@ public final class ReportFileExportTest {
         // Require the chapter label and the first actual sample row below it on the same page.
         int title=textTop(paper,0,"再次遇见，停留有何不同");
         int row=textTop(paper,0,"近 28 天遇见过");
-        assertTrue(title>=0 && row>title);
-        for(int cut:breaks)assertFalse("Orphaned familiarity title on a sheet boundary",cut>title && cut<=row);
+        assertTrue("Familiarity layout invariant: titleTop="+title+", rowTop="+row
+                +", paper="+layoutState(paper)+", evidence="+familiarityState(sample.portrait.evidence)
+                +", visits="+sample.portrait.capturedVisits+"/"+sample.portrait.finishedVisits
+                +", visibleMs="+sample.portrait.visibleMillis
+                +", titleViews="+textViewStates(paper,"再次遇见，停留有何不同")
+                +", rowViews="+textViewStates(paper,"近 28 天遇见过"), title>=0 && row>title);
+        for(int cut:breaks)assertFalse("Orphaned familiarity title on a sheet boundary: cut="+cut
+                +", titleTop="+title+", rowTop="+row+", cuts="+breaks,cut>title && cut<=row);
+    }
+    private static String familiarityState(com.douai.module.analytics.PortraitEvidence evidence) {
+        StringBuilder state=new StringBuilder("range=").append(evidence.startDate).append("..")
+                .append(evidence.endDate).append(", browseDays=").append(evidence.browseDays)
+                .append(", groups=").append(evidence.familiarity.size());
+        for(com.douai.module.analytics.PortraitEvidence.Familiarity group:evidence.familiarity)
+            state.append(" [type=").append(group.type).append(", source=").append(group.source)
+                    .append(", familiarN=").append(group.familiar.n).append(", unseenN=").append(group.unseen.n)
+                    .append(", excluded=").append(group.excluded).append(", eligible=").append(group.eligible)
+                    .append(", coverage=").append(group.coverage.size()).append(']');
+        return state.toString();
+    }
+    private static String layoutState(View view) {
+        return view.getClass().getSimpleName()+"[laidOut="+view.isLaidOut()+", bounds="+view.getLeft()+","+
+                view.getTop()+".."+view.getRight()+","+view.getBottom()+", measured="+
+                view.getMeasuredWidth()+"x"+view.getMeasuredHeight()+", size="+view.getWidth()+"x"+
+                view.getHeight()+", scrollY="+view.getScrollY()+"]";
+    }
+    private static String textViewStates(View root,String prefix) {
+        List<String> matches=new ArrayList<>();collectTextViewStates(root,prefix,"paper",0,matches);
+        return matches.isEmpty()?"<none>":String.join(" | ",matches);
+    }
+    private static void collectTextViewStates(View view,String prefix,String path,int absoluteTop,List<String> matches) {
+        String tag=String.valueOf(view.getTag());
+        String node=path+"/"+view.getClass().getSimpleName()+"[tag="+tag+"]";
+        if(view instanceof android.widget.TextView) {
+            android.widget.TextView text=(android.widget.TextView)view;
+            String value=text.getText().toString();
+            if(value.startsWith(prefix))matches.add("text="+value+", node="+node+", visibility="+
+                    view.getVisibility()+", laidOut="+view.isLaidOut()+", treeTop="+absoluteTop+
+                    ", bounds="+view.getLeft()+","+view.getTop()+".."+view.getRight()+","+
+                    view.getBottom()+", measured="+view.getMeasuredWidth()+"x"+view.getMeasuredHeight()+
+                    ", size="+view.getWidth()+"x"+view.getHeight()+", translationY="+view.getTranslationY());
+        }
+        if(view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group=(android.view.ViewGroup)view;
+            for(int index=0;index<group.getChildCount();index++) {
+                View child=group.getChildAt(index);
+                collectTextViewStates(child,prefix,node+"["+index+"]",absoluteTop+child.getTop(),matches);
+            }
+        }
     }
     private static int textTop(View v,int top,String prefix) {
         if(v instanceof android.widget.TextView && ((android.widget.TextView)v).getText().toString().startsWith(prefix))return top;

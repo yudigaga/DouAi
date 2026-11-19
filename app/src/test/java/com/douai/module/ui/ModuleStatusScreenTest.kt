@@ -1,6 +1,7 @@
 package com.douai.module.ui
 
 import android.graphics.Bitmap
+import android.os.Bundle
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
 import androidx.activity.ComponentActivity
@@ -10,6 +11,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -75,6 +77,33 @@ class ModuleStatusScreenTest {
     }
 
     @Test
+    fun configurationRetainsPreCreationStateClearsUnavailableAndRejectsClosedUpdates() {
+        val applied = ConfigurationStatus.fromDiagnostics(appliedConfigurationSnapshot())
+        assertTrue(applied.applied)
+        compose.runOnUiThread {
+            screen = ModuleStatusScreen(compose.activity)
+            screen.setConfigurationStatus(applied)
+            compose.activity.setContentView(screen.createView())
+        }
+        compose.onNodeWithTag("settings.status.configuration").assertExists()
+        compose.onNodeWithText(applied.title).assertExists()
+        compose.onNodeWithText(applied.detail).assertExists()
+        compose.runOnUiThread {
+            screen.setFrameworkSyncStatus(false, "连接已断开", "服务不可用")
+            screen.setConfigurationStatus(ConfigurationStatus.unavailable())
+        }
+        compose.onNodeWithText(applied.title).assertDoesNotExist()
+        compose.onNodeWithText(ConfigurationStatus.unavailable().title).assertExists()
+        compose.runOnUiThread {
+            screen.setConfigurationStatus(applied)
+            screen.close()
+            screen.setConfigurationStatus(ConfigurationStatus.unavailable())
+        }
+        compose.onNodeWithText(applied.title).assertExists()
+        compose.onNodeWithText(ConfigurationStatus.unavailable().title).assertDoesNotExist()
+    }
+
+    @Test
     @Config(qualifiers = "w640dp-h320dp-land-night-mdpi")
     fun shortLandscapeDarkScreenCanScrollToAction() {
         compose.runOnUiThread {
@@ -136,5 +165,20 @@ class ModuleStatusScreenTest {
         File(directory, "$name.png").outputStream().use {
             assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
         }
+    }
+
+    private fun appliedConfigurationSnapshot() = Bundle().apply {
+        putString("configuration.read_status", "READY")
+        putLong("configuration.revision", 3L)
+        putBoolean("configuration.closed", false)
+        putString("configuration.summary", "SUCCESS")
+        val prefix = "configuration.consumer.feed_ui."
+        putBoolean(prefix + "installed", true)
+        putLong(prefix + "desired_revision", 3L)
+        putLong(prefix + "applied_revision", 3L)
+        putString(prefix + "status", "APPLIED")
+        putString(prefix + "reason", "NONE")
+        putInt(prefix + "attempts", 1)
+        putString(prefix + "failure_class", null)
     }
 }

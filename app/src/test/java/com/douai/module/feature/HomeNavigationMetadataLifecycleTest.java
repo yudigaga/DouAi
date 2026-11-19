@@ -97,7 +97,7 @@ public class HomeNavigationMetadataLifecycleTest {
                 s.home.getResources().updateConfiguration(config,s.home.getResources().getDisplayMetrics());
                 s.home.getWindow().getDecorView().getViewTreeObserver().dispatchOnPreDraw();s.layoutHome();
                 assertNotNull("Returning to the host applies the configured state",s.titles[1].getCompoundDrawables()[1]);
-                assertTrue("The compound image actually paints the expected state pixels: "+state,paintedPixels(s.titles[1],stateColor(state))>0);
+                assertTrue("The compound image actually paints the expected state pixels: "+state,paintedPixels(s.titles[1],stateColor(IconState.of(false,state.selected)))>0);
                 assertEquals("城西镇",s.titles[1].getText().toString());
                 assertEquals("上导航 · 城西镇",target(s.icons(),selected.key).title);
             }

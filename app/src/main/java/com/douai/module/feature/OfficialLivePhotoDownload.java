@@ -72,7 +72,7 @@ final class OfficialLivePhotoDownload {
             toast(context, "媒体正在保存或下载队列已满");
             return false;
         }
-        toast(context, "实况已加入下载任务，可在设置中查看或取消");
+        toast(context, "实况已加入下载任务，可从侧边栏查看或取消");
         return true;
     }
 

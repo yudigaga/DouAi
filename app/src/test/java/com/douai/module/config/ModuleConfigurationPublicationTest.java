@@ -2,6 +2,7 @@ package com.douai.module.config;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Bundle;
 
 import com.douai.module.DouAiModule;
 import com.douai.module.diagnostics.DebugLog;
@@ -12,6 +13,7 @@ import com.douai.module.feature.FeedAdFilterHookTest;
 import com.douai.module.feature.NativeMessagingHooks;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.HostWorkQueue;
+import com.douai.module.ui.ConfigurationStatus;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -49,6 +51,82 @@ public final class ModuleConfigurationPublicationTest {
     private boolean previousDebug;
     private final List<AutoCloseable> receivers = new ArrayList<>();
     private final List<HostWorkQueue> queues = new ArrayList<>();
+
+    @Test public void moduleStatusUsesTheSameReadFailureRecoveryAndCloseSnapshotAsDiagnostics() throws Exception {
+        SharedPreferences accepted = preferences(values("status-view"));
+        update(accepted);
+        flushWorker();
+        ShadowLooper.idleMainLooper();
+        ConfigurationStatus before = configurationStatus();
+        assertEquals(ConfigurationStatus.fromDiagnostics(configurationDiagnostics()).title, before.title);
+        Object desired = field(module, "desiredConfigurationSnapshot");
+
+        SharedPreferences broken = (SharedPreferences) Proxy.newProxyInstance(
+                SharedPreferences.class.getClassLoader(), new Class<?>[]{SharedPreferences.class},
+                (proxy, method, arguments) -> {
+                    if ("getAll".equals(method.getName())) throw new IllegalStateException("fixture read failure");
+                    throw new AssertionError("Unexpected preference operation: " + method.getName());
+                });
+        update(broken);
+        ShadowLooper.idleMainLooper();
+        ConfigurationStatus failed = configurationStatus();
+        assertEquals(ConfigurationStatus.fromDiagnostics(configurationDiagnostics()).title, failed.title);
+        assertFalse(failed.applied);
+        assertFalse(failed.pending);
+        assertSame("The status surface cannot mutate the retained desired configuration", desired,
+                field(module, "desiredConfigurationSnapshot"));
+
+        update(accepted);
+        flushWorker();
+        ShadowLooper.idleMainLooper();
+        assertEquals("READY", configurationDiagnostics().getString("configuration.read_status"));
+        assertEquals(ConfigurationStatus.fromDiagnostics(configurationDiagnostics()).title, configurationStatus().title);
+        assertNotEquals(failed.title, configurationStatus().title);
+
+        invoke("closeConfigurationPublication");
+        ShadowLooper.idleMainLooper();
+        assertTrue(configurationDiagnostics().getBoolean("configuration.closed"));
+        assertEquals(ConfigurationStatus.fromDiagnostics(configurationDiagnostics()).title, configurationStatus().title);
+        assertFalse(configurationStatus().applied);
+        assertFalse(configurationStatus().pending);
+    }
+
+    @Test public void moduleStatusShowsDeferredImportWithoutPublishingItsIntermediateValues() throws Exception {
+        SharedPreferences preferences = RuntimeEnvironment.getApplication().getSharedPreferences(
+                "publication-status-import", Context.MODE_PRIVATE);
+        write(preferences, "before-import");
+        update(preferences);
+        flushWorker();
+        ShadowLooper.idleMainLooper();
+        Object desired = field(module, "desiredConfigurationSnapshot");
+        long revision = state().revision;
+        try (ConfigImportTransaction transaction = ConfigImportTransaction.begin(preferences, preferences.getAll())) {
+            preferences.edit().putString("download_name_template", "intermediate").commit();
+            update(preferences);
+            ShadowLooper.idleMainLooper();
+            assertEquals("DEFERRED", configurationDiagnostics().getString("configuration.read_status"));
+            assertTrue(configurationStatus().pending);
+            assertFalse(configurationStatus().applied);
+            assertSame(desired, field(module, "desiredConfigurationSnapshot"));
+            assertEquals(revision, state().revision);
+            assertEquals(ConfigurationStatus.fromDiagnostics(configurationDiagnostics()).title, configurationStatus().title);
+        }
+        update(preferences);
+        flushWorker();
+        ShadowLooper.idleMainLooper();
+        assertEquals("READY", configurationDiagnostics().getString("configuration.read_status"));
+        assertEquals(ConfigurationStatus.fromDiagnostics(configurationDiagnostics()).title, configurationStatus().title);
+    }
+
+    private Bundle configurationDiagnostics() throws Exception {
+        Method method = DouAiModule.class.getDeclaredMethod("diagnosticsSnapshot");
+        method.setAccessible(true);
+        return (Bundle) method.invoke(module);
+    }
+
+    private ConfigurationStatus configurationStatus() throws Exception {
+        return ConfigurationStatus.fromDiagnostics(configurationDiagnostics());
+    }
 
     @Before public void setup() throws Exception {
         previousDebug = DebugLog.isEnabled();

@@ -208,7 +208,8 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
         }};
         Monitor(View root,Activity owner){this.root=root;this.owner=owner;backdrop=new LiquidGlassBackdrop(root,log);
             motion=new LiquidGlassMotion(root.getContext());customization=new HomeUiCustomization(root,options,log,true);
-            clearance=new NavigationGlassClearance(root,view->motion.restingBounds(view,root));}
+            clearance=new NavigationGlassClearance(root,view->motion.restingBounds(view,root),
+                    (view,depth)->motion.restingBounds(view,root,depth));}
         void attach() {
             root.addOnAttachStateChangeListener(this);observer=root.getViewTreeObserver();
             observer.addOnGlobalLayoutListener(this);observer.addOnScrollChangedListener(this);
@@ -232,6 +233,11 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
                         entry.getValue().close();iterator.remove();changed=true;layoutChanged=true;
                     } else {
                         layoutChanged|=entry.getValue().refreshLayout(customization.labels(entry.getKey()),motionMargin());
+                        String capacity=entry.getValue().topCapacityDiagnostic();
+                        if(!"result=not_top".equals(capacity) && !capacity.equals(entry.getValue().lastTopCapacityReport)) {
+                            entry.getValue().lastTopCapacityReport=capacity;
+                            log.accept("liquid_glass: navigation_top_capacity;"+capacity);
+                        }
                         entry.getValue().syncNavigationBackground();
                     }
                 }
@@ -382,6 +388,7 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
         final int left,top,right,bottom;final NavigationBackground navigationBackground;
         final NavigationGlassLayout layout;
         boolean clearanceFallback;
+        String lastTopCapacityReport;
         @android.annotation.SuppressLint("ResourceType") // ID verified in the original 41.0.0 APK, not module R.
         Binding(View view,boolean floating,LiquidGlassBackdrop backdrop) {
             this.view=view;original=view.getBackground();left=view.getPaddingLeft();top=view.getPaddingTop();
@@ -405,6 +412,7 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
         boolean owned(){return view.getBackground()==applied;}
         boolean refreshLayout(java.util.Collection<android.widget.TextView> labels){return layout.refresh(labels);}
         boolean refreshLayout(java.util.Collection<android.widget.TextView> labels,int edge){return layout.refresh(labels,edge);}
+        String topCapacityDiagnostic(){return layout.topCapacityDiagnostic();}
         void syncNavigationBackground() {
             if(navigationBackground!=null && owned())navigationBackground.sync();
         }

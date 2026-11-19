@@ -72,9 +72,7 @@ class LocalAnalyticsAiSettingsMiuixTest {
     }
 
     @Test fun hostReportSelectsItsOwnSupplierAndEditsItsOwnSecondaryPrompt() {
-        compose.onNodeWithTag("settings.search").performTextReplacement("本地数据分析")
-        compose.onNodeWithText("扩展功能").performClick()
-        compose.onNodeWithTag("settings.option.本地数据分析").performClick()
+        compose.runOnUiThread { screen.openSidebarEntry("analytics") }
         val report = ShadowDialog.getLatestDialog()
         compose.waitUntil(10_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()

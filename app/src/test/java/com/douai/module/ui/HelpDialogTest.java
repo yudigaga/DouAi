@@ -52,7 +52,18 @@ public final class HelpDialogTest {
         LinearLayout list = (LinearLayout) extension.getParent();
         assertNull(home.findViewWithTag("settings.category.ANALYTICS"));
         assertNull(home.findViewWithTag("settings.category.BACKUP"));
-        assertEquals(list.indexOfChild(extension) + 2, list.indexOfChild(about));
+        View download = home.findViewWithTag("settings.category.DOWNLOAD");
+        assertNull(home.findViewWithTag("settings.group.download-tools"));
+        assertNull(home.findViewWithTag("settings.group.local-help"));
+        View spoof = home.findViewWithTag("settings.category.SPOOF");
+        assertNotNull(download);
+        assertNotNull(spoof);
+        assertSame(list, download.getParent());
+        assertSame(list, spoof.getParent());
+        assertSame(list, about.getParent());
+        assertTrue(list.indexOfChild(download) < list.indexOfChild(extension));
+        assertTrue(list.indexOfChild(extension) < list.indexOfChild(spoof));
+        assertTrue(list.indexOfChild(spoof) < list.indexOfChild(about));
         assertEquals(View.GONE, ((LinearLayout) about).getChildAt(1).getVisibility());
         about.performClick();
         AlertDialog page = latest();
@@ -156,6 +167,33 @@ public final class HelpDialogTest {
         assertFalse(text.contains("先启用全局"));
     }
 
+    @Test public void helpRoutesRemovedBrowseActionsThroughTheSidebar() {
+        String reading = helpPart("reading-41", "记下和找回片段");
+        String commentBookmarks = helpPart("reading-41", "评论筛选与收藏");
+        String pauseAndSpeed = helpPart("reading-41", "观看暂停与作者倍速");
+        String analytics = helpPart("analytics", "开始记录");
+        String downloads = helpPart("downloads", "查看下载进度或取消");
+        String automation = helpPart("automation", "发送与记录");
+        String autoReply = helpPart("auto_reply", "评论回复额度、提示与记录");
+
+        assertTrue(reading.contains("侧边栏"));
+        assertFalse(reading.contains("还可从扩展功能打开"));
+        assertTrue(commentBookmarks.contains("侧边栏"));
+        assertFalse(commentBookmarks.contains("可从扩展功能、手势"));
+        assertTrue(pauseAndSpeed.contains("观看暂停可从手势、快捷菜单或侧边栏打开"));
+        assertFalse(pauseAndSpeed.contains("连播相关"));
+        assertTrue(pauseAndSpeed.contains("在手势、快捷菜单或侧边栏通过“作者倍速”动作"));
+        assertFalse(pauseAndSpeed.contains("设置作者倍速菜单"));
+        assertTrue(analytics.contains("侧边栏"));
+        assertFalse(analytics.contains("设置的“扩展功能"));
+        assertTrue(downloads.contains("侧边栏"));
+        assertFalse(downloads.contains("下载相关 → 下载任务"));
+        assertTrue(automation.contains("从首页右滑侧边栏的回复历史或评论历史入口"));
+        assertFalse(automation.contains("从回复历史或评论历史查看"));
+        assertTrue(autoReply.contains("从侧边栏的“回复历史”查看"));
+        assertFalse(autoReply.contains("自动回复 → 发送与记录 → 回复历史记录"));
+    }
+
     @Test public void closingSettingsDismissesTheAboutAndHelpBranch() {
         AlertDialog help = openHelp();
         assertTrue(help.isShowing());
@@ -171,6 +209,16 @@ public final class HelpDialogTest {
         assertTrue(about.isShowing());
         ShadowLooper.idleMainLooper();
         return latest();
+    }
+
+    private static String helpPart(String sectionId, String partTitle) {
+        return HelpContent.sections().stream()
+                .filter(section -> sectionId.equals(section.id))
+                .flatMap(section -> section.parts.stream())
+                .filter(part -> partTitle.equals(part.title))
+                .map(part -> part.text)
+                .findFirst()
+                .orElseThrow();
     }
 
     private static AlertDialog latest() { return (AlertDialog) ShadowDialog.getLatestDialog(); }

@@ -19,14 +19,19 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 /** Window-owned clearance for the verified 41.0.0 bottom UI dock; never owns video or transforms. */
 public final class NavigationGlassClearance implements AutoCloseable {
     private static final int CARRIER=0x7f0a15bb,PROGRESS=0x7f0a16b2,ABOVE=0x7f0a3ff1;
     private static final int METADATA=0x7f0a3ffc,RIGHT=0x7f0a4000,PARENT=0x7f0a01db;
+    private static final int DANMAKU_ICON=0x7f0a2da7,DANMAKU_FRAME=0x7f0a2dab;
+    private static final String DANMAKU_CLIP="com.ss.android.ugc.aweme.feed.danmaku.view.DanmakuVisibilityFrameLayout";
+    private static final int DIGG_ANIMATION=0x7f0a30ca,DIGG_FRAME=0x7f0a30d6,DIGG_ACTION=0x7f0a30eb,DIGG_CLIP=0x7f0a30de;
     private final View root;
     private final Function<View,RectF> restingBounds;
+    private final BiFunction<View,Integer,RectF> retainedBounds;
     private final Map<View,Branch> branches=new IdentityHashMap<>();
     private final Map<View,WindowProgress> windowProgress=new IdentityHashMap<>();
     private final Set<View> blocked=identities();
@@ -36,10 +41,15 @@ public final class NavigationGlassClearance implements AutoCloseable {
     void setProgressMotionMargin(int pixels){progressMotionMargin=Math.max(0,pixels);}
     private String fallbackDetail="none",syncState="not_run";
     private View pendingGeometryView;
-    private boolean haveSignature,closed,syncing,discoveryWrite,compactReady;
+    private boolean haveSignature,closed,syncing,discoveryWrite,compactReady,structureRejected;
 
     public NavigationGlassClearance(View root,Function<View,RectF> restingBounds) {
+        this(root,restingBounds,null);
+    }
+
+    NavigationGlassClearance(View root,Function<View,RectF> restingBounds,BiFunction<View,Integer,RectF> retainedBounds) {
         this.root=java.util.Objects.requireNonNull(root);this.restingBounds=java.util.Objects.requireNonNull(restingBounds);
+        this.retainedBounds=retainedBounds;
     }
 
     /** Called with the controller's bounded scan, never from an every-frame tree traversal. */
@@ -120,6 +130,8 @@ public final class NavigationGlassClearance implements AutoCloseable {
                     block(bottoms,"structure",branch.owner);
                 }
             }
+            // A new discovery can validate the same live rules without changing their geometry hash.
+            if(structural!=structureRejected){structureRejected=structural;revision++;}
             if(bottoms.isEmpty()) {
                 for(Branch branch:branches.values())changed|=branch.restore();
                 for(WindowProgress track:windowProgress.values())changed|=track.restore();
@@ -364,6 +376,10 @@ public final class NavigationGlassClearance implements AutoCloseable {
                 fallbackDetail+=";instance="+Integer.toHexString(System.identityHashCode(view))+";size="+view.getWidth()+"x"+view.getHeight()
                         +";rotation_xy="+view.getRotationX()+"/"+view.getRotationY()
                         +";animation="+(animation==null?"none":animation.hasEnded()?"ended":"active");
+                fallbackDetail+=";scale_xy="+view.getScaleX()+"/"+view.getScaleY()
+                        +";laid_out="+view.isLaidOut()+";layout_requested="+view.isLayoutRequested()
+                        +";transient="+view.hasTransientState()+";matrix_invertible="+invertible(view.getMatrix())
+                        +";state_path="+statePath(view);
                 int depth=0;
                 for(View page=view;page!=null && depth++<40;page=page.getParent() instanceof View?(View)page.getParent():null) {
                     if(page.getId()==PARENT && page instanceof RelativeLayout) {
@@ -374,6 +390,41 @@ public final class NavigationGlassClearance implements AutoCloseable {
             }
         }
         for(Nav nav:navigation)blocked.add(nav.view);
+    }
+    private static boolean invertible(Matrix matrix) {
+        return matrix!=null && matrix.invert(new Matrix());
+    }
+    private String statePath(View view) {
+        StringBuilder result=new StringBuilder();int depth=0;
+        boolean danmaku=view.getId()==DANMAKU_ICON || view.getId()==DANMAKU_FRAME;
+        for(View current=view;current!=null && depth<5;depth++) {
+            if(depth>0)result.append('>');
+            android.view.animation.Animation animation=current.getAnimation();
+            result.append(current.getClass().getSimpleName()).append('#')
+                    .append(Integer.toHexString(current.getId())).append('[')
+                    .append(current.getWidth()).append('x').append(current.getHeight())
+                    .append(",s=").append(current.getScaleX()).append('/').append(current.getScaleY())
+                    .append(",t=").append(current.hasTransientState()?1:0)
+                    .append(",l=").append(current.isLaidOut()?1:0)
+                    .append(",r=").append(current.isLayoutRequested()?1:0)
+                    .append(",a=").append(animation==null?0:animation.hasEnded()?1:2)
+                    .append(",m=").append(invertible(current.getMatrix())?1:0);
+            if(danmaku) {
+                ViewGroup.LayoutParams size=current.getLayoutParams();
+                result.append(",lp=").append(size==null?"none":size.width+"x"+size.height)
+                        .append(",measured=").append(current.getMeasuredWidth()).append('x').append(current.getMeasuredHeight())
+                        .append(",attached=").append(current.isAttachedToWindow()?1:0)
+                        .append(",detaching=").append(current.isTemporarilyDetached()?1:0)
+                        .append(",delegate=").append(current.getTouchDelegate()!=null?1:0)
+                        .append(",identity=").append(current.getMatrix().isIdentity()?1:0);
+                if(current instanceof ViewGroup)result.append(",clip=").append(((ViewGroup)current).getClipChildren()?1:0);
+            }
+            result.append(']');
+            if(current==root)break;
+            if(!(current.getParent() instanceof View))break;
+            current=(View)current.getParent();
+        }
+        return result.toString();
     }
     /** A detached identity snapshot, safe while the controller closes rejected bindings. */
     public Set<View> blockedViews(){Set<View> copy=identities();copy.addAll(blocked);return Collections.unmodifiableSet(copy);}
@@ -539,6 +590,7 @@ public final class NavigationGlassClearance implements AutoCloseable {
         final ViewGroup owner;final RelativeLayout parent;final boolean carrier;
         final RelativeLayout.LayoutParams raw;
         final List<View> observed=new ArrayList<>(),affected=new ArrayList<>(),protectedNodes=new ArrayList<>(),capacityNodes=new ArrayList<>(),progressContent=new ArrayList<>();
+        final List<RectF> recycledObstacles=new ArrayList<>();
         final List<Shape> shapes=new ArrayList<>();final List<Rule> rules=new ArrayList<>();
         final Map<Integer,View> siblings=new HashMap<>();
         int original,last;boolean owned,unsafe,unknownBounds;View unknownView;
@@ -599,7 +651,7 @@ public final class NavigationGlassClearance implements AutoCloseable {
             return null;
         }
         List<RectF> observations() {
-            List<RectF> boxes=new ArrayList<>();float shift=rootShift();unknownBounds=false;unknownView=null;
+            List<RectF> boxes=new ArrayList<>(recycledObstacles);float shift=rootShift();unknownBounds=false;unknownView=null;
             if(!Float.isFinite(shift))return boxes;
             for(View view:observed)if(effectiveVisible(view)) {
                 if(view.getLayoutParams()!=null && view.getLayoutParams().height==ViewGroup.LayoutParams.MATCH_PARENT){unknownBounds=true;unknownView=view;continue;}
@@ -611,6 +663,7 @@ public final class NavigationGlassClearance implements AutoCloseable {
             }
             for(View view:progressContent)if(ownsContentBounds(view) && effectiveVisible(view)) {
                 RectF box=bounds(view);
+                if(box==null)box=recycledDanmakuBounds(view);
                 if(!finite(box)){if(view.getWidth()>0 && view.getHeight()>0){unknownBounds=true;unknownView=view;}continue;}
                 if(!intersectsRoot(box))continue;
                 box.offset(0,shift);boxes.add(box);
@@ -625,18 +678,28 @@ public final class NavigationGlassClearance implements AutoCloseable {
             for(Shape shape:shapes)value=mix(value,shape.liveSignature());
             for(Rule rule:rules)value=mix(value,rule.liveSignature());
             float shift=rootShift();
-            contentTop=Float.POSITIVE_INFINITY;unknownContent=null;
+            contentTop=Float.POSITIVE_INFINITY;unknownContent=null;recycledObstacles.clear();
             for(View view:capacityNodes) {
                 boolean ownsBounds=ownsContentBounds(view);value=mix(value,ownsBounds?1:0);
                 if(!ownsBounds)continue;
                 value=mix(value,System.identityHashCode(view));boolean visible=painted(view);value=mix(value,visible?1:0);
                 if(!visible || !Float.isFinite(shift))continue;
-                RectF box=bounds(view);boolean reliable=finite(box);value=mix(value,reliable?2:1);
+                RectF box=bounds(view);
+                boolean recycled=box==null;
+                if(recycled) {
+                    box=recycledDanmakuBounds(view);
+                    if(box==null)box=recycledDiggBounds(view);
+                }
+                boolean reliable=finite(box);
+                boolean inRoot=reliable && intersectsRoot(box);
+                value=mix(value,!reliable?1:recycled && inRoot?3:2);
                 if(!reliable){unknownContent=view;continue;}
                 box.offset(0,shift);
                 value=mix(value,Math.round(box.left));value=mix(value,Math.round(box.right));
                 value=mix(value,Math.round(box.top));value=mix(value,Math.round(box.bottom));
                 if(intersectsRoot(box))contentTop=Math.min(contentTop,box.top);
+                // Progress descendants already reserve their bounds in observations().
+                if(recycled && inRoot && !progressContent.contains(view))recycledObstacles.add(box);
             }
             for(View view:observed) {
                 value=mix(value,System.identityHashCode(view));boolean visible=effectiveVisible(view);value=mix(value,visible?1:0);
@@ -716,6 +779,109 @@ public final class NavigationGlassClearance implements AutoCloseable {
         return false;
     }
     private boolean painted(View view){return view.getWidth()>0 && view.getHeight()>0 && effectiveVisible(view);}
+
+    /** The 41.0.0 vertical danmaku control clips its FrameLayout to that frame's bounds. */
+    private RectF recycledDanmakuBounds(View view) {
+        View icon=view;
+        View frame=null;
+        boolean clipTarget=view instanceof FrameLayout && view.getClass().getName().equals(DANMAKU_CLIP);
+        if(view.getId()==DANMAKU_ICON && view.getParent() instanceof FrameLayout) {
+            frame=(View)view.getParent();
+        }else if(view.getId()==DANMAKU_FRAME && view.getClass()==FrameLayout.class) {
+            frame=view;
+        }else if(clipTarget) {
+            FrameLayout group=(FrameLayout)view;
+            for(int i=0;i<group.getChildCount();i++)if(group.getChildAt(i).getId()==DANMAKU_FRAME) {
+                if(frame!=null)return null;
+                frame=group.getChildAt(i);
+            }
+        }else return null;
+        if(frame==null || frame.getClass()!=FrameLayout.class)return null;
+        FrameLayout group=(FrameLayout)frame;
+        icon=null;
+        for(int i=0;i<group.getChildCount();i++)if(group.getChildAt(i).getId()==DANMAKU_ICON) {
+            if(icon!=null)return null;
+            icon=group.getChildAt(i);
+        }
+        if(icon==null || !icon.getClass().getName().equals("androidx.appcompat.widget.AppCompatImageView")
+                || !attachedForBounds(icon) || icon.hasTransientState() || icon.getAnimation()!=null
+                || !icon.getMatrix().isIdentity() || icon.getRotationX()!=0 || icon.getRotationY()!=0
+                || !(icon.getLayoutParams() instanceof FrameLayout.LayoutParams))return null;
+        if(frame.getClass()!=FrameLayout.class || frame.getId()!=DANMAKU_FRAME || !attachedForBounds(frame)
+                || !(frame.getParent() instanceof FrameLayout))return null;
+        FrameLayout clip=(FrameLayout)frame.getParent();
+        if(!clip.getClass().getName().equals(DANMAKU_CLIP) || (clipTarget && clip!=view)
+                || !attachedForBounds(clip) || !clip.getClipChildren() || clip.getTouchDelegate()!=null
+                || clip.hasTransientState() || clip.getAnimation()!=null || !invertible(clip.getMatrix())
+                || clip.getRotationX()!=0 || clip.getRotationY()!=0 || frame.getTouchDelegate()!=null)return null;
+        ViewGroup.LayoutParams size=icon.getLayoutParams();
+        if(size.width!=icon.getWidth() || size.height!=icon.getHeight())return null;
+        if(clipTarget)return retainedDanmakuBounds(clip);
+        RectF frameBounds=bounds(frame);
+        if(frameBounds!=null || retainedBounds==null)return frameBounds;
+        return retainedDanmakuBounds(frame);
+    }
+
+    private RectF retainedDanmakuBounds(View target) {
+        if(retainedBounds==null)return null;
+        // On feed rebind, the control and its plain mounting frames can retain size after losing layout flags.
+        int retainedDepth=0;
+        View current=target;
+        for(int depth=1;current!=root && depth<=4;depth++) {
+            if(depth>2 && current.getClass()!=FrameLayout.class)break;
+            if(!attachedForBounds(current) || current.getTouchDelegate()!=null)return null;
+            if(!current.isLaidOut()) {
+                if(!hasRetainedFrameSize(current))return null;
+                retainedDepth=depth;
+            }
+            if(!(current.getParent() instanceof View))return null;
+            current=(View)current.getParent();
+        }
+        return retainedDepth==0?null:retainedBounds.apply(target,retainedDepth);
+    }
+
+    private static boolean hasRetainedFrameSize(View view) {
+        if(!(view.getLayoutParams() instanceof FrameLayout.LayoutParams))return false;
+        ViewGroup.LayoutParams size=view.getLayoutParams();
+        int width=view.getWidth(),height=view.getHeight();
+        return width>0 && height>0 && width==view.getMeasuredWidth() && height==view.getMeasuredHeight()
+                && retainedDimension(size.width,width) && retainedDimension(size.height,height);
+    }
+
+    private static boolean retainedDimension(int declared,int actual) {
+        return declared==ViewGroup.LayoutParams.MATCH_PARENT || declared==ViewGroup.LayoutParams.WRAP_CONTENT
+                || declared==actual;
+    }
+
+    private static boolean attachedForBounds(View view) {
+        return view.isAttachedToWindow() && !view.isTemporarilyDetached() && !view.isLayoutRequested();
+    }
+
+    /** A reused 41.0.0 like renderer can lose its layout flag while its action still clips it. */
+    private RectF recycledDiggBounds(View view) {
+        View animation=view;
+        if(view.getId()==View.NO_ID && view.getClass().getName().equals("com.ss.android.ugc.aweme.feed.widget.DiggAnimationView")) {
+            if(!stableUnlaidNode(view) || !(view.getParent() instanceof FrameLayout))return null;
+            animation=(View)view.getParent();
+        }
+        if(animation.getId()!=DIGG_ANIMATION || !animation.getClass().getName().equals("com.ss.android.ugc.aweme.feed.widget.DiggAnimationLayout")
+                || !stableUnlaidNode(animation)
+                || !(animation.getParent() instanceof FrameLayout))return null;
+        View frame=(View)animation.getParent();
+        if(frame.getId()!=DIGG_FRAME || !frame.isLaidOut() || frame.isLayoutRequested()
+                || !(frame.getParent() instanceof LinearLayout))return null;
+        View action=(View)frame.getParent();
+        if(action.getId()!=DIGG_ACTION || action.isLayoutRequested() || !(action.getParent() instanceof FrameLayout))return null;
+        FrameLayout clip=(FrameLayout)action.getParent();
+        if(clip.getId()!=DIGG_CLIP || clip.isLayoutRequested() || !clip.getClipChildren()
+                || !clip.getClass().getName().equals("com.bytedance.highperformanceview.hpview.HPFrameLayout"))return null;
+        return bounds(action);
+    }
+    private static boolean stableUnlaidNode(View view) {
+        return !view.isLaidOut() && !view.isLayoutRequested() && !view.isTemporarilyDetached()
+                && !view.hasTransientState() && view.getAnimation()==null && view.getMatrix().isIdentity()
+                && view.getRotationX()==0 && view.getRotationY()==0;
+    }
     private RectF bounds(View view) {
         if(view.getWidth()<=0 || view.getHeight()<=0)return null;
         RectF box=restingBounds.apply(view);return finite(box)?new RectF(box):null;

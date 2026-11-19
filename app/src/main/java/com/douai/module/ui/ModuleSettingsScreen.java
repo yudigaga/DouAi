@@ -88,6 +88,8 @@ public final class ModuleSettingsScreen {
     private MiuixComponentHidePage miuixComponentHidePage;
     private Context miuixRowContext;
     private LinearLayout featureSearchResults;
+    private LinearLayout categoryList;
+    private ScrollView nativeHome;
     private boolean closed;
     private ScrollView categoryScroll;
     private ScrollView searchFocusHost;
@@ -104,14 +106,12 @@ public final class ModuleSettingsScreen {
             new SearchEntry("speech", "文本转语音与 MiniMax", "扩展功能 > 文本转语音设置", "TTS MiniMax 语音 音色 合成 语速 音量 音调 发音字典", SearchDestination.SPEECH),
             new SearchEntry("download-mode", "下载方式", "下载相关 > 下载方式", "下载 官方 第三方 解析 API", SearchDestination.DOWNLOAD, "settings.option.下载方式"),
             new SearchEntry("download-directory", "保存位置", "下载相关 > 保存位置", "下载 保存目录 保存路径 文件夹 SAF", SearchDestination.DOWNLOAD, "settings.option.保存位置"),
-            new SearchEntry("download-tasks", "下载任务", "下载相关 > 下载任务", "下载 进度 失败 任务", SearchDestination.DOWNLOAD, "settings.option.下载任务"),
             new SearchEntry("download-name", "文件名模板", "下载相关 > 文件名模板", "下载 文件名 命名 模板", SearchDestination.DOWNLOAD, "settings.option.文件名模板"),
             new SearchEntry("download-watermark", "无水印下载", "下载相关 > 无水印下载图集或者视频", "下载 去水印 无水印 视频 图集", SearchDestination.DOWNLOAD, "settings.toggle.无水印下载图集或者视频"),
             new SearchEntry("auto-comment", "自动评论", "自动评论 > 评论内容与作品范围", "AI 自动评论 生成 评论提示词 作品范围 每日限制", SearchDestination.AUTO_COMMENT),
             new SearchEntry("auto-reply", "私信自动回复", "自动回复 > 私聊与群聊", "私信 私聊 群聊 自动回复 回复提示词 接收范围 每日限制", SearchDestination.AUTO_REPLY),
             new SearchEntry("comment-reply", "评论回复", "自动回复 > 接收评论回复", "评论回复 楼中楼 回复评论 接收评论", SearchDestination.AUTO_REPLY),
             new SearchEntry("backup", "配置备份与恢复", "扩展功能 > 配置备份", "数据备份 导出配置 导入配置 恢复 迁移 密钥", SearchDestination.BACKUP),
-            new SearchEntry("analytics", "本地数据分析与报告", "扩展功能 > 本地数据分析", "本地分析 统计 图表 浏览历史 AI分析 报告 导出 长图 PNG PDF 分享", SearchDestination.ANALYTICS),
             new SearchEntry("debug-logs", "调试与日志", "关于 > 调试与日志", "调试 debug 日志 log LSPosed 详细 简要 JSON 刷新 清空 复制 导出", SearchDestination.DEBUG_LOGS),
             new SearchEntry("speed", "自动倍速与自动播放", "自动播放 > 倍速数值", "倍速 播放速度 自动滑动 智能滑动 暂停评论", SearchDestination.AUTOPLAY),
             new SearchEntry("module-only-speed", "仅模块控制倍速", "自动播放 > 仅模块控制倍速", "倍速 独占 模块控制 官方倍速 长按 手动优先 1x 4x", SearchDestination.AUTOPLAY,
@@ -129,7 +129,6 @@ public final class ModuleSettingsScreen {
             new SearchEntry("message-voice-file", "私聊语音文件", "消息管理 > 私聊语音文件", "私信 替换语音 音频 文件路径 选择文件", SearchDestination.MESSAGE, "settings.option.私聊语音文件"),
             new SearchEntry("comment-speech", "评论转语音", "评论相关 > 评论转语音", "语音 TTS # 单击发送 评论", SearchDestination.COMMENT, "settings.option.评论转语音"),
             new SearchEntry("hash-long-press-voice", "#长按发送转语音（全局）", "评论相关 > #长按发送转语音（全局）", "语音 TTS #长按 长按发送 全局 私信 群聊 评论", SearchDestination.COMMENT, "settings.toggle.#长按发送转语音（全局）"),
-            new SearchEntry("ai-chat", "AI 测试对话", "扩展功能 > AI 模型设置 > 测试对话", "AI 聊天 测试模型 对话 图片", SearchDestination.AI_CHAT),
             new SearchEntry("comment-ai", "评论 AI 解析与抖音搜索", "扩展功能 > AI 模型设置", "AI 解析 接管 评论 分析 搜索 抖音 联网 工具调用", SearchDestination.AI),
             new SearchEntry("sidebar", "首页右滑侧边栏与模块快捷入口", "界面相关 > 首页右滑打开侧边栏", "侧边栏 右滑 商城 常用功能 评论历史 回复历史 快捷入口", SearchDestination.GESTURES, "settings.toggle.首页右滑打开侧边栏")
     };
@@ -197,6 +196,7 @@ public final class ModuleSettingsScreen {
             miuixHome = null;
         }
         ScrollView scroll = new ScrollView(context);
+        nativeHome = scroll;
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(Color.rgb(248, 250, 250));
         scroll.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
@@ -242,6 +242,11 @@ public final class ModuleSettingsScreen {
         String[] searchTerms = new String[categories.length];
         for (int index = 0; index < categories.length; index++) searchTerms[index] = categories[index].searchText();
         miuixHome.setSearchTerms(searchTerms);
+        int[] categoryOrder = new int[HOME_CATEGORY_ORDER.length];
+        for (int index = 0; index < HOME_CATEGORY_ORDER.length; index++) {
+            categoryOrder[index] = HOME_CATEGORY_ORDER[index].ordinal();
+        }
+        miuixHome.setCategoryOrder(categoryOrder);
         String[] ids = new String[FEATURE_SEARCH.length], featureTitles = new String[FEATURE_SEARCH.length];
         String[] paths = new String[FEATURE_SEARCH.length], terms = new String[FEATURE_SEARCH.length];
         for (int index = 0; index < FEATURE_SEARCH.length; index++) {
@@ -288,10 +293,7 @@ public final class ModuleSettingsScreen {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
                 String query = s.toString().trim().toLowerCase(java.util.Locale.ROOT);
-                for (CategoryRow row : categoryRows) {
-                    row.view.setVisibility(query.isEmpty() || row.category.searchText().toLowerCase(java.util.Locale.ROOT).contains(query)
-                            ? View.VISIBLE : View.GONE);
-                }
+                renderCategoryList(query);
                 showFeatureSearch(query);
             }
             @Override public void afterTextChanged(Editable s) { }
@@ -324,10 +326,8 @@ public final class ModuleSettingsScreen {
             case AI: showAiModelSettings(); break;
             case SPEECH: showSpeechSettings(); break;
             case BACKUP: showConfigBackup(); break;
-            case ANALYTICS: showLocalAnalytics(); break;
             case DEBUG_LOGS: showDebugLogs(); break;
             case INTERACTION: showAutomationSettings(); break;
-            case AI_CHAT: showAiChat(); break;
             default:
                 openCategory(entry.destination.category);
                 if (entry.targetTag != null) focusSearchTarget(entry);
@@ -402,12 +402,12 @@ public final class ModuleSettingsScreen {
     }
 
     private void addCategoryList() {
-        LinearLayout list = new LinearLayout(context);
-        list.setOrientation(LinearLayout.VERTICAL);
-        list.setBackground(makeRounded(Color.WHITE, LINE, dp(8)));
+        categoryList = new LinearLayout(context);
+        categoryList.setOrientation(LinearLayout.VERTICAL);
+        categoryList.setBackground(makeRounded(Color.WHITE, LINE, dp(8)));
         LinearLayout.LayoutParams listParams = matchWrap();
         listParams.topMargin = dp(14);
-        content.addView(list, listParams);
+        content.addView(categoryList, listParams);
         if (featureSearchResults != null) {
             content.removeView(featureSearchResults);
             content.addView(featureSearchResults, matchWrap());
@@ -437,10 +437,30 @@ public final class ModuleSettingsScreen {
             row.setContentDescription(category.title);
             row.setTag("settings.category." + category.name());
             row.setOnClickListener(ignored -> openCategory(category));
-            list.addView(row, matchWrap());
             categoryRows.add(new CategoryRow(category, row));
-            if (category != Category.values()[Category.values().length - 1]) addDividerTo(list);
         }
+        renderCategoryList("");
+    }
+
+    private void renderCategoryList(String query) {
+        categoryList.removeAllViews();
+        if (query.isEmpty()) {
+            for (CategoryRow row : categoryRows) row.view.setVisibility(View.VISIBLE);
+            for (int index = 0; index < HOME_CATEGORY_ORDER.length; index++) {
+                categoryList.addView(categoryRows.get(HOME_CATEGORY_ORDER[index].ordinal()).view, matchWrap());
+                if (index + 1 < HOME_CATEGORY_ORDER.length) addDividerTo(categoryList);
+            }
+        } else {
+            boolean first = true;
+            for (CategoryRow row : categoryRows) {
+                boolean matches = row.category.searchText().toLowerCase(java.util.Locale.ROOT).contains(query);
+                row.view.setVisibility(matches ? View.VISIBLE : View.GONE);
+                if (matches && !first) addDividerTo(categoryList);
+                categoryList.addView(row.view, matchWrap());
+                if (matches) first = false;
+            }
+        }
+        ModuleTheme.bind(nativeHome);
     }
 
     private void openCategory(Category category) {
@@ -619,11 +639,7 @@ public final class ModuleSettingsScreen {
                 if (reading41()) {
                     addChoiceOption("断点续播", "resume_playback_mode", new String[]{"关闭", "提示恢复", "自动恢复"},
                             new String[]{"off", "prompt", "auto"}, "off");
-                    addOption("定时或看完后暂停", "", null, true,
-                            () -> com.douai.module.feature.FeedGestureToolsHook.launchCurrentAction(context,"stop_budget"));
                     addLocalSwitch("作者独立倍速", "", "author_speed_enabled");
-                    addOption("作者倍速规则", "", null, true,
-                            () -> com.douai.module.feature.FeedGestureToolsHook.launchCurrentAction(context,"author_speed_rules"));
                 }
                 addLocalSwitch("锁定最高画质", "", LocalOptions.LOCK_HIGHEST_VIDEO_QUALITY);
                 addOption("互动自动化", "", null, true, this::showAutomationSettings);
@@ -706,13 +722,8 @@ public final class ModuleSettingsScreen {
                 addOption("版本信息", "", null, true, this::showVersionSettings);
                 break;
             case EXTENSION:
-                if (reading41()) addOption("我的时间点书签", "", null, true,
-                        () -> com.douai.module.feature.PlaybackBookmarks.show(findOwnerActivity(context)));
-                if (reading41()) addOption("评论收藏", "", null, true,
-                        () -> com.douai.module.feature.CommentBookmarks.show(findOwnerActivity(context)));
                 addOption("AI 模型设置", "", null, true, this::showAiModelSettings);
                 addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
-                addOption("本地数据分析", "", null, true, this::showLocalAnalytics);
                 addOption("配置备份", "", null, true, this::showConfigBackup);
                 break;
             case ABOUT:
@@ -821,10 +832,6 @@ public final class ModuleSettingsScreen {
         directory[0] = addOption("保存位置", "", HostDownloadDirectoryPicker.displayName(
                 repository.getString(HostDownloadDirectoryPicker.SETTINGS_KEY, "")), true,
                 () -> showDownloadDirectory(directory[0]));
-        addOption("下载任务", "", null, true, () -> {
-            DownloadTasksDialog tasks = new DownloadTasksDialog(context, miuixHome != null);
-            showOptionDialog(tasks.dialog(), tasks::close);
-        });
         content.addView(selectedControls, matchWrap());
         refresh.run();
     }
@@ -971,8 +978,6 @@ public final class ModuleSettingsScreen {
                                     repository.putString("seen_work_days", value);
                                     days[0].setValue(value + " 天");
                                 }).setNegativeButton("取消", null).show());
-                addOption("临时过滤规则", "", null, true,
-                        () -> com.douai.module.feature.TemporaryFeedRules.show(findOwnerActivity(context)));
             }
             addSwitch("去广告开关", "", settings.hideAds, settings.feedFilterEnabled,
                     true, value -> update(s -> withFilter(s, value, Filter.AD)));
@@ -1219,8 +1224,6 @@ public final class ModuleSettingsScreen {
         if (reading41()) {
             addLocalSwitch("查看和复制语音转写", "", "comment_transcript_enabled");
             addLocalSwitch("在已加载评论中查找", "", "loaded_comment_search_enabled");
-            addOption("查找当前作品评论", "", null, repository.getBoolean("loaded_comment_search_enabled", false),
-                    () -> FeedGestureToolsHook.launchCurrentAction(context, "comment_search"));
         }
         String[] labels = {"复制评论", "保存评论图片", "复制源数据"};
         String[] keys = {"copy_comment_text", "comment_media_tools", "copy_source_data"};
@@ -1932,10 +1935,11 @@ public final class ModuleSettingsScreen {
     public void setFrameworkSyncStatus(boolean connected, String message, String error) {
         if (syncTitle == null) return;
         syncTitle.setText(connected ? "LSPosed 已连接" : "LSPosed 未连接");
-        String detail = error == null ? "" : error;
+        String detail = message == null ? "" : message;
+        if (error != null && !error.isEmpty()) detail += (detail.isEmpty() ? "" : "\n") + error;
         syncDetail.setText(detail);
         syncDetail.setVisibility(detail.isEmpty() ? View.GONE : View.VISIBLE);
-        syncMark.setBackground(makeCircle(connected ? Color.rgb(0, 146, 117)
+        syncMark.setBackground(makeCircle(connected && (error == null || error.isEmpty()) ? Color.rgb(0, 146, 117)
                 : Color.rgb(198, 84, 67)));
     }
 
@@ -2325,12 +2329,19 @@ public final class ModuleSettingsScreen {
 
         String searchText() {
             if (this == ABOUT) return title + " 调试 日志 LSPosed";
-            return this == EXTENSION ? title + " AI 模型设置 文本转语音设置 本地数据分析 数据备份 配置备份" : title;
+            return this == EXTENSION ? title + " AI 模型设置 文本转语音设置 数据备份 配置备份" : title;
         }
     }
 
+    private static final Category[] HOME_CATEGORY_ORDER = {
+            Category.BASIC, Category.INTERFACE, Category.FILTER, Category.COMPONENT_HIDE,
+            Category.AUTOPLAY, Category.AUTO_REPLY, Category.AUTO_COMMENT, Category.STREAK,
+            Category.COMMENT, Category.MESSAGE, Category.DOWNLOAD, Category.EXTENSION,
+            Category.SPOOF, Category.ABOUT
+    };
+
     private enum SearchDestination {
-        AI(null), SPEECH(null), BACKUP(null), ANALYTICS(null), DEBUG_LOGS(null), INTERACTION(null), AI_CHAT(null),
+        AI(null), SPEECH(null), BACKUP(null), DEBUG_LOGS(null), INTERACTION(null),
         DOWNLOAD(Category.DOWNLOAD), AUTO_COMMENT(Category.AUTO_COMMENT), AUTO_REPLY(Category.AUTO_REPLY),
         AUTOPLAY(Category.AUTOPLAY), FILTER(Category.FILTER), COMPONENT_HIDE(Category.COMPONENT_HIDE),
         STREAK(Category.STREAK), MESSAGE(Category.MESSAGE), GESTURES(Category.INTERFACE), COMMENT(Category.COMMENT);

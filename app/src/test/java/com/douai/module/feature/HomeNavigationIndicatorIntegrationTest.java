@@ -123,9 +123,11 @@ public class HomeNavigationIndicatorIntegrationTest {
                 tab.delegateReads=0;tab.r.selectionReads=0;tab.r.A.themeReads=0;
                 custom.sync();
                 assertEquals(1,tab.delegateReads);assertEquals(1,tab.r.selectionReads);assertEquals(1,tab.r.A.themeReads);
+                assertEquals(Color.BLUE,draw(((TextView)tab.getContentView()).getCompoundDrawables()[1]));
                 tab.r.A.dark=true;tab.r.selected=false;custom.sync();
                 assertEquals(2,tab.delegateReads);assertEquals(2,tab.r.selectionReads);assertEquals(2,tab.r.A.themeReads);
-                assertEquals(Color.GREEN,draw(((TextView)tab.getContentView()).getCompoundDrawables()[1]));
+                // Theme changes retain shared normal artwork; legacy night artwork is compatibility data only.
+                assertEquals(Color.RED,draw(((TextView)tab.getContentView()).getCompoundDrawables()[1]));
             }
         }
     }

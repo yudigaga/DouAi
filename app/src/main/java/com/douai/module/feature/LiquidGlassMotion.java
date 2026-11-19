@@ -234,11 +234,15 @@ public final class LiquidGlassMotion implements AutoCloseable {
 
     /** Root-local drawing bounds without this owner's still-owned motion; null when geometry is unreliable. */
     RectF restingBounds(View view, View root) {
+        return restingBounds(view, root, 0);
+    }
+
+    /** The caller validates retained layout for this many nodes starting at the target. */
+    RectF restingBounds(View view, View root, int retainedDepth) {
         requireMainThread();
-        if (closed || view == null || root == null || !view.isLaidOut() || !root.isLaidOut()
-                || view.getWidth() <= 0 || view.getHeight() <= 0 || root.getWidth() <= 0 || root.getHeight() <= 0) return null;
+        if (closed) return null;
         try {
-            Matrix transform = restingMatrixToRoot(view, root);
+            Matrix transform = restingMatrixToRoot(view, root, retainedDepth);
             if (transform == null) return null;
             RectF bounds = new RectF(0, 0, view.getWidth(), view.getHeight());
             transform.mapRect(bounds);
@@ -250,12 +254,17 @@ public final class LiquidGlassMotion implements AutoCloseable {
     }
 
     private Matrix restingMatrixToRoot(View view, View root) {
-        if (view == null || root == null || !view.isLaidOut() || !root.isLaidOut()
+        return restingMatrixToRoot(view, root, 0);
+    }
+
+    private Matrix restingMatrixToRoot(View view, View root, int retainedDepth) {
+        if (view == null || root == null || !root.isLaidOut()
                 || view.getWidth() <= 0 || view.getHeight() <= 0 || root.getWidth() <= 0 || root.getHeight() <= 0) return null;
         Matrix transform = new Matrix(), inverse = new Matrix();float[] values = new float[9];
         View current = view;int depth = 0;
         while (current != root) {
-            if (depth++ >= 40 || !current.isLaidOut() || current.getWidth() <= 0 || current.getHeight() <= 0
+            if (++depth > 40 || depth > retainedDepth && !current.isLaidOut()
+                    || current.getWidth() <= 0 || current.getHeight() <= 0
                     || ownTransientState(current) || current.getAnimation() != null) return null;
             Matrix local = restingMatrix(current, targets.get(current));
             if (!invertible2D(local, inverse, values)) return null;

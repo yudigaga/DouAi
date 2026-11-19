@@ -11,6 +11,7 @@ import com.douai.module.diagnostics.HostAdaptationDiagnostics;
 import com.douai.module.diagnostics.DebugLog;
 import com.douai.module.ui.ModuleStatusScreen;
 import com.douai.module.ui.ScanStatus;
+import com.douai.module.ui.ConfigurationStatus;
 
 import androidx.activity.ComponentActivity;
 
@@ -43,7 +44,7 @@ public final class MainActivity extends ComponentActivity {
         configRuntime = ModuleConfigRuntime.get(this);
         configStatusListener = (connected, message, error) -> {
             if (!destroyed && settingsScreen != null) {
-                settingsScreen.setFrameworkSyncStatus(connected, message, error);
+                settingsScreen.setFrameworkSyncStatus(configRuntime.sync().isConnected(), message, error);
             }
         };
         configRuntime.addStatusListener(configStatusListener);
@@ -74,14 +75,14 @@ public final class MainActivity extends ComponentActivity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        clearConfigurationStatus();
         if (activeService != null) readScanDiagnostics();
     }
 
     @Override
     protected void onPause() {
         resumed = false;
-        diagnosticsRequestId.incrementAndGet();
-        mainHandler.removeCallbacks(diagnosticsPoll);
+        clearConfigurationStatus();
         super.onPause();
     }
 
@@ -89,8 +90,8 @@ public final class MainActivity extends ComponentActivity {
     protected void onDestroy() {
         destroyed = true;
         resumed = false;
-        diagnosticsRequestId.incrementAndGet();
-        mainHandler.removeCallbacks(diagnosticsPoll);
+        clearConfigurationStatus();
+        if (settingsScreen != null) settingsScreen.close();
         settingsScreen = null;
         if (configRuntime != null) {
             configRuntime.removeStatusListener(configStatusListener);
@@ -103,26 +104,43 @@ public final class MainActivity extends ComponentActivity {
     private void handleServiceBound(XposedService service) {
         if (destroyed || service == null || configRuntime == null
                 || configRuntime.service() != service) return;
+        clearConfigurationStatus();
         activeService = service;
         if (resumed) readScanDiagnostics();
     }
 
     private void handleServiceDied(XposedService service) {
-        if (destroyed || service != activeService) return;
+        if (destroyed) return;
+        if (service == null) {
+            if (configRuntime == null || configRuntime.service() != null) return;
+        } else if (service != activeService) return;
         activeService = null;
+        clearConfigurationStatus();
+    }
+
+    private void clearConfigurationStatus() {
         diagnosticsRequestId.incrementAndGet();
         mainHandler.removeCallbacks(diagnosticsPoll);
+        if (settingsScreen != null) settingsScreen.setConfigurationStatus(ConfigurationStatus.unavailable());
+    }
+
+    private boolean acceptScanDiagnostics(long requestId, Bundle snapshot) {
+        if (destroyed || !resumed || activeService == null
+                || requestId != diagnosticsRequestId.get() || settingsScreen == null) return false;
+        ConfigurationStatus configuration = ConfigurationStatus.fromDiagnostics(snapshot);
+        settingsScreen.setConfigurationStatus(configuration);
+        if (snapshot == null || configuration.pending) scheduleDiagnosticsPoll();
+        return true;
     }
 
     private void readScanDiagnostics() {
-        if (destroyed || activeService == null || settingsScreen == null) return;
+        if (destroyed || !resumed || activeService == null || settingsScreen == null) return;
         long requestId = diagnosticsRequestId.incrementAndGet();
         ScanDiagnosticsChannel.request(this, mainHandler, snapshot -> {
-            if (destroyed || requestId != diagnosticsRequestId.get() || settingsScreen == null) return;
+            if (!acceptScanDiagnostics(requestId, snapshot)) return;
             if (snapshot == null) {
                 settingsScreen.setScanStatus(new ScanStatus("等待抖音进程",
                         "打开抖音后返回此页面，即可读取扫描状态。", false, false));
-                scheduleDiagnosticsPoll();
                 return;
             }
 

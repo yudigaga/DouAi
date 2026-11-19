@@ -21,7 +21,8 @@ public final class HomeUiCustomizationSettings {
     public static final String HIDE_LABELS = "theme_nav_hide_labels";
     public static final String HIDDEN_NAVIGATION = "theme_hidden_navigation";
     public static final int MAX_ICON_BYTES = 32768;
-    public static final int MAX_TOTAL_BASE64 = 262144;
+    // The 44 supplied images plus the previous 256 KiB allowance fit below the 2 MiB backup bound.
+    public static final int MAX_TOTAL_BASE64 = 1536 * 1024;
     public static final int MAX_ICONS = 32;
     public static final int MAX_JSON_LENGTH = MAX_TOTAL_BASE64 + MAX_ICONS * 400;
     private static volatile ValidatedIcons lastValidatedIcons;

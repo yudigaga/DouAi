@@ -58,7 +58,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     private boolean restartInProgress;
     private String restartFailure;
     private String pendingRestartNotice;
-    private boolean closed;
+    private volatile boolean closed;
 
     public HostUiController(Application application, Consumer<String> log) {
         this(application, log, new HostAppRestarter(),

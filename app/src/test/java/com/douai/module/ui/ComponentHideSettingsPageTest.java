@@ -63,10 +63,10 @@ public final class ComponentHideSettingsPageTest {
         assertEquals(1, countText(home, "本地伪装"));
         assertEquals(Arrays.asList(
                 "settings.category.BASIC", "settings.category.INTERFACE", "settings.category.FILTER",
-                "settings.category.DOWNLOAD", "settings.category.AUTOPLAY", "settings.category.AUTO_REPLY",
-                "settings.category.AUTO_COMMENT", "settings.category.COMMENT", "settings.category.STREAK",
-                "settings.category.COMPONENT_HIDE", "settings.category.MESSAGE", "settings.category.SPOOF",
-                "settings.category.EXTENSION", "settings.category.ABOUT"), categoryTags(home));
+                "settings.category.COMPONENT_HIDE", "settings.category.AUTOPLAY", "settings.category.AUTO_REPLY",
+                "settings.category.AUTO_COMMENT", "settings.category.STREAK", "settings.category.COMMENT",
+                "settings.category.MESSAGE", "settings.category.DOWNLOAD", "settings.category.EXTENSION",
+                "settings.category.SPOOF", "settings.category.ABOUT"), categoryTags(home));
         home.scrollTo(0, 200);
 
         findDescription(home, "界面相关").performClick();
@@ -115,7 +115,7 @@ public final class ComponentHideSettingsPageTest {
 
         EditText search = home.findViewWithTag("settings.search");
         assertNotNull(search);
-        for (String query : Arrays.asList("本地数据分析", "配置备份", "数据备份")) {
+        for (String query : Arrays.asList("配置备份", "数据备份")) {
             search.setText(query);
             assertEquals(query, View.VISIBLE, findDescription(home, "扩展功能").getVisibility());
             assertEquals(query, View.GONE, findDescription(home, "基本功能").getVisibility());
@@ -208,13 +208,14 @@ public final class ComponentHideSettingsPageTest {
         assertEquals(1, countText(extensionDialog.getWindow().getDecorView(), "文本转语音设置"));
         View extensionRoot = extensionDialog.getWindow().getDecorView();
         assertNotNull(extensionRoot.findViewWithTag("settings.option.配置备份"));
-        extensionRoot.findViewWithTag("settings.option.本地数据分析").performClick();
+        assertNull(extensionRoot.findViewWithTag("settings.option.本地数据分析"));
+        extensionDialog.dismiss();
+        screen.openSidebarEntry("analytics");
         Dialog analyticsDialog = ShadowDialog.getLatestDialog();
         assertTrue(analyticsDialog.isShowing());
         assertNotNull(analyticsDialog.getWindow().getDecorView().findViewWithTag("analytics.root"));
         analyticsDialog.dismiss();
-        assertTrue(extensionDialog.isShowing());
-        extensionRoot.findViewWithTag("settings.option.本地数据分析").performClick();
+        screen.openSidebarEntry("analytics");
         Dialog reopenedAnalytics = ShadowDialog.getLatestDialog();
         assertTrue(reopenedAnalytics.isShowing());
         screen.dismissChildPages();

@@ -153,14 +153,22 @@ public class LiquidGlassControllerTest {
         Drawable originalIcon=new ColorDrawable(Color.RED);originalIcon.setBounds(0,0,4,4);
         title.setCompoundDrawables(null,originalIcon,null,null);title.setCompoundDrawablePadding(7);
         MainTitleBar navigation=new MainTitleBar(a);navigation.addView(new HomeTopTabItemViewNew(a,"homepage_hot",title));
-        FrameLayout root=new FrameLayout(a);root.addView(navigation,new FrameLayout.LayoutParams(-1,48));a.setContentView(root);
+        FrameLayout root=new FrameLayout(a);root.addView(navigation,new FrameLayout.LayoutParams(-1,48));
+        ImageView feedLike=new ImageView(a);feedLike.setId(0x7f0a30ca);feedLike.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        Drawable originalFeed=new ColorDrawable(Color.MAGENTA);feedLike.setImageDrawable(originalFeed);
+        FrameLayout.LayoutParams feedParams=new FrameLayout.LayoutParams(83,83,Gravity.BOTTOM|Gravity.RIGHT);
+        root.addView(feedLike,feedParams);a.setContentView(root);
         Drawable background=new ColorDrawable(Color.BLACK);navigation.setBackground(background);layout(a.getWindow().getDecorView());
         String icons=HomeUiCustomizationSettings.putIcon("{}","nav_top:homepage_hot",HomeUiIconFixtures.webp(8,8,Color.BLUE));
+        icons=HomeUiCustomizationSettings.putIcon(icons,"feed_like",HomeUiIconFixtures.webp(8,8,Color.GREEN));
         LiquidGlassController controller=new LiquidGlassController(a,options(false,false,icons,true),null);
         try {
             controller.onActivityResumed(a);assertSame(originalIcon,title.getCompoundDrawables()[1]);
             controller.setOptions(options(true,false,icons,true));layout(a.getWindow().getDecorView());
             Drawable imported=title.getCompoundDrawables()[1];assertNotSame(originalIcon,imported);
+            Drawable feedImported=feedLike.getDrawable();assertNotSame(originalFeed,feedImported);
+            assertEquals(24,feedImported.getIntrinsicWidth());assertEquals(ImageView.ScaleType.CENTER,feedLike.getScaleType());
+            assertSame(feedParams,feedLike.getLayoutParams());assertEquals(83,feedParams.width);assertEquals(83,feedParams.height);
             assertEquals(0,title.getTextSize(),0);assertFalse(title.getIncludeFontPadding());
             assertEquals("推荐",title.getText().toString());assertTrue(title.performClick());assertEquals(1,clicks.get());
             controller.setOptions(options(true,false,icons,false));layout(a.getWindow().getDecorView());
@@ -168,11 +176,17 @@ public class LiquidGlassControllerTest {
             assertSame(imported,title.getCompoundDrawables()[1]);
             controller.setOptions(options(false,false,icons,true));
             assertSame(background,navigation.getBackground());assertSame(originalIcon,title.getCompoundDrawables()[1]);
+            assertSame(originalFeed,feedLike.getDrawable());assertEquals(ImageView.ScaleType.CENTER_CROP,feedLike.getScaleType());
+            assertSame(feedParams,feedLike.getLayoutParams());assertEquals(83,feedParams.width);assertEquals(83,feedParams.height);
             assertEquals(originalSize,title.getTextSize(),0);assertEquals(7,title.getCompoundDrawablePadding());assertTrue(title.getIncludeFontPadding());
             controller.setOptions(options(true,false,icons,true));assertEquals(0,title.getTextSize(),0);
             controller.onActivityPaused(a);assertSame(originalIcon,title.getCompoundDrawables()[1]);assertEquals(originalSize,title.getTextSize(),0);
+            assertSame(originalFeed,feedLike.getDrawable());assertEquals(ImageView.ScaleType.CENTER_CROP,feedLike.getScaleType());
             controller.onActivityResumed(a);assertEquals(0,title.getTextSize(),0);assertEquals("推荐",title.getText().toString());
+            assertNotSame(originalFeed,feedLike.getDrawable());assertEquals(ImageView.ScaleType.CENTER,feedLike.getScaleType());
             controller.close();assertSame(originalIcon,title.getCompoundDrawables()[1]);assertEquals(originalSize,title.getTextSize(),0);
+            assertSame(originalFeed,feedLike.getDrawable());assertEquals(ImageView.ScaleType.CENTER_CROP,feedLike.getScaleType());
+            assertSame(feedParams,feedLike.getLayoutParams());
         } finally {controller.close();a.finish();}
     }
     @Test public void preDrawHostTextFailureReleasesTheNavigationWithoutEscapingIntoTheHost() {

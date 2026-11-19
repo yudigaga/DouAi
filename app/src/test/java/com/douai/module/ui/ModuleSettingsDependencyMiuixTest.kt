@@ -75,12 +75,20 @@ class ModuleSettingsDependencyMiuixTest {
         }
         closeChildren()
         category(3)
-        touch("settings.option.下载任务")
-        compose.runOnIdle { assertTrue(currentDialog()!!.isShowing); assertFalse(store.load().downloadEnabled) }
+        assertHidden("settings.option.下载任务")
+        compose.runOnUiThread { screen.openSidebarEntry("download_tasks") }
+        compose.runOnIdle {
+            assertTrue(currentDialog()!!.isShowing)
+            assertNotNull(currentDialog()!!.window!!.decorView.findViewWithTag<View>("download.tasks"))
+            assertFalse(store.load().downloadEnabled)
+        }
         closeChildren()
         category(5)
         touch("settings.option.发送与记录")
-        touch("settings.option.回复历史记录")
+        assertVisible("settings.toggle.保存历史记录")
+        assertHidden("settings.option.回复历史记录")
+        closeChildren()
+        compose.runOnUiThread { screen.openSidebarEntry("reply_history") }
         compose.onNodeWithTag("automation.history").assertIsDisplayed()
         compose.runOnIdle { assertFalse(store.getBoolean("native_auto_reply", true)) }
     }

@@ -134,7 +134,7 @@ public class HomeUiCustomizationTest {
         }
         return tokens;
     }
-    @Test public void allFourDefaultBottomLocationsMatchNativeFactoryTypesAcrossTheirFourStates() throws Exception {
+    @Test public void allFourDefaultBottomLocationsMatchNativeFactoryTypesAcrossBothSelectionStatesAndThemes() throws Exception {
         Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
         String[] ids={"homepage_home","homepage_familiar","homepage_notification","homepage_profile"};
         String[] raw={"HOME","FAMILIAR","NOTIFICATION","USER"};
@@ -150,7 +150,7 @@ public class HomeUiCustomizationTest {
         try {
             for(IconState state:IconState.values()) {
                 for(BottomTab tab:tabs)tab.setSelected(state.selected);setNight(root,state.night);custom.sync();custom.sync();
-                for(BottomTab tab:tabs)assertEquals(tab.getTabType()+" / "+state,stateColor(state),drawColor(tab.getTabTitle().getCompoundDrawables()[1]));
+                for(BottomTab tab:tabs)assertEquals(tab.getTabType()+" / "+state,state.selected?Color.GREEN:Color.BLUE,drawColor(tab.getTabTitle().getCompoundDrawables()[1]));
             }
             for(int i=0;i<ids.length;i++) {
                 final String canonical="nav_bottom:"+ids[i],nativeKey="nav_bottom:"+raw[i];
@@ -183,22 +183,22 @@ public class HomeUiCustomizationTest {
     private static String icon(String json,String key,int color) {
         return HomeUiCustomizationSettings.putIcon(json,key,HomeUiIconFixtures.webp(8,8,color));
     }
-    @Test public void navigationUsesOwnerSelectionAndHostNightModeAcrossFourPreloadedStates() {
+    @Test public void navigationUsesOwnerSelectionAcrossBothThemesWithOnlyTwoPreloadedStates() {
         Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
         OwnerSelectedTab tab=new OwnerSelectedTab(a);root.addView(tab);TextView title=tab.getTabTitle();
         assertHostOwner(tab);
         int originalMode=root.getResources().getConfiguration().uiMode;
         Map<IconState,byte[]> variants=fourIcons();String json=HomeUiCustomizationSettings.putIcons("{}","nav_bottom:homepage_home",variants);
         setNight(root,false);HomeUiCustomization custom=new HomeUiCustomization(root,options(json,false),null);
-        long cached=variants.values().stream().mapToLong(bytes->bytes.length+8L*8*4).sum();
+        long cached=variants.get(IconState.DAY_NORMAL).length+variants.get(IconState.DAY_SELECTED).length+2L*8*8*4;
         try(MediaMemoryBudget.Reservation occupied=MediaMemoryBudget.tryAcquire(MediaMemoryBudget.CAPACITY_BYTES-cached)) {
             assertNotNull(occupied);
             for(IconState state:IconState.values()) {
                 tab.setSelected(state.selected);setNight(root,state.night);assertFalse(title.isSelected());custom.sync();
-                assertEquals(stateColor(state),drawColor(title.getCompoundDrawables()[1]));
+                assertEquals(state.selected?Color.GREEN:Color.BLUE,drawColor(title.getCompoundDrawables()[1]));
             }
             Drawable latest=new ColorDrawable(Color.MAGENTA);title.setCompoundDrawables(null,latest,null,null);
-            custom.sync();assertEquals(Color.YELLOW,drawColor(title.getCompoundDrawables()[1]));
+            custom.sync();assertEquals(Color.GREEN,drawColor(title.getCompoundDrawables()[1]));
             custom.close();assertSame(latest,title.getCompoundDrawables()[1]);
         } finally {root.getResources().getConfiguration().uiMode=originalMode;custom.close();a.finish();}
     }
@@ -219,18 +219,18 @@ public class HomeUiCustomizationTest {
             custom.close();assertSame(original,image.getDrawable());
         } finally {root.getResources().getConfiguration().uiMode=originalMode;custom.close();a.finish();}
     }
-    @Test public void verifiedTopThemeProviderWinsOverConfigurationAndFailureFallsBackWithoutLosingArtwork() {
+    @Test public void verifiedTopSelectionWinsOverOwnerAndThemeChangesDoNotReplaceArtwork() {
         Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
         TextView title=new TextView(a);title.setText("推荐");NativeThemeTop top=new NativeThemeTop(a,title);root.addView(top);
         assertHostOwner(top);
         int originalMode=root.getResources().getConfiguration().uiMode;setNight(root,false);top.r.A.dark=true;
         HomeUiCustomization custom=new HomeUiCustomization(root,options(HomeUiCustomizationSettings.putIcons("{}","nav_top:homepage_hot",fourIcons()),false),null);
         try {
-            assertEquals(Color.WHITE,drawColor(title.getCompoundDrawables()[1]));
+            assertEquals(Color.BLUE,drawColor(title.getCompoundDrawables()[1]));
             top.r.A.dark=false;custom.sync();assertEquals(Color.BLUE,drawColor(title.getCompoundDrawables()[1]));
             top.r.selected=true;assertFalse(top.isSelected());custom.sync();assertEquals(Color.GREEN,drawColor(title.getCompoundDrawables()[1]));
-            top.r.A.dark=true;custom.sync();assertEquals(Color.YELLOW,drawColor(title.getCompoundDrawables()[1]));
-            top.setSelected(true);top.r.selected=false;custom.sync();assertEquals(Color.WHITE,drawColor(title.getCompoundDrawables()[1]));
+            top.r.A.dark=true;custom.sync();assertEquals(Color.GREEN,drawColor(title.getCompoundDrawables()[1]));
+            top.setSelected(true);top.r.selected=false;custom.sync();assertEquals(Color.BLUE,drawColor(title.getCompoundDrawables()[1]));
             top.r.A.unavailable=true;top.r.selectionUnavailable=true;custom.sync();assertEquals(Color.GREEN,drawColor(title.getCompoundDrawables()[1]));
         } finally {root.getResources().getConfiguration().uiMode=originalMode;custom.close();a.finish();}
     }
@@ -252,17 +252,91 @@ public class HomeUiCustomizationTest {
             assertSame(tint,title.getCompoundDrawableTintList());assertEquals(.42f,title.getAlpha(),0);
         } finally {custom.close();a.finish();}
     }
-    @Test public void explicitNativeStateCanLeaveAndReenterLegacySelectedFeedWithoutCrossThemeFallback() {
+    @Test public void imageIconsUseOneFeedGlyphSizeWithoutChangingHitboxesOrCustomColors() {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
+        ImageView like=new ImageView(a),comment=new ImageView(a);
+        like.setId(0x7f0a30ca);comment.setId(0x7f0a254e);
+        like.setScaleType(ImageView.ScaleType.CENTER_CROP);comment.setScaleType(ImageView.ScaleType.FIT_XY);
+        Drawable nativeLike=new ColorDrawable(Color.DKGRAY),nativeComment=new ColorDrawable(Color.LTGRAY);
+        like.setImageDrawable(nativeLike);comment.setImageDrawable(nativeComment);
+        FrameLayout.LayoutParams likeParams=new FrameLayout.LayoutParams(135,135),commentParams=new FrameLayout.LayoutParams(83,83);
+        root.addView(like,likeParams);root.addView(comment,commentParams);
+        byte[] red=HomeUiIconFixtures.webp(8,8,Color.RED),blue=HomeUiIconFixtures.webp(8,8,Color.BLUE);
+        String json=HomeUiCustomizationSettings.putIcon("{}","feed_like",red);
+        json=HomeUiCustomizationSettings.putIcon(json,"feed_comment",blue);
+        a.setContentView(root);
+        root.measure(View.MeasureSpec.makeMeasureSpec(360,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(800,View.MeasureSpec.EXACTLY));
+        root.layout(0,0,360,800);
+        HomeUiCustomization custom=new HomeUiCustomization(root,options(json,false),null);
+        try {
+            int glyph=Math.round(24*a.getResources().getDisplayMetrics().density);
+            assertEquals(ImageView.ScaleType.CENTER,like.getScaleType());assertEquals("Fixed-size drawing honors FIT_XY bounds without changing the host mode",ImageView.ScaleType.FIT_XY,comment.getScaleType());
+            assertEquals(glyph,like.getDrawable().getIntrinsicWidth());assertEquals(glyph,comment.getDrawable().getIntrinsicWidth());
+            assertEquals(Color.RED,drawColor(like.getDrawable()));assertEquals(Color.BLUE,drawColor(comment.getDrawable()));
+            assertArrayEquals(new int[]{glyph,glyph},drawnBounds(like));assertArrayEquals(new int[]{glyph,glyph},drawnBounds(comment));
+            assertSame(likeParams,like.getLayoutParams());assertSame(commentParams,comment.getLayoutParams());
+            assertEquals(135,likeParams.width);assertEquals(83,commentParams.width);
+            assertArrayEquals("Rendering does not rewrite saved custom artwork",red,HomeUiCustomizationSettings.readIcon(json,"feed_like",IconState.DAY_NORMAL));
+            assertArrayEquals("Rendering does not rewrite saved custom artwork",blue,HomeUiCustomizationSettings.readIcon(json,"feed_comment",IconState.DAY_NORMAL));
+        } finally {
+            custom.close();
+            assertEquals(ImageView.ScaleType.CENTER_CROP,like.getScaleType());assertEquals(ImageView.ScaleType.FIT_XY,comment.getScaleType());
+            assertSame(nativeLike,like.getDrawable());assertSame(nativeComment,comment.getDrawable());
+            a.finish();
+        }
+    }
+    @Test public void goneInvisibleAndZeroAlphaFeedIconsKeepHostGeometryAndRestoreLatestArtwork() {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
+        ImageView like=new ImageView(a);like.setId(0x7f0a30ca);like.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        like.setAlpha(0f);like.setVisibility(View.GONE);Drawable initial=new ColorDrawable(Color.DKGRAY);like.setImageDrawable(initial);
+        FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(72,72);root.addView(like,params);a.setContentView(root);
+        layoutRoot(root,360,800);
+        String json=icon("{}","feed_like",Color.BLUE);HomeUiCustomization custom=new HomeUiCustomization(root,options(json,false),null);
+        try {
+            Drawable themed=like.getDrawable();assertNotSame("GONE targets are still customized without changing visibility",initial,themed);
+            assertEquals(View.GONE,like.getVisibility());assertEquals(0f,like.getAlpha(),0f);assertSame(params,like.getLayoutParams());
+            like.setVisibility(View.INVISIBLE);like.setAlpha(.42f);like.requestLayout();layoutRoot(root,360,800);custom.refresh();custom.sync();
+            assertEquals(View.INVISIBLE,like.getVisibility());assertEquals(.42f,like.getAlpha(),0f);assertSame(params,like.getLayoutParams());
+            assertEquals(72,like.getWidth());assertEquals(72,like.getHeight());
+            like.setVisibility(View.VISIBLE);like.setAlpha(1f);like.requestLayout();layoutRoot(root,360,800);custom.refresh();custom.sync();
+            assertEquals(View.VISIBLE,like.getVisibility());assertEquals(1f,like.getAlpha(),0f);assertSame(params,like.getLayoutParams());
+            assertEquals(Color.BLUE,drawColor(like.getDrawable()));
+            like.setAlpha(0f);custom.sync();assertSame("A visible alpha-zero placeholder keeps its icon override",themed,like.getDrawable());
+            assertEquals(View.VISIBLE,like.getVisibility());assertEquals(0f,like.getAlpha(),0f);assertSame(params,like.getLayoutParams());
+            like.setAlpha(1f);custom.sync();
+            Drawable latest=new ColorDrawable(Color.GREEN);like.setImageDrawable(latest);custom.sync();assertEquals(Color.BLUE,drawColor(like.getDrawable()));
+            custom.setOptions(options("{}",false));
+            assertSame("Switching the theme off restores the latest host drawable",latest,like.getDrawable());
+            assertEquals(View.VISIBLE,like.getVisibility());assertEquals(1f,like.getAlpha(),0f);assertSame(params,like.getLayoutParams());
+            assertEquals(ImageView.ScaleType.CENTER_CROP,like.getScaleType());
+        } finally {custom.close();a.finish();}
+    }
+    private static int[] drawnBounds(ImageView image) {
+        Bitmap bitmap=Bitmap.createBitmap(image.getWidth(),image.getHeight(),Bitmap.Config.ARGB_8888);
+        try {
+            image.draw(new Canvas(bitmap));int left=bitmap.getWidth(),top=bitmap.getHeight(),right=-1,bottom=-1;
+            for(int y=0;y<bitmap.getHeight();y++)for(int x=0;x<bitmap.getWidth();x++)
+                if(Color.alpha(bitmap.getPixel(x,y))>0){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}
+            return new int[]{right-left+1,bottom-top+1};
+        }finally{bitmap.recycle();}
+    }
+    private static void layoutRoot(View root,int width,int height) {
+        root.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(height,View.MeasureSpec.EXACTLY));
+        root.layout(0,0,width,height);
+    }
+    @Test public void explicitNativeStateCanLeaveAndReenterLegacySelectedFeedAcrossBothThemes() {
         Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
         ImageView like=new ImageView(a);like.setId(0x7f0a30ca);root.addView(like);
         Drawable original=new ColorDrawable(Color.RED);like.setImageDrawable(original);
         String json=icon(icon("{}","feed_like",Color.BLUE),"feed_like_selected",Color.GREEN);
-        json=HomeUiCustomizationSettings.removeIcon(json,"feed_like",IconState.NIGHT_SELECTED);
+        json=HomeUiCustomizationSettings.removeIcon(json,"feed_like",IconState.DAY_SELECTED);
         int originalMode=root.getResources().getConfiguration().uiMode;setNight(root,true);like.setSelected(true);
         HomeUiCustomization custom=new HomeUiCustomization(root,options(json,false),null);
         try {
-            assertSame(original,like.getDrawable());setNight(root,false);custom.sync();assertEquals(Color.GREEN,drawColor(like.getDrawable()));
-            setNight(root,true);custom.sync();assertSame(original,like.getDrawable());like.setSelected(false);custom.sync();
+            assertSame(original,like.getDrawable());setNight(root,false);custom.sync();assertSame(original,like.getDrawable());
+            like.setSelected(false);custom.sync();assertEquals(Color.BLUE,drawColor(like.getDrawable()));
+            setNight(root,true);custom.sync();assertEquals(Color.BLUE,drawColor(like.getDrawable()));
+            like.setSelected(true);custom.sync();assertSame(original,like.getDrawable());like.setSelected(false);custom.sync();
             assertEquals(Color.BLUE,drawColor(like.getDrawable()));
         } finally {root.getResources().getConfiguration().uiMode=originalMode;custom.close();a.finish();}
     }
@@ -275,8 +349,8 @@ public class HomeUiCustomizationTest {
         HomeUiCustomization custom=new HomeUiCustomization(root,options(HomeUiCustomizationSettings.putIcons("{}","feed_like",fourIcons()),false),null);
         try {
             for(boolean night:new boolean[]{false,true,false,true}) {
-                setNight(root,night);custom.sync();assertEquals(night?Color.YELLOW:Color.GREEN,drawColor(like.getDrawable()));
-                custom.sync();custom.sync();assertEquals(night?Color.YELLOW:Color.GREEN,drawColor(like.getDrawable()));
+                setNight(root,night);custom.sync();assertEquals(Color.GREEN,drawColor(like.getDrawable()));
+                custom.sync();custom.sync();assertEquals(Color.GREEN,drawColor(like.getDrawable()));
             }
             custom.close();assertSame(host,like.getDrawable());assertFalse(like.isSelected());assertFalse(like.isActivated());
         } finally {root.getResources().getConfiguration().uiMode=originalMode;custom.close();a.finish();}
@@ -288,15 +362,17 @@ public class HomeUiCustomizationTest {
         nativeIcon.addState(new int[]{android.R.attr.state_selected},nativeSelected);nativeIcon.addState(new int[0],new ColorDrawable(Color.RED));
         like.setImageDrawable(nativeIcon);nativeIcon.setState(new int[]{android.R.attr.state_enabled,android.R.attr.state_selected});
         int originalMode=root.getResources().getConfiguration().uiMode;setNight(root,false);
-        String json=HomeUiCustomizationSettings.putIcons("{}","feed_like",fourIcons());
-        json=HomeUiCustomizationSettings.removeIcon(json,"feed_like",IconState.NIGHT_SELECTED);
+        String selectedJson=HomeUiCustomizationSettings.putIcons("{}","feed_like",fourIcons());
+        String json=HomeUiCustomizationSettings.removeIcon(selectedJson,"feed_like",IconState.DAY_SELECTED);
         HomeUiCustomization custom=new HomeUiCustomization(root,options(json,false),null);
         try {
-            assertFalse(like.isSelected());assertFalse(like.isActivated());assertEquals(Color.GREEN,drawColor(like.getDrawable()));
+            assertFalse(like.isSelected());assertFalse(like.isActivated());assertSame(nativeIcon,like.getDrawable());assertSame(nativeSelected,nativeIcon.getCurrent());
             for(int i=0;i<3;i++) {
                 setNight(root,true);custom.sync();assertSame(nativeIcon,like.getDrawable());assertSame(nativeSelected,nativeIcon.getCurrent());
                 custom.sync();custom.sync();assertSame(nativeIcon,like.getDrawable());assertSame(nativeSelected,nativeIcon.getCurrent());
+                custom.setOptions(options(selectedJson,false));assertEquals(Color.GREEN,drawColor(like.getDrawable()));
                 setNight(root,false);custom.sync();custom.sync();assertEquals(Color.GREEN,drawColor(like.getDrawable()));
+                custom.setOptions(options(json,false));assertSame(nativeIcon,like.getDrawable());assertSame(nativeSelected,nativeIcon.getCurrent());
             }
             custom.close();assertSame(nativeIcon,like.getDrawable());assertSame(nativeSelected,nativeIcon.getCurrent());
             assertFalse(like.isSelected());assertFalse(like.isActivated());
@@ -329,7 +405,7 @@ public class HomeUiCustomizationTest {
             assertEquals(View.VISIBLE,primary.getVisibility());assertEquals(View.GONE,branch.getVisibility());
         } finally {custom.close();a.finish();}
     }
-    @Test public void nativeDoubleLayerImageUsesItsVerifiedTitlesFourStateSelectionRatherThanItsOwnFlags() {
+    @Test public void nativeDoubleLayerImageUsesItsVerifiedTitlesSelectionAcrossBothThemesRatherThanItsOwnFlags() {
         Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
         OwnerSelectedTab tab=new OwnerSelectedTab(a);root.addView(tab);tab.getTabTitle().setId(0x7f0aaefe);tab.getTabTitle().setVisibility(View.GONE);
         assertHostOwner(tab);
@@ -341,7 +417,7 @@ public class HomeUiCustomizationTest {
         try {
             for(IconState state:IconState.values()) {
                 title.setSelected(state.selected);setNight(root,state.night);assertFalse(tab.isSelected());assertFalse(image.isSelected());
-                custom.sync();custom.sync();assertEquals(stateColor(state),drawColor(image.getDrawable()));assertNull(title.getCompoundDrawables()[1]);
+                custom.sync();custom.sync();assertEquals(state.selected?Color.GREEN:Color.BLUE,drawColor(image.getDrawable()));assertNull(title.getCompoundDrawables()[1]);
             }
             custom.close();assertSame(original,image.getDrawable());
         } finally {root.getResources().getConfiguration().uiMode=originalMode;custom.close();a.finish();}
@@ -360,7 +436,7 @@ public class HomeUiCustomizationTest {
             android.graphics.Rect bounds=new android.graphics.Rect(tab.getLeft(),tab.getTop(),tab.getRight(),tab.getBottom());
             assertEquals(Color.BLUE,drawColor(tab.getTabTitle().getCompoundDrawables()[1]));
             tab.setSelected(true);custom.sync();assertEquals("The icon changes on the same update, before any animation clock advances",Color.GREEN,drawColor(tab.getTabTitle().getCompoundDrawables()[1]));
-            assertSame(wrapper,tab.getForeground());setNight(root,true);custom.sync();assertEquals(Color.YELLOW,drawColor(tab.getTabTitle().getCompoundDrawables()[1]));
+            assertSame(wrapper,tab.getForeground());setNight(root,true);custom.sync();assertEquals(Color.GREEN,drawColor(tab.getTabTitle().getCompoundDrawables()[1]));
             for(int i=0;i<8;i++)custom.sync();assertSame(wrapper,tab.getForeground());assertSame(feedForeground,feed.getForeground());
             assertSame(position,tab.getLayoutParams());assertEquals(140,position.width);assertEquals(100,position.height);assertEquals(20,position.leftMargin);assertEquals(30,position.topMargin);
             assertEquals(bounds,new android.graphics.Rect(tab.getLeft(),tab.getTop(),tab.getRight(),tab.getBottom()));assertEquals(.7f,tab.getAlpha(),0);assertEquals(0,tab.getTranslationX(),0);assertEquals(0,tab.getTranslationY(),0);

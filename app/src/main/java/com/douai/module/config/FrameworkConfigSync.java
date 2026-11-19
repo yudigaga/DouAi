@@ -64,7 +64,7 @@ public final class FrameworkConfigSync {
 
     public synchronized boolean publish(FeatureSettings settings) {
         if (service == null) {
-            notifyStatus(false, "本地设置已保存；等待 LSPosed 服务连接。", lastError);
+            notifyStatus(false, "设置已更新；等待 LSPosed 服务连接后同步。", lastError);
             return false;
         }
         XposedService boundService = service;
@@ -105,9 +105,9 @@ public final class FrameworkConfigSync {
                     if (generation != serviceGeneration || boundService != service) return;
                 }
                 if (result == null) {
-                    notifyStatus(true, "LSPosed 服务已连接。", null);
+                    notifyStatus(true, "设置已同步到 LSPosed；宿主应用情况请查看最近配置状态。", null, generation);
                 } else {
-                    notifyStatus(false, "LSPosed 服务操作失败。", result);
+                    notifyStatus(false, "LSPosed 服务操作失败。", result, generation);
                 }
             });
         });
@@ -149,8 +149,19 @@ public final class FrameworkConfigSync {
     }
 
     private void notifyStatus(boolean connected, String message, String error) {
+        long generation;
+        synchronized (this) { generation = serviceGeneration; }
+        notifyStatus(connected, message, error, generation);
+    }
+
+    private void notifyStatus(boolean connected, String message, String error, long generation) {
         if (listener != null) {
-            mainHandler.post(() -> listener.onStatusChanged(connected, message, error));
+            mainHandler.post(() -> {
+                synchronized (FrameworkConfigSync.this) {
+                    if (generation != serviceGeneration) return;
+                }
+                listener.onStatusChanged(connected, message, error);
+            });
         }
     }
 

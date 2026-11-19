@@ -115,7 +115,7 @@ public final class MediaStoreDownloader {
             toast(sourceContext, "媒体正在保存或下载队列已满");
             return false;
         }
-        toast(sourceContext, "已加入下载任务，可在设置中查看进度或取消");
+        toast(sourceContext, "已加入下载任务，可从侧边栏查看进度或取消");
         return true;
     }
 

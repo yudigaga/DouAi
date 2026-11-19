@@ -71,7 +71,7 @@ public class HomeIconLiveApplicationTest {
             assertNotNull(row);assertTrue(((TextView)row.getChildAt(1)).getText().toString().contains("已配置"));
             assertEquals(Color.RED,((BitmapDrawable)fixture.tab.getTabTitle().getCompoundDrawables()[1]).getBitmap().getPixel(4,4));
             assertTrue(row.performClick());fixture.worker.runAll();ShadowLooper.idleMainLooper();
-            for(IconState state:IconState.values()) {
+            for(IconState state:new IconState[]{IconState.DAY_NORMAL,IconState.DAY_SELECTED}) {
                 ImageView preview=(ImageView)fixture.latest("home.icons.preview."+state.key);
                 assertEquals(Color.RED,((BitmapDrawable)preview.getDrawable()).getBitmap().getPixel(4,4));
             }
@@ -79,7 +79,7 @@ public class HomeIconLiveApplicationTest {
             assertEquals(0,fixture.publications.get());
         }
     }
-    @Test public void theDefaultBuiltInButtonPublishesFourStatesMatchingTheSavedPreviewAndLiveNavigation() throws Exception {
+    @Test public void theDefaultBuiltInButtonPublishesTwoStatesMatchingTheSavedPreviewAndBothHostThemes() throws Exception {
         try(Fixture fixture=new Fixture()) {
             assertNull(fixture.tab.getTabTitle().getCompoundDrawables()[1]);
             fixture.useBuiltIn();
@@ -89,7 +89,7 @@ public class HomeIconLiveApplicationTest {
             fixture.assertNoConfirmation();
 
             EnumMap<IconState,Pixels> expected=new EnumMap<>(IconState.class);
-            for(IconState state:IconState.values()) {
+            for(IconState state:new IconState[]{IconState.DAY_NORMAL,IconState.DAY_SELECTED}) {
                 ImageView preview=(ImageView)fixture.latest("home.icons.preview."+state.key);
                 assertTrue(preview.getDrawable() instanceof BitmapDrawable);
                 expected.put(state,new Pixels(((BitmapDrawable)preview.getDrawable()).getBitmap()));
@@ -98,15 +98,19 @@ public class HomeIconLiveApplicationTest {
                     java.util.Arrays.equals(expected.get(IconState.DAY_NORMAL).colors,expected.get(IconState.DAY_SELECTED).colors));
 
             assertEquals("One built-in save publishes the complete set once",1,fixture.publications.get());
-            for(IconState state:IconState.values()) {
+            for(IconState state:new IconState[]{IconState.DAY_NORMAL,IconState.DAY_SELECTED}) {
                 assertNotNull(HomeUiCustomizationSettings.readIcon(fixture.icons(),"nav_bottom:homepage_home",state));
                 byte[] encoded=HomeUiCustomizationSettings.readIcon(fixture.icons(),"nav_bottom:homepage_home",state);
                 Bitmap saved=android.graphics.BitmapFactory.decodeByteArray(encoded,0,encoded.length);
                 try {expected.get(state).assertMatches(saved);}finally {saved.recycle();}
+            }
+            assertNull(HomeUiCustomizationSettings.readIcon(fixture.icons(),"nav_bottom:homepage_home",IconState.NIGHT_NORMAL));
+            assertNull(HomeUiCustomizationSettings.readIcon(fixture.icons(),"nav_bottom:homepage_home",IconState.NIGHT_SELECTED));
+            for(IconState state:IconState.values()) {
                 fixture.hostState(state);
                 Drawable actual=fixture.tab.getTabTitle().getCompoundDrawables()[1];
                 assertTrue("The controller has applied the configured icon for "+state,actual instanceof BitmapDrawable);
-                expected.get(state).assertMatches(((BitmapDrawable)actual).getBitmap());
+                expected.get(state.selected?IconState.DAY_SELECTED:IconState.DAY_NORMAL).assertMatches(((BitmapDrawable)actual).getBitmap());
             }
             assertTrue(fixture.tab.performClick());assertEquals(1,fixture.nativeClicks.get());
 
@@ -144,6 +148,123 @@ public class HomeIconLiveApplicationTest {
         }
     }
 
+    @Test public void savedArtworkAndNativeDefaultsSurvivePassiveSettingsReopen() throws Exception {
+        byte[][] old=oldBuiltInArtwork();
+        byte[] customNormal=com.douai.module.config.HomeUiIconFixtures.webp(8,8,Color.RED);
+        byte[] customSelected=com.douai.module.config.HomeUiIconFixtures.webp(8,8,Color.GREEN);
+        byte[] night=com.douai.module.config.HomeUiIconFixtures.webp(8,8,Color.BLUE);
+        byte[] other=com.douai.module.config.HomeUiIconFixtures.webp(8,8,Color.MAGENTA);
+        byte[][][] scenarios={old,{customNormal,customSelected},{null,null}};
+        for(byte[][] pair:scenarios) {
+            String initial=pair[0]==null?"{}":savedArtwork(pair[0],pair[1],night,other);
+            try(Fixture fixture=new Fixture(initial)) {
+                View feed=fixture.page.dialog().getWindow().getDecorView().findViewWithTag("home.icons.target.feed_like");
+                assertNotNull(feed);assertTrue(feed.performClick());fixture.flush();
+                assertEquals(initial,fixture.icons());assertEquals(0,fixture.publications.get());
+                fixture.openEditor();fixture.flush();
+                fixture.assertArtwork(pair[0],pair[1]);
+                assertEquals(initial,fixture.icons());assertEquals(0,fixture.publications.get());
+                fixture.reopenPage();
+                fixture.assertArtwork(pair[0],pair[1]);
+                assertEquals("Passive close/open preserves the exact stored JSON",initial,fixture.icons());
+                assertEquals(0,fixture.publications.get());
+                if(pair[0]!=null)assertSavedArtwork(fixture.icons(),pair[0],pair[1],night,other);
+            }
+        }
+    }
+
+    @Test public void transparentBuiltinPairSurvivesReopenAndSingleThenWholeRestore() throws Exception {
+        byte[][] old=oldBuiltInArtwork();
+        byte[] normal=BuiltInNavigationIcons.symbolForPath("bottom/01-home",false);
+        byte[] selected=BuiltInNavigationIcons.symbolForPath("bottom/01-home",true);
+        byte[] night=com.douai.module.config.HomeUiIconFixtures.webp(8,8,Color.BLUE);
+        byte[] other=com.douai.module.config.HomeUiIconFixtures.webp(8,8,Color.MAGENTA);
+        String initial=savedArtwork(old[0],old[1],night,other);
+        try(Fixture fixture=new Fixture(initial)) {
+            fixture.useBuiltIn();
+            assertEquals(initial,fixture.icons());assertEquals(0,fixture.publications.get());
+            fixture.worker.runAll();
+            assertEquals("Worker completion alone cannot publish",initial,fixture.icons());
+            assertEquals(0,fixture.publications.get());ShadowLooper.idleMainLooper();
+            assertSavedArtwork(fixture.icons(),normal,selected,night,other);
+            fixture.assertArtwork(normal,selected);assertEquals(1,fixture.publications.get());
+            String applied=fixture.icons();fixture.reopenPage();
+            assertEquals(applied,fixture.icons());assertEquals(1,fixture.publications.get());
+            assertSavedArtwork(fixture.icons(),normal,selected,night,other);fixture.assertArtwork(normal,selected);
+
+            fixture.stateAction(IconState.DAY_NORMAL,1);fixture.flush();
+            assertSavedArtwork(fixture.icons(),null,selected,night,other);
+            fixture.assertArtwork(null,selected);assertEquals(2,fixture.publications.get());
+            String oneRestored=fixture.icons();fixture.reopenPage();
+            assertEquals(oneRestored,fixture.icons());assertEquals(2,fixture.publications.get());
+            assertSavedArtwork(fixture.icons(),null,selected,night,other);fixture.assertArtwork(null,selected);
+
+            assertTrue(fixture.latest("home.icons.restore.all").performClick());fixture.flush();
+            org.json.JSONObject remaining=new org.json.JSONObject(fixture.icons());
+            assertEquals(1,remaining.length());assertFalse(remaining.has("nav_bottom:homepage_home"));
+            assertEquals(encoded(other),remaining.getString("feed_comment"));
+            fixture.assertArtwork(null,null);assertEquals(3,fixture.publications.get());
+            String allRestored=fixture.icons();fixture.reopenPage();
+            assertEquals(allRestored,fixture.icons());assertEquals(3,fixture.publications.get());
+            fixture.assertArtwork(null,null);
+            assertTrue(fixture.tab.performClick());assertEquals(1,fixture.nativeClicks.get());
+        }
+    }
+
+    @Test public void transparentBuiltinSingleStatePreservesOtherSavedArtworkAfterReopen() throws Exception {
+        byte[][] old=oldBuiltInArtwork();
+        byte[] selected=BuiltInNavigationIcons.symbolForPath("bottom/01-home",true);
+        byte[] night=com.douai.module.config.HomeUiIconFixtures.webp(8,8,Color.BLUE);
+        byte[] other=com.douai.module.config.HomeUiIconFixtures.webp(8,8,Color.MAGENTA);
+        String initial=savedArtwork(old[0],old[1],night,other);
+        try(Fixture fixture=new Fixture(initial)) {
+            fixture.openEditor();fixture.flush();fixture.stateAction(IconState.DAY_SELECTED,2);
+            assertEquals(initial,fixture.icons());assertEquals(0,fixture.publications.get());
+            fixture.worker.runAll();assertEquals(initial,fixture.icons());ShadowLooper.idleMainLooper();
+            assertSavedArtwork(fixture.icons(),old[0],selected,night,other);
+            fixture.assertArtwork(old[0],selected);assertEquals(1,fixture.publications.get());
+            String applied=fixture.icons();fixture.reopenPage();
+            assertEquals(applied,fixture.icons());assertEquals(1,fixture.publications.get());
+            assertSavedArtwork(fixture.icons(),old[0],selected,night,other);
+            fixture.assertArtwork(old[0],selected);
+        }
+    }
+
+    private static byte[] fixtureBytes(String path) throws Exception {
+        String resource="/META-INF/douai/"+path;
+        try(java.io.InputStream stream=HomeIconLiveApplicationTest.class.getResourceAsStream(resource)) {
+            assertNotNull("Missing independent fixture: "+resource,stream);return stream.readAllBytes();
+        }
+    }
+    private static byte[][] oldBuiltInArtwork() throws Exception {
+        // Convert frozen old source once before seeding; reopen never regenerates saved bytes.
+        return new byte[][]{
+                HomeIconImport.convert(fixtureBytes("legacy-built-in-fixtures/bottom/01-home.svg")),
+                HomeIconImport.convert(fixtureBytes("legacy-built-in-fixtures/bottom/01-home-active.svg"))};
+    }
+    private static String encoded(byte[] bytes){return java.util.Base64.getEncoder().encodeToString(bytes);}
+    private static String savedArtwork(byte[] normal,byte[] selected,byte[] night,byte[] other) throws Exception {
+        org.json.JSONObject home=new org.json.JSONObject().put("day_normal",encoded(normal)).put("day_selected",encoded(selected))
+                .put("night_normal",encoded(night)).put("night_selected",org.json.JSONObject.NULL);
+        return new org.json.JSONObject().put("nav_bottom:homepage_home",home).put("feed_comment",encoded(other)).toString();
+    }
+    private static void assertSavedArtwork(String json,byte[] normal,byte[] selected,byte[] night,byte[] other) throws Exception {
+        org.json.JSONObject root=new org.json.JSONObject(json),home=root.getJSONObject("nav_bottom:homepage_home");
+        assertEquals(2,root.length());assertEquals(4,home.length());
+        for(IconState state:IconState.values()) {
+            byte[] expected=state==IconState.DAY_NORMAL?normal:state==IconState.DAY_SELECTED?selected:
+                    state==IconState.NIGHT_NORMAL?night:null;
+            assertTrue("Stored compatibility field remains explicit: "+state,home.has(state.key));
+            if(expected==null)assertTrue("Native state stays explicit null: "+state,home.isNull(state.key));
+            else assertArrayEquals("Saved bytes for "+state,expected,java.util.Base64.getDecoder().decode(home.getString(state.key)));
+        }
+        assertEquals(encoded(other),root.getString("feed_comment"));
+    }
+    private static Pixels pixels(byte[] encoded) {
+        Bitmap bitmap=android.graphics.BitmapFactory.decodeByteArray(encoded,0,encoded.length);assertNotNull(bitmap);
+        try{return new Pixels(bitmap);}finally{bitmap.recycle();}
+    }
+
     private static final class Pixels {
         final int width,height;final int[] colors;
         Pixels(Bitmap bitmap) {
@@ -166,7 +287,7 @@ public class HomeIconLiveApplicationTest {
         final ManualExecutor worker=new ManualExecutor();
         final LiquidGlassController controller;
         final SharedPreferences.OnSharedPreferenceChangeListener listener;
-        final HomeIconSettingsDialog page;
+        HomeIconSettingsDialog page;
         Fixture(){this("{}");}
         Fixture(String initialIcons) {
             assertEquals("The real 41 factory exposes a raw type through getTabType", "HOME",tab.getTabType());
@@ -190,11 +311,41 @@ public class HomeIconLiveApplicationTest {
                     controller.setOptions(LocalOptions.readFrom(updated));
             };
             preferences.registerOnSharedPreferenceChangeListener(listener);
-            page=new HomeIconSettingsDialog(activity,store,false,(dialog,dismiss)->{
+            page=createPage();
+            page.dialog().show();ShadowLooper.idleMainLooper();
+        }
+        HomeIconSettingsDialog createPage() {
+            return new HomeIconSettingsDialog(activity,store,false,(dialog,dismiss)->{
                 if(dismiss!=null)dialog.setOnDismissListener(ignored->dismiss.run());dialog.show();
             },uri->{throw new AssertionError("Built-in selection must not read a document");},
                     (owner,intent,selected)->{throw new AssertionError("Built-in selection must not launch a picker");},worker);
-            page.dialog().show();ShadowLooper.idleMainLooper();
+        }
+        void flush(){do{worker.runAll();ShadowLooper.idleMainLooper();}while(!worker.tasks.isEmpty());}
+        void reopenPage() {
+            page.close();page.dialog().dismiss();flush();
+            page=createPage();page.dialog().show();ShadowLooper.idleMainLooper();openEditor();flush();
+        }
+        void stateAction(IconState state,int index) {
+            assertTrue(latest("home.icons.state."+state.key).performClick());
+            AlertDialog options=(AlertDialog)ShadowDialog.getLatestDialog();
+            android.widget.ListView list=options.getListView();assertNotNull(list);
+            assertTrue(list.performItemClick(list.getAdapter().getView(index,null,list),index,index));
+        }
+        void assertArtwork(byte[] normal,byte[] selected) {
+            for(IconState state:new IconState[]{IconState.DAY_NORMAL,IconState.DAY_SELECTED}) {
+                byte[] expected=state.selected?selected:normal;
+                Drawable preview=((ImageView)latest("home.icons.preview."+state.key)).getDrawable();
+                if(expected==null)assertNull("Native artwork has no invented preview: "+state,preview);
+                else {assertTrue(preview instanceof BitmapDrawable);pixels(expected).assertMatches(((BitmapDrawable)preview).getBitmap());}
+            }
+            for(IconState state:IconState.values()) {
+                hostState(state);byte[] expected=state.selected?selected:normal;
+                Drawable actual=tab.getTabTitle().getCompoundDrawables()[1];
+                if(expected==null)assertNull("Native compound drawable remains null: "+state,actual);
+                else {assertTrue("Actual controller drawable for "+state,actual instanceof BitmapDrawable);
+                    pixels(expected).assertMatches(((BitmapDrawable)actual).getBitmap());}
+            }
+            hostState(IconState.DAY_NORMAL);
         }
         String icons(){return store.getString(HomeUiCustomizationSettings.ICONS,"{}");}
         View latest(String tag) {

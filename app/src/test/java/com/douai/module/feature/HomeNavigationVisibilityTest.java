@@ -58,7 +58,7 @@ public class HomeNavigationVisibilityTest {
             for(IconState state:IconState.values()) {
                 s.first.r.selected=state.selected;s.first.r.A.dark=state.night;s.custom.sync();
                 BitmapDrawable shown=(BitmapDrawable)s.title.getCompoundDrawables()[1];
-                assertEquals(color(state),shown.getBitmap().getPixel(4,4));
+                assertEquals(color(IconState.of(false,state.selected)),shown.getBitmap().getPixel(4,4));
                 assertEquals(s.art,ReflectionHelpers.getField(s.custom,"rawJson"));
             }
         }

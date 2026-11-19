@@ -348,10 +348,6 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                 });
             }
             addLocalSwitch(panel, "保存历史记录", "", kind + "_save_history");
-            addOption(panel, reply ? "回复历史记录" : "评论历史记录", "", null, true, () -> {
-                AutomationHistoryDialog history = new AutomationHistoryDialog(context, kind, useMiuix);
-                showOptionDialog(history.dialog(), history::closeDetails);
-            });
         };
         showAutomationPanel("发送与记录", panel, build[0]);
     }

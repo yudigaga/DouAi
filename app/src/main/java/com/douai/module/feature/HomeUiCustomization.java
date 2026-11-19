@@ -2,10 +2,15 @@ package com.douai.module.feature;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.content.res.Configuration;
 import android.content.res.ColorStateList;
 import android.graphics.ColorFilter;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.drawable.Animatable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
@@ -14,12 +19,15 @@ import android.os.SystemClock;
 import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.TextView;
 import com.douai.module.config.HomeUiCustomizationSettings;
 import com.douai.module.config.HomeUiCustomizationSettings.IconState;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.ui.BuiltInNavigationIcons;
 import org.json.JSONObject;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -40,6 +48,8 @@ import java.util.function.Consumer;
 public final class HomeUiCustomization implements AutoCloseable {
     private static final String TOP = "com.ss.android.ugc.aweme.homepage.tab.top.ui.tabstrip.item.HomeTopTabItemViewNew";
     private static final String BOTTOM = "com.ss.android.ugc.aweme.homepage.tab.ui.bottom.BottomTab";
+    private static final String TOP_CORNER = "com.ss.android.ugc.aweme.homepage.topcorner.ui.TopCornerEntranceView";
+    private static final String MAIN_TITLE_BAR = "com.ss.android.ugc.aweme.homepage.tab.top.ui.titlebar.MainTitleBar";
     private static final HomeNavigationMetadata NAVIGATION_METADATA=new HomeNavigationMetadata();
     private static final HostReflectionCache ACCESS=new HostReflectionCache();
     private final View root;
@@ -137,6 +147,24 @@ public final class HomeUiCustomization implements AutoCloseable {
             Set<View> foundHidden=Collections.newSetFromMap(new IdentityHashMap<>());
             Map<TextView,View> currentLabels = new IdentityHashMap<>();
             for (View view : nodes) {
+                if(hasClass(view,TOP_CORNER)) {
+                    TopCornerTarget target=topCornerTarget(view);
+                    if(target==null || !hiddenNavigation.contains(target.key)) {
+                        NavigationItemVisibility previousHidden=hiddenItems.remove(view);
+                        if(previousHidden!=null)previousHidden.close();
+                    }
+                    if(target!=null) {
+                        NAVIGATION_METADATA.observe(target.key,target.key.equals("nav_top:homepage_right_search")?"搜索":"菜单",
+                                view.isShown() && view.getWindowVisibility()==View.VISIBLE);
+                        if(hiddenNavigation.contains(target.key)) {
+                            foundHidden.add(view);
+                            NavigationItemVisibility hidden=hiddenItems.get(view);
+                            if(hidden==null){hidden=new NavigationItemVisibility(view);hiddenItems.put(view,hidden);}
+                            hidden.hide();
+                        }else if(configured(target.key))bindImage(target.image,target.key,view,foundImages);
+                    }
+                    continue;
+                }
                 boolean top = hasClass(view, TOP), bottom = hasClass(view, BOTTOM);
                 if (top || bottom) {
                     try {
@@ -178,8 +206,15 @@ public final class HomeUiCustomization implements AutoCloseable {
                 if (!(view instanceof ImageView)) continue;
                 ImageView image = (ImageView) view;
                 if(insideHiddenNavigation(image))continue;
-                String key = feedKey(image.getId());
+                IconState role=collectRole(image);
+                String key = role!=null?"feed_collect":feedKey(image.getId());
                 if (key == null || !configured(key)) continue;
+                if(role==null && "feed_collect".equals(key)) {
+                    ImageState previous=images.get(image);
+                    if(previous!=null && previous.owner==null && previous.originalId==0x7f0a2439 && "feed_collect".equals(previous.key)) {
+                        previous.close();images.remove(image);continue;
+                    }
+                }
                 bindImage(image,key,null,foundImages);
             }
             for(Iterator<Map.Entry<View,NavigationItemVisibility>> it=hiddenItems.entrySet().iterator();it.hasNext();) {
@@ -220,16 +255,27 @@ public final class HomeUiCustomization implements AutoCloseable {
             nativeGeneration++;
             for(Iterator<Map.Entry<View,NavigationItemVisibility>> it=hiddenItems.entrySet().iterator();it.hasNext();) {
                 Map.Entry<View,NavigationItemVisibility> entry=it.next();
-                if(!within(entry.getKey(),root)){entry.getValue().close();it.remove();}else entry.getValue().hide();
+                View owner=entry.getKey();
+                TopCornerTarget target=hasClass(owner,TOP_CORNER)?topCornerTarget(owner):null;
+                if(!within(owner,root) || hasClass(owner,TOP_CORNER) && (target==null || !hiddenNavigation.contains(target.key))) {
+                    entry.getValue().close();it.remove();
+                }else entry.getValue().hide();
             }
             for (Iterator<Map.Entry<ImageView,ImageState>> it=images.entrySet().iterator();it.hasNext();) {
                 Map.Entry<ImageView,ImageState> entry=it.next();
                 ImageState state=entry.getValue();
-                boolean sameTarget=state.owner==null?state.key.equals(feedKey(entry.getKey().getId()))
-                        :within(state.owner,root) && within(entry.getKey(),state.owner) && within(state.selectionView,state.owner);
+                IconState role=collectRole(entry.getKey());
+                boolean sameTarget;
+                if(state.owner==null) {
+                    sameTarget=role!=null && "feed_collect".equals(state.key)
+                            || entry.getKey().getId()==state.originalId && state.key.equals(feedKey(entry.getKey().getId()));
+                }else if(hasClass(state.owner,TOP_CORNER)) {
+                    TopCornerTarget target=topCornerTarget(state.owner);
+                    sameTarget=target!=null && state.key.equals(target.key) && target.image==entry.getKey();
+                }else sameTarget=within(state.owner,root) && within(entry.getKey(),state.owner) && within(state.selectionView,state.owner);
                 if (!configured(state.key) || !sameTarget || !within(entry.getKey(),root)) { state.close(); it.remove(); }
                 else {
-                    Asset next=cached(state.owner,state.selectionView,state.key);
+                    Asset next=cached(state,role);
                     if(next==null)state.close();else if(state.apply(next))imageWrites++;
                 }
             }
@@ -298,7 +344,7 @@ public final class HomeUiCustomization implements AutoCloseable {
         if (cached != null) return cached;
         MediaMemoryBudget.Reservation reservation = null;
         try {
-            byte[] bytes = Base64.getDecoder().decode(encoded);
+            byte[] bytes = BuiltInNavigationIcons.replaceLegacyArtwork(Base64.getDecoder().decode(encoded));
             BitmapFactory.Options bounds = new BitmapFactory.Options(); bounds.inJustDecodeBounds = true;
             BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0 || bounds.outWidth > 512 || bounds.outHeight > 512) return null;
@@ -334,20 +380,52 @@ public final class HomeUiCustomization implements AutoCloseable {
                 @Override public void setColorFilter(ColorFilter filter) { }
             };
         }
+        Drawable drawable(ImageView view,String key) {
+            int dp=key.startsWith("nav_top:")?20:24;
+            int pixels=Math.max(1,Math.round(dp*view.getResources().getDisplayMetrics().density));
+            return new FixedSizeBitmapDrawable(view,bitmap,pixels);
+        }
         @Override public void close() { bitmap.recycle(); reservation.close(); }
+    }
+
+    private static final class FixedSizeBitmapDrawable extends BitmapDrawable {
+        private final int size;
+        private final Paint paint=new Paint(Paint.FILTER_BITMAP_FLAG|Paint.DITHER_FLAG);
+        FixedSizeBitmapDrawable(ImageView view,Bitmap bitmap,int size) {
+            super(view.getResources(),bitmap);this.size=size;
+        }
+        @Override public int getIntrinsicWidth(){return size;}
+        @Override public int getIntrinsicHeight(){return size;}
+        @Override public boolean isStateful(){return true;}
+        @Override public void draw(Canvas canvas) {
+            Rect bounds=getBounds();if(bounds.isEmpty())return;
+            Bitmap bitmap=getBitmap();
+            float scale=Math.min((float)size/bitmap.getWidth(),(float)size/bitmap.getHeight());
+            scale=Math.min(scale,Math.min((float)bounds.width()/bitmap.getWidth(),(float)bounds.height()/bitmap.getHeight()));
+            float width=bitmap.getWidth()*scale,height=bitmap.getHeight()*scale;
+            float left=bounds.exactCenterX()-width/2f,top=bounds.exactCenterY()-height/2f;
+            canvas.drawBitmap(bitmap,null,new RectF(left,top,left+width,top+height),paint);
+        }
+        @Override public void setAlpha(int alpha){paint.setAlpha(Math.max(0,Math.min(255,alpha)));invalidateSelf();}
+        @Override public void setColorFilter(ColorFilter filter){ }
+        @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
     }
 
     private static final class ImageState implements AutoCloseable {
         final ImageView image;
         final String key;
+        final int originalId;
         final View owner,selectionView;
         final boolean lottie;
         final Method compositionGetter;
+        ImageView.ScaleType originalScaleType,appliedScaleType;
+        boolean scaleTypeOwned;
         Drawable original, applied;
         Asset asset;
         boolean wasRunning, compositionUnavailable;
         ImageState(ImageView image,String key,View owner,View selectionView) {
-            this.image=image; this.key=key;this.owner=owner;this.selectionView=selectionView;
+            this.image=image; this.key=key;this.originalId=image.getId();this.owner=owner;this.selectionView=selectionView;
+            originalScaleType=image.getScaleType();
             lottie=hasClass(image,"com.airbnb.lottie.LottieAnimationView");
             Method getter=null;
             if(lottie)try { getter=image.getClass().getMethod("getComposition"); }
@@ -357,6 +435,7 @@ public final class HomeUiCustomization implements AutoCloseable {
         boolean apply(Asset next) {
             // The host setter cancels pending composition callbacks; let its load finish first.
             if(!compositionReady())return false;
+            boolean changed=syncScaleType();
             Drawable current = image.getDrawable();
             int[] hostState=current!=null && (current!=applied || next!=asset || applied==null)?current.getState().clone():null;
             if (current != applied || applied == null) {
@@ -364,13 +443,22 @@ public final class HomeUiCustomization implements AutoCloseable {
                 wasRunning = original instanceof Animatable && ((Animatable) original).isRunning();
                 if (wasRunning) ((Animatable) original).stop();
             }
-            if (next != asset) { asset=next; applied=next.drawable(image); }
+            if (next != asset) { asset=next; applied=next.drawable(image,key); }
             if (image.getDrawable() != applied) {
                 image.setImageDrawable(applied);
                 if(hostState!=null && hasSelectedState(hostState) && !hasSelectedState(image.getDrawableState())) applied.setState(hostState);
                 return true;
             }
-            return false;
+            return changed;
+        }
+        private boolean syncScaleType() {
+            ImageView.ScaleType current=image.getScaleType();
+            if(scaleTypeOwned && current!=appliedScaleType) {originalScaleType=current;scaleTypeOwned=false;}
+            else if(!scaleTypeOwned)originalScaleType=current;
+            if(current==ImageView.ScaleType.CENTER || current==ImageView.ScaleType.CENTER_INSIDE
+                    || current==ImageView.ScaleType.FIT_XY)return false;
+            image.setScaleType(ImageView.ScaleType.CENTER);appliedScaleType=ImageView.ScaleType.CENTER;scaleTypeOwned=true;
+            return true;
         }
         private boolean compositionReady() {
             if(!lottie)return true;
@@ -387,6 +475,8 @@ public final class HomeUiCustomization implements AutoCloseable {
                 if(original!=null && hasSelectedState(hostState) && !hasSelectedState(image.getDrawableState()))original.setState(hostState);
                 if (wasRunning && original instanceof Animatable) ((Animatable) original).start();
             }
+            if(scaleTypeOwned && image.getScaleType()==appliedScaleType)image.setScaleType(originalScaleType);
+            scaleTypeOwned=false;
             original=null; applied=null; asset=null; wasRunning=false;
         }
     }
@@ -449,11 +539,12 @@ public final class HomeUiCustomization implements AutoCloseable {
         found.add(image);ImageState state=images.get(image);
         if(state!=null && (!key.equals(state.key) || state.owner!=owner || state.selectionView!=selectionView)){state.close();state=null;}
         if(state==null){state=new ImageState(image,key,owner,selectionView);images.put(image,state);}
-        Asset next=cached(owner,selectionView,key);if(next==null)state.close();else if(state.apply(next))imageWrites++;
+        Asset next=cached(state,collectRole(image));if(next==null)state.close();else if(state.apply(next))imageWrites++;
     }
+    /** Shared selection states use legacy day keys; persisted night artwork remains compatibility data. */
     private Set<String> encodedAssets() {
         Set<String> wanted=new HashSet<>();for(var entry:icons.entrySet())if(!hiddenNavigation.contains(entry.getKey()))
-            for(String value:entry.getValue().values())if(value!=null)wanted.add(value);
+            for(var state:entry.getValue().entrySet())if(!state.getKey().night && state.getValue()!=null)wanted.add(state.getValue());
         return wanted;
     }
     private boolean insideHiddenNavigation(View view) {
@@ -464,16 +555,21 @@ public final class HomeUiCustomization implements AutoCloseable {
         }
         return false;
     }
+    private Asset cached(ImageState state,IconState role) {
+        if(role==null || !"feed_collect".equals(state.key))return cached(state.owner,state.selectionView,state.key);
+        Map<IconState,String> states=icons.get(state.key);
+        return states==null?null:assets.get(states.get(role));
+    }
     private Asset cached(View owner,View content,String key) {
         Map<IconState,String> states=icons.get(key);
         if(states==null)return null;
         NavigationState nativeState=navigation.get(owner);
         if(nativeState!=null) {
             nativeState.sample();
-            return assets.get(states.get(IconState.of(nativeState.night,nativeState.selected)));
+            return assets.get(states.get(IconState.of(false,nativeState.selected)));
         }
         Object delegate=owner!=null && hasClass(owner,TOP)?topDelegate(owner):null;
-        return assets.get(states.get(IconState.of(night(delegate,content),selection(owner,content,delegate))));
+        return assets.get(states.get(IconState.of(false,selection(owner,content,delegate))));
     }
     private boolean selection(View owner,View content,Object delegate) {
         Boolean nativeSelected=topSelected(delegate);
@@ -668,6 +764,63 @@ public final class HomeUiCustomization implements AutoCloseable {
     }
     private static int dp(View view,int value) { return Math.round(value*view.getResources().getDisplayMetrics().density); }
     private static void add(Map<String,Target> targets,String key,String title,boolean navigation) { targets.put(key,new Target(key,title,navigation)); }
+    private static final class TopCornerTarget {
+        final String key;
+        final ImageView image;
+        TopCornerTarget(String key,ImageView image){this.key=key;this.image=image;}
+    }
+    @android.annotation.SuppressLint("ResourceType") // Only the verified owner's public getter authorizes this host image.
+    private TopCornerTarget topCornerTarget(View owner) {
+        if(!hasClass(owner,TOP_CORNER) || !within(owner,root) || owner==root)return null;
+        View ancestor=owner.getParent() instanceof View?(View)owner.getParent():null;
+        boolean titleBar=false;
+        for(int depth=0;ancestor!=null && depth<=64;depth++) {
+            if(hasClass(ancestor,MAIN_TITLE_BAR)){titleBar=true;break;}
+            if(ancestor==root)break;
+            ancestor=ancestor.getParent() instanceof View?(View)ancestor.getParent():null;
+        }
+        if(!titleBar)return null;
+        try {
+            Field field=ACCESS.field(owner.getClass(),"d");
+            if(field==null || field.getType()!=String.class || !Modifier.isPublic(field.getModifiers())
+                    || Modifier.isStatic(field.getModifiers()))return null;
+            String identity=(String)field.get(owner);
+            if(!"homepage_right_search".equals(identity) && !"homepage_left_sidebar".equals(identity)
+                    && !"homepage_left_sidebar_jx".equals(identity))return null;
+            Method getter=ACCESS.publicNoArgMethod(owner.getClass(),"getIconView");
+            if(getter==null || !Modifier.isPublic(getter.getModifiers()) || Modifier.isStatic(getter.getModifiers())
+                    || getter.getParameterTypes().length!=0 || !ImageView.class.isAssignableFrom(getter.getReturnType()))return null;
+            Object content=getter.invoke(owner);
+            if(!(content instanceof ImageView))return null;
+            ImageView image=(ImageView)content;
+            return image.getId()==0x7f0abc18 && within(image,owner) && within(image,root)
+                    ?new TopCornerTarget("nav_top:"+identity,image):null;
+        }catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {
+            once("home_ui_customization: top_corner_contract_unavailable");return null;
+        }
+    }
+    @android.annotation.SuppressLint("ResourceType") // Fixed artwork roles exist only in the verified direct-child pair.
+    private IconState collectRole(ImageView image) {
+        if(image.getId()!=0x7f0a2010 && image.getId()!=0x7f0a2439)return null;
+        if(!within(image,root) || !(image.getParent() instanceof FrameLayout))return null;
+        FrameLayout frame=(FrameLayout)image.getParent();
+        if(frame.getId()!=0x7f0a240b || !(frame.getParent() instanceof ViewGroup))return null;
+        ViewGroup owner=(ViewGroup)frame.getParent();
+        if(!within(owner,root) || owner.getId()!=0x7f0a204e || !hasClass(owner,"androidx.constraintlayout.widget.ConstraintLayout"))return null;
+        for(int i=0;i<owner.getChildCount();i++) {
+            View child=owner.getChildAt(i);
+            if(child.getId()==0x7f0a240b && child!=frame)return null;
+        }
+        View selected=null,normal=null;
+        for(int i=0;i<frame.getChildCount();i++) {
+            View child=frame.getChildAt(i);
+            if(child.getId()==0x7f0a2010){if(selected!=null)return null;selected=child;}
+            if(child.getId()==0x7f0a2439){if(normal!=null)return null;normal=child;}
+        }
+        if(!(selected instanceof ImageView) || !hasClass(selected,"com.airbnb.lottie.LottieAnimationView")
+                || !(normal instanceof ImageView) || hasClass(normal,"com.airbnb.lottie.LottieAnimationView"))return null;
+        return image==selected?IconState.of(false,true):image==normal?IconState.of(false,false):null;
+    }
     private static String feedKey(int id) {
         // Verified 41.0.0 image children, not the containing action slots.
         switch(id) {

@@ -55,6 +55,7 @@ import java.util.function.IntConsumer
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -127,7 +128,9 @@ object MiuixSettingsViews {
     ) : AutoCloseable {
         private val environment = HostComposeEnvironment(activity, onClose)
         private var currentScan by mutableStateOf(ScanStatus.pending())
+        private var closed = false
         private var categorySearchTerms by mutableStateOf(titles.copyOf())
+        private var categoryOrder by mutableStateOf(titles.indices.toList())
         private var featureSearch by mutableStateOf<List<FeatureSearch>>(emptyList())
         private var onFeature: IntConsumer? = null
         val view = ComposeView(environment.context())
@@ -143,6 +146,11 @@ object MiuixSettingsViews {
             require(terms.size == titles.size)
             categorySearchTerms = terms.copyOf()
         }
+        fun setCategoryOrder(indices: IntArray) {
+            require(indices.size == titles.size)
+            require(indices.all { it in titles.indices } && indices.toSet().size == titles.size)
+            categoryOrder = indices.toList()
+        }
         fun setFeatureSearch(ids: Array<String>, labels: Array<String>, paths: Array<String>,
                              terms: Array<String>, action: IntConsumer) {
             require(ids.size == labels.size && ids.size == paths.size && ids.size == terms.size)
@@ -150,7 +158,10 @@ object MiuixSettingsViews {
             featureSearch = ids.indices.map { FeatureSearch(ids[it], labels[it], paths[it], terms[it]) }
         }
         fun bindBackNavigation(dialog: Dialog) = environment.bindBackNavigation(dialog)
-        override fun close() = environment.close()
+        override fun close() {
+            closed = true
+            environment.close()
+        }
 
         @Composable
         private fun Content() {
@@ -196,19 +207,10 @@ object MiuixSettingsViews {
                     featureSearch[it].terms.contains(query.trim(), ignoreCase = true)
                 }
                 if (matching.isEmpty() && features.isEmpty()) BasicComponent(title = "没有匹配的设置分类")
-                matching.forEach { index ->
-                    BasicComponent(
-                        title = titles[index],
-                        modifier = Modifier.testTag("settings.category.$index"),
-                        endActions = {
-                            if (counts[index] >= 0) {
-                                Text(if (counts[index] == 0) "未适配" else "${counts[index]}项",
-                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                            }
-                            Icon(MiuixIcons.Basic.ArrowRight, contentDescription = null)
-                        },
-                        onClick = { onCategory.accept(index) },
-                    )
+                if (query.isBlank()) {
+                    categoryOrder.forEach { index -> CategoryRow(index) }
+                } else {
+                    matching.forEach { index -> CategoryRow(index) }
                 }
                 features.forEach { index ->
                     val entry = featureSearch[index]
@@ -220,6 +222,22 @@ object MiuixSettingsViews {
                     )
                 }
             }
+        }
+
+        @Composable
+        private fun CategoryRow(index: Int) {
+            BasicComponent(
+                title = titles[index],
+                modifier = Modifier.testTag("settings.category.$index"),
+                endActions = {
+                    if (counts[index] >= 0) {
+                        Text(if (counts[index] == 0) "未适配" else "${counts[index]}项",
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                    }
+                    Icon(MiuixIcons.Basic.ArrowRight, contentDescription = null)
+                },
+                onClick = { onCategory.accept(index) },
+            )
         }
 
         private data class FeatureSearch(val id: String, val title: String, val path: String, val terms: String)

@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -47,6 +48,8 @@ import top.yukonga.miuix.kmp.preference.SwitchPreference
 /** Used only in the module process; host dialogs retain their own UI and settings store. */
 class ModuleStatusScreen(private val activity: ComponentActivity) {
     private var currentScan by mutableStateOf(ScanStatus.pending())
+    private var currentConfiguration by mutableStateOf(ConfigurationStatus.unavailable())
+    private var closed = false
     private var frameworkConnected by mutableStateOf(false)
     private var frameworkMessage by mutableStateOf("")
     private var frameworkError by mutableStateOf<String?>(null)
@@ -71,6 +74,12 @@ class ModuleStatusScreen(private val activity: ComponentActivity) {
         frameworkMessage = message.orEmpty()
         frameworkError = error
     }
+
+    fun setConfigurationStatus(status: ConfigurationStatus) {
+        if (!closed) currentConfiguration = status
+    }
+
+    fun close() { closed = true }
 
     @Suppress("DEPRECATION")
     @Composable
@@ -139,6 +148,11 @@ class ModuleStatusScreen(private val activity: ComponentActivity) {
                             summary = currentScan.detail + if (currentScan.restartRequired) {
                                 "\n" + stringResource(R.string.module_restart_required)
                             } else "",
+                        )
+                        BasicComponent(
+                            title = currentConfiguration.title,
+                            summary = currentConfiguration.detail,
+                            modifier = Modifier.testTag("settings.status.configuration"),
                         )
                     }
                 }

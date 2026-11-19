@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
-/** Four-state editors own their asynchronous previews and pending configuration publication. */
+/** Two-state editors own their asynchronous previews and pending configuration publication. */
 final class HomeIconSettingsDialog implements AutoCloseable {
     interface Files {
         InputStream read(Uri uri) throws Exception;
@@ -50,6 +50,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
     }
     interface Picker { AutoCloseable launch(Activity activity,Intent intent,Consumer<Uri> selected); }
     private interface Source { InputStream open() throws Exception; }
+    private static final IconState[] EDITABLE_STATES={IconState.DAY_NORMAL,IconState.DAY_SELECTED};
     private static final ThreadPoolExecutor WORKER=executor("DouAi-home-icons",4);
     private static final ThreadPoolExecutor CLOSER=executor("DouAi-home-icons-close",4);
     private final Context context;
@@ -79,7 +80,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
         context=ModuleTheme.themedContext(baseContext);this.store=store;this.miuix=miuix;
         this.presenter=presenter;this.files=files;this.picker=picker;this.worker=worker;activity=activity(context);
         LinearLayout body=column();body.setPadding(dp(12),dp(4),dp(12),dp(12));
-        body.addView(text("每个位置可分别设置日间静态、日间选中、夜间静态、夜间选中图标，并查看实际 WebP 预览。可用内置图标按位置一键保存，也可逐态导入 SVG / WebP。SVG 源文件不超过 256 KiB，最长边转为256像素；最终静态 WebP 不超过32 KiB。导航项可整项隐藏或显示；右侧 Feed 仅保留图片替换。",13),matchWrap());
+        body.addView(text("每个位置可分别设置未选中、已选中两态图标，日夜共用，并查看实际 WebP 预览。内置图标保留所提供的未选中、已选中原始图片，可按位置一键保存；已保存的旧图标、自定义图标与夜间数据在主动应用前保持原样。导入的 SVG / WebP 保留原色。SVG 源文件不超过 256 KiB，最长边转为256像素；最终静态 WebP 不超过32 KiB。导航项可整项隐藏或显示；右侧 Feed 仅保留图片替换。",13),matchWrap());
         status=text("请选择图标位置。上导航保留最近识别的首页频道；未出现时，请先返回首页，再从抖音内打开此页。",13);
         status.setTag("home.icons.status");status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setPadding(0,dp(12),0,dp(8));body.addView(status,matchWrap());
@@ -107,7 +108,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
             if(!custom && target.navigation)for(java.util.Iterator<String> keys=saved.keys();keys.hasNext();) {
                 if(target.key.equals(HomeUiCustomizationSettings.canonicalNavigationKey(keys.next()))){custom=true;break;}
             }
-            String value=target.navigation && hidden.contains(target.key)?"已隐藏 · 可显示与编辑":custom?"已配置 · 四态编辑与预览":"原图 · 四态编辑与预览";
+            String value=target.navigation && hidden.contains(target.key)?"已隐藏 · 可显示与编辑":custom?"已配置 · 双态编辑与预览":"原图 · 双态编辑与预览";
             View row;
             if(miuix)row=new MiuixSettingsViews.Option(context,target.title,"",value,true,()->choose(target)).getView();
             else {
@@ -134,7 +135,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
         String[] actions=BuiltInNavigationIcons.entryForPosition(owner.target.key)==null
                 ?new String[]{"导入 SVG / WebP","恢复此状态原图"}
                 :new String[]{"导入 SVG / WebP","恢复此状态原图","使用内置图标并保存"};
-        Dialog choice=builder(owner.target.title+" · "+state.title)
+        Dialog choice=builder(owner.target.title+" · "+stateTitle(state))
                 .setItems(actions,(selected,which)->{
                     if(!owner.live() || !current(ticket) || !chosen.compareAndSet(false,true)){selected.dismiss();return;}
                     selected.dismiss();
@@ -152,7 +153,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
         stop();long ticket=generation;
         if(state==null) {
             Map<IconState,Source> sources=new EnumMap<>(IconState.class);
-            for(IconState variant:IconState.values())sources.put(variant,()->files.builtIn(entry,BuiltInNavigationIcons.styleFor(variant)));
+            for(IconState variant:EDITABLE_STATES)sources.put(variant,()->files.builtIn(entry,BuiltInNavigationIcons.styleFor(variant)));
             queue(owner.target,sources,false,ticket,true);
         }else queue(owner.target,state,()->files.builtIn(entry,BuiltInNavigationIcons.styleFor(state)),ticket,true);
     }
@@ -224,7 +225,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
             if(!previous.equals(hiddenJson())){setStatus("导航显示设置已变化，请重新操作；当前设置已保留。");render();return;}
             if(!next.equals(previous))store.putString(HomeUiCustomizationSettings.HIDDEN_NAVIGATION,next);
             if(!current(ticket))return;
-            setStatus((hide?"已隐藏导航项 · ":"已显示导航项 · ")+title+"；四态图标保持不变。");render();
+            setStatus((hide?"已隐藏导航项 · ":"已显示导航项 · ")+title+"；图标设置保持不变。");render();
         }catch(RuntimeException failure){if(!closed)setStatus("保存导航显示设置失败，请重试；原设置已保留。");}
     }
 
@@ -306,7 +307,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
         boolean disposed;
         Editor(HomeUiCustomization.Target target) {
             this.target=target;LinearLayout body=column();body.setPadding(dp(12),dp(8),dp(12),dp(12));
-            body.addView(text("内置图标按当前位置自动匹配，点击保存即可应用，无需选择图案。点按四态可导入自定义图标或恢复原图；下方显示已保存图片的实际 WebP 预览。",13),matchWrap());
+            body.addView(text("内置图标按当前位置匹配所提供的未选中、已选中原始图片，点击保存即可应用。两态日夜共用；已保存的旧图标、自定义图片与夜间兼容数据在主动应用前保持原样。点按可导入保留原色的自定义图标或恢复原图。下方显示已保存图片的实际 WebP 预览。",13),matchWrap());
             if(target.navigation) {
                 visibilityStatus=text("",13);visibilityStatus.setTag("home.icons.visibility.status");
                 visibilityStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);body.addView(visibilityStatus,matchWrap());
@@ -318,8 +319,8 @@ final class HomeIconSettingsDialog implements AutoCloseable {
             if(!builtIn.isEnabled()) {
                 TextView unavailable=text("此位置暂无内置图标，可导入 SVG / WebP 自定义。",13);unavailable.setTag("home.icons.builtin.unavailable");body.addView(unavailable,matchWrap());
             }
-            body.addView(action("恢复四态原图","home.icons.restore.all",()->restoreAll(target)),matchWrap());
-            if(target.navigation)body.addView(text("恢复四态原图只恢复图片，不改变此导航项的隐藏状态。",13),matchWrap());
+            body.addView(action("恢复此位置原图","home.icons.restore.all",()->restoreAll(target)),matchWrap());
+            if(target.navigation)body.addView(text("恢复此位置原图只恢复图片，不改变此导航项的隐藏状态。",13),matchWrap());
             notice=text("预览显示当前配置；保存后请返回首页查看。",13);notice.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
             body.addView(notice,matchWrap());
             dialog=builder(target.title).setView(scrolling(body)).setNegativeButton("返回",null).create();
@@ -331,7 +332,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
             try {
                 boolean hidden=HomeUiCustomizationSettings.readHiddenNavigation(hiddenJson()).contains(target.key);
                 visibilityButton.setEnabled(true);visibilityButton.setText(hidden?"显示此导航项":"隐藏此导航项");
-                visibilityStatus.setText(hidden?"显示设置：此导航项已隐藏（图标、文字和点击区）。显示后仍使用下方已保存的四态图标。":"显示设置：未隐藏此导航项。隐藏会移除图标、文字和点击区；四态图标保留。");
+                visibilityStatus.setText(hidden?"显示设置：此导航项已隐藏（图标、文字和点击区）。显示后仍使用下方已保存的双态图标。":"显示设置：未隐藏此导航项。隐藏会移除图标、文字和点击区；图标设置保留。");
             }catch(RuntimeException failure){visibilityButton.setEnabled(false);visibilityStatus.setText("无法读取导航显示设置，请重新打开；当前设置已保留。");}
         }
         void showSaved(PreviewSet previews) {
@@ -382,43 +383,40 @@ final class HomeIconSettingsDialog implements AutoCloseable {
         final Map<IconState,ImageView> images=new EnumMap<>(IconState.class);
         PreviewSet held;
         PreviewGrid(Consumer<IconState> clicked) {
-            for(int row=0;row<2;row++) {
-                LinearLayout line=new LinearLayout(context);line.setOrientation(LinearLayout.HORIZONTAL);
-                view.addView(line,matchWrap());
-                for(int col=0;col<2;col++) {
-                    IconState state=IconState.of(row==1,col==1);
-                    LinearLayout cell=column();cell.setGravity(Gravity.CENTER);cell.setMinimumHeight(dp(124));
-                    cell.setPadding(dp(8),dp(8),dp(8),dp(8));cell.setTag("home.icons.state."+state.key);
-                    ModuleTheme.preserveColors(cell);cells.put(state,cell);
-                    TextView title=text(state.title,14);title.setGravity(Gravity.CENTER);titles.put(state,title);cell.addView(title,matchWrap());
-                    ImageView image=new ImageView(context);image.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                    image.setTag("home.icons.preview."+state.key);images.put(state,image);
-                    LinearLayout.LayoutParams imageSize=new LinearLayout.LayoutParams(dp(36),dp(36));
-                    imageSize.topMargin=dp(8);imageSize.bottomMargin=dp(4);cell.addView(image,imageSize);
-                    TextView detail=text("正在读取预览…",12);detail.setGravity(Gravity.CENTER);detail.setMinLines(2);
-                    detail.setTag("home.icons.preview.status."+state.key);details.put(state,detail);cell.addView(detail,matchWrap());
-                    if(clicked!=null){cell.setFocusable(true);cell.setContentDescription(state.title+"，编辑图标");cell.setOnClickListener(ignored->clicked.accept(state));}
-                    LinearLayout.LayoutParams size=new LinearLayout.LayoutParams(0,-2,1);size.setMargins(dp(4),dp(8),dp(4),0);line.addView(cell,size);
-                }
+            LinearLayout line=new LinearLayout(context);line.setOrientation(LinearLayout.HORIZONTAL);
+            view.addView(line,matchWrap());
+            for(IconState state:EDITABLE_STATES) {
+                LinearLayout cell=column();cell.setGravity(Gravity.CENTER);cell.setMinimumHeight(dp(124));
+                cell.setPadding(dp(8),dp(8),dp(8),dp(8));cell.setTag("home.icons.state."+state.key);
+                ModuleTheme.preserveColors(cell);cells.put(state,cell);
+                TextView title=text(stateTitle(state),14);title.setGravity(Gravity.CENTER);titles.put(state,title);cell.addView(title,matchWrap());
+                ImageView image=new ImageView(context);image.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+                image.setTag("home.icons.preview."+state.key);images.put(state,image);
+                LinearLayout.LayoutParams imageSize=new LinearLayout.LayoutParams(dp(36),dp(36));
+                imageSize.topMargin=dp(8);imageSize.bottomMargin=dp(4);cell.addView(image,imageSize);
+                TextView detail=text("正在读取预览…",12);detail.setGravity(Gravity.CENTER);detail.setMinLines(2);
+                detail.setTag("home.icons.preview.status."+state.key);details.put(state,detail);cell.addView(detail,matchWrap());
+                if(clicked!=null){cell.setFocusable(true);cell.setContentDescription(stateTitle(state)+"，编辑图标");cell.setOnClickListener(ignored->clicked.accept(state));}
+                LinearLayout.LayoutParams size=new LinearLayout.LayoutParams(0,-2,1);size.setMargins(dp(4),dp(8),dp(4),0);line.addView(cell,size);
             }
             restoreColors();
         }
         void restoreColors() {
-            for(IconState state:IconState.values()) {
-                cells.get(state).setBackgroundColor(state.night?0xff20252b:0xfff3f5f7);
-                titles.get(state).setTextColor(state.night?0xffffffff:0xff20252b);
-                details.get(state).setTextColor(state.night?0xffd9e0e5:0xff46525b);
+            for(IconState state:EDITABLE_STATES) {
+                cells.get(state).setBackgroundColor(0xff20252b);
+                titles.get(state).setTextColor(0xffffffff);
+                details.get(state).setTextColor(0xffd9e0e5);
             }
         }
         void loading(){clear();for(TextView detail:details.values())detail.setText("正在读取预览…");}
         void failed(String message){clear();for(TextView detail:details.values())detail.setText(message);}
         void bind(PreviewSet next,String source) {
             clear();held=next;
-            for(IconState state:IconState.values()) {
+            for(IconState state:EDITABLE_STATES) {
                 HomeIconPreview preview=next.images.get(state);ImageView image=images.get(state);
                 if(preview==null)image.setImageDrawable(null);else image.setImageBitmap(preview.bitmap());
                 image.setVisibility(preview==null?View.GONE:View.VISIBLE);
-                image.setContentDescription(state.title+" · "+source);
+                image.setContentDescription(stateTitle(state)+" · "+source);
                 details.get(state).setText(preview==null?"宿主原图\n无法读取预览":source);
             }
             restoreColors();
@@ -438,7 +436,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
             PreviewSet result=new PreviewSet(key);
             try {
                 pending.check();Map<IconState,String> variants=HomeUiCustomizationSettings.readEncodedIcons(json).get(key);
-                for(IconState state:IconState.values()) {
+                for(IconState state:EDITABLE_STATES) {
                     pending.check();String encoded=variants==null?null:variants.get(state);
                     if(encoded!=null)result.images.put(state,HomeIconPreview.decode(Base64.getDecoder().decode(encoded)));
                 }
@@ -461,6 +459,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
         if(editor!=null){Editor old=editor;editor=null;old.close();old.dialog.dismiss();}
     }
     private MiuixDialogBuilder builder(String title){MiuixDialogBuilder builder=new MiuixDialogBuilder(context,miuix);builder.setTitle(title);return builder;}
+    private static String stateTitle(IconState state){return state.selected?"已选中":"未选中";}
     private TextView text(String value,int size){TextView text=new TextView(context);text.setText(value);text.setTextSize(size);text.setTextColor(ModuleTheme.color(context,0xff313b43));return text;}
     private Button action(String title,String tag,Runnable clicked){Button button=new Button(context);button.setText(title);button.setAllCaps(false);button.setTag(tag);button.setMinHeight(dp(48));button.setOnClickListener(ignored->clicked.run());return button;}
     private LinearLayout column(){LinearLayout layout=new LinearLayout(context);layout.setOrientation(LinearLayout.VERTICAL);return layout;}

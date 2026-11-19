@@ -80,7 +80,7 @@ class HomeIconSettingsDialogMiuixTest {
         }
     }
 
-    @Test fun miuixIconOptionOpensTheLogicalTargetAndItsFourStateEditor() {
+    @Test fun miuixIconOptionOpensTheLogicalTargetAndItsTwoStateEditor() {
         compose.onNodeWithTag("settings.option.首页图标").assertIsEnabled().performClick()
         compose.waitForIdle()
         compose.onNodeWithTag("settings.option.点赞").performClick()
@@ -88,15 +88,17 @@ class HomeIconSettingsDialogMiuixTest {
         compose.runOnIdle {
             val editor = ShadowDialog.getLatestDialog() as AlertDialog
             val root = editor.window!!.decorView
-            for (state in IconState.values()) {
+            for (state in arrayOf(IconState.DAY_NORMAL, IconState.DAY_SELECTED)) {
                 assertNotNull(root.findViewWithTag<View>("home.icons.state.${state.key}"))
                 assertNotNull(root.findViewWithTag<ImageView>("home.icons.preview.${state.key}"))
             }
+            assertNull(root.findViewWithTag<View>("home.icons.state.night_normal"))
+            assertNull(root.findViewWithTag<View>("home.icons.state.night_selected"))
             assertNotNull(root.findViewWithTag<View>("home.icons.builtin.all"))
         }
     }
 
-    @Test fun miuixDefaultBuiltInSaveAppliesFourPreviewsWithoutAnySelectionDialog() {
+    @Test fun miuixDefaultBuiltInSaveAppliesTwoPreviewsWithoutAnySelectionDialog() {
         compose.onNodeWithTag("settings.option.首页图标").assertIsEnabled().performClick()
         compose.waitForIdle()
         compose.onNodeWithTag("settings.option.下导航 · 首页").performClick()
@@ -119,7 +121,7 @@ class HomeIconSettingsDialogMiuixTest {
                 assertNull((dialog as? AlertDialog)?.listView)
             }
             val snapshot = store.getString(HomeUiCustomizationSettings.ICONS, "{}")
-            for (state in IconState.values()) {
+            for (state in arrayOf(IconState.DAY_NORMAL, IconState.DAY_SELECTED)) {
                 val bytes = HomeUiCustomizationSettings.readIcon(snapshot, "nav_bottom:homepage_home", state)
                 assertNotNull(bytes)
                 val saved = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
@@ -129,6 +131,8 @@ class HomeIconSettingsDialogMiuixTest {
                     assertTrue(saved.sameAs(preview))
                 } finally { saved.recycle() }
             }
+            assertNull(HomeUiCustomizationSettings.readIcon(snapshot, "nav_bottom:homepage_home", IconState.NIGHT_NORMAL))
+            assertNull(HomeUiCustomizationSettings.readIcon(snapshot, "nav_bottom:homepage_home", IconState.NIGHT_SELECTED))
         }
     }
 

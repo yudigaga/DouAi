@@ -94,7 +94,7 @@ public final class ThirdPartyDownload {
                         + (tree.isEmpty() ? "Download/DouAi" : "所选目录");
         }, log, flow, 1) != null;
         if (accepted) analytics.manual("download_queued", "下载任务已加入", "accepted");
-        toast(context, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该作品正在下载或队列已满");
+        toast(context, accepted ? "已加入下载任务，可从侧边栏查看进度或取消" : "该作品正在下载或队列已满");
     }
 
     private static final class Session implements AutoCloseable, Application.ActivityLifecycleCallbacks {
@@ -218,7 +218,7 @@ public final class ThirdPartyDownload {
                         + (capturedTree.isEmpty() ? "Download/DouAi" : "所选目录");
             }, logger, flow, 1) != null;
             if (accepted) analytics.manual("download_queued", "下载任务已加入", "accepted");
-            toast(target, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该选择正在下载或队列已满");
+            toast(target, accepted ? "已加入下载任务，可从侧边栏查看进度或取消" : "该选择正在下载或队列已满");
         }
 
         private void failed() {

@@ -101,7 +101,7 @@ public class HomeIconSettingsDialogTest {
         assertFalse(status().contains("已转换"));
     }
 
-    @Test public void builtInNavigationIconConvertsOffMainWithoutAFilePickerAndKeepsOtherOverrides() throws Exception {
+    @Test public void builtInNavigationIconLoadsTransparentWebpOffMainWithoutAFilePickerAndKeepsOtherOverrides() throws Exception {
         byte[] previous=HomeUiIconFixtures.webp(6,6,Color.BLUE);
         store.putString(HomeUiCustomizationSettings.ICONS,HomeUiCustomizationSettings.putIcon("{}","feed_comment",previous));
         openTarget("nav_bottom:homepage_home");chooseState(IconState.DAY_SELECTED,2);
@@ -114,12 +114,7 @@ public class HomeIconSettingsDialogTest {
         assertNull(saved("nav_bottom:homepage_home"));
         assertNotNull(encoded);assertTrue(encoded.length<=32768);
         assertArrayEquals(previous,saved("feed_comment"));
-        Bitmap bitmap=BitmapFactory.decodeByteArray(encoded,0,encoded.length);assertNotNull(bitmap);
-        try {
-            assertEquals(256,bitmap.getWidth());assertEquals(256,bitmap.getHeight());
-            assertEquals(Color.TRANSPARENT,bitmap.getPixel(0,0));
-            assertEquals(0xff20252b,bitmap.getPixel(128,128));
-        }finally{bitmap.recycle();}
+        assertSavedBuiltin("nav_bottom:homepage_home",IconState.DAY_SELECTED,"bottom/01-home");
         assertTrue(status().contains("已保存内置图标"));
     }
 
@@ -199,7 +194,8 @@ public class HomeIconSettingsDialogTest {
         assertEquals(View.GONE,preview(IconState.DAY_NORMAL).getVisibility());
         TextView restored=(TextView)latestView("home.icons.preview.status.day_normal");
         assertTrue(restored.getText().toString().contains("无法读取"));
-        assertPreviewColor(IconState.NIGHT_NORMAL,Color.RED);
+        assertPreviewColor(IconState.DAY_SELECTED,Color.RED);
+        assertNoVisibleView("home.icons.preview.night_normal");
     }
 
     @Test public void closingCancelsThePickerAndRejectsItsLateResult() {
@@ -228,7 +224,7 @@ public class HomeIconSettingsDialogTest {
         assertNotNull(page.dialog().getWindow().getDecorView().findViewWithTag("home.icons.target.nav_top:homepage_hot"));
     }
 
-    @Test public void fourStatePreviewUsesSavedPixelsAndEachStateCanBeEditedIndependently() {
+    @Test public void twoStatePreviewUsesSavedPixelsAndKeepsLegacyNightArtworkWhenEdited() {
         Map<IconState,byte[]> variants=new EnumMap<>(IconState.class);
         variants.put(IconState.DAY_NORMAL,HomeUiIconFixtures.webp(8,8,Color.RED));
         variants.put(IconState.DAY_SELECTED,HomeUiIconFixtures.webp(8,8,Color.GREEN));
@@ -238,58 +234,103 @@ public class HomeIconSettingsDialogTest {
         openTarget("feed_like");
         assertNull(preview(IconState.DAY_NORMAL).getDrawable());worker.runAll();ShadowLooper.idleMainLooper();
         assertPreviewColor(IconState.DAY_NORMAL,Color.RED);assertPreviewColor(IconState.DAY_SELECTED,Color.GREEN);
-        assertPreviewColor(IconState.NIGHT_NORMAL,Color.BLUE);assertPreviewColor(IconState.NIGHT_SELECTED,Color.YELLOW);
-        chooseState(IconState.NIGHT_SELECTED,0);input=HomeUiIconFixtures.webp(8,8,Color.MAGENTA);picker.select();
+        assertEquals("未选中，编辑图标",latestView("home.icons.state.day_normal").getContentDescription().toString());
+        assertEquals("已选中，编辑图标",latestView("home.icons.state.day_selected").getContentDescription().toString());
+        assertNoVisibleView("home.icons.state.night_normal");assertNoVisibleView("home.icons.state.night_selected");
+        chooseState(IconState.DAY_SELECTED,0);input=HomeUiIconFixtures.webp(8,8,Color.MAGENTA);picker.select();
         worker.runAll();ShadowLooper.idleMainLooper();
         assertArrayEquals(variants.get(IconState.DAY_NORMAL),HomeUiCustomizationSettings.readIcon(json(),"feed_like",IconState.DAY_NORMAL));
         assertArrayEquals(variants.get(IconState.NIGHT_NORMAL),HomeUiCustomizationSettings.readIcon(json(),"feed_like",IconState.NIGHT_NORMAL));
-        assertArrayEquals(input,HomeUiCustomizationSettings.readIcon(json(),"feed_like",IconState.NIGHT_SELECTED));
-        worker.runAll();ShadowLooper.idleMainLooper();assertPreviewColor(IconState.NIGHT_SELECTED,Color.MAGENTA);
+        assertArrayEquals(variants.get(IconState.NIGHT_SELECTED),HomeUiCustomizationSettings.readIcon(json(),"feed_like",IconState.NIGHT_SELECTED));
+        assertArrayEquals(input,HomeUiCustomizationSettings.readIcon(json(),"feed_like",IconState.DAY_SELECTED));
+        worker.runAll();ShadowLooper.idleMainLooper();assertPreviewColor(IconState.DAY_SELECTED,Color.MAGENTA);
     }
 
-    @Test public void choosingABuiltInPublishesAllFourStatesAndTheirActualSavedPreviewWithoutConfirmation() throws Exception {
+    @Test public void editingARawNavigationStatePreservesLegacyNightArtworkAndExplicitNull() throws Exception {
+        Map<IconState,byte[]> variants=new EnumMap<>(IconState.class);
+        variants.put(IconState.DAY_NORMAL,HomeUiIconFixtures.webp(8,8,Color.RED));
+        variants.put(IconState.DAY_SELECTED,HomeUiIconFixtures.webp(8,8,Color.GREEN));
+        variants.put(IconState.NIGHT_NORMAL,HomeUiIconFixtures.webp(8,8,Color.BLUE));
+        variants.put(IconState.NIGHT_SELECTED,null);
+        org.json.JSONObject raw=new org.json.JSONObject(HomeUiCustomizationSettings.putIcons("{}","nav_bottom:homepage_home",variants));
+        raw.put("nav_bottom:HOME",raw.remove("nav_bottom:homepage_home"));
+        String previous=HomeUiCustomizationSettings.putIcon(raw.toString(),"feed_comment",input);
+        store.putString(HomeUiCustomizationSettings.ICONS,previous);
+        openTarget("nav_bottom:homepage_home");worker.runAll();ShadowLooper.idleMainLooper();
+        assertEquals(previous,json());
+        chooseState(IconState.DAY_SELECTED,0);input=HomeUiIconFixtures.webp(8,8,Color.MAGENTA);picker.select();
+        worker.runAll();ShadowLooper.idleMainLooper();
+        assertArrayEquals(variants.get(IconState.DAY_NORMAL),HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",IconState.DAY_NORMAL));
+        assertArrayEquals(input,HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",IconState.DAY_SELECTED));
+        assertArrayEquals(variants.get(IconState.NIGHT_NORMAL),HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",IconState.NIGHT_NORMAL));
+        org.json.JSONObject saved=new org.json.JSONObject(json());
+        assertFalse(saved.has("nav_bottom:HOME"));
+        org.json.JSONObject states=saved.getJSONObject("nav_bottom:homepage_home");
+        assertTrue(states.has("night_selected"));assertTrue(states.isNull("night_selected"));
+        assertArrayEquals(HomeUiCustomizationSettings.readIcon(previous,"feed_comment"),saved("feed_comment"));
+        worker.runAll();ShadowLooper.idleMainLooper();
+        assertPreviewColor(IconState.DAY_SELECTED,Color.MAGENTA);
+    }
+
+    @Test public void savingTwoBuiltInStatesPreservesExistingNightArtworkAndExplicitNull() throws Exception {
+        byte[] legacyNight=HomeUiIconFixtures.webp(8,8,Color.BLUE);
+        Map<IconState,byte[]> variants=new EnumMap<>(IconState.class);
+        variants.put(IconState.DAY_NORMAL,input);variants.put(IconState.NIGHT_NORMAL,legacyNight);
+        variants.put(IconState.NIGHT_SELECTED,null);
+        store.putString(HomeUiCustomizationSettings.ICONS,HomeUiCustomizationSettings.putIcons("{}","nav_bottom:homepage_home",variants));
+        openTarget("nav_bottom:homepage_home");latestView("home.icons.builtin.all").performClick();
+        worker.runAll();ShadowLooper.idleMainLooper();
+        assertArrayEquals(legacyNight,HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",IconState.NIGHT_NORMAL));
+        org.json.JSONObject states=new org.json.JSONObject(json()).getJSONObject("nav_bottom:homepage_home");
+        assertTrue(states.has("night_selected"));assertTrue(states.isNull("night_selected"));
+        assertSavedBuiltin("nav_bottom:homepage_home",IconState.DAY_SELECTED,"bottom/01-home");
+        assertNoVisibleView("home.icons.state.night_normal");assertNoVisibleView("home.icons.state.night_selected");
+    }
+
+    @Test public void choosingABuiltInPublishesTwoTransparentVectorStatesAndTheirActualSavedPreviewWithoutConfirmation() throws Exception {
         openTarget("nav_bottom:homepage_home");
         View all=latestView("home.icons.builtin.all");assertEquals("使用内置图标并保存",((android.widget.Button)all).getText().toString());assertTrue(all.performClick());
         assertNoSelectionDialog();
         assertEquals("{}",json());worker.runAllOffMain();assertEquals("{}",json());ShadowLooper.idleMainLooper();
         assertNoConfirmation();
-        ImageView day=preview(IconState.DAY_SELECTED),night=preview(IconState.NIGHT_SELECTED);
-        assertEquals(0xff20252b,((BitmapDrawable)day.getDrawable()).getBitmap().getPixel(128,128));
-        assertEquals(Color.WHITE,((BitmapDrawable)night.getDrawable()).getBitmap().getPixel(128,128));
-        for(IconState state:IconState.values()) {
+        ImageView selected=preview(IconState.DAY_SELECTED);
+        assertSavedBuiltin("nav_bottom:homepage_home",IconState.DAY_NORMAL,"bottom/01-home");
+        assertSavedBuiltin("nav_bottom:homepage_home",IconState.DAY_SELECTED,"bottom/01-home");
+        for(IconState state:new IconState[]{IconState.DAY_NORMAL,IconState.DAY_SELECTED}) {
             byte[] bytes=HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",state);assertNotNull(bytes);
             Bitmap saved=BitmapFactory.decodeByteArray(bytes,0,bytes.length);
             try {assertTrue(saved.sameAs(((BitmapDrawable)preview(state).getDrawable()).getBitmap()));}
             finally {saved.recycle();}
         }
+        assertNull(HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",IconState.NIGHT_NORMAL));
+        assertNull(HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",IconState.NIGHT_SELECTED));
+        assertNoVisibleView("home.icons.preview.night_normal");assertNoVisibleView("home.icons.preview.night_selected");
         assertTrue(status().contains("返回首页查看"));assertNull(picker.intent);
-        Bitmap visible=((BitmapDrawable)day.getDrawable()).getBitmap();page.close();assertTrue(visible.isRecycled());assertAllBudgetAvailable();
+        Bitmap visible=((BitmapDrawable)selected.getDrawable()).getBitmap();page.close();assertTrue(visible.isRecycled());assertAllBudgetAvailable();
     }
 
-    @Test public void oneStateUsesItsOwnDayNightAndSelectionStyleWithoutAnAppearanceChooser() {
-        openTarget("nav_bottom:homepage_profile");chooseState(IconState.NIGHT_SELECTED,2);
+    @Test public void oneStateUsesTransparentBuiltinSelectionWithoutAnAppearanceChooser() throws Exception {
+        openTarget("nav_bottom:homepage_profile");chooseState(IconState.DAY_SELECTED,2);
         worker.runAll();ShadowLooper.idleMainLooper();assertNoConfirmation();
         for(IconState state:IconState.values()) {
             byte[] bytes=HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_profile",state);
-            if(state==IconState.NIGHT_SELECTED)assertNotNull(bytes);else assertNull(bytes);
+            if(state==IconState.DAY_SELECTED)assertNotNull(bytes);else assertNull(bytes);
         }
-        Bitmap actual=((BitmapDrawable)preview(IconState.NIGHT_SELECTED).getDrawable()).getBitmap();
-        boolean white=false;for(int y=0;y<actual.getHeight() && !white;y++)for(int x=0;x<actual.getWidth();x++)if(actual.getPixel(x,y)==Color.WHITE){white=true;break;}
-        assertTrue(white);
+        assertSavedBuiltin("nav_bottom:homepage_profile",IconState.DAY_SELECTED,"bottom/05-profile");
         for(android.app.Dialog shown:ShadowDialog.getShownDialogs())if(shown.isShowing() && shown instanceof AlertDialog)
             assertNull("Only the editor remains; no style or confirmation chooser is opened",((AlertDialog)shown).getListView());
     }
 
     @Test public void aNewerSingleStateRequestRejectsAnOlderDecodedWholeSet() {
         openTarget("nav_bottom:homepage_home");latestView("home.icons.builtin.all").performClick();worker.runAll();
-        chooseState(IconState.NIGHT_SELECTED,2);worker.runAll();ShadowLooper.idleMainLooper();
-        for(IconState state:IconState.values())if(state==IconState.NIGHT_SELECTED)
+        chooseState(IconState.DAY_SELECTED,2);worker.runAll();ShadowLooper.idleMainLooper();
+        for(IconState state:IconState.values())if(state==IconState.DAY_SELECTED)
             assertNotNull(HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",state));
         else assertNull(HomeUiCustomizationSettings.readIcon(json(),"nav_bottom:homepage_home",state));
         page.close();assertAllBudgetAvailable();
     }
 
-    @Test public void failureOnTheThirdBuiltInSourceKeepsTheWholePreviousConfigurationAndReleasesBudget() {
+    @Test public void failureOnTheSecondBuiltInSourceKeepsTheWholePreviousConfigurationAndReleasesBudget() {
         page.close();page.dialog().dismiss();int[] opened={0};
         String previous=HomeUiCustomizationSettings.putIcon("{}","feed_comment",input);store.putString(HomeUiCustomizationSettings.ICONS,previous);
         page=new HomeIconSettingsDialog(activity,store,false,(dialog,dismiss)->{
@@ -297,12 +338,12 @@ public class HomeIconSettingsDialogTest {
         },new HomeIconSettingsDialog.Files() {
             @Override public InputStream read(Uri uri){return new ByteArrayInputStream(input);}
             @Override public InputStream builtIn(BuiltInNavigationIcons.Entry entry,BuiltInNavigationIcons.Style style) throws Exception {
-                if(++opened[0]==3)throw new java.io.IOException("Third built-in source unavailable");
+                if(++opened[0]==2)throw new java.io.IOException("Second built-in source unavailable");
                 return BuiltInNavigationIcons.open(entry,style);
             }
         },picker,worker);
         page.dialog().show();openTarget("nav_bottom:homepage_home");latestView("home.icons.builtin.all").performClick();
-        worker.runAll();ShadowLooper.idleMainLooper();assertEquals(3,opened[0]);assertEquals(previous,json());assertTrue(status().contains("保留"));
+        worker.runAll();ShadowLooper.idleMainLooper();assertEquals(2,opened[0]);assertEquals(previous,json());assertTrue(status().contains("保留"));
         page.close();assertAllBudgetAvailable();
     }
 
@@ -368,7 +409,7 @@ public class HomeIconSettingsDialogTest {
         assertEquals("{}",json());
         for(IconState state:IconState.values())assertNull(HomeUiCustomizationSettings.readIcon(json(),"feed_like",state));
         openTarget("feed_like");worker.runAll();ShadowLooper.idleMainLooper();
-        for(IconState state:IconState.values()) {
+        for(IconState state:new IconState[]{IconState.DAY_NORMAL,IconState.DAY_SELECTED}) {
             assertNull(preview(state).getDrawable());
             assertEquals(View.GONE,preview(state).getVisibility());
             TextView original=(TextView)latestView("home.icons.preview.status."+state.key);
@@ -377,15 +418,49 @@ public class HomeIconSettingsDialogTest {
         }
     }
 
-    @Test public void feedWithoutADefinedDefaultKeepsCustomImportAndHasNoNavigationHideAction() {
+    @Test public void feedWithADefinedDefaultKeepsCustomImportRestoreAndHasNoNavigationHideAction() throws Exception {
         openTarget("feed_like");android.widget.Button builtIn=(android.widget.Button)latestView("home.icons.builtin.all");
-        assertFalse(builtIn.isEnabled());assertTrue(((TextView)latestView("home.icons.builtin.unavailable")).getText().toString().contains("自定义"));
+        assertTrue(builtIn.isEnabled());assertNoVisibleView("home.icons.builtin.unavailable");
         assertNull(((AlertDialog)ShadowDialog.getLatestDialog()).getWindow().getDecorView().findViewWithTag("home.icons.visibility"));
-        builtIn.performClick();worker.runAll();ShadowLooper.idleMainLooper();assertEquals("{}",json());assertNull(picker.intent);
+        assertNotNull(latestView("home.icons.restore.all"));
+        builtIn.performClick();worker.runAll();ShadowLooper.idleMainLooper();assertNull(picker.intent);
+        assertSavedBuiltin("feed_like",IconState.DAY_NORMAL,"feed/01-like");
+        assertSavedBuiltin("feed_like",IconState.DAY_SELECTED,"feed/01-like");
         latestView("home.icons.state.day_normal").performClick();ListView actions=((AlertDialog)ShadowDialog.getLatestDialog()).getListView();
-        assertEquals(2,actions.getAdapter().getCount());assertEquals("导入 SVG / WebP",actions.getAdapter().getItem(0));
+        assertEquals(3,actions.getAdapter().getCount());assertEquals("导入 SVG / WebP",actions.getAdapter().getItem(0));
+        assertEquals("恢复此状态原图",actions.getAdapter().getItem(1));
+        assertEquals("使用内置图标并保存",actions.getAdapter().getItem(2));
     }
-
+    @Test public void allSixFeedBuiltinsSaveTransparentVectorPairsAndPreviewsWithoutNavigationActions() throws Exception {
+        String[][] entries={{"feed_like","feed/01-like"},{"feed_comment","feed/02-comment"},
+                {"feed_collect","feed/03-collect"},{"feed_share","feed/04-share"},
+                {"feed_follow","feed/05-follow"},{"feed_mute","feed/06-mute"}};
+        for(int index=0;index<entries.length;index++) {
+            String key=entries[index][0],path=entries[index][1];openTarget(key);
+            worker.runAll();ShadowLooper.idleMainLooper();String previous=json();
+            android.widget.Button builtIn=(android.widget.Button)latestView("home.icons.builtin.all");
+            assertTrue(key,builtIn.isEnabled());assertNoVisibleView("home.icons.builtin.unavailable");
+            assertNull(((AlertDialog)ShadowDialog.getLatestDialog()).getWindow().getDecorView().findViewWithTag("home.icons.visibility"));
+            assertTrue(builtIn.performClick());assertEquals(previous,json());
+            worker.runAll();assertEquals("Worker alone cannot publish a partial pair: "+key,previous,json());
+            ShadowLooper.idleMainLooper();assertNull(picker.intent);assertNoConfirmation();assertNoSelectionDialog();
+            assertSavedBuiltin(key,IconState.DAY_NORMAL,path);
+            assertSavedBuiltin(key,IconState.DAY_SELECTED,path);
+            org.json.JSONObject savedPair=new org.json.JSONObject(json()).getJSONObject(key);
+            assertEquals("Only the two editable day fields are created: "+key,2,savedPair.length());
+            assertFalse(savedPair.has(IconState.NIGHT_NORMAL.key));assertFalse(savedPair.has(IconState.NIGHT_SELECTED.key));
+            for(int earlier=0;earlier<index;earlier++)for(IconState state:IconState.values())
+                assertArrayEquals("Previously saved Feed artwork must survive: "+entries[earlier][0]+"/"+state,
+                        HomeUiCustomizationSettings.readIcon(previous,entries[earlier][0],state),
+                        HomeUiCustomizationSettings.readIcon(json(),entries[earlier][0],state));
+            assertTrue(latestView("home.icons.state.day_normal").performClick());
+            AlertDialog actions=(AlertDialog)ShadowDialog.getLatestDialog();ListView list=actions.getListView();
+            assertEquals(3,list.getAdapter().getCount());assertEquals("导入 SVG / WebP",list.getAdapter().getItem(0));
+            assertEquals("恢复此状态原图",list.getAdapter().getItem(1));
+            assertEquals("使用内置图标并保存",list.getAdapter().getItem(2));
+            assertTrue(actions.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());ShadowLooper.idleMainLooper();
+        }
+    }
     @Test public void hidingAndShowingNavigationPreserveAllArtAndTheActualEditorPreview() {
         String icons=HomeUiCustomizationSettings.putIcon("{}","nav_bottom:homepage_home",input);store.putString(HomeUiCustomizationSettings.ICONS,icons);
         openTarget("nav_bottom:homepage_home");worker.runAll();ShadowLooper.idleMainLooper();
@@ -402,10 +477,10 @@ public class HomeIconSettingsDialogTest {
         assertEquals("隐藏此导航项",((android.widget.Button)latestView("home.icons.visibility")).getText().toString());
     }
 
-    @Test public void restoringFourStateArtworkDoesNotImplicitlyShowHiddenNavigation() {
+    @Test public void restoringPositionArtworkDoesNotImplicitlyShowHiddenNavigation() {
         store.putString(HomeUiCustomizationSettings.ICONS,HomeUiCustomizationSettings.putIcon("{}","nav_bottom:homepage_home",input));
         String hidden=HomeUiCustomizationSettings.setNavigationHidden("[]","nav_bottom:homepage_home",true);store.putString(HomeUiCustomizationSettings.HIDDEN_NAVIGATION,hidden);
-        openTarget("nav_bottom:homepage_home");assertEquals("恢复四态原图",((android.widget.Button)latestView("home.icons.restore.all")).getText().toString());
+        openTarget("nav_bottom:homepage_home");assertEquals("恢复此位置原图",((android.widget.Button)latestView("home.icons.restore.all")).getText().toString());
         latestView("home.icons.restore.all").performClick();worker.runAll();ShadowLooper.idleMainLooper();
         assertEquals("{}",json());assertEquals(hidden,hiddenJson());
         assertEquals("显示此导航项",((android.widget.Button)latestView("home.icons.visibility")).getText().toString());
@@ -419,7 +494,7 @@ public class HomeIconSettingsDialogTest {
         openTarget("nav_top:unknown_hidden_channel");worker.runAll();ShadowLooper.idleMainLooper();
         assertFalse(latestView("home.icons.builtin.all").isEnabled());
         assertEquals("显示此导航项",((android.widget.Button)latestView("home.icons.visibility")).getText().toString());
-        for(IconState state:IconState.values())assertNull(preview(state).getDrawable());
+        for(IconState state:new IconState[]{IconState.DAY_NORMAL,IconState.DAY_SELECTED})assertNull(preview(state).getDrawable());
         latestView("home.icons.visibility").performClick();worker.runAll();ShadowLooper.idleMainLooper();
         assertTrue(HomeUiCustomizationSettings.readHiddenNavigation(hiddenJson()).isEmpty());assertEquals("{}",json());
     }
@@ -442,6 +517,24 @@ public class HomeIconSettingsDialogTest {
         page.close();assertAllBudgetAvailable();
     }
 
+    private void assertSavedBuiltin(String key,IconState state,String path) throws Exception {
+        BuiltInNavigationIcons.Entry entry=BuiltInNavigationIcons.entryForPosition(key);
+        assertNotNull("Mapped built-in remains available: "+key,entry);
+        assertEquals(path,entry.path);
+        byte[] expected;
+        try(InputStream source=BuiltInNavigationIcons.open(entry,BuiltInNavigationIcons.styleFor(state))) {
+            expected=source.readAllBytes();
+        }
+        assertArrayEquals("Selected built-in WebP bytes: "+key+"/"+state,expected,
+                HomeUiCustomizationSettings.readIcon(json(),key,state));
+        Bitmap expectedPixels=BitmapFactory.decodeByteArray(expected,0,expected.length);assertNotNull(expectedPixels);
+        try {
+            assertEquals(256,expectedPixels.getWidth());assertEquals(256,expectedPixels.getHeight());
+            assertEquals(0,android.graphics.Color.alpha(expectedPixels.getPixel(0,0)));
+            assertTrue("Preview must show generated transparent symbol pixels: "+key+"/"+state,
+                    expectedPixels.sameAs(((BitmapDrawable)preview(state).getDrawable()).getBitmap()));
+        }finally{expectedPixels.recycle();}
+    }
     private void choose(String key,int index) {
         openTarget(key);chooseState(IconState.DAY_NORMAL,index);
     }
@@ -462,6 +555,10 @@ public class HomeIconSettingsDialogTest {
             View view=dialog.getWindow().getDecorView().findViewWithTag(tag);if(view!=null)return view;
         }
         fail("Visible view missing: "+tag);return null;
+    }
+    private void assertNoVisibleView(String tag) {
+        for(android.app.Dialog shown:ShadowDialog.getShownDialogs())if(shown.isShowing() && shown.getWindow()!=null)
+            assertNull(shown.getWindow().getDecorView().findViewWithTag(tag));
     }
     private ImageView preview(IconState state){return (ImageView)latestView("home.icons.preview."+state.key);}
     private void assertPreviewColor(IconState state,int color){

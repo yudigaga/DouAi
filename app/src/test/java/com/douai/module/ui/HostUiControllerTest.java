@@ -3,6 +3,7 @@ package com.douai.module.ui;
 import android.app.Activity;
 import android.app.Dialog;
 import android.content.SharedPreferences;
+import android.os.Bundle;
 import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
@@ -400,10 +401,8 @@ public final class HostUiControllerTest {
         HostUiController controller = new HostUiController(RuntimeEnvironment.getApplication(), logs::add);
         ModuleSettingsScreen screen = controller.createSettingsScreen(activity, () -> { });
         try {
-            View settings = screen.createView(); activity.setContentView(settings);
-            settings.findViewWithTag("settings.category.EXTENSION").performClick();
-            Dialog extension = ShadowDialog.getLatestDialog();
-            extension.getWindow().getDecorView().findViewWithTag("settings.option.本地数据分析").performClick();
+            activity.setContentView(screen.createView());
+            screen.openSidebarEntry("analytics");
             idleMainLooper();
             Dialog analytics = ShadowDialog.getLatestDialog();
             assertTrue(analytics.isShowing());

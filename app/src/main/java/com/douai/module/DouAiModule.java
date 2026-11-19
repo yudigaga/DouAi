@@ -1630,8 +1630,7 @@ public final class DouAiModule extends XposedModule {
         } catch (Throwable unavailable) { /* Observability cannot interrupt feature installation. */ }
     }
 
-    private Bundle diagnosticsSnapshot() {
-        Bundle snapshot = new Bundle(scanDiagnostics);
+    private synchronized void writeConfigurationDiagnostics(Bundle snapshot) {
         snapshot.putString("configuration.read_status", configurationReadStatus.name());
         snapshot.putString("configuration.read_failure_class", configurationReadFailureClass);
         ConfigurationPublication<ConfigurationSnapshot> publication = configurationPublication;
@@ -1651,6 +1650,11 @@ public final class DouAiModule extends XposedModule {
                 snapshot.putString(prefix + "failure_class", node.failureClass);
             }
         }
+    }
+
+    private Bundle diagnosticsSnapshot() {
+        Bundle snapshot = new Bundle(scanDiagnostics);
+        writeConfigurationDiagnostics(snapshot);
         snapshot.putBoolean("feature.comment_ai.installed", commentAiAnalysisHook != null && commentAiAnalysisHook.isActive());
         snapshot.putBoolean("feature.home_sidebar.installed", homeSidebarGestureHook != null && homeSidebarGestureHook.isActive()
                 && homeSidebarModuleHook != null && homeSidebarModuleHook.isActive());

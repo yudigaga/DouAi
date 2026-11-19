@@ -136,7 +136,7 @@ public final class ModuleSettingsDependencyTest {
         assertFalse(store.load().downloadEnabled);
         visible(page, "settings.option.下载方式");
         visible(page, "settings.option.保存位置");
-        visible(page, "settings.option.下载任务");
+        assertNull(page.findViewWithTag("settings.option.下载任务"));
         visible(page, "settings.toggle.直接保存全部媒体");
         hidden(page, "settings.option.文件名模板");
         toggle(page, "自定义文件名", true);
@@ -357,7 +357,7 @@ public final class ModuleSettingsDependencyTest {
         View page = open("EXTENSION");
         visible(page, "settings.option.AI 模型设置");
         visible(page, "settings.option.文本转语音设置");
-        visible(page, "settings.option.本地数据分析");
+        assertNull(page.findViewWithTag("settings.option.本地数据分析"));
         visible(page, "settings.option.配置备份");
         assertFalse(store.getBoolean("native_auto_reply", false));
         assertFalse(store.getBoolean("native_auto_comment", false));

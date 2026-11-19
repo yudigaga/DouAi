@@ -460,10 +460,10 @@ public final class LocalAnalytics implements AutoCloseable {
             operation.finish(DouAiLog.Outcome.CANCELLED, "reader_interrupted", "empty=true");
             Thread.currentThread().interrupt();
             return AnalyticsSnapshot.empty();
-        } catch (Exception ignored) {
-            operation.error("snapshot_read", ignored);
+        } catch (Exception failure) {
+            operation.error("snapshot_read", failure);
             operation.finish(DouAiLog.Outcome.FAILED, "snapshot_read_failed", "days=" + days);
-            throw new IllegalStateException("无法读取本地统计数据");
+            throw new IllegalStateException("无法读取本地统计数据", failure);
         }
     }
 
@@ -576,11 +576,11 @@ public final class LocalAnalytics implements AutoCloseable {
                 }
                 lastPrunedDay = null;
                 operation.finish(DouAiLog.Outcome.SUCCESS, "database_and_sidecars_absent", "existence_verified=true; enabled_flag_preserved=true");
-            } catch (Exception ignored) {
-                operation.error("database_delete", ignored);
+            } catch (Exception failure) {
+                operation.error("database_delete", failure);
                 operation.finish(DouAiLog.Outcome.FAILED, "clear_failed", "collection=disabled");
                 failClosed();
-                throw new IllegalStateException("无法清除本地统计数据");
+                throw new IllegalStateException("无法清除本地统计数据", failure);
             } finally {
                 // Observations accepted while deletion waited for the DB belong to the clear
                 // boundary as well. Fence them and reset their consecutive-view suppression.
@@ -956,9 +956,9 @@ public final class LocalAnalytics implements AutoCloseable {
                         trend(start, end, dailyViews), ranks(db, range, "type"), ranks(db, range, "author"),
                         ranks(db, range, "topic"), ranks(db, range, "feature"), hours, recent,
                         readPortrait(db, start, end, views, features, unique, repeated, first));
-            } catch (Exception ignored) {
+            } catch (Exception failure) {
                 failClosed();
-                throw new IllegalStateException("无法读取本地统计数据");
+                throw new IllegalStateException("无法读取本地统计数据", failure);
             }
         }
     }
