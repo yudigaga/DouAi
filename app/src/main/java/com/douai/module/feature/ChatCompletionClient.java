@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -21,6 +22,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.FutureTask;
@@ -31,8 +33,11 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Provider-aware text client for module-local model profiles. */
 public final class ChatCompletionClient {
@@ -53,6 +58,9 @@ public final class ChatCompletionClient {
     private long historyEpoch;
     private final TestChatMemory memory;
     private final Consumer<String> diagnostics;
+    private final ConnectionFactory connections;
+
+    interface ConnectionFactory { HttpURLConnection open(URL url) throws IOException; }
 
     /** Safe transport metadata only; never retains provider text, URLs, headers or a raw cause. */
     public static final class ReplyFailure extends IllegalStateException {
@@ -71,6 +79,130 @@ public final class ChatCompletionClient {
         public int responseChars() { return responseChars; }
     }
 
+    /** One text-only request with its own cancellation and no conversation or tool capabilities. */
+    public static final class IsolatedTextRequest {
+        private static final Pattern JSON_ESCAPES = Pattern.compile("\\\\(?:u([0-9a-fA-F]{4})|([\"\\\\/]))");
+        private final ChatCompletionClient client;
+        private final AtomicBoolean started = new AtomicBoolean();
+        private final AtomicBoolean cancelledBeforeStart = new AtomicBoolean();
+
+        public IsolatedTextRequest() { this(ChatCompletionClient::openConnection); }
+
+        IsolatedTextRequest(ConnectionFactory connections) {
+            client = new ChatCompletionClient(null, null, HistoryImageBudget.SHARED, connections);
+        }
+
+        /** Uses an application-owned instruction and the parent's absolute System.nanoTime() deadline. */
+        public String execute(AiModelSettings settings, String modelId, String systemInstruction,
+                              String userText, long parentDeadlineNanos, int maxOutputTokens) throws Exception {
+            if (!started.compareAndSet(false, true)) throw new IllegalStateException("模型请求已经使用");
+            if (cancelledBeforeStart.get() || Thread.currentThread().isInterrupted()) throw cancelled();
+            long startedNanos = System.nanoTime();
+            if (parentDeadlineNanos - startedNanos <= 0) throw new SocketTimeoutException("AI request deadline exceeded");
+            if (systemInstruction == null || systemInstruction.trim().isEmpty() || systemInstruction.length() > MAX_REPLY_CHARS
+                    || userText == null || userText.trim().isEmpty() || userText.length() > MAX_REPLY_CHARS
+                    || maxOutputTokens < 1 || maxOutputTokens > 131072) {
+                throw new IllegalArgumentException("AI 扩展请求的输入或预算无效");
+            }
+            AiModelConfig source = selectedProfile(settings, modelId);
+            AiModelConfig config = isolatedProfile(source, systemInstruction, maxOutputTokens);
+            List<String> secrets = credentials(config);
+            if (containsCredential(systemInstruction, secrets) || containsCredential(userText, secrets)) {
+                throw new IllegalArgumentException("模型请求文字包含凭据");
+            }
+            RequestDeadline deadline = new RequestDeadline(startedNanos, config.timeoutSeconds, parentDeadlineNanos);
+            String result;
+            try {
+                result = client.sendBoundedStream(config, "", userText, Collections.emptyList(), "", false,
+                        "", ignored -> { }, MAX_STRUCTURED_REPLY_CHARS, null, null, deadline, cancelledBeforeStart);
+            } catch (ReplyFailure failure) {
+                throw failure;
+            } catch (SocketTimeoutException timeout) {
+                throw new SocketTimeoutException("AI request deadline exceeded");
+            } catch (CancellationException cancellation) {
+                throw cancelled();
+            } catch (Exception failure) {
+                throw new IOException("AI 扩展模型请求失败");
+            }
+            if (cancelledBeforeStart.get() || Thread.currentThread().isInterrupted()) throw cancelled();
+            deadline.remainingMillis();
+            if (containsCredential(result, secrets)) throw new IOException("模型回复包含凭据");
+            return result;
+        }
+
+        public void cancel() {
+            cancelledBeforeStart.set(true);
+            client.cancelCurrentRequest();
+        }
+
+        private static AiModelConfig selectedProfile(AiModelSettings settings, String modelId) {
+            if (settings != null && modelId != null && !modelId.isEmpty()) {
+                for (AiModelConfig config : settings.configs) if (config.id.equals(modelId)) return config;
+            }
+            throw new IllegalStateException("所选 AI 扩展模型配置已不存在，请重新选择");
+        }
+
+        private static AiModelConfig isolatedProfile(AiModelConfig source, String instruction, int maxOutputTokens) throws Exception {
+            try { AiModelConfig.validateAddress(source.apiEndpoint, false); }
+            catch (IllegalArgumentException invalid) { throw new IllegalArgumentException("AI 扩展需要有效的 HTTPS 模型地址"); }
+            JSONObject headers = new JSONObject();
+            for (Map.Entry<String, String> header : source.headers().entrySet()) {
+                switch (header.getKey().toLowerCase(Locale.ROOT)) {
+                    case "authorization":
+                    case "api-key":
+                    case "x-api-key":
+                    case "x-goog-api-key":
+                        headers.put(header.getKey(), header.getValue());
+                        break;
+                    default:
+                        break;
+                }
+            }
+            if (AiModelConfig.ANTHROPIC.equals(source.protocol)) headers.put("anthropic-version", "2023-06-01");
+            AiModelConfig config = AiModelConfig.fromJson(new JSONObject()
+                    .put("id", source.id).put("name", source.name).put("protocol", source.protocol)
+                    .put("responseMode", source.responseMode).put("apiEndpoint", source.apiEndpoint)
+                    .put("modelName", source.modelName).put("apiKey", source.apiKey).put("customHeaders", headers.toString())
+                    .put("systemPrompt", instruction).put("contextRounds", 0).put("timeoutSeconds", source.timeoutSeconds)
+                    .put("maxTokensEnabled", true).put("maxTokens", source.maxTokensEnabled
+                            ? Math.min(source.maxTokens, maxOutputTokens) : maxOutputTokens));
+            config.validate(true);
+            return config;
+        }
+
+        private static List<String> credentials(AiModelConfig config) {
+            List<String> secrets = new ArrayList<>();
+            if (!config.apiKey.isEmpty()) secrets.add(config.apiKey);
+            for (Map.Entry<String, String> header : config.headers().entrySet()) {
+                if (header.getKey().equalsIgnoreCase("anthropic-version")) continue;
+                String value = header.getValue().trim();
+                if (value.isEmpty()) continue;
+                secrets.add(value);
+                if (header.getKey().equalsIgnoreCase("Authorization")) {
+                    int separator = value.indexOf(' ');
+                    if (separator >= 0) secrets.add(value.substring(separator + 1).trim());
+                }
+            }
+            return secrets;
+        }
+
+        private static boolean containsCredential(String text, List<String> secrets) {
+            for (String secret : secrets) if (!secret.isEmpty() && text.contains(secret)) return true;
+            if (secrets.isEmpty() || text.indexOf('\\') < 0) return false;
+            // A generated JSON document may turn escaped text into plaintext after this boundary.
+            Matcher matcher = JSON_ESCAPES.matcher(text);
+            StringBuffer unescaped = new StringBuffer(text.length());
+            while (matcher.find()) {
+                String unicode = matcher.group(1);
+                String replacement = unicode == null ? matcher.group(2) : String.valueOf((char) Integer.parseInt(unicode, 16));
+                matcher.appendReplacement(unescaped, Matcher.quoteReplacement(replacement));
+            }
+            matcher.appendTail(unescaped);
+            for (String secret : secrets) if (!secret.isEmpty() && unescaped.indexOf(secret) >= 0) return true;
+            return false;
+        }
+    }
+
     public ChatCompletionClient() { this(null, null); }
 
     public ChatCompletionClient(TestChatMemory memory, Consumer<String> diagnostics) {
@@ -78,9 +210,19 @@ public final class ChatCompletionClient {
     }
 
     ChatCompletionClient(TestChatMemory memory, Consumer<String> diagnostics, HistoryImageBudget historyImageBudget) {
+        this(memory, diagnostics, historyImageBudget, ChatCompletionClient::openConnection);
+    }
+
+    private ChatCompletionClient(TestChatMemory memory, Consumer<String> diagnostics, HistoryImageBudget historyImageBudget,
+                                 ConnectionFactory connections) {
         this.memory = memory;
         this.diagnostics = diagnostics == null ? ignored -> { } : diagnostics;
         this.historyImageBudget = java.util.Objects.requireNonNull(historyImageBudget);
+        this.connections = java.util.Objects.requireNonNull(connections);
+    }
+
+    private static HttpURLConnection openConnection(URL url) throws IOException {
+        return (HttpURLConnection) url.openConnection();
     }
 
     private static ThreadPoolExecutor ioWorkers() {
@@ -219,13 +361,26 @@ public final class ChatCompletionClient {
     private String sendBoundedStream(AiModelConfig config, String conversation, String prompt, List<ChatImage> images,
                                        String secondary, boolean remember, String document, IntConsumer sent,
                                        int maximumReplyChars, Consumer<String> onPartial, DouyinSearch search) throws Exception {
-        ActiveRequest request = new ActiveRequest();
+        return sendBoundedStream(config, conversation, prompt, images, secondary, remember, document, sent,
+                maximumReplyChars, onPartial, search, new RequestDeadline(System.nanoTime(), config.timeoutSeconds), null);
+    }
+
+    private String sendBoundedStream(AiModelConfig config, String conversation, String prompt, List<ChatImage> images,
+                                     String secondary, boolean remember, String document, IntConsumer sent,
+                                     int maximumReplyChars, Consumer<String> onPartial, DouyinSearch search,
+                                     RequestDeadline deadline, AtomicBoolean cancelledBeforeStart) throws Exception {
+        ActiveRequest request = new ActiveRequest(cancelledBeforeStart);
         request.onPartial = onPartial;
         request.asynchronous = true;
-        RequestDeadline deadline = new RequestDeadline(System.nanoTime(), config.timeoutSeconds);
-        FutureTask<String> io = new FutureTask<>(() -> search == null
-                ? send(config, conversation, prompt, images, secondary, remember, document, sent, maximumReplyChars, request, deadline)
-                : sendWithSearch(config, conversation, prompt, images, secondary, remember, document, search, request, deadline));
+        FutureTask<String> io = new FutureTask<>(() -> {
+            if (cancelledBeforeStart != null) {
+                ensureActive(request);
+                deadline.remainingMillis();
+            }
+            return search == null
+                    ? send(config, conversation, prompt, images, secondary, remember, document, sent, maximumReplyChars, request, deadline)
+                    : sendWithSearch(config, conversation, prompt, images, secondary, remember, document, search, request, deadline);
+        });
         request.io = io;
         synchronized (requestLock) { ensureActive(request); activeRequest = request; }
         try {
@@ -631,7 +786,7 @@ public final class ChatCompletionClient {
             ensureActive(request);
             diagnostic(config, secondaryPrompt, prior.size(), "prepare", 0);
             JSONObject body = requestBody(config, prior, withDocument(prompt, document), images, secondaryPrompt);
-            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection = connections.open(new URL(url));
             synchronized (requestLock) {
                 request.connection = connection;
                 ensureActive(request);
@@ -694,7 +849,8 @@ public final class ChatCompletionClient {
             if (request.ownsTrace && !request.asynchronous) request.trace.finish(DouAiLog.Outcome.SUCCESS, "model_output_validated", "chars=" + result.length() + ";evidence=protocol_completion_and_output_bounds");
             return result;
         } catch (Exception error) {
-            request.trace.error("model_transport", error);
+            if (request.externalCancellation == null) request.trace.error("model_transport", error);
+            else request.trace.stage("model_transport", "error_type=" + error.getClass().getSimpleName());
             if (request.ownsTrace) request.trace.finish(error instanceof java.net.SocketTimeoutException ? DouAiLog.Outcome.TIMED_OUT : error instanceof CancellationException ? DouAiLog.Outcome.CANCELLED : DouAiLog.Outcome.FAILED, "model_request_failed", "type=" + error.getClass().getSimpleName());
             diagnostic(config, secondaryPrompt, prior.size(), "failed", 0);
             ensureActive(request);
@@ -815,7 +971,8 @@ public final class ChatCompletionClient {
     }
 
     private static void ensureActive(ActiveRequest request) throws java.net.SocketTimeoutException {
-        if (request.cancelled || Thread.currentThread().isInterrupted()) throw cancelled();
+        if (request.cancelled || Thread.currentThread().isInterrupted()
+                || (request.externalCancellation != null && request.externalCancellation.get())) throw cancelled();
         if (request.timedOut) throw new java.net.SocketTimeoutException("AI request deadline exceeded");
     }
 
@@ -824,6 +981,7 @@ public final class ChatCompletionClient {
     private static final class ActiveRequest {
         final boolean ownsTrace = DouAiLog.current() == null;
         final DouAiLog.Operation trace = AutomationTrace.capture("ai_model", "request");
+        final AtomicBoolean externalCancellation;
         volatile boolean cancelled;
         volatile boolean timedOut;
         boolean asynchronous;
@@ -836,12 +994,18 @@ public final class ChatCompletionClient {
         Runnable commitHistory;
         Consumer<String> onPartial;
         String lastPartial;
+
+        ActiveRequest(AtomicBoolean externalCancellation) { this.externalCancellation = externalCancellation; }
     }
 
     private static final class RequestDeadline {
         private final long started;
         private final long budget;
         RequestDeadline(long started, int seconds) { this.started = started; this.budget = TimeUnit.SECONDS.toNanos(seconds); }
+        RequestDeadline(long started, int seconds, long parentEndNanos) {
+            this.started = started;
+            this.budget = Math.min(TimeUnit.SECONDS.toNanos(seconds), Math.max(0, parentEndNanos - started));
+        }
         long remainingNanos() { return Math.max(0, budget - (System.nanoTime() - started)); }
         int remainingMillis() throws java.net.SocketTimeoutException {
             long remaining = remainingNanos();

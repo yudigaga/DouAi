@@ -724,6 +724,7 @@ public final class ModuleSettingsScreen {
                 break;
             case EXTENSION:
                 addOption("AI 模型设置", "", null, true, this::showAiModelSettings);
+                addOption("AI Skills", "", null, true, this::showAiSkillSettings);
                 addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
                 addOption("配置备份", "", null, true, this::showConfigBackup);
                 break;
@@ -1414,6 +1415,15 @@ public final class ModuleSettingsScreen {
     private void toast(String message) {
         android.widget.Toast.makeText(context, message == null ? "操作失败" : message,
                 android.widget.Toast.LENGTH_SHORT).show();
+    }
+
+    private void showAiSkillSettings() {
+        try {
+            AiSkillSettingsDialog page = new AiSkillSettingsDialog(context, repository, miuixHome != null, this::showOptionDialog);
+            showOptionDialog(page.dialog(), page::close);
+        } catch (RuntimeException unavailable) {
+            toast("无法打开 AI Skills 设置");
+        }
     }
 
     private void showAiChat(AiSkills.Entry skillsEntry) {
@@ -2333,7 +2343,7 @@ public final class ModuleSettingsScreen {
 
         String searchText() {
             if (this == ABOUT) return title + " 调试 日志 LSPosed";
-            return this == EXTENSION ? title + " AI 模型设置 文本转语音设置 数据备份 配置备份" : title;
+            return this == EXTENSION ? title + " AI 模型设置 AI Skills 技能 文本转语音设置 数据备份 配置备份" : title;
         }
     }
 

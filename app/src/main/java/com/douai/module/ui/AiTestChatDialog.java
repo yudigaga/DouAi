@@ -40,6 +40,8 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.SkillServices;
+import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.feature.DouyinSearch;
@@ -128,6 +130,7 @@ final class AiTestChatDialog extends Dialog {
     private final LinearLayout skillCommands;
     private List<AiSkills.Command> visibleCommands = Collections.emptyList();
     private AiSkills.Entry skillEntry;
+    private SkillStore skillStore;
     private final List<ChatImage> draftImages = new ArrayList<>();
     private final List<Document> draftDocuments = new ArrayList<>();
     private final List<PendingAttachment> draftPending = new ArrayList<>();
@@ -613,7 +616,11 @@ final class AiTestChatDialog extends Dialog {
 
     public void enableSkills(AiSkills.Entry entry) {
         skillEntry = entry;
-        input.setHint(entry == null ? "输入消息" : "输入消息，或输入 / 选择技能");
+        skillStore = entry == null ? null : SkillStore.forContext(getContext());
+        boolean enabled = false;
+        try { enabled = skillStore != null && skillStore.enabled(); }
+        catch (IllegalStateException unavailable) { }
+        if (enabled) input.setHint("输入消息，或输入 / 选择技能");
         updateSkillMenu();
     }
 
@@ -677,7 +684,14 @@ final class AiTestChatDialog extends Dialog {
                 || (prompt.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) {
             DouAiLog.event("ai_chat", "eligibility", disposed ? "closed" : busy ? "busy" : "empty_input", ""); return;
         }
-        AiSkills.Invocation skill = skillEntry == null || retryAnswer != null ? null : AiSkills.match(skillEntry, prompt);
+        final AiSkills.Invocation skill;
+        try {
+            skill = skillEntry == null || retryAnswer != null ? null : AiSkills.match(skillEntry, prompt, skillStore);
+        } catch (IllegalStateException unavailable) {
+            state.setText("技能目录无法访问");
+            updateSend();
+            return;
+        }
         if (skill != null) {
             String invalid = null;
             if (!images.isEmpty() || !documents.isEmpty() || !selected.isEmpty()) {
@@ -714,6 +728,7 @@ final class AiTestChatDialog extends Dialog {
         renderAttachments();
         int ticket = ++generation;
         Session active = session;
+        SkillStore activeSkillStore = skillStore;
         Future<?> clearBarrier = historyClear;
         RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, selected, answer, skill,
                 com.douai.module.analytics.LocalAnalytics.get(getContext()).beginOperation(null, "ai"));
@@ -743,7 +758,7 @@ final class AiTestChatDialog extends Dialog {
                 turn.checkStopped();
                 if (turn.skill != null) {
                     turn.trace.stage("skill_execute", "input_chars=" + turn.skill.argument().length());
-                    reply = AiSkills.execute(turn.skill);
+                    reply = AiSkills.execute(turn.skill, activeSkillStore);
                     turn.checkStopped();
                 } else {
                     turn.trace.stage("provider_request", "images=" + turn.preparedImages.size() + ";documents=" + turn.preparedDocuments.size());
@@ -890,7 +905,7 @@ final class AiTestChatDialog extends Dialog {
         request = null;
         pending = null;
         ChatMessage answer = turn.answer;
-        if (failure == null) {
+        if (failure == null && (turn.skill == null || !turn.stopRequested)) {
             answer.text = reply;
             answer.color = TEXT;
             if (turn.skill == null && !turn.stopRequested) {
@@ -898,11 +913,14 @@ final class AiTestChatDialog extends Dialog {
             }
             state.setText("");
         } else if (turn.skill != null) {
-            answer.text = turn.stopRequested ? "已停止" : "技能执行失败";
+            answer.text = turn.stopRequested ? "已停止" : failure instanceof SkillServices.Failure
+                    ? failure.getMessage() : "技能执行失败";
             answer.color = turn.stopRequested ? MUTED : ERROR;
             state.setText(answer.text);
-            restoreDraft(turn.prompt, Collections.emptyList(), Collections.emptyList());
-            turn.trace.stage("skill_execute", "error_type=" + failure.getClass().getSimpleName());
+            if (turn.skill.version() == 0) {
+                restoreDraft(turn.prompt, Collections.emptyList(), Collections.emptyList());
+            }
+            if (failure != null) turn.trace.stage("skill_execute", "error_type=" + failure.getClass().getSimpleName());
         } else {
             answer.text = turn.stopRequested ? "已停止" : turn.reading
                     ? "附件读取失败：" + failureDetail(failure) : errorMessage(failure);
@@ -1071,7 +1089,12 @@ final class AiTestChatDialog extends Dialog {
             skillMenu.setVisibility(View.GONE);
             return;
         }
-        List<AiSkills.Command> commands = AiSkills.commands(skillEntry, input.getText().toString());
+        List<AiSkills.Command> commands;
+        try {
+            commands = AiSkills.commands(skillEntry, input.getText().toString(), skillStore);
+        } catch (IllegalStateException unavailable) {
+            commands = Collections.emptyList();
+        }
         if (!commands.equals(visibleCommands)) {
             visibleCommands = commands;
             skillCommands.removeAllViews();

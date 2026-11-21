@@ -1,10 +1,14 @@
 package com.douai.module.ui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.text.method.PasswordTransformationMethod;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.Switch;
+import android.widget.TextView;
 
+import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.FeatureSettings;
@@ -22,6 +26,7 @@ import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowDialog;
+import org.robolectric.shadows.ShadowLooper;
 
 import java.util.Arrays;
 import java.util.List;
@@ -153,6 +158,46 @@ public final class ModuleSettingsActionSeparationTest {
         testInput.setText("/");
         assertNull(testChat.findViewWithTag("ai.chat.skill.摘要"));
         assertNull(testChat.findViewWithTag("ai.chat.skill.查询"));
+    }
+
+    @Test public void skillsManagerOffersSimulationWithoutAModelConfiguration() {
+        assertTrue(option(open("EXTENSION"), "AI Skills").performClick());
+        View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertPresent(manager, "skills.enabled");
+        assertPresent(manager, "skills.requirements");
+        assertTrue(manager.findViewWithTag("skills.generate.mock").isEnabled());
+        assertNotNull(manager.findViewWithTag("skills.service.mock-orders"));
+    }
+
+    @Test public void registeringAServiceRequiresSeparateConfirmationOfItsEndpointAndBudget() throws Exception {
+        assertTrue(option(open("EXTENSION"), "AI Skills").performClick());
+        View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertTrue(manager.findViewWithTag("skills.service.register").performClick());
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        View form = editor.getWindow().getDecorView();
+        String endpoint = "https://orders.example.test/query";
+        ((EditText) form.findViewWithTag("skills.service.id")).setText("fixture-orders");
+        ((EditText) form.findViewWithTag("skills.service.label")).setText("订单模拟目标");
+        ((EditText) form.findViewWithTag("skills.service.endpoint")).setText(endpoint);
+        ((EditText) form.findViewWithTag("skills.service.cost")).setText("2");
+        EditText token = form.findViewWithTag("skills.service.token");
+        assertTrue(token.getTransformationMethod() instanceof PasswordTransformationMethod);
+        assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+
+        SkillServices services = SkillServices.forContext(activity);
+        SkillServices.Service registered = services.list().stream()
+                .filter(service -> service.id().equals("fixture-orders")).findFirst().orElseThrow();
+        assertFalse(services.isAuthorized(registered));
+        assertTrue(manager.findViewWithTag("skills.service.fixture-orders.authorize").performClick());
+        AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        TextView message = confirmation.findViewById(android.R.id.message);
+        assertNotNull(message);
+        assertTrue(message.getText().toString().contains(endpoint));
+        assertTrue(message.getText().toString().contains("每次调用最多 2 费用单位"));
+        assertTrue(confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(services.isAuthorized(registered));
     }
 
     private View open(String category) {

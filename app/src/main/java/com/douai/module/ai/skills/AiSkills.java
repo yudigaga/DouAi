@@ -14,7 +14,9 @@ public final class AiSkills {
 
     public record Command(String name, String description) {}
 
-    public record Invocation(Command command, String argument) {}
+    public record Invocation(Command command, String argument, int version) {
+        Invocation(Command command, String argument) { this(command, argument, 0); }
+    }
 
     private interface Action {
         String run(String argument);
@@ -39,34 +41,69 @@ public final class AiSkills {
     private AiSkills() {}
 
     public static List<Command> commands(Entry entry, String input) {
+        return commands(entry, input, null);
+    }
+
+    public static List<Command> commands(Entry entry, String input, SkillStore store) {
         if (entry == null || input == null) return Collections.emptyList();
         String draft = input.replaceFirst("^" + SPACE + "+", "");
         if (!draft.startsWith("/")) return Collections.emptyList();
         String prefix = draft.substring(1);
         if (SPACE_PATTERN.matcher(prefix).find()) return Collections.emptyList();
 
+        if (store != null && !store.enabled()) return Collections.emptyList();
         List<Command> matches = new ArrayList<>();
         for (Skill skill : BUILT_INS) {
             if (skill.entries().contains(entry) && skill.command().name().startsWith(prefix)) {
                 matches.add(skill.command());
             }
         }
+        if (store != null) {
+            for (SkillStore.Available skill : store.available()) {
+                if (skill.command().name().startsWith(prefix)) matches.add(skill.command());
+            }
+        }
         return matches;
     }
 
     public static Invocation match(Entry entry, String input) {
+        return match(entry, input, null);
+    }
+
+    public static Invocation match(Entry entry, String input, SkillStore store) {
         if (entry == null || input == null) return null;
         Matcher matcher = COMMAND.matcher(input);
-        if (!matcher.matches()) return null;
+        if (!matcher.matches() || (store != null && !store.enabled())) return null;
+        String argument = matcher.group(2);
+        argument = argument == null ? "" : argument.replaceFirst(SPACE + "+$", "");
 
         for (Skill skill : BUILT_INS) {
             if (skill.entries().contains(entry) && skill.command().name().equals(matcher.group(1))) {
-                String argument = matcher.group(2);
-                return new Invocation(skill.command(),
-                        argument == null ? "" : argument.replaceFirst(SPACE + "+$", ""));
+                return new Invocation(skill.command(), argument);
+            }
+        }
+        if (store != null) {
+            for (SkillStore.Available skill : store.available()) {
+                if (skill.command().name().equals(matcher.group(1))) {
+                    return new Invocation(skill.command(), argument, skill.version());
+                }
             }
         }
         return null;
+    }
+
+    static boolean isBuiltIn(String name) {
+        for (Skill skill : BUILT_INS) {
+            if (skill.command().name().equals(name)) return true;
+        }
+        return false;
+    }
+
+    public static String execute(Invocation call, SkillStore store) throws Exception {
+        if (store != null && !store.enabled()) throw new IllegalStateException("技能已停用");
+        if (call.version() == 0) return execute(call);
+        if (store == null) throw new IllegalStateException("技能不可用");
+        return store.execute(call.command().name(), call.version(), call.argument());
     }
 
     public static String execute(Invocation call) {
@@ -79,7 +116,7 @@ public final class AiSkills {
         throw new IllegalArgumentException("技能不可用");
     }
 
-    private static String summarize(String argument) {
+    static String summarize(String argument) {
         Matcher boundaries = SENTENCE_END.matcher(argument);
         int summaryEnd = boundaries.find() && boundaries.find() ? boundaries.end() : argument.length();
         if (summaryEnd <= 240) return argument.substring(0, summaryEnd).trim();
@@ -87,7 +124,7 @@ public final class AiSkills {
         return argument.substring(0, end).trim() + "…";
     }
 
-    private static String lookupOrder(String argument) {
+    static String lookupOrder(String argument) {
         if (!ORDER_NUMBER.matcher(argument).matches()) {
             throw new IllegalArgumentException("订单号只能包含字母、数字、短横线或下划线");
         }

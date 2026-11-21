@@ -173,6 +173,19 @@ public final class AiTestChatDialogTest {
         assertEquals(0, sessions.get(0).cancelCount);
     }
 
+    @Test public void stoppingBeforeTheUiReceivesACompletedSkillSuppressesItsResult() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        submit("/查询 DA-1001");
+        worker.runNext();
+
+        assertEquals("停止请求", send.getContentDescription());
+        assertTrue(send.performClick());
+        ShadowLooper.idleMainLooper();
+
+        assertEquals("已停止", text("ai.chat.answer").getText().toString());
+        assertEquals("/查询 DA-1001", input.getText().toString());
+    }
+
     @Test public void successfulAnswerDisplaysOnlyTheSearchResultsFromItsOwnTurn() throws Exception {
         FakeSession active = sessions.get(0);
         active.found = List.of(new DouyinSearch.Result("手势舞", List.of(new DouyinSearch.Item(
