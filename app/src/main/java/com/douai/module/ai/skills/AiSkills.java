@@ -21,10 +21,11 @@ public final class AiSkills {
         CommandUnavailable(String message) { super(message); }
     }
 
-    public record Invocation(Command command, String argument, int version, McpRegistry.Binding mcpBinding) {
-        Invocation(Command command, String argument) { this(command, argument, 0, null); }
-        Invocation(Command command, String argument, int version) { this(command, argument, version, null); }
-        public boolean localBuiltIn() { return version == 0 && mcpBinding == null; }
+    public record Invocation(Command command, String argument, int version,
+                             McpRegistry.Binding mcpBinding, boolean delegated) {
+        Invocation(Command command, String argument) { this(command, argument, 0, null, false); }
+        Invocation(Command command, String argument, int version) { this(command, argument, version, null, false); }
+        public boolean localBuiltIn() { return version == 0 && mcpBinding == null && !delegated; }
     }
 
     private interface Action {
@@ -32,6 +33,8 @@ public final class AiSkills {
     }
 
     private record Skill(Command command, EnumSet<Entry> entries, Action action) {}
+
+    private static final Command DELEGATE = new Command("委派", "交给已选子代理 · 纯文本任务");
 
     private static final String SPACE = "[\\s\\p{Z}]";
     private static final Pattern SPACE_PATTERN = Pattern.compile(SPACE);
@@ -54,6 +57,10 @@ public final class AiSkills {
     }
 
     public static List<Command> commands(Entry entry, String input, SkillStore store) {
+        return commands(entry, input, store, false);
+    }
+
+    public static List<Command> commands(Entry entry, String input, SkillStore store, boolean delegationEnabled) {
         if (entry == null || input == null) return Collections.emptyList();
         String draft = input.replaceFirst("^" + SPACE + "+", "");
         if (!draft.startsWith("/")) return Collections.emptyList();
@@ -81,6 +88,7 @@ public final class AiSkills {
                 }
             }
         }
+        if (entry == Entry.WORK && delegationEnabled && DELEGATE.name().startsWith(prefix)) matches.add(DELEGATE);
         return matches;
     }
 
@@ -89,11 +97,21 @@ public final class AiSkills {
     }
 
     public static Invocation match(Entry entry, String input, SkillStore store) {
+        return match(entry, input, store, false);
+    }
+
+    public static Invocation match(Entry entry, String input, SkillStore store, boolean delegationEnabled) {
         if (entry == null || input == null) return null;
         Matcher matcher = COMMAND.matcher(input);
         if (!matcher.matches() || (store != null && !store.enabled())) return null;
         String argument = matcher.group(2);
         argument = argument == null ? "" : argument.replaceFirst(SPACE + "+$", "");
+        if (DELEGATE.name().equals(matcher.group(1))) {
+            if (entry != Entry.WORK || !delegationEnabled) {
+                throw new CommandUnavailable("请在工作 AI 中配置并使用子代理");
+            }
+            return new Invocation(DELEGATE, argument, 0, null, true);
+        }
 
         for (Skill skill : BUILT_INS) {
             if (skill.entries().contains(entry) && skill.command().name().equals(matcher.group(1))) {
@@ -110,7 +128,7 @@ public final class AiSkills {
                 try {
                     for (McpRegistry.Binding binding : store.mcp().bindings()) {
                         if (binding.alias().equals(matcher.group(1))) {
-                            return new Invocation(mcpCommand(binding), argument, 0, binding);
+                            return new Invocation(mcpCommand(binding), argument, 0, binding, false);
                         }
                     }
                 } catch (Exception unavailable) {
@@ -127,6 +145,7 @@ public final class AiSkills {
     }
 
     static boolean isBuiltIn(String name) {
+        if (DELEGATE.name().equals(name)) return true;
         for (Skill skill : BUILT_INS) {
             if (skill.command().name().equals(name)) return true;
         }

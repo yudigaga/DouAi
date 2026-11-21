@@ -44,3 +44,21 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 协议参考 [2025-11-25 Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 与 [2026-07-28 Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)。
+
+## 阶段 4 · 子代理
+
+- `AiSubAgentSettingsDialog.java`、`ModuleSettingsScreen.java` 提供子代理模型和工具选择。模型按现有配置的稳定 ID 绑定，配置只保存 ID 和本地工具白名单。
+- `AiSubAgents.java`、`AiSkills.java`、`AiTestChatDialog.java` 接入工作 AI 的 `/委派 任务`。一次委派最多两次模型请求、每次最多 600 输出 Token、一次本地工具调用，共用 30 秒截止时间。用户停止时取消在途模型请求，聊天界面丢弃迟到结果。
+- 子代理只接收当次任务和被允许的工具结果。当前白名单可选摘要、模拟订单，默认均关。子代理无法调用在线 Skill、MCP 或再委派。普通模型对话及显式选中的文本技能无需模型支持原生工具调用。
+- `AiSubAgentsTest.java`、`AiSubAgentSettingsDialogTest.java` 覆盖选定稳定 ID、共享截止时间、子代理权限、预算和设置入口。四套协议用 `IsolatedTextRequestTest.java` 的传输替身测试。
+
+从同一 0.3.1 工作树运行最终专项和既有自动化回归。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests 'com.douai.module.ai.*' --tests '*AiSubAgentSettingsDialogTest' --tests '*IsolatedTextRequestTest' --tests '*ChatCompletionClientTest' --tests '*ManualAiSearchClientTest' --tests '*AiTestChatDialogTest' --tests '*NativeAiConversationTest' --tests '*ModuleSettingsActionSeparationTest' --tests '*AiModelContactConfigTest' --tests '*Automation*Test' --tests '*ConfigTransfer*Test' --tests '*AutoReply*Test' --tests '*AutoComment*Test'
+```
+
+最终针对性回归 594 项，无失败，跳过 0 项。
+
+独立真机验收可依次覆盖两种聊天布局、离线模拟生成与回退、MCP 文件选择器与真实服务、Android Keystore、既有模型协议的真实账号，以及子代理的停止按钮和权限提示。

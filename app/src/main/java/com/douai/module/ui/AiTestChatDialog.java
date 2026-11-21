@@ -42,10 +42,12 @@ import android.widget.TextView;
 import com.douai.module.ai.mcp.McpClient;
 import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.AiSubAgents;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
+import com.douai.module.config.SettingsStore;
 import com.douai.module.feature.DouyinSearch;
 import com.douai.module.feature.ChatCompletionClient;
 import com.douai.module.feature.ChatImage;
@@ -133,6 +135,7 @@ final class AiTestChatDialog extends Dialog {
     private List<AiSkills.Command> visibleCommands = Collections.emptyList();
     private AiSkills.Entry skillEntry;
     private SkillStore skillStore;
+    private SettingsStore subAgentSettings;
     private final List<ChatImage> draftImages = new ArrayList<>();
     private final List<Document> draftDocuments = new ArrayList<>();
     private final List<PendingAttachment> draftPending = new ArrayList<>();
@@ -616,7 +619,12 @@ final class AiTestChatDialog extends Dialog {
         if (window != null) sizeWindow(window.getDecorView().getRootWindowInsets());
     }
 
-    public void enableSkills(AiSkills.Entry entry) {
+    void enableSkills(AiSkills.Entry entry) {
+        enableSkills(entry, null);
+    }
+
+    void enableSkills(AiSkills.Entry entry, SettingsStore settings) {
+        subAgentSettings = entry == AiSkills.Entry.WORK ? settings : null;
         skillEntry = entry;
         skillStore = entry == null ? null : SkillStore.forContext(getContext());
         boolean enabled = false;
@@ -687,8 +695,10 @@ final class AiTestChatDialog extends Dialog {
             DouAiLog.event("ai_chat", "eligibility", disposed ? "closed" : busy ? "busy" : "empty_input", ""); return;
         }
         final AiSkills.Invocation skill;
+        SettingsStore selectedSettings = subAgentSettings;
+        AiSubAgents.Selection subAgent = AiSubAgents.read(selectedSettings);
         try {
-            skill = skillEntry == null || retryAnswer != null ? null : AiSkills.match(skillEntry, prompt, skillStore);
+            skill = skillEntry == null || retryAnswer != null ? null : AiSkills.match(skillEntry, prompt, skillStore, subAgent.enabled());
         } catch (AiSkills.CommandUnavailable unavailable) {
             state.setText(unavailable.getMessage());
             updateSend();
@@ -735,6 +745,8 @@ final class AiTestChatDialog extends Dialog {
         int ticket = ++generation;
         Session active = session;
         SkillStore activeSkillStore = skillStore;
+        long delegationDeadline = skill != null && skill.delegated()
+                ? System.nanoTime() + AiSubAgents.TIME_LIMIT_NANOS : 0;
         Future<?> clearBarrier = historyClear;
         RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, selected, answer, skill,
                 com.douai.module.analytics.LocalAnalytics.get(getContext()).beginOperation(null, "ai"));
@@ -752,7 +764,7 @@ final class AiTestChatDialog extends Dialog {
                     if (turn.stopRequested) throw new java.util.concurrent.CancellationException();
                     turn.started = true;
                 }
-                if (clearBarrier != null) clearBarrier.get();
+                if (clearBarrier != null && turn.skill == null) clearBarrier.get();
                 turn.checkStopped();
                 if (!selected.isEmpty()) {
                     turn.trace.stage("media_read", "attachments=" + selected.size());
@@ -764,7 +776,15 @@ final class AiTestChatDialog extends Dialog {
                 turn.checkStopped();
                 if (turn.skill != null) {
                     turn.trace.stage("skill_execute", "input_chars=" + turn.skill.argument().length());
-                    reply = AiSkills.execute(turn.skill, activeSkillStore);
+                    if (turn.skill.delegated()) {
+                        if (!activeSkillStore.enabled() || !subAgent.equals(AiSubAgents.read(selectedSettings))) {
+                            throw new IllegalStateException("子代理设置已变化");
+                        }
+                        reply = AiSubAgents.run(AiModelSettings.read(selectedSettings), subAgent,
+                                turn.skill.argument(), delegationDeadline);
+                    } else {
+                        reply = AiSkills.execute(turn.skill, activeSkillStore);
+                    }
                     turn.checkStopped();
                 } else {
                     turn.trace.stage("provider_request", "images=" + turn.preparedImages.size() + ";documents=" + turn.preparedDocuments.size());
@@ -957,7 +977,10 @@ final class AiTestChatDialog extends Dialog {
         if (failure instanceof McpRegistry.Failure registry && registry.resultUnknown()) return registry.getMessage();
         if (stopped) return "已停止";
         if (failure instanceof SkillServices.Failure || failure instanceof McpClient.Failure
-                || failure instanceof McpRegistry.Failure) return failure.getMessage();
+                || failure instanceof McpRegistry.Failure || failure instanceof AiSubAgents.Failure) {
+            return failure.getMessage();
+        }
+        if (failure instanceof java.net.SocketTimeoutException) return "技能请求超时，请先核实请求状态";
         return "技能执行失败";
     }
 
@@ -1107,7 +1130,8 @@ final class AiTestChatDialog extends Dialog {
         }
         List<AiSkills.Command> commands;
         try {
-            commands = AiSkills.commands(skillEntry, input.getText().toString(), skillStore);
+            commands = AiSkills.commands(skillEntry, input.getText().toString(), skillStore,
+                    AiSubAgents.read(subAgentSettings).enabled());
         } catch (IllegalStateException unavailable) {
             commands = Collections.emptyList();
         }

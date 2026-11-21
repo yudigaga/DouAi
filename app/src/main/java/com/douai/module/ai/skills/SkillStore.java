@@ -259,13 +259,13 @@ public final class SkillStore {
             JSONObject value = object(json, 16000);
             keys(value, "schemaVersion", "name", "description", "documentation", "execution", "trial");
             if (integer(value, "schemaVersion") != 1) throw new IllegalArgumentException();
-            String name = value.getString("name");
+            String name = text(value.get("name"), 24);
             if (!NAME.matcher(name).matches() || AiSkills.isBuiltIn(name) || name.startsWith("mcp-")) throw new IllegalArgumentException();
             String description = text(value.get("description"), 100);
             if (description.codePoints().anyMatch(Character::isISOControl)) throw new IllegalArgumentException();
             String documentation = text(value.get("documentation"), 6000);
             JSONObject run = value.getJSONObject("execution");
-            String kind = run.getString("kind");
+            String kind = text(run.get("kind"), 16);
             String service = null;
             if ("summary".equals(kind)) {
                 keys(run, "kind", "maxInput");
