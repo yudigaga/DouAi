@@ -1,6 +1,7 @@
 package com.douai.module.ui;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -23,11 +24,14 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ImageView;
 
 import com.douai.module.config.AiModelConfig;
+import com.douai.module.config.AiModelSettings;
+import com.douai.module.config.HostSettingsStore;
 import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostResourceProfile;
 import com.douai.module.feature.ChatImage;
@@ -106,6 +110,26 @@ public final class NativeAiConversationTest {
         if (activity != null) activity.finish();
         HostAdaptation.setCurrentProfile(null);
         ShadowLooper.idleMainLooper();
+    }
+
+    @Test public void openingASavedAiContactOffersTheSharedSlashCommands() throws Exception {
+        dialog.dismiss();
+        AiModelConfig contact = AiModelConfig.fromJson(new JSONObject().put("id", "skills-contact")
+                .put("name", "联系人模型").put("messageContactEnabled", true)
+                .put("apiEndpoint", "https://example.test/v1").put("modelName", "model"));
+        HostSettingsStore store = new HostSettingsStore(activity);
+        new AiModelSettings(List.of(contact), contact.id).save(store);
+        Dialog opened = AiConversationDialog.show(activity, store, contact);
+        assertNotNull(opened);
+        try {
+            View conversation = opened.getWindow().getDecorView();
+            EditText composer = conversation.findViewWithTag("ai.chat.input");
+            composer.setText("/");
+            assertNotNull(conversation.findViewWithTag("ai.chat.skill.摘要"));
+            assertNotNull(conversation.findViewWithTag("ai.chat.skill.查询"));
+        } finally {
+            opened.dismiss();
+        }
     }
 
     @Test public void legacyOriginalProfileKeepsNativeChatAndAlbumUsableAfterVersionSpoofing() throws Exception {

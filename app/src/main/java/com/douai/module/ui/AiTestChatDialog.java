@@ -28,6 +28,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.BaseAdapter;
 import android.widget.ImageButton;
@@ -38,6 +39,7 @@ import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.feature.DouyinSearch;
@@ -122,6 +124,10 @@ final class AiTestChatDialog extends Dialog {
     private final TextView state;
     private final LinearLayout attachments;
     private final HorizontalScrollView attachmentScroll;
+    private final HorizontalScrollView skillMenu;
+    private final LinearLayout skillCommands;
+    private List<AiSkills.Command> visibleCommands = Collections.emptyList();
+    private AiSkills.Entry skillEntry;
     private final List<ChatImage> draftImages = new ArrayList<>();
     private final List<Document> draftDocuments = new ArrayList<>();
     private final List<PendingAttachment> draftPending = new ArrayList<>();
@@ -415,6 +421,14 @@ final class AiTestChatDialog extends Dialog {
         attachmentParams.topMargin = dp(8);
         root.addView(attachmentScroll, attachmentParams);
 
+        skillMenu = new HorizontalScrollView(context);
+        skillMenu.setTag("ai.chat.skills");
+        skillMenu.setHorizontalScrollBarEnabled(false);
+        skillMenu.setVisibility(View.GONE);
+        skillCommands = new LinearLayout(context);
+        skillMenu.addView(skillCommands);
+        root.addView(skillMenu, wrap());
+
         LinearLayout composer = new LinearLayout(context);
         composer.setGravity(Gravity.BOTTOM);
         composer.setPadding(0, dp(10), 0, 0);
@@ -575,12 +589,14 @@ final class AiTestChatDialog extends Dialog {
         }
         quickReplies.addView(quickRow);
         content.addView(quickReplies, wrap());
+        move(skillMenu, content, wrap());
         nativeViews.messageContainer.addView(content, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         nativeViews.root.setFitsSystemWindows(Build.VERSION.SDK_INT < 30);
         // Theme only module-owned status/attachment content. Host controls retain their native palette.
         ModuleTheme.bind(state);
         ModuleTheme.bind(attachmentScroll);
+        ModuleTheme.bind(skillMenu);
     }
 
     private static void move(View view, ViewGroup parent, ViewGroup.LayoutParams params) {
@@ -593,6 +609,12 @@ final class AiTestChatDialog extends Dialog {
         if (miuixSurface != null) miuixSurface.bindBackNavigation(this);
         Window window = getWindow();
         if (window != null) sizeWindow(window.getDecorView().getRootWindowInsets());
+    }
+
+    public void enableSkills(AiSkills.Entry entry) {
+        skillEntry = entry;
+        input.setHint(entry == null ? "输入消息" : "输入消息，或输入 / 选择技能");
+        updateSkillMenu();
     }
 
     void setContactEditAction(Runnable action) {
@@ -655,6 +677,20 @@ final class AiTestChatDialog extends Dialog {
                 || (prompt.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) {
             DouAiLog.event("ai_chat", "eligibility", disposed ? "closed" : busy ? "busy" : "empty_input", ""); return;
         }
+        AiSkills.Invocation skill = skillEntry == null || retryAnswer != null ? null : AiSkills.match(skillEntry, prompt);
+        if (skill != null) {
+            String invalid = null;
+            if (!images.isEmpty() || !documents.isEmpty() || !selected.isEmpty()) {
+                invalid = "此技能只接收文本，请先移除附件";
+            } else if (skill.argument().isEmpty()) {
+                invalid = "请在 /" + skill.command().name() + " 后输入参数";
+            }
+            if (invalid != null) {
+                state.setText(invalid);
+                updateSend();
+                return;
+            }
+        }
         cancelRestore();
         ChatMessage answer = retryAnswer;
         if (answer == null) {
@@ -667,7 +703,7 @@ final class AiTestChatDialog extends Dialog {
             answer = addMessage(assistantName, "正在回复…", false, Collections.emptyList());
             answer.sourceUser = user;
         }
-        answer.text = selected.isEmpty() ? "正在回复…" : "正在读取附件…";
+        answer.text = skill != null ? "正在运行技能…" : selected.isEmpty() ? "正在回复…" : "正在读取附件…";
         if (answer.videos != null) { answer.videos.close(); answer.videos = null; }
         answer.retry = false;
         messageRows.notifyDataSetChanged();
@@ -679,7 +715,8 @@ final class AiTestChatDialog extends Dialog {
         int ticket = ++generation;
         Session active = session;
         Future<?> clearBarrier = historyClear;
-        RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, selected, answer, com.douai.module.analytics.LocalAnalytics.get(getContext()).beginOperation(null,"ai"));
+        RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, selected, answer, skill,
+                com.douai.module.analytics.LocalAnalytics.get(getContext()).beginOperation(null, "ai"));
         pending = turn;
         busy = true;
         state.setText(answer.text);
@@ -704,16 +741,22 @@ final class AiTestChatDialog extends Dialog {
                     main.post(() -> showPreparedMedia(turn));
                 }
                 turn.checkStopped();
-                turn.trace.stage("provider_request", "images=" + turn.preparedImages.size() + ";documents=" + turn.preparedDocuments.size());
-                reply = active.replyStreaming(prompt, turn.preparedImages,
-                        documentText(turn.preparedDocuments, turn.preparedImages), text -> queuePartialReply(turn, text));
-                turn.checkStopped();
-                try {
-                    turn.searchResults = AiSearchVideoCards.snapshot(active.searchResults());
-                    turn.searchBridge = active.searchBridge();
-                } catch (RuntimeException unavailable) {
-                    turn.searchResults = Collections.emptyList();
-                    turn.searchBridge = null;
+                if (turn.skill != null) {
+                    turn.trace.stage("skill_execute", "input_chars=" + turn.skill.argument().length());
+                    reply = AiSkills.execute(turn.skill);
+                    turn.checkStopped();
+                } else {
+                    turn.trace.stage("provider_request", "images=" + turn.preparedImages.size() + ";documents=" + turn.preparedDocuments.size());
+                    reply = active.replyStreaming(prompt, turn.preparedImages,
+                            documentText(turn.preparedDocuments, turn.preparedImages), text -> queuePartialReply(turn, text));
+                    turn.checkStopped();
+                    try {
+                        turn.searchResults = AiSearchVideoCards.snapshot(active.searchResults());
+                        turn.searchBridge = active.searchBridge();
+                    } catch (RuntimeException unavailable) {
+                        turn.searchResults = Collections.emptyList();
+                        turn.searchBridge = null;
+                    }
                 }
             }
             catch (InterruptedException cancelled) {
@@ -850,8 +893,16 @@ final class AiTestChatDialog extends Dialog {
         if (failure == null) {
             answer.text = reply;
             answer.color = TEXT;
-            answer.videos = turn.stopRequested ? null : searchVideoCards.group(turn.searchResults, turn.searchBridge, turn.analytics);
+            if (turn.skill == null && !turn.stopRequested) {
+                answer.videos = searchVideoCards.group(turn.searchResults, turn.searchBridge, turn.analytics);
+            }
             state.setText("");
+        } else if (turn.skill != null) {
+            answer.text = turn.stopRequested ? "已停止" : "技能执行失败";
+            answer.color = turn.stopRequested ? MUTED : ERROR;
+            state.setText(answer.text);
+            restoreDraft(turn.prompt, Collections.emptyList(), Collections.emptyList());
+            turn.trace.stage("skill_execute", "error_type=" + failure.getClass().getSimpleName());
         } else {
             answer.text = turn.stopRequested ? "已停止" : turn.reading
                     ? "附件读取失败：" + failureDetail(failure) : errorMessage(failure);
@@ -865,11 +916,11 @@ final class AiTestChatDialog extends Dialog {
             if (draftPending.isEmpty()) draftPending.addAll(turn.attachments);
             answer.retryPending = new ArrayList<>(turn.attachments);
             renderAttachments();
+            turn.trace.error(turn.reading ? "media_read" : "provider_request", failure);
         }
         messageRows.notifyDataSetChanged();
         updateSend();
         scrollToBottom();
-        if (failure != null) turn.trace.error(turn.reading ? "media_read" : "provider_request", failure);
         turn.trace.finish(turn.stopRequested ? DouAiLog.Outcome.CANCELLED : failure == null ? DouAiLog.Outcome.SUCCESS
                         : failure instanceof java.net.SocketTimeoutException ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED,
                 turn.stopRequested ? "user_cancelled" : failure == null ? "response_rendered" : "request_failed",
@@ -883,7 +934,7 @@ final class AiTestChatDialog extends Dialog {
             pending.trace.finish(DouAiLog.Outcome.CANCELLED, "user_cancelled", "provider_result=unknown");
             if (pending.started && request != null) request.cancel(true);
         }
-        session.cancel();
+        if (pending.skill == null) session.cancel();
         searchVideoCards.cancelPages();
         state.setText("正在停止…");
         updateSend();
@@ -927,7 +978,7 @@ final class AiTestChatDialog extends Dialog {
         if (pending != null) pending.trace.finish(DouAiLog.Outcome.CANCELLED, "conversation_closed_or_cleared", "provider_result=unknown");
         ++generation;
         if (request != null) request.cancel(true);
-        session.cancel();
+        if (pending == null || pending.skill == null) session.cancel();
         searchVideoCards.cancelPending();
         request = null;
         pending = null;
@@ -1010,7 +1061,37 @@ final class AiTestChatDialog extends Dialog {
             nativeViews.emoji.setEnabled(!disposed);
             if (quickReplies != null) quickReplies.setVisibility(!busy && !hasContent ? View.VISIBLE : View.GONE);
         }
+        updateSkillMenu();
         if (miuixSurface != null) miuixSurface.refresh();
+    }
+
+    private void updateSkillMenu() {
+        if (skillEntry == null || disposed || busy || !draftImages.isEmpty()
+                || !draftDocuments.isEmpty() || !draftPending.isEmpty()) {
+            skillMenu.setVisibility(View.GONE);
+            return;
+        }
+        List<AiSkills.Command> commands = AiSkills.commands(skillEntry, input.getText().toString());
+        if (!commands.equals(visibleCommands)) {
+            visibleCommands = commands;
+            skillCommands.removeAllViews();
+            for (AiSkills.Command command : commands) {
+                String slash = "/" + command.name();
+                Button option = new Button(getContext());
+                option.setTag("ai.chat.skill." + command.name());
+                option.setText(slash);
+                option.setAllCaps(false);
+                option.setContentDescription(slash + "，" + command.description());
+                option.setTooltipText(command.description());
+                option.setOnClickListener(ignored -> {
+                    input.setText(slash + " ");
+                    input.setSelection(input.length());
+                    input.requestFocus();
+                });
+                skillCommands.addView(option);
+            }
+        }
+        skillMenu.setVisibility(commands.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     private void showConversationActions() {
@@ -1340,6 +1421,7 @@ final class AiTestChatDialog extends Dialog {
         final List<ChatImage> preparedImages;
         final List<Document> preparedDocuments;
         final ChatMessage answer;
+        final AiSkills.Invocation skill;
         volatile boolean stopRequested;
         volatile String latestPartial = "";
         boolean partialQueued;
@@ -1349,7 +1431,8 @@ final class AiTestChatDialog extends Dialog {
         DouyinSearch searchBridge;
 
         RequestTurn(int ticket, String prompt, List<ChatImage> images, List<Document> documents,
-                    List<PendingAttachment> attachments, ChatMessage answer, com.douai.module.analytics.LocalAnalytics.FlowOperation analytics) {
+                    List<PendingAttachment> attachments, ChatMessage answer, AiSkills.Invocation skill,
+                    com.douai.module.analytics.LocalAnalytics.FlowOperation analytics) {
             this.analytics=analytics;
             this.ticket = ticket;
             this.prompt = prompt;
@@ -1359,6 +1442,7 @@ final class AiTestChatDialog extends Dialog {
             this.preparedImages = new ArrayList<>(images);
             this.preparedDocuments = new ArrayList<>(documents);
             this.answer = answer;
+            this.skill = skill;
         }
 
         void checkStopped() throws InterruptedException {

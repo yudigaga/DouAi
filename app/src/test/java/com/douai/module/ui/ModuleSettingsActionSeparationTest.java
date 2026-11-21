@@ -5,12 +5,15 @@ import android.view.View;
 import android.widget.EditText;
 import android.widget.Switch;
 
+import com.douai.module.config.AiModelConfig;
+import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.HostSettingsStore;
 import com.douai.module.config.SidebarSettings;
 import com.douai.module.feature.FeedGestureToolsHook;
 import com.douai.module.scan.HostAdaptation;
 
+import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -127,6 +130,29 @@ public final class ModuleSettingsActionSeparationTest {
         }
         search.setText("本地数据分析");
         assertEquals(View.GONE, home.findViewWithTag("settings.category.EXTENSION").getVisibility());
+    }
+
+    @Test public void sidebarChatOffersSkillsWhileTheModelConfigurationTestStaysUnchanged() throws Exception {
+        AiModelConfig model = AiModelConfig.fromJson(new JSONObject().put("id", "work-model")
+                .put("name", "工作模型").put("apiEndpoint", "https://example.test/v1")
+                .put("modelName", "model"));
+        new AiModelSettings(List.of(model), model.id).save(store);
+
+        screen.openSidebarEntry("ai_chat");
+        View workChat = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        EditText workInput = workChat.findViewWithTag("ai.chat.input");
+        workInput.setText("/");
+        assertPresent(workChat, "ai.chat.skill.摘要");
+        assertPresent(workChat, "ai.chat.skill.查询");
+
+        screen.openSidebarEntry("ai_models");
+        View models = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertTrue(option(models, "测试当前配置").performClick());
+        View testChat = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        EditText testInput = testChat.findViewWithTag("ai.chat.input");
+        testInput.setText("/");
+        assertNull(testChat.findViewWithTag("ai.chat.skill.摘要"));
+        assertNull(testChat.findViewWithTag("ai.chat.skill.查询"));
     }
 
     private View open(String category) {

@@ -8,6 +8,7 @@ import android.app.Dialog;
 import android.os.Bundle;
 import android.widget.Toast;
 
+import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.SettingsStore;
@@ -39,6 +40,7 @@ public final class AiConversationDialog {
         try {
             dialog = new AiTestChatDialog(activity, snapshot, true, true, nativeViews,
                     manualSearch(activity, store));
+            dialog.enableSkills(AiSkills.Entry.CONTACT);
             dialog.setOwnerActivity(activity);
             AiTestChatDialog opened = dialog;
             dialog.setContactEditAction(() -> {

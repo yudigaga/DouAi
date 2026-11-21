@@ -18,6 +18,7 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
 
+import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.feature.ChatImage;
 import com.douai.module.feature.ChatImageLoader;
@@ -113,6 +114,63 @@ public final class AiTestChatDialogTest {
         assertEquals("发送", send.getContentDescription());
         assertTrue(send.isEnabled());
         assertEquals("", text("ai.chat.state").getText().toString());
+    }
+
+    @Test public void workSlashMenuFillsCommandAndRendersItsResultWithoutCallingTheChatModel() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        input.setText("/");
+        assertEquals(View.VISIBLE, root.findViewWithTag("ai.chat.skills").getVisibility());
+        assertNotNull(root.findViewWithTag("ai.chat.skill.查询"));
+        input.setText("/摘");
+        assertNull(root.findViewWithTag("ai.chat.skill.查询"));
+        assertTrue(root.findViewWithTag("ai.chat.skill.摘要").performClick());
+        assertEquals("/摘要 ", input.getText().toString());
+        assertEquals(input.length(), input.getSelectionStart());
+        assertEquals(View.GONE, root.findViewWithTag("ai.chat.skills").getVisibility());
+
+        input.append("今天发布了测试版本。明天验证所有界面。");
+        assertTrue(send.performClick());
+        assertEquals("停止请求", send.getContentDescription());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertTrue(text("ai.chat.answer").getText().toString().contains("今天发布了测试版本"));
+        assertTrue(sessions.get(0).prompts.isEmpty());
+    }
+
+    @Test public void skillsDisabledPreservesSlashTextInTheOrdinaryChatSession() {
+        submit("/摘要 普通消息");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(Collections.singletonList("/摘要 普通消息"), sessions.get(0).prompts);
+        assertEquals("模型回复", text("ai.chat.answer").getText().toString());
+    }
+
+    @Test public void textSkillWithAnAttachmentKeepsTheDraftAndStartsNoRequest() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        dialog.addImage(image());
+        submit("/摘要 一段文本");
+
+        assertEquals("/摘要 一段文本", input.getText().toString());
+        assertNotNull(findView("ai.chat.remove_image"));
+        assertEquals(0, messageCount());
+        assertEquals("发送", send.getContentDescription());
+        assertTrue(sessions.get(0).prompts.isEmpty());
+    }
+
+    @Test public void stoppingAQueuedSkillDoesNotRunTheModelOrReplaceTheNextDraft() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        submit("/查询 DA-1001");
+        input.setText("下一条草稿");
+        assertTrue(send.performClick());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals("已停止", text("ai.chat.answer").getText().toString());
+        assertEquals("下一条草稿", input.getText().toString());
+        assertTrue(sessions.get(0).prompts.isEmpty());
+        assertEquals(0, sessions.get(0).cancelCount);
     }
 
     @Test public void successfulAnswerDisplaysOnlyTheSearchResultsFromItsOwnTurn() throws Exception {

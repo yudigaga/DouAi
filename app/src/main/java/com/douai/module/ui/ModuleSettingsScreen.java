@@ -26,6 +26,7 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AiProviderPresets;
@@ -158,7 +159,7 @@ public final class ModuleSettingsScreen {
             case "module": break;
             case "comment_history": showAutomationHistory(com.douai.module.config.AutomationHistoryStore.COMMENT); break;
             case "reply_history": showAutomationHistory(com.douai.module.config.AutomationHistoryStore.REPLY); break;
-            case "ai_chat": showAiChat(); break;
+            case "ai_chat": showAiChat(AiSkills.Entry.WORK); break;
             case "download_tasks": {
                 DownloadTasksDialog page = new DownloadTasksDialog(context, miuixHome != null);
                 showOptionDialog(page.dialog(), page::close); break;
@@ -1266,7 +1267,7 @@ public final class ModuleSettingsScreen {
         panel.setPadding(dp(16), dp(8), dp(16), dp(8));
         content = panel;
         addOption("添加模型配置", "", null, true, this::showAiPresetPicker);
-        addOption("测试当前配置", "", null, true, this::showAiChat);
+        addOption("测试当前配置", "", null, true, () -> showAiChat(null));
         addLocalSwitch("接管评论 AI 解析", "", CommentAiSettings.TAKEOVER);
         AiModelSettings commentModels = aiSettings();
         String commentModelId = repository.getString(CommentAiSettings.MODEL_ID, "");
@@ -1415,10 +1416,13 @@ public final class ModuleSettingsScreen {
                 android.widget.Toast.LENGTH_SHORT).show();
     }
 
-    private void showAiChat() {
-        try { showOptionDialog(new AiTestChatDialog(context, aiSettings().selected(), miuixHome != null,
-                false, null, AiConversationDialog.manualSearch(context, repository))); }
-        catch (RuntimeException failure) { toast(safeError(failure)); }
+    private void showAiChat(AiSkills.Entry skillsEntry) {
+        try {
+            AiTestChatDialog dialog = new AiTestChatDialog(context, aiSettings().selected(), miuixHome != null,
+                    false, null, AiConversationDialog.manualSearch(context, repository));
+            if (skillsEntry != null) dialog.enableSkills(skillsEntry);
+            showOptionDialog(dialog);
+        } catch (RuntimeException failure) { toast(safeError(failure)); }
     }
 
     private void addChoiceOption(String title, String key, String[] labels, String[] values, String fallback) {
