@@ -5,9 +5,12 @@ import android.app.AlertDialog;
 import android.text.method.PasswordTransformationMethod;
 import android.view.View;
 import android.widget.EditText;
+import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import com.douai.module.ai.mcp.McpClient;
+import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
@@ -198,6 +201,40 @@ public final class ModuleSettingsActionSeparationTest {
         assertTrue(confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
         ShadowLooper.idleMainLooper();
         assertTrue(services.isAuthorized(registered));
+    }
+
+    @Test public void mcpSettingsSaveAnInertEndpointUntilItsProtocolAndAddressAreApproved() throws Exception {
+        assertTrue(option(open("EXTENSION"), "在线 MCP").performClick());
+        View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertPresent(manager, "mcp.import");
+        assertPresent(manager, "mcp.export");
+        assertTrue(manager.findViewWithTag("mcp.service.add").performClick());
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        View form = editor.getWindow().getDecorView();
+        String endpoint = "https://tools.example.test/mcp";
+        ((EditText) form.findViewWithTag("mcp.service.id")).setText("mcp-fixture");
+        ((EditText) form.findViewWithTag("mcp.service.label")).setText("测试工具");
+        ((EditText) form.findViewWithTag("mcp.service.endpoint")).setText(endpoint);
+        ((Spinner) form.findViewWithTag("mcp.service.protocol")).setSelection(1);
+        EditText token = form.findViewWithTag("mcp.service.token");
+        assertTrue(token.getTransformationMethod() instanceof PasswordTransformationMethod);
+        assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+
+        McpRegistry registry = McpRegistry.forContext(activity);
+        McpRegistry.Service service = registry.services().stream()
+                .filter(item -> item.id().equals("mcp-fixture")).findFirst().orElseThrow();
+        assertEquals(McpClient.LEGACY, service.protocol());
+        assertFalse(registry.isAuthorized(service));
+        assertTrue(manager.findViewWithTag("mcp.service.mcp-fixture.authorize").performClick());
+        AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        TextView message = confirmation.findViewById(android.R.id.message);
+        assertNotNull(message);
+        assertTrue(message.getText().toString().contains(endpoint));
+        assertTrue(message.getText().toString().contains(McpClient.LEGACY));
+        assertTrue(confirmation.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(registry.isAuthorized(service));
     }
 
     private View open(String category) {

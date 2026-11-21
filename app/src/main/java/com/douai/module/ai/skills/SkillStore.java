@@ -1,6 +1,7 @@
 package com.douai.module.ai.skills;
 
 import android.content.Context;
+import com.douai.module.ai.mcp.McpRegistry;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -51,19 +52,27 @@ public final class SkillStore {
     private final File directory;
     private final File catalog;
     private final SkillServices services;
+    private final McpRegistry mcp;
 
     public static SkillStore forContext(Context context) {
         Context app = context.getApplicationContext();
         Context owner = app == null ? context : app;
         return new SkillStore(new File(owner.getNoBackupFilesDir(), "douai-ai/skills"),
-                SkillServices.forContext(owner));
+                SkillServices.forContext(owner), McpRegistry.forContext(owner));
     }
 
     SkillStore(File directory, SkillServices services) {
+        this(directory, services, null);
+    }
+
+    private SkillStore(File directory, SkillServices services, McpRegistry mcp) {
         this.directory = directory;
         this.catalog = new File(directory, "catalog.json");
         this.services = services;
+        this.mcp = mcp;
     }
+
+    McpRegistry mcp() { return mcp; }
 
     public boolean enabled() {
         return read(state -> state.getBoolean("enabled"));
@@ -251,7 +260,7 @@ public final class SkillStore {
             keys(value, "schemaVersion", "name", "description", "documentation", "execution", "trial");
             if (integer(value, "schemaVersion") != 1) throw new IllegalArgumentException();
             String name = value.getString("name");
-            if (!NAME.matcher(name).matches() || AiSkills.isBuiltIn(name)) throw new IllegalArgumentException();
+            if (!NAME.matcher(name).matches() || AiSkills.isBuiltIn(name) || name.startsWith("mcp-")) throw new IllegalArgumentException();
             String description = text(value.get("description"), 100);
             if (description.codePoints().anyMatch(Character::isISOControl)) throw new IllegalArgumentException();
             String documentation = text(value.get("documentation"), 6000);

@@ -29,3 +29,18 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 专项 144 项通过，无失败或跳过。测试使用模拟模型响应、模拟订单和 HTTPS 传输替身。待独立验收真机 Keystore、设置交互、抖音宿主和真实模型服务。
+
+## 阶段 3 · 在线 MCP
+
+- `McpClient.java` 复用有界 HTTPS 传输，支持显式选择 Streamable HTTP `2025-11-25` 或 `2026-07-28`，处理 JSON、SSE 和工具分页。协议不兼容时报告所选版本的失败。
+- `McpRegistry.java` 维护服务 ID、工具名、别名和已审核的工具指纹。端点、协议、凭据或工具定义变化后重新确认。工具调用前重新检查远程定义和本地授权。调用发出后结果未知时保留该状态，客户端无自动重发。
+- `McpSettingsDialog.java`、`ModuleSettingsScreen.java` 提供登记、授权后异步发现、手动绑定和 JSON 导入预览及导出。导入不联网，替换同 ID 也会清空凭据、授权和已审核指纹。
+- `AiSkills.java`、`SkillStore.java`、`AiTestChatDialog.java` 将已审核的命令接入两个入口。用法示例为 `/mcp-weather {"city":"深圳"}`。未登记或未授权的命令有本地反馈。
+- 专项使用模拟 HTTP 和 SAF 配置测试。当前接收文本工具结果与受限的 JSON Schema。OAuth、旧 HTTP+SSE、GET 续流、订阅、多轮服务器输入请求及超出子集的工具有单独的兼容性限制，真实服务及 Android 文件选择器待独立验收。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests '*McpClientTest' --tests '*McpRegistryTest' --tests '*McpManualRoutingTest' --tests '*ModuleSettingsActionSeparationTest'
+```
+
+协议参考 [2025-11-25 Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 与 [2026-07-28 Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)。

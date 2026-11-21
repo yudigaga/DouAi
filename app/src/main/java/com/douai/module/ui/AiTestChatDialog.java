@@ -39,6 +39,8 @@ import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import com.douai.module.ai.mcp.McpClient;
+import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -687,6 +689,10 @@ final class AiTestChatDialog extends Dialog {
         final AiSkills.Invocation skill;
         try {
             skill = skillEntry == null || retryAnswer != null ? null : AiSkills.match(skillEntry, prompt, skillStore);
+        } catch (AiSkills.CommandUnavailable unavailable) {
+            state.setText(unavailable.getMessage());
+            updateSend();
+            return;
         } catch (IllegalStateException unavailable) {
             state.setText("技能目录无法访问");
             updateSend();
@@ -913,11 +919,10 @@ final class AiTestChatDialog extends Dialog {
             }
             state.setText("");
         } else if (turn.skill != null) {
-            answer.text = turn.stopRequested ? "已停止" : failure instanceof SkillServices.Failure
-                    ? failure.getMessage() : "技能执行失败";
+            answer.text = skillFailure(turn.stopRequested, failure);
             answer.color = turn.stopRequested ? MUTED : ERROR;
             state.setText(answer.text);
-            if (turn.skill.version() == 0) {
+            if (turn.skill.localBuiltIn()) {
                 restoreDraft(turn.prompt, Collections.emptyList(), Collections.emptyList());
             }
             if (failure != null) turn.trace.stage("skill_execute", "error_type=" + failure.getClass().getSimpleName());
@@ -943,6 +948,17 @@ final class AiTestChatDialog extends Dialog {
                         : failure instanceof java.net.SocketTimeoutException ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED,
                 turn.stopRequested ? "user_cancelled" : failure == null ? "response_rendered" : "request_failed",
                 "response_chars=" + (reply == null ? 0 : reply.length()) + ";view_notified=true;remote_delivery=not_applicable");
+    }
+
+    private static String skillFailure(boolean stopped, Exception failure) {
+        if (failure instanceof SkillServices.Failure service
+                && service.code() == SkillServices.Code.UNKNOWN_RESULT) return "请求结果未知，请先核实";
+        if (failure instanceof McpClient.Failure mcp && mcp.resultUnknown()) return mcp.getMessage();
+        if (failure instanceof McpRegistry.Failure registry && registry.resultUnknown()) return registry.getMessage();
+        if (stopped) return "已停止";
+        if (failure instanceof SkillServices.Failure || failure instanceof McpClient.Failure
+                || failure instanceof McpRegistry.Failure) return failure.getMessage();
+        return "技能执行失败";
     }
 
     private void stopRequest() {

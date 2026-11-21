@@ -1,10 +1,13 @@
 package com.douai.module.ai.skills;
 
+import com.douai.module.ai.mcp.McpRegistry;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -14,8 +17,14 @@ public final class AiSkills {
 
     public record Command(String name, String description) {}
 
-    public record Invocation(Command command, String argument, int version) {
-        Invocation(Command command, String argument) { this(command, argument, 0); }
+    public static final class CommandUnavailable extends IllegalStateException {
+        CommandUnavailable(String message) { super(message); }
+    }
+
+    public record Invocation(Command command, String argument, int version, McpRegistry.Binding mcpBinding) {
+        Invocation(Command command, String argument) { this(command, argument, 0, null); }
+        Invocation(Command command, String argument, int version) { this(command, argument, version, null); }
+        public boolean localBuiltIn() { return version == 0 && mcpBinding == null; }
     }
 
     private interface Action {
@@ -62,6 +71,15 @@ public final class AiSkills {
             for (SkillStore.Available skill : store.available()) {
                 if (skill.command().name().startsWith(prefix)) matches.add(skill.command());
             }
+            if (store.mcp() != null && ("mcp-".startsWith(prefix) || prefix.startsWith("mcp-"))) {
+                try {
+                    for (McpRegistry.Binding binding : store.mcp().activeBindings()) {
+                        if (binding.alias().startsWith(prefix)) matches.add(mcpCommand(binding));
+                    }
+                } catch (Exception unavailable) {
+                    // Keep local skills available when the separate MCP registry fails to load.
+                }
+            }
         }
         return matches;
     }
@@ -88,8 +106,24 @@ public final class AiSkills {
                     return new Invocation(skill.command(), argument, skill.version());
                 }
             }
+            if (store.mcp() != null && matcher.group(1).startsWith("mcp-")) {
+                try {
+                    for (McpRegistry.Binding binding : store.mcp().bindings()) {
+                        if (binding.alias().equals(matcher.group(1))) {
+                            return new Invocation(mcpCommand(binding), argument, 0, binding);
+                        }
+                    }
+                } catch (Exception unavailable) {
+                    throw new CommandUnavailable("MCP 绑定无法读取");
+                }
+                throw new CommandUnavailable("MCP 命令未登记");
+            }
         }
         return null;
+    }
+
+    private static Command mcpCommand(McpRegistry.Binding binding) {
+        return new Command(binding.alias(), "MCP 工具 · JSON 参数");
     }
 
     static boolean isBuiltIn(String name) {
@@ -101,7 +135,12 @@ public final class AiSkills {
 
     public static String execute(Invocation call, SkillStore store) throws Exception {
         if (store != null && !store.enabled()) throw new IllegalStateException("技能已停用");
-        if (call.version() == 0) return execute(call);
+        if (call.mcpBinding() != null) {
+            if (store == null || store.mcp() == null) throw new IllegalStateException("MCP 绑定不可用");
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            return store.mcp().execute(call.mcpBinding(), call.argument(), deadline);
+        }
+        if (call.localBuiltIn()) return execute(call);
         if (store == null) throw new IllegalStateException("技能不可用");
         return store.execute(call.command().name(), call.version(), call.argument());
     }

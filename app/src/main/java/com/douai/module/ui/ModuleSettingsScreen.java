@@ -725,6 +725,7 @@ public final class ModuleSettingsScreen {
             case EXTENSION:
                 addOption("AI 模型设置", "", null, true, this::showAiModelSettings);
                 addOption("AI Skills", "", null, true, this::showAiSkillSettings);
+                addOption("在线 MCP", "", null, true, this::showMcpSettings);
                 addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
                 addOption("配置备份", "", null, true, this::showConfigBackup);
                 break;
@@ -1423,6 +1424,15 @@ public final class ModuleSettingsScreen {
             showOptionDialog(page.dialog(), page::close);
         } catch (RuntimeException unavailable) {
             toast("无法打开 AI Skills 设置");
+        }
+    }
+
+    private void showMcpSettings() {
+        try {
+            McpSettingsDialog page = new McpSettingsDialog(context, miuixHome != null, this::showOptionDialog);
+            showOptionDialog(page.dialog(), page::close);
+        } catch (RuntimeException unavailable) {
+            toast("无法打开在线 MCP 设置");
         }
     }
 
@@ -2343,7 +2353,7 @@ public final class ModuleSettingsScreen {
 
         String searchText() {
             if (this == ABOUT) return title + " 调试 日志 LSPosed";
-            return this == EXTENSION ? title + " AI 模型设置 AI Skills 技能 文本转语音设置 数据备份 配置备份" : title;
+            return this == EXTENSION ? title + " AI 模型设置 AI Skills 技能 在线 MCP 文本转语音设置 数据备份 配置备份" : title;
         }
     }
 
