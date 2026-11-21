@@ -2,8 +2,10 @@ package com.douai.module.feature;
 
 import android.app.Activity;
 import android.content.SharedPreferences;
+import android.graphics.Rect;
 import android.os.Looper;
 import android.view.View;
+import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
@@ -11,6 +13,7 @@ import com.douai.module.config.ExtendedSettings;
 import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.ComponentHideSettings.Component;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -50,6 +53,8 @@ public final class FeedUiHideHookTest {
         public void onImagePageSelected() { }
         public void onVideoResume() { }
         public void onVideoPause() { }
+        public void bindVideo(AwemeFixture work) { }
+        public void bindVideoAtPosition(AwemeFixture work, int position) { }
         public void onImageResume() { }
         public void onImagePause() { }
     }
@@ -63,6 +68,80 @@ public final class FeedUiHideHookTest {
     public static final class PlayerFixture {
         public void onPause(String aid) { }
         public void onPlaying(String aid) { }
+    }
+
+    public static final class PagerFixture extends FrameLayout {
+        PagerFixture(Activity context) { super(context); }
+        @Override public boolean dispatchTouchEvent(android.view.MotionEvent event) {
+            return super.dispatchTouchEvent(event);
+        }
+    }
+
+    @Test public void anIncomingVideoUsesTheHiddenPolicyBeforeSelectionAndRestoresOnSwipeAbort() throws Throwable {
+        Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
+        PagerFixture pager=new PagerFixture(activity);
+        FrameLayout selected=new FrameLayout(activity),next=new FrameLayout(activity);
+        TextView currentLike=new TextView(activity),nextLike=new TextView(activity);
+        currentLike.setId(2131374327);nextLike.setId(2131374327);nextLike.setClickable(true);
+        selected.addView(currentLike,new FrameLayout.LayoutParams(40,40));
+        next.addView(nextLike,new FrameLayout.LayoutParams(40,40));
+        pager.addView(selected,new FrameLayout.LayoutParams(360,800));
+        pager.addView(next,new FrameLayout.LayoutParams(360,800));
+        activity.setContentView(pager);
+        View decor=activity.getWindow().getDecorView();
+        decor.measure(View.MeasureSpec.makeMeasureSpec(360,View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(800,View.MeasureSpec.EXACTLY));
+        decor.layout(0,0,360,800);
+        SharedPreferences prefs=componentPreferences();
+        prefs.edit().putString(Component.LIKE.key,"-2")
+                .putBoolean(ComponentHideSettings.HIDE_ON_SWITCH,true).commit();
+        Map<String,XposedInterface.Hooker> hooks=new HashMap<>();
+        HostAdaptation.Profile before=HostAdaptation.currentProfile();
+        FeedUiHideHook hook;
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try { hook=install(hooks,ExtendedSettings.readFrom(prefs)); }
+        finally { HostAdaptation.setCurrentProfile(before); }
+        try {
+            FeedHolderFixture current=holder(selected),incoming=holder(next);incoming.aid="next";
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"),current);idleMainLooper();
+            hook.setComponentsTemporarilyShown(true);idleMainLooper();
+            int edge=pager.getHeight();
+            assertTrue(edge>60);
+            Rect cardClip=new Rect(),pagerClip=new Rect();
+            assertTrue(pager.getGlobalVisibleRect(pagerClip));
+            next.layout(0,edge+20,360,edge+820);
+            assertFalse(next.getGlobalVisibleRect(cardClip) && Rect.intersects(cardClip,pagerClip));
+            intercept(hooks.get("DouAi.FeedUi.PreviewVideo"),incoming,new AwemeFixture("next"));
+            ViewTreeObserver tree=decor.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());assertEquals(View.VISIBLE,nextLike.getVisibility());
+            next.layout(0,edge-60,360,edge+740);
+            assertTrue(next.getGlobalVisibleRect(cardClip) && Rect.intersects(cardClip,pagerClip));
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals("The right control must already be hidden while dragging in the unselected card",
+                    View.GONE,nextLike.getVisibility());
+            assertTrue("Preparing the incoming card must not reset the outgoing reveal",hook.areComponentsTemporarilyShown());
+            assertEquals(View.VISIBLE,currentLike.getVisibility());
+            int searches=hook.getViewSearches();
+            for(int i=0;i<8;i++)assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(searches,hook.getViewSearches());
+            next.layout(0,edge+20,360,edge+820);
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(View.VISIBLE,nextLike.getVisibility());assertTrue(nextLike.isClickable());
+
+            next.layout(0,edge-60,360,edge+740);
+            assertFalse(tree.dispatchOnPreDraw());assertEquals(View.GONE,nextLike.getVisibility());
+            interceptWithProceed(hooks.get("DouAi.FeedUi.PreviewVideoAtPosition"),incoming,()->{
+                assertEquals("Restore the old card's properties before native rebind",View.VISIBLE,nextLike.getVisibility());
+                assertTrue(nextLike.isClickable());
+                incoming.aid="recycled";
+            },new AwemeFixture("recycled"),1);
+            assertFalse(tree.dispatchOnPreDraw());assertEquals(View.GONE,nextLike.getVisibility());
+            intercept(hooks.get("DouAi.FeedUi.HideVideoActions"),incoming);idleMainLooper();
+            assertFalse(hook.areComponentsTemporarilyShown());
+            assertEquals(View.GONE,nextLike.getVisibility());
+            hook.setComponentsTemporarilyShown(true);idleMainLooper();
+            assertEquals(View.VISIBLE,nextLike.getVisibility());assertTrue(nextLike.isClickable());
+        } finally {hook.close();idleMainLooper();activity.finish();}
     }
 
     @Test public void preparedSettingsFinishOnlyAfterTheCurrentCardReconcile() throws Throwable {
@@ -2356,11 +2435,16 @@ public final class FeedUiHideHookTest {
     }
 
     private static void intercept(XposedInterface.Hooker hook, Object holder, Object... arguments) throws Throwable {
+        interceptWithProceed(hook,holder,()->{},arguments);
+    }
+
+    private static void interceptWithProceed(XposedInterface.Hooker hook, Object holder, Runnable proceed,
+                                             Object... arguments) throws Throwable {
         assertNotNull(hook);
         XposedInterface.Chain chain = (XposedInterface.Chain) Proxy.newProxyInstance(
                 XposedInterface.Chain.class.getClassLoader(), new Class<?>[]{XposedInterface.Chain.class},
                 (proxy, method, args) -> {
-                    if ("proceed".equals(method.getName())) return null;
+                    if ("proceed".equals(method.getName())) { proceed.run(); return null; }
                     if ("getThisObject".equals(method.getName())) return holder;
                     if ("getArg".equals(method.getName())) return arguments[(Integer) args[0]];
                     throw new UnsupportedOperationException(method.getName());
@@ -2375,6 +2459,15 @@ public final class FeedUiHideHookTest {
                 methodResult("feed_holder_resume", owner, "onVideoResume"),
                 methodResult("feed_holder_pause", owner, "onVideoPause"),
                 classResult("feed_holder_main_root", owner),
+                new RuleScanResult("feed_item_bind_aweme", "method_scan", Collections.singletonList(
+                        new HostCandidate("test.apk", "classes.dex", owner, "bindVideo",
+                                "("+descriptor(AwemeFixture.class)+")V"))),
+                new RuleScanResult("feed_item_bind_aweme_position", "method_scan", Collections.singletonList(
+                        new HostCandidate("test.apk", "classes.dex", owner, "bindVideoAtPosition",
+                                "("+descriptor(AwemeFixture.class)+"I)V"))),
+                new RuleScanResult("auto_slide_pager_touch", "playback", Collections.singletonList(
+                        new HostCandidate("test.apk", "classes.dex", descriptor(PagerFixture.class),
+                                "dispatchTouchEvent", "(Landroid/view/MotionEvent;)Z"))),
                 methodResult("image_holder_page_selected", owner, "onImagePageSelected"),
                 methodResult("image_holder_resume", owner, "onImageResume"),
                 methodResult("image_holder_pause", owner, "onImagePause"),

@@ -6,6 +6,7 @@ import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.view.MotionEvent;
 import android.view.SurfaceView;
 import android.view.TextureView;
 import android.view.View;
@@ -13,26 +14,38 @@ import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import com.douai.module.scan.HostScanReport;
+import com.douai.module.diagnostics.DebugLog;
 import com.douai.module.diagnostics.DouAiLog;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.function.Consumer;
 import io.github.libxposed.api.XposedInterface;
 
-/** Compose the selected video's already-laid-out image into card coordinates without resizing its buffer. */
+/** Frame already-laid-out video in card coordinates without resizing its buffer. */
 final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobalLayoutListener, View.OnAttachStateChangeListener {
+    private static final int MAX_INCOMING=2;
+    private static final int PAGER_DRAGGING=1;
     private final Handler ui=new Handler(Looper.getMainLooper());
-    private final BehaviorHookGroup hooks;
+    private final BehaviorHookGroup hooks,incomingHooks;
     private final Method getWork,getPlayer,getSurface,getVideo,getCurrent,comments;
     private final Field params,panel,dialogs,rootField,width,height;
     private Geometry geometry=new Geometry();
     private final LeavingCards leaving=new LeavingCards();
+    private final ArrayList<Incoming> incoming=new ArrayList<>(MAX_INCOMING);
     private final ChangeGate diagnostics=new ChangeGate();
+    private final FeedFirstFrameTrace firstFrames=new FeedFirstFrameTrace((stage,aid,delta)->
+            DouAiLog.event("hide_video_black_edges","first_frame_timing",stage,
+                    "work_ref="+DouAiLog.reference(aid)+";since_selection_ms="+delta+";presentation=unverified"));
+    private volatile boolean rendererTraceInstalled;
+    private boolean unavailableTraceReported;
     private WeakReference<Object> holder=new WeakReference<>(null);
     private WeakReference<View> root=new WeakReference<>(null);
     private ViewTreeObserver observer;
+    private ViewTreeObserver.OnPreDrawListener pendingFrame;
+    private boolean observingAttachment;
     private volatile boolean enabled,closed;
 
     static FeedVideoFraming install(XposedInterface api,HostScanReport report,ClassLoader loader,boolean enabled,Consumer<String> log) throws Exception {
@@ -41,6 +54,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     private FeedVideoFraming(XposedInterface api,HostScanReport report,ClassLoader loader,boolean enabled,Consumer<String> log) throws Exception {
         this.enabled=enabled;
         hooks=new BehaviorHookGroup("feed_video_framing",log);
+        incomingHooks=new BehaviorHookGroup("feed_video_framing.incoming",log);
         Method select=HostTargets.method(report,"feed_holder_page_selected",loader), resume=HostTargets.method(report,"feed_holder_resume",loader),
                 pause=HostTargets.method(report,"feed_holder_pause",loader);
         Class<?> type=select.getDeclaringClass();
@@ -62,36 +76,207 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             });
             hooks.add(api,pause,c->{Object result=c.proceed(),h=c.getThisObject();onMain(()->{if(holder.get()==h)leaveCurrent();});return result;});
             hooks.add(api,screenChange,c->{Object result=c.proceed();
-                if(enabled && !closed && "comment_panel".equals(c.getArg(0))) onMain(()->{leaving.clear();apply();});
+                if(enabled && !closed && "comment_panel".equals(c.getArg(0))) onMain(()->{clearIncoming();leaving.clear();requestFrame(true);});
                 return result;
             });
         } catch(Exception | LinkageError failed){hooks.close();throw failed;}
+        installRendererTrace(api,report,loader);
+        installIncoming(api,report,loader,type);
     }
+
+    private void installIncoming(XposedInterface api,HostScanReport report,ClassLoader loader,Class<?> holderType){
+        try {
+            Method bind=HostTargets.method(report,"feed_item_bind_aweme",loader);
+            Method bindAt=HostTargets.method(report,"feed_item_bind_aweme_position",loader);
+            Method touch=HostTargets.method(report,"auto_slide_pager_touch",loader);
+            Method scrollState=HostTargets.method(report,"auto_slide_scroll_state",loader);
+            Field pagerField=HostTargets.field(getCurrent.getDeclaringClass(),"f");
+            if(bind.getDeclaringClass()!=holderType || bindAt.getDeclaringClass()!=holderType
+                    || Modifier.isStatic(bind.getModifiers()) || Modifier.isStatic(bindAt.getModifiers())
+                    || bind.getReturnType()!=void.class || bindAt.getReturnType()!=void.class
+                    || bind.getParameterCount()!=1 || bindAt.getParameterCount()!=2
+                    || bind.getParameterTypes()[0]!=getWork.getReturnType()
+                    || bindAt.getParameterTypes()[0]!=getWork.getReturnType() || bindAt.getParameterTypes()[1]!=int.class
+                    || Modifier.isStatic(pagerField.getModifiers()) || !ViewGroup.class.isAssignableFrom(touch.getDeclaringClass())
+                    || !touch.getDeclaringClass().isAssignableFrom(pagerField.getType()) || touch.getReturnType()!=boolean.class
+                    || touch.getParameterCount()!=1 || touch.getParameterTypes()[0]!=MotionEvent.class
+                    || scrollState.getDeclaringClass()!=touch.getDeclaringClass() || Modifier.isStatic(scrollState.getModifiers())
+                    || scrollState.getParameterCount()!=0 || scrollState.getReturnType()!=int.class)return;
+            for(Method method:new Method[]{bind,bindAt})incomingHooks.add(api,method,c->aroundBind(c,pagerField,scrollState));
+        }catch(Exception | LinkageError unavailable){incomingHooks.fail(unavailable);}
+    }
+
+    private Object aroundBind(XposedInterface.Chain chain,Field pagerField,Method scrollState) throws Throwable {
+        if(!enabled || closed || !incomingHooks.isActive() || Looper.myLooper()!=ui.getLooper())return chain.proceed();
+        Object h=chain.getThisObject(),work=chain.getArg(0);
+        try {
+            View card=(View)rootField.get(h);
+            Incoming old=findIncoming(card);
+            if(old!=null)old.remove(true);
+            leaving.restore(card);
+            if(card!=null && card==root.get() && holder.get()==h && getWork.invoke(h)!=work)geometry.restore();
+        }catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){/* Preserve the host bind. */}
+        Object result=chain.proceed();
+        try {
+            View card=(View)rootField.get(h);
+            if(card!=null && card==root.get() && holder.get()==h){requestFrame(false);return result;}
+            Object feed=feed(h);
+            if(card==null || !enabled || closed || !getCurrent.getDeclaringClass().isInstance(feed)
+                    || getCurrent.invoke(feed)==h || !ordinary(work) || getWork.invoke(h)!=work)return result;
+            Object pager=pagerField.get(feed);
+            if(!(pager instanceof ViewGroup) || findIncoming(card)!=null)return result;
+            if(incoming.size()==MAX_INCOMING)incoming.get(0).remove(true);
+            Incoming next=new Incoming(card,h,work,feed,(View)pager,pagerField,scrollState);
+            incoming.add(next);card.addOnAttachStateChangeListener(next);
+            if(card.isAttachedToWindow())next.onViewAttachedToWindow(card);
+        }catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){/* Use native geometry. */}
+        return result;
+    }
+
+    private Object feed(Object h) throws IllegalAccessException {
+        Object item=params.get(h);return item==null?null:panel.get(item);
+    }
+    private boolean commentsClosed(Object feed) throws ReflectiveOperationException {
+        Object state=dialogs.get(feed);
+        return state!=null && Boolean.FALSE.equals(comments.invoke(state,true));
+    }
+    private static boolean ordinary(Object work) {
+        return Integer.valueOf(0).equals(HostTargets.invoke(work,"getAwemeType"))
+                && Boolean.FALSE.equals(HostTargets.invoke(work,"isLive")) && Boolean.FALSE.equals(HostTargets.invoke(work,"getAd"));
+    }
+    private static boolean within(View view,View parent){
+        if(parent==null)return false;
+        for(int depth=0;view!=null && depth<32;depth++){
+            if(view==parent)return true;
+            view=view.getParent() instanceof View?(View)view.getParent():null;
+        }
+        return false;
+    }
+    private Incoming findIncoming(View card){
+        if(card!=null)for(Incoming next:incoming)if(next.card.get()==card)return next;
+        return null;
+    }
+    private void clearIncoming(){while(!incoming.isEmpty())incoming.get(incoming.size()-1).remove(true);}
+
+    private Geometry takeIncoming(View card,Object h){
+        Incoming next=findIncoming(card);
+        if(next==null)return null;
+        boolean take=false;
+        try {take=next.matches(h);}
+        catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){/* Restore only our properties. */}
+        next.remove(!take);
+        return take?next.geometry:null;
+    }
+    private void installRendererTrace(XposedInterface api,HostScanReport report,ClassLoader loader){
+        try {
+            Class<?> dispatcher=HostTargets.method(report,"component_player_playing",loader).getDeclaringClass();
+            Class<?> info=hostRenderType(loader,"X.0Gf4");
+            Method first=dispatcher.getDeclaredMethod("onRenderFirstFrame",String.class,info);
+            if(first.isSynthetic() || Modifier.isStatic(first.getModifiers()) || first.getReturnType()!=void.class)return;
+            hooks.add(api,first,chain->{
+                boolean collect=tracing();
+                long at=collect?SystemClock.elapsedRealtime():0;
+                Object aid=collect?chain.getArg(0):null,owner=collect?chain.getThisObject():null;
+                Object result=chain.proceed();
+                if(aid instanceof String)onMain(()->{
+                    if(!tracing())return;
+                    try {firstFrames.rendered(owner,(String)aid,at);}
+                    catch(RuntimeException | LinkageError unavailable){firstFrames.clear();}
+                });
+                return result;
+            });
+            rendererTraceInstalled=true;
+        }catch(Exception | LinkageError unavailable){
+            // Optional observation; host signature changes never disable framing.
+        }
+    }
+    // Obfuscated DEX names are valid at runtime but are not Java PSI type names in Lint.
+    private static Class<?> hostRenderType(ClassLoader loader,String name) throws ClassNotFoundException {
+        return Class.forName(name,false,loader);
+    }
+    private boolean tracing(){return rendererTraceInstalled && enabled && !closed && DebugLog.isEnabled();}
+
+    private void traceSelection(Object selected){
+        try {
+            if(!tracing()){
+                firstFrames.clear();
+                if(DebugLog.isEnabled() && !rendererTraceInstalled && !unavailableTraceReported){
+                    unavailableTraceReported=true;
+                    DouAiLog.event("hide_video_black_edges","first_frame_timing","callback_unavailable","presentation=unverified");
+                }
+                return;
+            }
+            if(selected==null)return;
+            Object item=params.get(selected), feed=item==null?null:panel.get(item);
+            if(getCurrent.getDeclaringClass().isInstance(feed) && getCurrent.invoke(feed)==selected)
+                traceSelection(feed,getWork.invoke(selected));
+        }catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){firstFrames.deselected();}
+    }
+    private void traceSelection(Object feed,Object work){
+        Object owner=dispatcher(feed);String aid=workAid(work);
+        if(!firstFrames.matches(owner,aid))firstFrames.selected(owner,aid,SystemClock.elapsedRealtime());
+    }
+    private void traceDraw(Object feed,Object work){
+        if(!tracing())return;
+        try {
+            traceSelection(feed,work);
+            firstFrames.drawOpportunity(SystemClock.elapsedRealtime());
+        }catch(RuntimeException | LinkageError unavailable){firstFrames.deselected();}
+    }
+    private static Object dispatcher(Object feed){return HostTargets.read(HostTargets.read(feed,"V"),"m");}
+    private static String workAid(Object work){Object aid=HostTargets.invoke(work,"getAid");return aid instanceof String?(String)aid:null;}
     void setEnabled(boolean value) {
         if(enabled==value || closed)return;enabled=value;
-        onMain(()->{if(closed)return;if(enabled){observe();apply();}else{stopObserving();geometry.restore();leaving.clear();}});
+        onMain(()->{if(closed)return;if(enabled){traceSelection(holder.get());observe();requestFrame(true);}else{stopObserving();geometry.restore();clearIncoming();leaving.clear();firstFrames.clear();}});
     }
     private void select(Object h) {
         if(closed)return;
         try{
             View card=(View)rootField.get(h);
-            if(card!=root.get() || holder.get()!=h){leaveCurrent();geometry=leaving.take(card);holder=new WeakReference<>(h);root=new WeakReference<>(card);}
-            if(enabled){observe();apply();}
+            if(card!=root.get() || holder.get()!=h){
+                leaveCurrent();
+                Geometry prepared=takeIncoming(card,h);
+                geometry=prepared==null?leaving.take(card):prepared;
+                holder=new WeakReference<>(h);root=new WeakReference<>(card);
+            }
+            if(enabled){traceSelection(h);observe();requestFrame(true);}
         }catch(ReflectiveOperationException | RuntimeException e){unbind();}
     }
     private void observe(){
         View v=root.get();if(v==null)return;
+        if(!observingAttachment){v.addOnAttachStateChangeListener(this);observingAttachment=true;}
+        if(!v.isAttachedToWindow())return;
         ViewTreeObserver tree=v.getViewTreeObserver();
-        if(tree.isAlive() && observer!=tree){stopObserving();observer=tree;tree.addOnGlobalLayoutListener(this);v.addOnAttachStateChangeListener(this);}
+        if(tree.isAlive() && observer!=tree){stopObservingDraws();observer=tree;tree.addOnGlobalLayoutListener(this);}
     }
     private void stopObserving(){
-        if(observer!=null && observer.isAlive())observer.removeOnGlobalLayoutListener(this);observer=null;
-        View v=root.get();if(v!=null)v.removeOnAttachStateChangeListener(this);
+        stopObservingDraws();
+        View v=root.get();if(v!=null && observingAttachment)v.removeOnAttachStateChangeListener(this);
+        observingAttachment=false;
     }
-    @Override public void onViewAttachedToWindow(View v){if(enabled && !closed){observe();apply();}}
-    @Override public void onViewDetachedFromWindow(View v){geometry.restore();}
-    // Global layout is delivered before drawing. Transform properties don't request a second layout.
-    @Override public void onGlobalLayout(){apply();}
+    private void stopObservingDraws(){
+        cancelFrame();
+        if(observer!=null && observer.isAlive())observer.removeOnGlobalLayoutListener(this);observer=null;
+    }
+    @Override public void onViewAttachedToWindow(View v){if(v==root.get() && enabled && !closed){traceSelection(holder.get());observe();requestFrame(true);}}
+    @Override public void onViewDetachedFromWindow(View v){if(v==root.get()){stopObservingDraws();geometry.restore();firstFrames.deselected();}}
+    @Override public void onGlobalLayout(){requestFrame(false);}
+    private void requestFrame(boolean invalidate){
+        if(!enabled || closed || pendingFrame!=null || observer==null || !observer.isAlive())return;
+        // Other global layout listeners can still move the host render view in this traversal.
+        pendingFrame=new ViewTreeObserver.OnPreDrawListener(){
+            @Override public boolean onPreDraw(){
+                if(pendingFrame==this){cancelFrame();apply();}
+                return true;
+            }
+        };
+        observer.addOnPreDrawListener(pendingFrame);
+        View v=root.get();if(invalidate && v!=null)v.postInvalidateOnAnimation();
+    }
+    private void cancelFrame(){
+        if(pendingFrame!=null && observer!=null && observer.isAlive())observer.removeOnPreDrawListener(pendingFrame);
+        pendingFrame=null;
+    }
     private void apply(){
         if(!enabled || closed)return;
         try { if(!applyToCurrent()) geometry.restore(); }
@@ -101,24 +286,27 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         Object h=holder.get();View card=root.get();
         if(h==null || card==null || !card.isAttachedToWindow() || !card.isShown()
                 || card.getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT)return false;
-        Object item=params.get(h);Object feed=item==null?null:panel.get(item);
+        Object feed=feed(h);
         if(!getCurrent.getDeclaringClass().isInstance(feed))return false;
         if(getCurrent.invoke(feed)!=h){
+            firstFrames.deselected();
             // The pager can change its current holder before either holder's lifecycle callback.
             if(geometry.changed()){leaving.leave(card,geometry);geometry=new Geometry();}
             return false;
         }
-        Object dialogState=dialogs.get(feed);
-        if(dialogState==null || !Boolean.FALSE.equals(comments.invoke(dialogState,true)))return false;
+        if(!commentsClosed(feed))return false;
         Object work=getWork.invoke(h);
-        if(!Integer.valueOf(0).equals(HostTargets.invoke(work,"getAwemeType")) || !Boolean.FALSE.equals(HostTargets.invoke(work,"isLive"))
-                || !Boolean.FALSE.equals(HostTargets.invoke(work,"getAd")))return false;
+        traceDraw(feed,work);
+        if(!ordinary(work))return false;
         Object video=getVideo.invoke(work), player=getPlayer.invoke(h);
         if(video==null || player==null)return false;
         View render=(View)getSurface.invoke(player);
         if(!geometry.changed() && !leaving.empty())geometry=leaving.take(card);
         int sw=width.getInt(video),sh=height.getInt(video);
         boolean applied=geometry.frame(render,card,sw,sh);
+        if(applied && geometry.syncColouring(card,render) && DebugLog.isEnabled())
+            DouAiLog.event("hide_video_black_edges","free_space_colour_bands","redundant_after_fill",
+                    "work_ref="+DouAiLog.reference(workAid(work))+";presentation=unverified");
         report(work,render,card,sw,sh,applied);
         return applied;
     }
@@ -127,7 +315,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         int ch=card.getHeight()-card.getPaddingTop()-card.getPaddingBottom();
         int rw=render==null?0:render.getWidth(),rh=render==null?0:render.getHeight();
         Geometry g=geometry;
-        long shape=g.reason.hashCode();
+        long shape=g.reason.hashCode()*31L+g.blockedLayer.hashCode();
         shape=shape*31+sw;shape=shape*31+sh;shape=shape*31+cw;shape=shape*31+ch;
         shape=shape*31+rw;shape=shape*31+rh;shape=shape*31+g.rawX;shape=shape*31+g.rawY;
         shape=shape*31+(applied?Math.round(g.scale*1000):0);
@@ -139,7 +327,8 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
                 "work_ref="+DouAiLog.reference(aid instanceof String?(String)aid:null)+";source="+sw+"x"+sh+
                         ";render="+rw+"x"+rh+";card="+cw+"x"+ch+";render_in_card="+
                         (g.rawX==Integer.MIN_VALUE?"unknown":g.rawX+","+g.rawY)+";layer="+layer+
-                        ";scale="+(applied?g.scale:1)+";translation="+(applied?g.tx:0)+","+(applied?g.ty:0));
+                        ";scale="+(applied?g.scale:1)+";translation="+(applied?g.tx:0)+","+(applied?g.ty:0)
+                        +";blocked_layer="+g.blockedLayer);
     }
     static final class ChangeGate {
         private WeakReference<Object> previous=new WeakReference<>(null);private long signature,next;
@@ -158,21 +347,122 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         return fit/fill>=.75?fill:fit;
     }
 
+    private final class Incoming implements ViewTreeObserver.OnGlobalLayoutListener, ViewTreeObserver.OnPreDrawListener,
+            View.OnAttachStateChangeListener {
+        final WeakReference<View> card,pager;
+        final WeakReference<Object> holder,work,panel;
+        final Field pagerField;
+        final Method scrollState;
+        final Geometry geometry=new Geometry();
+        final Rect clip=new Rect(),viewport=new Rect();
+        WeakReference<View> renderer=new WeakReference<>(null);
+        ViewTreeObserver tree;
+        boolean dirty=true,visible,manual,removed,reported;
+        Incoming(View card,Object holder,Object work,Object panel,View pager,Field pagerField,Method scrollState){
+            this.card=new WeakReference<>(card);this.holder=new WeakReference<>(holder);this.work=new WeakReference<>(work);
+            this.panel=new WeakReference<>(panel);this.pager=new WeakReference<>(pager);
+            this.pagerField=pagerField;this.scrollState=scrollState;
+        }
+        private boolean scoped(View card,View pager){
+            return card!=null && pager!=null && card.isAttachedToWindow() && pager.isAttachedToWindow()
+                    && within(card,pager) && card.getWindowVisibility()==View.VISIBLE
+                    && card.getResources().getConfiguration().orientation==Configuration.ORIENTATION_PORTRAIT;
+        }
+        @Override public void onViewAttachedToWindow(View view){
+            if(tree!=null || removed)return;
+            ViewTreeObserver observer=view.getViewTreeObserver();
+            if(!observer.isAlive())return;
+            tree=observer;tree.addOnGlobalLayoutListener(this);tree.addOnPreDrawListener(this);
+        }
+        @Override public void onViewDetachedFromWindow(View view){remove(true);}
+        @Override public void onGlobalLayout(){dirty=true;}
+        @Override public boolean onPreDraw(){
+            if(removed)return true;
+            try {update();}
+            catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){remove(true);}
+            return true;
+        }
+        private void update() throws ReflectiveOperationException {
+            View card=this.card.get(),pager=this.pager.get();
+            if(!enabled || closed || !scoped(card,pager) || holder.get()==null || work.get()==null || panel.get()==null){
+                remove(true);return;
+            }
+            boolean entering=card.isShown() && card.getGlobalVisibleRect(clip)
+                    && pager.getGlobalVisibleRect(viewport) && Rect.intersects(clip,viewport);
+            if(!entering){
+                if(visible)geometry.restore();
+                visible=false;manual=false;return;
+            }
+            boolean first=!visible;
+            visible=true;
+            if(first)manual=Integer.valueOf(PAGER_DRAGGING).equals(scrollState.invoke(pager));
+            if(!manual)return;
+            View target=geometry.target.get(),render=renderer.get();
+            if(target!=null && (!geometry.clean(target) || !within(render,card) || !within(target,card))){
+                geometry.restore();dirty=true;
+            }
+            if(dirty || first){dirty=false;prepare();}
+        }
+        private void prepare() throws ReflectiveOperationException {
+            View card=this.card.get(),pager=this.pager.get();
+            Object h=holder.get(),feed=panel.get(),work=this.work.get();
+            if(h==null || feed==null || work==null || rootField.get(h)!=card || feed(h)!=feed
+                    || pagerField.get(feed)!=pager || getWork.invoke(h)!=work || !commentsClosed(feed)){
+                remove(true);return;
+            }
+            Object player=getPlayer.invoke(h),video=getVideo.invoke(work);
+            View render=player==null?null:(View)getSurface.invoke(player);
+            if(renderer.get()!=render)geometry.restore();
+            renderer=new WeakReference<>(render);
+            if(video==null || render==null){geometry.restore();return;}
+            int sw=width.getInt(video),sh=height.getInt(video);
+            if(!geometry.frame(render,card,sw,sh)){geometry.restore();return;}
+            if(geometry.changed() && !reported && DebugLog.isEnabled()){
+                reported=true;
+                DouAiLog.event("hide_video_black_edges","incoming_framing",geometry.reason,
+                        "work_ref="+DouAiLog.reference(workAid(work))+";render="+render.getWidth()+"x"+render.getHeight()
+                                +";scale="+geometry.scale+";presentation=unverified");
+            }
+        }
+        boolean matches(Object h) throws ReflectiveOperationException {
+            View card=this.card.get(),pager=this.pager.get(),target=geometry.target.get(),render=renderer.get();
+            Object feed=panel.get(),work=this.work.get();
+            if(!visible || !geometry.changed() || !scoped(card,pager) || h!=holder.get()
+                    || work==null || feed==null || rootField.get(h)!=card || feed(h)!=feed || pagerField.get(feed)!=pager
+                    || getCurrent.invoke(feed)!=h || getWork.invoke(h)!=work || !commentsClosed(feed)
+                    || !within(target,card) || !within(render,card) || !geometry.clean(target))return false;
+            Object player=getPlayer.invoke(h);
+            return player!=null && getSurface.invoke(player)==render;
+        }
+        void remove(boolean restore){
+            if(removed)return;removed=true;
+            View v=card.get();if(v!=null)v.removeOnAttachStateChangeListener(this);
+            if(tree!=null && tree.isAlive()){tree.removeOnGlobalLayoutListener(this);tree.removeOnPreDrawListener(this);}
+            tree=null;incoming.remove(this);
+            if(restore)geometry.restore();
+        }
+    }
+
     /** Only borrow compositor properties, not layout params, native gravity, margins or surface size. */
     static final class Geometry {
         private WeakReference<View> target=new WeakReference<>(null);
         private final Matrix matrix=new Matrix();
+        private final FeedColourBandLease colours=new FeedColourBandLease();
         private float scale=1,tx,ty;
+        private boolean coversNativeVerticalGap;
         int rawX,rawY;
-        String reason="unmeasured";
+        String reason="unmeasured",blockedLayer="none";
         boolean changed(){return target.get()!=null && (scale!=1 || tx!=0 || ty!=0);}
         boolean frame(View render,View card,int srcW,int srcH) {
-            rawX=rawY=Integer.MIN_VALUE;reason="unsupported_surface_or_clip";
+            rawX=rawY=Integer.MIN_VALUE;reason="unsupported_surface_or_clip";blockedLayer="none";coversNativeVerticalGap=false;
             if(!(render instanceof SurfaceView || render instanceof TextureView) || !(card instanceof ViewGroup)
                     || !render.isAttachedToWindow() || !((ViewGroup)card).getClipChildren()
                     || !((ViewGroup)card).getClipToPadding() || render.getWidth()<=0 || render.getHeight()<=0)return false;
-            reason="native_transform";
-            if(!clean(card) || render instanceof TextureView && !((TextureView)render).getTransform(matrix).isIdentity())return false;
+            String rejected=transformRejection(card);
+            String rejectedLayer="card";
+            if(rejected==null && render instanceof TextureView && !((TextureView)render).getTransform(matrix).isIdentity()){
+                rejected="texture_transform";rejectedLayer="render";
+            }
             int w=card.getWidth()-card.getPaddingLeft()-card.getPaddingRight(), h=card.getHeight()-card.getPaddingTop()-card.getPaddingBottom();
             reason="unusable_size";
             if(w<=0 || w>h || srcW<=0 || srcH<=0 || srcW>32768 || srcH>32768 || w>32768 || h>32768)return false;
@@ -184,13 +474,19 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             float x=0,y=0,layerX=0,layerY=0;
             View layer=render,v=render;
             // Map physical layout coordinates (excluding our old transforms) to card-local coordinates.
-            int depth=0;reason="native_transform_or_wrong_card";
+            int depth=0;
             while(v!=card && depth++<32){
-                if(!clean(v) || !(v.getParent() instanceof ViewGroup))return false;
+                if(!(v.getParent() instanceof ViewGroup))return reject("renderer_outside_card","ancestry");
+                // A clip in an unrelated window branch must not mask a wrong-card rejection.
+                if(rejected==null){
+                    rejected=transformRejection(v);
+                    if(rejected!=null)rejectedLayer=v==render?"render":"media_parent";
+                }
                 ViewGroup p=(ViewGroup)v.getParent();
                 x+=v.getLeft()-p.getScrollX();y+=v.getTop()-p.getScrollY();v=p;
             }
-            if(v!=card)return false;
+            if(v!=card)return reject("renderer_outside_card","ancestry");
+            if(rejected!=null)return reject(rejected,rejectedLayer);
             rawX=(int)x;rawY=(int)y;
             reason="surface_aspect_mismatch";
             if(Math.abs(rw*(double)srcH-rh*(double)srcW)>Math.max(srcW,srcH)*2.0)return false;
@@ -239,16 +535,25 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             if(layer.getScaleY()!=s)layer.setScaleY(s);
             if(layer.getTranslationX()!=dx)layer.setTranslationX(dx);
             if(layer.getTranslationY()!=dy)layer.setTranslationY(dy);
-            scale=s;tx=dx;ty=dy;reason=constrained?"centered_in_clip":"centered";return true;
+            scale=s;tx=dx;ty=dy;reason=constrained?"centered_in_clip":"centered";
+            coversNativeVerticalGap=s>1f && rh<h && rw*s+.5f>=w && rh*s+.5f>=h;
+            return true;
         }
-        private boolean clean(View v) {
+        boolean syncColouring(View card,View render){return colours.sync(card,render.getWidth(),coversNativeVerticalGap);}
+        private boolean reject(String code,String layer){reason=code;blockedLayer=layer;return false;}
+        private boolean clean(View v) {return transformRejection(v)==null;}
+        private String transformRejection(View v) {
             boolean ours=v==target.get();
-            return v.getRotation()==0 && v.getRotationX()==0 && v.getRotationY()==0 && v.getAnimation()==null
-                    && v.getClipBounds()==null && !v.getClipToOutline()
-                    && v.getScaleX()==(ours?scale:1) && v.getScaleY()==(ours?scale:1)
-                    && v.getTranslationX()==(ours?tx:0) && v.getTranslationY()==(ours?ty:0);
+            if(v.getRotation()!=0 || v.getRotationX()!=0 || v.getRotationY()!=0)return "native_rotation";
+            if(v.getAnimation()!=null)return "native_animation";
+            if(v.getClipBounds()!=null || v.getClipToOutline())return "native_clip";
+            if(v.getScaleX()!=(ours?scale:1) || v.getScaleY()!=(ours?scale:1))return "native_scale";
+            if(v.getTranslationX()!=(ours?tx:0) || v.getTranslationY()!=(ours?ty:0))return "native_translation";
+            return null;
         }
         void restore(){
+            colours.restore();
+            coversNativeVerticalGap=false;
             View v=target.get();
             if(v!=null){
                 if(scale!=1 && v.getScaleX()==scale)v.setScaleX(1);
@@ -284,6 +589,9 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             ViewTreeObserver tree=card.getViewTreeObserver();l.tree=new WeakReference<>(tree);
             if(tree.isAlive())tree.addOnPreDrawListener(l);else l.release(true);
         }
+        void restore(View card){
+            if(card!=null)for(int i=list.size()-1;i>=0;i--)if(list.get(i).card.get()==card)list.get(i).release(true);
+        }
         void clear(){while(!list.isEmpty())list.get(list.size()-1).release(true);}
         private final class Lease implements ViewTreeObserver.OnPreDrawListener,View.OnAttachStateChangeListener {
             final WeakReference<View> card;final Geometry geometry;
@@ -313,10 +621,11 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     }
     private void leaveCurrent(){
         stopObserving();
+        firstFrames.deselected();
         if(enabled&&!closed)leaving.leave(root.get(),geometry);else geometry.restore();
         geometry=new Geometry();holder.clear();root.clear();
     }
-    private void unbind(){stopObserving();geometry.restore();holder.clear();root.clear();}
+    private void unbind(){stopObserving();geometry.restore();holder.clear();root.clear();firstFrames.clear();}
     private void onMain(Runnable r){if(Looper.myLooper()==Looper.getMainLooper())r.run();else ui.post(r);}
-    @Override public void close(){closed=true;hooks.close();onMain(()->{unbind();leaving.clear();});}
+    @Override public void close(){closed=true;incomingHooks.close();hooks.close();onMain(()->{unbind();clearIncoming();leaving.clear();});}
 }

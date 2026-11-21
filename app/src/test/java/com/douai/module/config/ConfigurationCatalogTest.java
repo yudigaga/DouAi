@@ -11,6 +11,14 @@ import static com.douai.module.config.ConfigurationCatalog.Feature.*;
 import static org.junit.Assert.*;
 
 public final class ConfigurationCatalogTest {
+    @Test public void nativeDoubleTapSwitchOnlyRefreshesItsGate() {
+        String key = "disable_double_tap_like";
+        assertConsumers(key, EnumSet.of(HOST_BEHAVIOR));
+        ConfigurationChanges changed = ConfigurationChanges.between(Map.of(key, true), Map.of(key, false));
+        assertFalse(changed.affects(GESTURE));
+        assertTrue(changed.affects(HOST_BEHAVIOR));
+    }
+
     @Test public void expansionAutomaticSettingsDefaultOffAndRefreshOnlyTheirOwners() {
         assertEquals(false,ConfigurationCatalog.settings().get("temporary_feed_rules_enabled").defaultValue);
         assertEquals(false,ConfigurationCatalog.settings().get("author_speed_enabled").defaultValue);

@@ -35,10 +35,25 @@ final class LiquidGlassTargets {
             this.targets=targets;this.treeLimited=treeLimited;this.targetLimited=targetLimited;
         }
     }
-    static Selection select(View root) {return select(root,true);}
-    static Selection select(View root,boolean activityWindow) {
+    static final class TreeSnapshot {
+        final View root;
+        final List<View> nodes;
+        final boolean truncated;
+        private TreeSnapshot(View root,List<View> nodes,boolean truncated) {
+            this.root=root;this.nodes=Collections.unmodifiableList(nodes);this.truncated=truncated;
+        }
+    }
+    static TreeSnapshot snapshot(View root) {
         List<View> nodes=new ArrayList<>();boolean[] truncated={false};collect(root,nodes,0,truncated);
-        if(truncated[0])return new Selection(Collections.emptyMap(),true,false);
+        return new TreeSnapshot(root,nodes,truncated[0]);
+    }
+    static Selection select(View root) {return select(root,snapshot(root),true);}
+    static Selection select(View root,boolean activityWindow) {return select(root,snapshot(root),activityWindow);}
+    static Selection select(View root,TreeSnapshot snapshot,boolean activityWindow) {
+        if(root==null)return new Selection(Collections.emptyMap(),false,false);
+        if(snapshot==null || snapshot.root!=root)return new Selection(Collections.emptyMap(),true,false);
+        if(snapshot.truncated)return new Selection(Collections.emptyMap(),true,false);
+        List<View> nodes=snapshot.nodes;
         Set<View> mediaAncestors=Collections.newSetFromMap(new IdentityHashMap<>());
         for(View node:nodes) if(isMedia(node) || opaque(node)) {
             for(View v=node;v!=null;v=v.getParent() instanceof View?(View)v.getParent():null) {
@@ -54,9 +69,10 @@ final class LiquidGlassTargets {
     }
 
     /** Called by the bounded discovery scan, never by the animation frame callback. */
-    static List<View> motionTargets(View root) {
-        List<View> nodes=new ArrayList<>();boolean[] truncated={false};collect(root,nodes,0,truncated);
-        if(truncated[0] || root==null)return Collections.emptyList();
+    static List<View> motionTargets(View root) {return motionTargets(root,snapshot(root));}
+    static List<View> motionTargets(View root,TreeSnapshot snapshot) {
+        if(root==null || snapshot==null || snapshot.root!=root || snapshot.truncated)return Collections.emptyList();
+        List<View> nodes=snapshot.nodes;
         Set<View> protectedTrees=identities(),unsafeGroups=identities();
         for(View node:nodes) {
             View parent=node.getParent() instanceof View?(View)node.getParent():null;
@@ -221,8 +237,7 @@ final class LiquidGlassTargets {
     }
 
     static List<View> nodes(View root) {
-        List<View> nodes=new ArrayList<>();
-        collect(root,nodes,0,new boolean[1]);return nodes;
+        return snapshot(root).nodes;
     }
 
     private static void collect(View view,List<View> nodes,int depth,boolean[] truncated) {

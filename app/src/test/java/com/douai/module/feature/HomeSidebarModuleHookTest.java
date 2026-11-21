@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import android.app.Activity;
+import android.util.ArrayMap;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -9,6 +10,7 @@ import android.widget.LinearLayout;
 import android.widget.Space;
 import android.widget.TextView;
 import com.douai.module.config.SidebarSettings;
+import com.douai.module.feature.HomeSidebarModuleHook.ScanSnapshot;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -22,6 +24,95 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class HomeSidebarModuleHookTest {
+    @Test public void sidebarScanSnapshotRejectsSameCountRegistryReplacement() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        try {
+            LinearLayout list = new LinearLayout(activity);
+            ArrayMap<String, Object> entries = new ArrayMap<>();
+            entries.put("first", new Object());
+            entries.put("second", new Object());
+            ScanSnapshot snapshot = ScanSnapshot.capture(
+                    list, entries, 1, new ArrayList<>(entries.values()));
+            assertTrue(snapshot.matchesComponents(entries));
+            entries.put("second", new Object());
+            assertTrue(snapshot.matches(list, entries, 1));
+            assertFalse(snapshot.matchesComponents(entries));
+        } finally { activity.finish(); }
+    }
+
+    @Test public void sidebarScanSnapshotMatchesOnlyTheExactOwnerListRegistryAndGeneration() throws Exception {
+        Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
+        try {
+            LinearLayout list=new LinearLayout(activity);list.addView(new View(activity));list.addView(new View(activity));
+            LinearLayout otherList=new LinearLayout(activity);otherList.addView(new View(activity));otherList.addView(new View(activity));
+            Object registry=new Object(),otherRegistry=new Object(),component=new Object();
+            ScanSnapshot snapshot=ScanSnapshot.capture(list,registry,7,List.of(component));
+            assertTrue(snapshot.matches(list,registry,7));
+            assertFalse(snapshot.matches(otherList,registry,7));
+            assertFalse(snapshot.matches(list,otherRegistry,7));
+            assertFalse(snapshot.matches(list,registry,8));
+        } finally {activity.finish();}
+    }
+
+    @Test public void sidebarScanSnapshotRejectsSameCountChildReplacementAndOrderChanges() throws Exception {
+        Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
+        try {
+            LinearLayout list=new LinearLayout(activity);
+            View first=new View(activity),second=new View(activity);list.addView(first);list.addView(second);
+            Object registry=new Object();
+            ScanSnapshot snapshot=ScanSnapshot.capture(list,registry,3,List.of(new Object()));
+            list.removeView(second);list.addView(new View(activity));
+            assertEquals(2,list.getChildCount());
+            assertFalse("Equal child counts do not make a replaced host list reusable",
+                    snapshot.matches(list,registry,3));
+
+            LinearLayout ordered=new LinearLayout(activity);View a=new View(activity),b=new View(activity);
+            ordered.addView(a);ordered.addView(b);
+            Object orderedRegistry=new Object();
+            ScanSnapshot reordered=ScanSnapshot.capture(ordered,orderedRegistry,3,List.of(new Object()));
+            ordered.removeView(a);ordered.addView(a,1);
+            assertFalse(reordered.matches(ordered,orderedRegistry,3));
+        } finally {activity.finish();}
+    }
+
+    @Test public void sidebarBuilderGenerationInvalidatesAnUnchangedListForLateNotificationDiscovery() throws Exception {
+        Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
+        try {
+            LinearLayout list=new LinearLayout(activity);list.addView(new View(activity));
+            Object registry=new Object();
+            ScanSnapshot snapshot=ScanSnapshot.capture(list,registry,11,List.of(new Object()));
+            assertTrue(snapshot.matches(list,registry,11));
+            assertFalse("A host build can reveal notification identity without changing the list yet",
+                    snapshot.matches(list,registry,12));
+        } finally {activity.finish();}
+    }
+
+    @Test public void sidebarScanSnapshotCanRebaseAcrossNativePositionRestorationAndReturn() throws Exception {
+        Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
+        LinearLayout list=new LinearLayout(activity);FrameLayout nativeCommon=new FrameLayout(activity);
+        FrameLayout notification=new FrameLayout(activity);list.addView(nativeCommon);list.addView(notification);
+        activity.setContentView(list);
+        HomeSidebarModuleHook.Binding binding=HomeSidebarModuleHook.Binding.attach(nativeCommon,false,(id,owner)->{});
+        Object registry=new Object(),component=new Object();
+        try {
+            HomeSidebarModuleHook.reconcile(List.of(binding),list,Set.of(notification),true,SidebarSettings.parse("module"));
+            ScanSnapshot snapshot=ScanSnapshot.capture(list,registry,5,List.of(component))
+                    .withScanData(List.of(component),List.of());
+            assertTrue(snapshot.matches(list,registry,5));
+
+            HomeSidebarModuleHook.reconcile(List.of(binding),list,Set.of(notification),false,SidebarSettings.parse("module"));
+            assertFalse(snapshot.matches(list,registry,5));
+            snapshot=snapshot.withChildren(list,5);
+            assertTrue("Restored native ordering can refresh identities without rescanning the owner registry",
+                    snapshot.matches(list,registry,5));
+
+            HomeSidebarModuleHook.reconcile(List.of(binding),list,Set.of(notification),true,SidebarSettings.parse("module"));
+            assertSame(notification,list.getChildAt(0));
+            snapshot=snapshot.withChildren(list,5);
+            assertTrue(snapshot.matches(list,registry,5));
+        } finally {binding.rollbackAttached();activity.finish();}
+    }
+
     @Test public void retainedCommonItemsStayAboveTheModuleAndHideByBusinessIdentityWithGridRestoration() {
         Activity activity=Robolectric.buildActivity(Activity.class).setup().get();
         LinearLayout list=new LinearLayout(activity);list.setOrientation(LinearLayout.VERTICAL);

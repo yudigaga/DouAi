@@ -73,7 +73,7 @@ public class BuiltInNavigationIconsTest {
         exposed[0]^=1;
         assertArrayEquals(expected,BuiltInNavigationIcons.symbolForPath("top/01-recommend",false));
     }
-    @Test public void allFortyFourVariantsAreTransparentWhiteSymbolsWithOneConsistentCanvas() throws Exception {
+    @Test public void allFortyFourVariantsUseTheApprovedPaletteAndOneTransparentCanvas() throws Exception {
         String[] designs={"top/01-recommend","top/02-following","top/03-featured","top/04-trending","top/05-nearby",
                 "top/06-live","top/07-shop","top/08-drama","top/09-search","top/10-menu",
                 "bottom/01-home","bottom/02-friends","bottom/03-create","bottom/04-messages","bottom/05-profile",
@@ -84,7 +84,9 @@ public class BuiltInNavigationIconsTest {
         Set<String> resources=new HashSet<>();
         for(BuiltInNavigationIcons.Entry entry:BuiltInNavigationIcons.ENTRIES)for(boolean selected:new boolean[]{false,true}) {
             String name=entry.path+(selected?"-active":"")+".webp";
-            assertTrue(resources.add(name));byte[] expected;
+            assertTrue(resources.add(name));
+            boolean rainbow=selected && !entry.path.startsWith("feed/");
+            int expected=expectedColor(entry.path,selected);
             IconState day=selected?IconState.DAY_SELECTED:IconState.DAY_NORMAL;
             IconState night=selected?IconState.NIGHT_SELECTED:IconState.NIGHT_NORMAL;
             byte[] source;
@@ -100,21 +102,98 @@ public class BuiltInNavigationIconsTest {
             try {
                 assertEquals(256,bitmap.getWidth());assertEquals(256,bitmap.getHeight());
                 assertEquals("Transparent canvas corner: "+name,0,Color.alpha(bitmap.getPixel(0,0)));
-                int minX=256,minY=256,maxX=-1,maxY=-1,visible=0;
+                int minX=256,minY=256,maxX=-1,maxY=-1,visible=0,opaque=0;
                 for(int y=0;y<256;y++)for(int x=0;x<256;x++) {
                     int color=bitmap.getPixel(x,y);
                     if(Color.alpha(color)==0)continue;
                     visible++;minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);
-                    assertTrue("Built-in symbol is white: "+name+" @"+x+","+y,
-                            Color.red(color)>=235 && Color.green(color)>=235 && Color.blue(color)>=235);
+                    if(Color.alpha(color)<250)continue;
+                    opaque++;
+                    // API 28 encodes lossy WebP; antialiased edges are checked through the silhouette instead.
+                    if(!rainbow && !nearColor(expected,color))
+                        fail("Unexpected artwork color in "+name+": 0x"+Integer.toHexString(color));
                 }
-                assertTrue("Symbol has visible pixels: "+name,visible>0);
+                assertTrue("Artwork has solid rather than translucent strokes: "+name,opaque>visible/2);
                 assertTrue("No backplate fills the icon edges: "+name+" bounds="+minX+","+minY+"-"+maxX+","+maxY,
                         minX>=12 && minY>=12 && maxX<=243 && maxY<=243);
-                assertTrue("Artwork occupancy stays symbol-sized: "+name,visible<256*256*0.5f);
+                assertTrue("Artwork occupancy stays symbol-sized: "+name,visible<256*256*0.65f);
+                if(rainbow)assertDiagonalRainbow(name,bitmap,minX,minY,maxX,maxY,opaque);
             }finally{bitmap.recycle();}
         }
         assertEquals(44,resources.size());
+    }
+
+    @Test public void selectionChangesTheSilhouetteAtRenderedIconSizes() throws Exception {
+        for(BuiltInNavigationIcons.Entry entry:BuiltInNavigationIcons.ENTRIES) {
+            int size=entry.path.startsWith("top/")?20:24;
+            int[] normal=renderedPixels(entry.path,false,size),selected=renderedPixels(entry.path,true,size);
+            int normalCutoff=relativeAlphaCutoff(normal),selectedCutoff=relativeAlphaCutoff(selected);
+            int difference=0,union=0;
+            for(int i=0;i<normal.length;i++) {
+                boolean n=Color.alpha(normal[i])>=normalCutoff,s=Color.alpha(selected[i])>=selectedCutoff;
+                if(n || s)union++;
+                if(n!=s)difference++;
+            }
+            assertTrue("Both states need a visible silhouette: "+entry.path,normalCutoff>0 && selectedCutoff>0 && union>0);
+            assertTrue("Opacity or color alone is not a distinct "+size+"px silhouette for "+entry.path
+                    +" ("+difference+"/"+union+" pixels differ)",difference*10>=union);
+        }
+    }
+
+    private static int expectedColor(String path,boolean selected) {
+        if(!selected)return Color.WHITE;
+        if("feed/01-like".equals(path))return 0xFFFF687D;
+        if("feed/03-collect".equals(path))return 0xFFFFD475;
+        return Color.WHITE;
+    }
+
+    private static boolean nearColor(int expected,int actual) {
+        return Math.abs(Color.red(expected)-Color.red(actual))<=16
+                && Math.abs(Color.green(expected)-Color.green(actual))<=16
+                && Math.abs(Color.blue(expected)-Color.blue(actual))<=16;
+    }
+
+    private static void assertDiagonalRainbow(String name,Bitmap bitmap,int left,int top,int right,int bottom,int opaque) {
+        // Project onto the SVG's top-left to bottom-right axis in its object bounding box.
+        int[] stops={0xFFFF697E,0xFFFFD674,0xFF75E7B5,0xFF73C7FF,0xFFC29AFF};
+        double[] offsets={0,.25,.50,.76,1};
+        int matches=0;
+        for(int y=top;y<=bottom;y++)for(int x=left;x<=right;x++) {
+            int color=bitmap.getPixel(x,y);
+            if(Color.alpha(color)<250)continue;
+            double t=((x-left)/(double)(right-left)+(y-top)/(double)(bottom-top))/2;
+            int upper=1;
+            while(t>offsets[upper] && upper<offsets.length-1)upper++;
+            int a=stops[upper-1],b=stops[upper];
+            double f=(t-offsets[upper-1])/(offsets[upper]-offsets[upper-1]);
+            int expected=Color.rgb(blend(Color.red(a),Color.red(b),f),
+                    blend(Color.green(a),Color.green(b),f),blend(Color.blue(a),Color.blue(b),f));
+            if(nearColor(expected,color))matches++;
+        }
+        assertTrue("Approved diagonal rainbow survives WebP for "+name+" ("+matches+"/"+opaque+" pixels match)",
+                matches>=opaque*.90);
+    }
+
+    private static int blend(int a,int b,double f) {
+        return (int)Math.round(a+(b-a)*f);
+    }
+
+    private static int[] renderedPixels(String path,boolean selected,int size) throws Exception {
+        byte[] bytes=BuiltInNavigationIcons.symbolForPath(path,selected);
+        Bitmap source=BitmapFactory.decodeByteArray(bytes,0,bytes.length);
+        assertNotNull(path,source);
+        Bitmap small=Bitmap.createScaledBitmap(source,size,size,true);
+        try {
+            int[] pixels=new int[size*size];
+            small.getPixels(pixels,0,size,0,0,size,size);
+            return pixels;
+        }finally{small.recycle();source.recycle();}
+    }
+
+    private static int relativeAlphaCutoff(int[] pixels) {
+        int peak=0;
+        for(int pixel:pixels)peak=Math.max(peak,Color.alpha(pixel));
+        return Math.round(peak*0.65f);
     }
 
     @Test public void oldBundledArtworkIsRerenderedForDisplayWithoutRewritingItsStoredBytes() throws Exception {

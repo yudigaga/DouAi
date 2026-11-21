@@ -131,7 +131,12 @@ public final class HomeUiCustomization implements AutoCloseable {
     }
 
     public void refresh() {
+        refresh(LiquidGlassTargets.snapshot(root));
+    }
+
+    void refresh(LiquidGlassTargets.TreeSnapshot snapshot) {
         if (closed || refreshing) return;
+        if(snapshot==null || snapshot.root!=root)snapshot=LiquidGlassTargets.snapshot(root);
         refreshing = true;
         long workStarted=slowReports<6?SystemClock.elapsedRealtimeNanos():0;
         try {
@@ -139,14 +144,15 @@ public final class HomeUiCustomization implements AutoCloseable {
             Set<String> wanted=encodedAssets();
             for(String encoded:wanted)asset(encoded);
             missingAssets=0;for(String encoded:wanted)if(!assets.containsKey(encoded))missingAssets++;
-            List<View> nodes = new ArrayList<>();
-            collect(root, nodes, 0);
-            discoveryLimited=nodes.size()>=4096;
+            List<View> nodes=snapshot.nodes;
+            discoveryLimited=snapshot.truncated || nodes.size()>=4096;
+            boolean complete=!discoveryLimited;
             Set<ImageView> foundImages = Collections.newSetFromMap(new IdentityHashMap<>());
             Set<View> foundNavigation=Collections.newSetFromMap(new IdentityHashMap<>());
             Set<View> foundHidden=Collections.newSetFromMap(new IdentityHashMap<>());
             Map<TextView,View> currentLabels = new IdentityHashMap<>();
             for (View view : nodes) {
+                if(LiquidGlassTargets.opaque(view))continue;
                 if(hasClass(view,TOP_CORNER)) {
                     TopCornerTarget target=topCornerTarget(view);
                     if(target==null || !hiddenNavigation.contains(target.key)) {
@@ -207,7 +213,7 @@ public final class HomeUiCustomization implements AutoCloseable {
                 ImageView image = (ImageView) view;
                 if(insideHiddenNavigation(image))continue;
                 IconState role=collectRole(image);
-                String key = role!=null?"feed_collect":feedKey(image.getId());
+                String key = role!=null?"feed_collect":feedImageKey(image);
                 if (key == null || !configured(key)) continue;
                 if(role==null && "feed_collect".equals(key)) {
                     ImageState previous=images.get(image);
@@ -217,24 +223,32 @@ public final class HomeUiCustomization implements AutoCloseable {
                 }
                 bindImage(image,key,null,foundImages);
             }
-            for(Iterator<Map.Entry<View,NavigationItemVisibility>> it=hiddenItems.entrySet().iterator();it.hasNext();) {
-                Map.Entry<View,NavigationItemVisibility> entry=it.next();
-                if(!foundHidden.contains(entry.getKey())){entry.getValue().close();it.remove();}
+            if(complete) {
+                for(Iterator<Map.Entry<View,NavigationItemVisibility>> it=hiddenItems.entrySet().iterator();it.hasNext();) {
+                    Map.Entry<View,NavigationItemVisibility> entry=it.next();
+                    if(!foundHidden.contains(entry.getKey())){entry.getValue().close();it.remove();}
+                }
+                for (Iterator<Map.Entry<ImageView,ImageState>> it = images.entrySet().iterator(); it.hasNext();) {
+                    Map.Entry<ImageView,ImageState> entry = it.next();
+                    if (!foundImages.contains(entry.getKey())) { entry.getValue().close(); it.remove(); }
+                }
+                for (Iterator<Map.Entry<TextView,LabelState>> it = labels.entrySet().iterator(); it.hasNext();) {
+                    Map.Entry<TextView,LabelState> entry = it.next();
+                    if (!currentLabels.containsKey(entry.getKey())) { entry.getValue().close(); it.remove(); }
+                }
+                foundLabels=currentLabels;
+                for(Iterator<Map.Entry<View,NavigationState>> it=navigation.entrySet().iterator();it.hasNext();) {
+                    Map.Entry<View,NavigationState> entry=it.next();
+                    if(!foundNavigation.contains(entry.getKey())){entry.getValue().close();it.remove();}
+                }
+                refreshNavigationGroups();
+            } else {
+                Map<TextView,View> retainedLabels=new IdentityHashMap<>();
+                for(Map.Entry<TextView,View> entry:foundLabels.entrySet())
+                    if(within(entry.getKey(),root))retainedLabels.put(entry.getKey(),entry.getValue());
+                retainedLabels.putAll(currentLabels);
+                foundLabels=retainedLabels;
             }
-            for (Iterator<Map.Entry<ImageView,ImageState>> it = images.entrySet().iterator(); it.hasNext();) {
-                Map.Entry<ImageView,ImageState> entry = it.next();
-                if (!foundImages.contains(entry.getKey())) { entry.getValue().close(); it.remove(); }
-            }
-            for (Iterator<Map.Entry<TextView,LabelState>> it = labels.entrySet().iterator(); it.hasNext();) {
-                Map.Entry<TextView,LabelState> entry = it.next();
-                if (!currentLabels.containsKey(entry.getKey())) { entry.getValue().close(); it.remove(); }
-            }
-            foundLabels = currentLabels;
-            for(Iterator<Map.Entry<View,NavigationState>> it=navigation.entrySet().iterator();it.hasNext();) {
-                Map.Entry<View,NavigationState> entry=it.next();
-                if(!foundNavigation.contains(entry.getKey())){entry.getValue().close();it.remove();}
-            }
-            refreshNavigationGroups();
             syncNavigation();
             Set<Asset> retained=Collections.newSetFromMap(new IdentityHashMap<>());
             for(ImageState state:images.values())if(state.asset!=null)retained.add(state.asset);
@@ -268,7 +282,7 @@ public final class HomeUiCustomization implements AutoCloseable {
                 boolean sameTarget;
                 if(state.owner==null) {
                     sameTarget=role!=null && "feed_collect".equals(state.key)
-                            || entry.getKey().getId()==state.originalId && state.key.equals(feedKey(entry.getKey().getId()));
+                            || entry.getKey().getId()==state.originalId && state.key.equals(feedImageKey(entry.getKey()));
                 }else if(hasClass(state.owner,TOP_CORNER)) {
                     TopCornerTarget target=topCornerTarget(state.owner);
                     sameTarget=target!=null && state.key.equals(target.key) && target.image==entry.getKey();
@@ -821,7 +835,20 @@ public final class HomeUiCustomization implements AutoCloseable {
                 || !(normal instanceof ImageView) || hasClass(normal,"com.airbnb.lottie.LottieAnimationView"))return null;
         return image==selected?IconState.of(false,true):image==normal?IconState.of(false,false):null;
     }
-    private static String feedKey(int id) {
+    @android.annotation.SuppressLint("ResourceType") // IDs belong to the verified host APK, not module R.
+    private static String feedImageKey(ImageView image) {
+        int id=image.getId();
+        if(id==View.NO_ID) {
+            // In the host's grouped like layout the named ID belongs to the owner, not its artwork.
+            if(!(image.getParent() instanceof FrameLayout))return null;
+            FrameLayout owner=(FrameLayout)image.getParent();
+            if(owner.getId()!=0x7f0a30ca || !hasClass(owner,"com.ss.android.ugc.aweme.feed.widget.DiggAnimationLayout")
+                    || !(owner.getParent() instanceof FrameLayout)
+                    || ((FrameLayout)owner.getParent()).getId()!=0x7f0a30d6)return null;
+            String type=image.getClass().getName();
+            return "com.ss.android.ugc.aweme.feed.widget.DiggAnimationView".equals(type)
+                    || "com.ss.android.ugc.aweme.feed.widget.DiggAnimationViewV2".equals(type)?"feed_like":null;
+        }
         // Verified 41.0.0 image children, not the containing action slots.
         switch(id) {
             case 0x7f0a30ca:return "feed_like";
@@ -853,13 +880,5 @@ public final class HomeUiCustomization implements AutoCloseable {
             view=view.getParent() instanceof View?(View)view.getParent():null;
         }
         return false;
-    }
-    private static void collect(View view,List<View> nodes,int depth) {
-        if(view==null || depth>40 || nodes.size()>=4096 || LiquidGlassTargets.opaque(view))return;
-        nodes.add(view);
-        if(view instanceof ViewGroup) {
-            ViewGroup group=(ViewGroup)view;
-            for(int i=0;i<group.getChildCount() && nodes.size()<4096;i++)collect(group.getChildAt(i),nodes,depth+1);
-        }
     }
 }

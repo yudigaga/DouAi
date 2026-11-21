@@ -137,6 +137,25 @@ public final class VideoPageEntryHostContractTest {
         }
     }
 
+    @Test public void recommendationVideoCardsUseTheSamePresenterAndExposePaintedCoverBounds() throws Exception {
+        try (ZipFile apk=host()) {
+            String coverModule=FEED + "quick/uimodule/FeedCoverModule;";
+            String story=FEED + "quick/uimodule/StoryRootModule;";
+            ClassDef holder=type(apk,25,FEED + "adapter/VideoViewHolder;");
+            assertTrue(calls(method(holder,"LJJIIJZLJL","V"),story,"<init>","V",
+                    VIEW,VIEW,"LX/0tOJ;","Z","Z"));
+            assertTrue(calls(method(type(apk,25,story),"subModules","Ljava/util/List;"),
+                    coverModule,"<init>","V",VIEW,"I"));
+            ClassDef module=type(apk,25,coverModule);
+            assertTrue(calls(method(module,"<init>","V",VIEW,"I"),PRESENTER,"<init>","V",VIEW));
+            assertTrue(accesses(method(module,"presenter","Lcom/ss/android/ugc/aweme/kiwi/presenter/QIPresenter;"),
+                    coverModule,"a",PRESENTER,"IGET"));
+            ClassDef hierarchy=type(apk,38,"Lcom/facebook/drawee/generic/GenericDraweeHierarchy;");
+            Method painted=method(hierarchy,"getActualImageBounds","V","Landroid/graphics/RectF;");
+            assertTrue(calls(painted,"Landroid/graphics/Matrix;","mapRect","Z","Landroid/graphics/RectF;"));
+        }
+    }
+
     private static ZipFile host() throws Exception {
         String path = System.getenv("DOUAI_TEST_APK");
         assumeTrue(path != null && new File(path).isFile());

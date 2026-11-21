@@ -553,7 +553,10 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         return "none";
     }
     private String assignedAction(String prefix,int region) {
-        String action=regionAction(options,prefix,region);
+        return assignedAction(options,prefix,region);
+    }
+    private String assignedAction(LocalOptions current,String prefix,int region) {
+        String action=regionAction(current,prefix,region);
         if ((com.douai.module.config.SidebarSettings.isFeedAction(action)||"like".equals(action))
                 && !PlaybackBookmarks.enabled()) return "none";
         if (("seek_back_10".equals(action)||"seek_forward_10".equals(action))
@@ -691,34 +694,75 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         BehaviorHookGroup group = newGroup("double_tap_action");
         try {
             Method target = HostTargets.method(report, "adv_ui_double_tap", loader);
+            Method currentHolder = assignedLikeHolder(report, loader, target);
             group.add(framework, target, XposedInterface.PRIORITY_HIGHEST, chain -> {
-                if (closed || !group.isActive()) return chain.proceed();
-                try {
-                    doubleTapCallbacks++;
+                AssignedDoubleTapLike permit = null;
+                if (!closed && group.isActive()) try {
                     Object holder = selectedHolder.get();
-                    View root = activeRoot();
-                    if (holder == null || root == null || panel(holder) != chain.getThisObject()) {
-                        logGestureGate("double_tap", doubleTapCallbacks, root, "inactive_or_foreign_panel");
-                        return chain.proceed();
+                    DoubleTapRoute route = handleDoubleTap(chain, holder);
+                    if (route == DoubleTapRoute.CONSUME) return null;
+                    if (route == DoubleTapRoute.LIKE) {
+                        permit = assignedLikePermit(currentHolder, chain, holder);
+                        DouAiLog.event("gesture", "decision",
+                                permit == null ? "assigned_like_target_unverified" : "native_like_delegated",
+                                "gesture_kind=double_tap;assigned_like=true");
                     }
-                    Object event = chain.getArg(0);
-                    if (!(event instanceof MotionEvent)) return chain.proceed();
-                    View touch = uniqueTouch(root);
-                    if (touch == null || !touch.isShown()) return chain.proceed();
-                    MotionEvent tap = (MotionEvent) event;
-                    int region = region(touch, tap.getRawX(), tap.getRawY());
-                    String action = region < 0 ? "none" : assignedAction("double_tap",region);
-                    if ("none".equals(action)) return chain.proceed();
-                    gestureActions++;
-                    logGestureAction("double_tap", action, region);
-                    dispatch(action, holder, root);
-                    return null;
                 } catch (ReflectiveOperationException | RuntimeException failure) {
                     group.fail(failure);
-                    return chain.proceed();
                 }
+                return permit == null ? chain.proceed() : permit.proceed(chain);
             });
         } catch (Throwable failure) { group.fail(failure); }
+    }
+
+    private AssignedDoubleTapLike assignedLikePermit(Method currentHolder, XposedInterface.Chain chain, Object holder) {
+        if (currentHolder == null || Looper.myLooper() != main.getLooper()) return null;
+        try {
+            Object panel = chain.getThisObject();
+            if (currentHolder.invoke(panel) != holder) return null;
+            Object work = awemeAccessor.invoke(holder);
+            return work == null || selectedHolder.get() != holder ? null
+                    : new AssignedDoubleTapLike(panel, (MotionEvent) chain.getArg(0), holder, work);
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) {
+            return null;
+        }
+    }
+
+    private static Method assignedLikeHolder(HostScanReport report, ClassLoader loader, Method target) {
+        if (HostAdaptation.currentProfile() != HostAdaptation.PROFILE_410) return null;
+        try {
+            Method current = HostTargets.method(report, "auto_slide_current_holder", loader);
+            if (!Modifier.isStatic(current.getModifiers()) && current.getParameterCount() == 0
+                    && current.getDeclaringClass().isAssignableFrom(target.getDeclaringClass())) return current;
+        } catch (Exception | LinkageError unavailable) {
+            // Other grid actions still work without the like target contract.
+        }
+        return null;
+    }
+
+    private enum DoubleTapRoute { PASS, CONSUME, LIKE }
+
+    private DoubleTapRoute handleDoubleTap(XposedInterface.Chain chain, Object holder) throws ReflectiveOperationException {
+        doubleTapCallbacks++;
+        View root = activeRoot();
+        if (holder == null || root == null || panel(holder) != chain.getThisObject()) {
+            logGestureGate("double_tap", doubleTapCallbacks, root, "inactive_or_foreign_panel");
+            return DoubleTapRoute.PASS;
+        }
+        Object event = chain.getArg(0);
+        if (!(event instanceof MotionEvent)) return DoubleTapRoute.PASS;
+        View touch = uniqueTouch(root);
+        if (touch == null || !touch.isShown()) return DoubleTapRoute.PASS;
+        MotionEvent tap = (MotionEvent) event;
+        int region = region(touch, tap.getRawX(), tap.getRawY());
+        LocalOptions current = options;
+        String action = region < 0 ? "none" : assignedAction(current,"double_tap",region);
+        if ("none".equals(action)) return DoubleTapRoute.PASS;
+        if ("like".equals(action)) return DoubleTapRoute.LIKE;
+        gestureActions++;
+        logGestureAction("double_tap", action, region);
+        dispatch(action, holder, root);
+        return DoubleTapRoute.CONSUME;
     }
 
     private void installSpeed(XposedInterface framework, HostScanReport report, ClassLoader loader) {

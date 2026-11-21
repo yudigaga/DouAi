@@ -272,15 +272,21 @@ public final class HostBehaviorHooks implements AutoCloseable {
         try {
             ArrayList<Method> targets = new ArrayList<>();
             for (String rule : rules) targets.add(HostTargets.method(report, rule, loader));
-            for (Method target : targets) {
+            for (int index = 0; index < targets.size(); index++) {
+                Method target = targets.get(index);
+                String rule = rules[index];
+                boolean doubleTapGate = "disable_double_tap_like".equals(key);
                 boolean returnsBoolean = target.getReturnType() == boolean.class;
                 if ((returnsBoolean && !(skippedResult instanceof Boolean))
                         || (!returnsBoolean && target.getReturnType() != void.class)) {
                     throw new IllegalStateException("Suppression contract changed: " + target);
                 }
                 group.add(framework, target, chain -> {
-                    boolean apply = enabled(key);
-                    DouAiLog.event(key, "decision", apply ? "enabled_host_call_blocked" : "disabled_host_call_forwarded",
+                    boolean disabling = enabled(key);
+                    boolean assigned = doubleTapGate && AssignedDoubleTapLike.admit(rule, chain);
+                    boolean apply = disabling && !assigned;
+                    DouAiLog.event(key, "decision", apply ? "enabled_host_call_blocked"
+                                    : disabling ? "assigned_like_forwarded" : "disabled_host_call_forwarded",
                             "host_invoked=" + !apply + ";result_scope=local_interception");
                     if (apply) {
                         DouAiLog.Operation operation = DouAiLog.begin(key, "host_gate");

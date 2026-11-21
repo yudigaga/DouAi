@@ -3,6 +3,7 @@ package com.douai.module.feature;
 import android.app.Activity;
 import android.app.Application;
 import android.content.Context;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.view.View;
 import android.annotation.SuppressLint;
@@ -20,6 +21,7 @@ import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.ComponentHideSettings.Component;
 import com.douai.module.scan.HostCandidate;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
 
@@ -51,6 +53,8 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private static final int MIN_STABLE_STRUCTURE_CHECKS = 64;
     private static final int STABLE_STRUCTURE_SWEEP_FRAMES = 16;
     private static final int MAX_CUSTOM_RETRIES = 8;
+    private static final int MAX_VIDEO_PREVIEWS = 4;
+    private static final int MAX_PREVIEW_NODES = 1024;
     private static final String VIEW_FINDER_TAG = "douai.view_finder";
     private static final Map<Component, int[]> COMPONENT_IDS = componentIds();
     private static final int WIDGET_CONTAINER_ID = 2131362267;
@@ -86,6 +90,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private final Set<Integer> resourceMismatches = new HashSet<>();
     private final Set<View> activeCards = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<View> knownCards = Collections.newSetFromMap(new WeakHashMap<>());
+    private final List<VideoPreview> videoPreviews = new ArrayList<>();
     private final Set<View> windowRoots = Collections.newSetFromMap(new WeakHashMap<>());
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final RetainedConfigurationAction.Owner configurationActions = new RetainedConfigurationAction.Owner();
@@ -152,6 +157,9 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                     "f", "Image");
             if (hook.handles.isEmpty()) throw new IllegalStateException("No feed overlay lifecycle is available");
             hook.installPlaybackCallbacks(framework, report, loader);
+            if (hook.videoLifecycleInstalled && HostAdaptation.currentProfile() == HostAdaptation.PROFILE_410) {
+                hook.installVideoPreviews(framework, report, loader);
+            }
             hook.shortProgress = ShortVideoProgressHook.install(framework, report, loader, settings, hook.log);
             if (context != null && context.getApplicationContext() instanceof Application) {
                 hook.application = (Application) context.getApplicationContext();
@@ -180,6 +188,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         if (shortProgress != null) shortProgress.setSettings(settings);
         mainHandler.post(() -> {
             if (closed) return;
+            releasePreviewStyles();
             ComponentHideSettings current = components;
             if (!usesPlaybackPolicy(current)) clearPendingPlayback();
             if (componentsShown && (current == null || !current.enabled || !current.showOnPause)) {
@@ -219,6 +228,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 }
                 if (phase == 1) {
                     attempt.check();
+                    releasePreviewStyles();
                     ComponentHideSettings current = components;
                     if (!usesPlaybackPolicy(current)) clearPendingPlayback();
                     if (componentsShown && (current == null || !current.enabled || !current.showOnPause)) {
@@ -432,6 +442,11 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
     }
 
+    private static String workAid(Object work) {
+        Object aid = HostTargets.invoke(work, "getAid");
+        return aid instanceof String ? (String) aid : null;
+    }
+
     @SuppressLint("ResourceType") // IDs belong to the verified host APK, not module resources.
     private void openComments(View root) {
         View container = findComponentView(root, 2131371414);
@@ -535,6 +550,81 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         handles.add(handle);
     }
 
+    private void installVideoPreviews(XposedInterface framework, HostScanReport report, ClassLoader loader) {
+        int firstHandle = handles.size();
+        try {
+            Class<?> owner = HostTargets.type(report, "feed_holder_main_root", loader);
+            Field rootField = HostTargets.field(owner, "w");
+            Method pagerTouch = HostTargets.method(report, "auto_slide_pager_touch", loader);
+            Class<?> pagerType = pagerTouch.getDeclaringClass();
+            Method bind = HostTargets.method(report, "feed_item_bind_aweme", loader);
+            Method bindAt = HostTargets.method(report, "feed_item_bind_aweme_position", loader);
+            if (!View.class.isAssignableFrom(rootField.getType()) || !ViewGroup.class.isAssignableFrom(pagerType)
+                    || pagerTouch.getReturnType() != boolean.class
+                    || !java.util.Arrays.equals(pagerTouch.getParameterTypes(), new Class<?>[]{android.view.MotionEvent.class})
+                    || bind.getDeclaringClass() != owner || bindAt.getDeclaringClass() != owner
+                    || bind.getReturnType() != void.class || bindAt.getReturnType() != void.class
+                    || bind.getParameterCount() != 1 || bindAt.getParameterCount() != 2
+                    || bindAt.getParameterTypes()[0] != bind.getParameterTypes()[0]
+                    || bindAt.getParameterTypes()[1] != int.class) return;
+            for (Method method : new Method[]{bind, bindAt}) {
+                XposedInterface.HookHandle handle = framework.hook(method)
+                        .setId(method == bind ? "DouAi.FeedUi.PreviewVideo" : "DouAi.FeedUi.PreviewVideoAtPosition")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH)
+                        .intercept(chain -> aroundVideoBind(chain, rootField, pagerType));
+                if (handle == null) throw new IllegalStateException("Empty feed preview hook");
+                handles.add(handle);
+            }
+        } catch (Exception | LinkageError failure) {
+            for (int index=handles.size()-1;index>=firstHandle;index--) {
+                try { handles.remove(index).unhook(); }
+                catch (Throwable rollback) { failure.addSuppressed(rollback); }
+            }
+            safeLog("Incoming feed controls unavailable: " + failure.getClass().getSimpleName());
+        }
+    }
+
+    private Object aroundVideoBind(XposedInterface.Chain chain, Field rootField, Class<?> pagerType) throws Throwable {
+        if (closed || Looper.myLooper() != mainHandler.getLooper()) return chain.proceed();
+        Object holder = chain.getThisObject();
+        try {
+            View oldRoot = (View) rootField.get(holder);
+            VideoPreview old = preview(oldRoot);
+            if (old != null) old.remove();
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            safeLog("Could not release incoming feed controls: " + failure.getClass().getSimpleName());
+        }
+        Object result = chain.proceed();
+        try {
+            ComponentHideSettings current = components;
+            if (closed || current == null || !current.configured || !current.enabled) return result;
+            View root = (View) rootField.get(holder);
+            String aid = workAid(chain.getArg(0));
+            if (root == null || aid == null || aid.isEmpty() || !aid.equals(readAid(holder))
+                    || activeCards.contains(root) || preview(root) != null) return result;
+            for (VideoPreview candidate : new ArrayList<>(videoPreviews)) {
+                if (candidate.root.get() == null || candidate.holder.get() == null) candidate.remove();
+            }
+            if (videoPreviews.size() >= MAX_VIDEO_PREVIEWS) videoPreviews.get(0).remove();
+            VideoPreview candidate = new VideoPreview(root, holder, aid, pagerType);
+            videoPreviews.add(candidate);
+            root.addOnAttachStateChangeListener(candidate);
+            if (root.isAttachedToWindow()) candidate.onViewAttachedToWindow(root);
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            safeLog("Could not prepare incoming feed controls: " + failure.getClass().getSimpleName());
+        }
+        return result;
+    }
+
+    private VideoPreview preview(View root) {
+        if (root != null) for (VideoPreview candidate : videoPreviews) if (candidate.root.get() == root) return candidate;
+        return null;
+    }
+
+    private void releasePreviewStyles() {
+        for (VideoPreview candidate : videoPreviews) candidate.releaseStyles();
+    }
+
     private Object afterLifecycle(XposedInterface.Chain chain, Field itemViewField, boolean paused) throws Throwable {
         Object result = chain.proceed();
         if (closed) return result;
@@ -578,6 +668,9 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                         componentsShown = false;
                         notifyVisibility();
                     }
+                    VideoPreview preview = preview(root);
+                    if (preview != null) preview.remove(current != null && current.configured && current.enabled
+                            && !componentsShown && preview.holder.get() == holder && preview.aid.equals(aid));
                     activeCards.add(root);
                     knownCards.add(root);
                     trackWindow(root.getRootView());
@@ -714,26 +807,32 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     }
 
     private int applyComponents(View root, ComponentHideSettings current) {
+        Map<View, TargetStyle> styles = current.enabled && !componentsShown
+                ? componentStyles(root, current, MAX_TREE_NODES) : new WeakHashMap<>();
+        fixedTargets.put(root, styles);
+        captureCardStructure(root);
+        refreshCustomTargets(root.getRootView(), false);
+        return reconcileTargets();
+    }
+
+    private Map<View, TargetStyle> componentStyles(View root, ComponentHideSettings current, int budget) {
         Map<View, Integer> targets = new LinkedHashMap<>();
         Map<View, Component> targetOwners = new WeakHashMap<>();
-        if (current.enabled && !componentsShown) {
-            Map<View, Component> matches = new LinkedHashMap<>();
-            collectComponents(root, root, matches);
-            for (Map.Entry<View, Component> entry : matches.entrySet()) {
-                int alpha = current.alpha(entry.getValue());
-                if (alpha == 255) continue;
-                addComponentTarget(entry.getKey(), entry.getValue(), alpha, current, matches, targets, targetOwners);
-            }
+        Map<View, Component> matches = new LinkedHashMap<>();
+        int[] remaining = {budget};
+        collectComponents(root, root, matches, remaining, 0);
+        if (budget == MAX_PREVIEW_NODES && remaining[0] < 0) return Collections.emptyMap();
+        for (Map.Entry<View, Component> entry : matches.entrySet()) {
+            int alpha = current.alpha(entry.getValue());
+            if (alpha == 255) continue;
+            addComponentTarget(entry.getKey(), entry.getValue(), alpha, current, matches, targets, targetOwners);
         }
         Map<View, TargetStyle> styles = new WeakHashMap<>();
         for (Map.Entry<View, Integer> target : targets.entrySet()) {
             styles.put(target.getKey(), new TargetStyle(target.getValue(), true, target.getKey(),
                     targetOwners.get(target.getKey()) == Component.PROGRESS));
         }
-        fixedTargets.put(root, styles);
-        captureCardStructure(root);
-        refreshCustomTargets(root.getRootView(), false);
-        return reconcileTargets();
+        return styles;
     }
 
     private boolean hasCustomEffect() {
@@ -892,7 +991,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             }
         }
         for (View view : new ArrayList<>(originalStates.keySet())) {
-            if (!targets.containsKey(view)) {
+            if (!targets.containsKey(view) && !ownsPreviewStyle(view)) {
                 ViewState original = originalStates.get(view);
                 if (view != null && original != null) restore(view, original);
                 originalStates.remove(view);
@@ -908,6 +1007,20 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         return changed;
     }
 
+    private boolean ownsPreviewStyle(View view) {
+        for (VideoPreview candidate : videoPreviews) if (candidate.applied.contains(view)) return true;
+        return false;
+    }
+
+    private void restorePreviewStyle(View view) {
+        if (view == null || ownsPreviewStyle(view)) return;
+        for (Map<View, TargetStyle> styles : fixedTargets.values()) if (styles.containsKey(view)) return;
+        for (Map<View, TargetStyle> styles : windowProgressTargets.values()) if (styles.containsKey(view)) return;
+        for (Map<View, Integer> styles : customTargets.values()) if (styles.containsKey(view)) return;
+        ViewState state = originalStates.remove(view);
+        if (state != null) restore(view, state);
+    }
+
     private static boolean isFinderView(View view) {
         for (View current = view; current != null; ) {
             Object tag = current.getTag();
@@ -915,10 +1028,6 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             current = current.getParent() instanceof View ? (View) current.getParent() : null;
         }
         return false;
-    }
-
-    private void collectComponents(View view, View root, Map<View, Component> matches) {
-        collectComponents(view, root, matches, new int[]{MAX_TREE_NODES}, 0);
     }
 
     @SuppressLint("ResourceType") // Resource IDs are verified against the host APK, not the module R class.
@@ -959,7 +1068,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
-            for (int index = 0; index < group.getChildCount(); index++) {
+            for (int index = 0; remaining[0] >= 0 && index < group.getChildCount(); index++) {
                 collectComponents(group.getChildAt(index), root, matches, remaining, depth + 1);
             }
         }
@@ -1250,6 +1359,129 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
     }
 
+    private final class VideoPreview implements ViewTreeObserver.OnPreDrawListener, View.OnAttachStateChangeListener {
+        final WeakReference<View> root;
+        final WeakReference<Object> holder;
+        final String aid;
+        final Class<?> pagerType;
+        final Rect cardClip = new Rect(), pagerClip = new Rect();
+        final Set<View> applied = Collections.newSetFromMap(new WeakHashMap<>());
+        ViewTreeObserver observer;
+        Map<View, TargetStyle> styles;
+
+        VideoPreview(View root, Object holder, String aid, Class<?> pagerType) {
+            this.root = new WeakReference<>(root);
+            this.holder = new WeakReference<>(holder);
+            this.aid = aid;
+            this.pagerType = pagerType;
+        }
+
+        private View pagerOf(View view) {
+            for (int depth = 0; view != null && depth < 32; depth++) {
+                if (pagerType.isInstance(view)) return view;
+                view = view.getParent() instanceof View ? (View) view.getParent() : null;
+            }
+            return null;
+        }
+
+        @Override public boolean onPreDraw() {
+            try { prepareDraw(); }
+            catch (RuntimeException | LinkageError unavailable) {
+                try { remove(); }
+                catch (RuntimeException | LinkageError ignored) { }
+                safeLog("Skipping incoming feed controls: " + unavailable.getClass().getSimpleName());
+            }
+            return true;
+        }
+
+        private void prepareDraw() {
+            if (closed) return;
+            View card = root.get();
+            if (card == null || holder.get() == null) { remove(); return; }
+            ComponentHideSettings current = components;
+            if (current == null || !current.configured || !current.enabled) { remove(); return; }
+            View pager = pagerOf(card), active = selectedRoot.get();
+            if (componentsShown && !current.hideOnSwitch || active == null || active == card || pager == null
+                    || !active.isAttachedToWindow() || pagerOf(active) != pager
+                    || !card.isAttachedToWindow() || !card.isShown() || !card.getGlobalVisibleRect(cardClip)
+                    || !pager.getGlobalVisibleRect(pagerClip) || !Rect.intersects(cardClip, pagerClip)) {
+                releaseStyles();
+                return;
+            }
+            if (styles == null) {
+                if (!aid.equals(readAid(holder.get()))) { remove(); return; }
+                // The attached, bound card is entering the pager; avoid window-level discovery here.
+                viewSearches.incrementAndGet();
+                styles = componentStyles(card, current, MAX_PREVIEW_NODES);
+            }
+            View window = card.getRootView();
+            Map<View, Integer> custom = customTargets.get(window);
+            Map<View, TargetStyle> progress = windowProgressTargets.get(window);
+            for (Map.Entry<View, TargetStyle> entry : styles.entrySet()) {
+                View target = entry.getKey();
+                TargetStyle style = entry.getValue();
+                if (target == null || !isDescendant(target, card) || !style.identity.matches(target)
+                        || custom != null && custom.containsKey(target)
+                        || progress != null && progress.containsKey(target)) {
+                    if (applied.remove(target)) restorePreviewStyle(target);
+                    continue;
+                }
+                applied.add(target);
+                hiddenViews.addAndGet(applyComponentTarget(target, style.alpha, style.trackHostAlpha));
+            }
+        }
+
+        void releaseStyles() {
+            styles = null;
+            for (java.util.Iterator<View> iterator=applied.iterator();iterator.hasNext();) {
+                View target=iterator.next();
+                iterator.remove();
+                try { restorePreviewStyle(target); }
+                catch (RuntimeException | LinkageError unavailable) {
+                    safeLog("Could not restore incoming feed control: " + unavailable.getClass().getSimpleName());
+                }
+            }
+        }
+
+        void remove() { remove(false); }
+
+        void remove(boolean selected) {
+            View card = root.get();
+            if (card != null) card.removeOnAttachStateChangeListener(this);
+            detachObserver();
+            videoPreviews.remove(this);
+            if (selected && card != null && styles != null && !applied.isEmpty()) {
+                Map<View, TargetStyle> adopted = new WeakHashMap<>();
+                for (View target : applied) {
+                    TargetStyle style=styles.get(target);
+                    if (style != null && isDescendant(target, card) && style.identity.matches(target))
+                        adopted.put(target, style);
+                }
+                if (!adopted.isEmpty()) fixedTargets.put(card, adopted);
+            }
+            releaseStyles();
+        }
+
+        @Override public void onViewAttachedToWindow(View view) {
+            ViewTreeObserver next = view.getViewTreeObserver();
+            if (observer != next && next.isAlive()) {
+                detachObserver();
+                observer = next;
+                observer.addOnPreDrawListener(this);
+            }
+        }
+
+        @Override public void onViewDetachedFromWindow(View view) {
+            detachObserver();
+            releaseStyles();
+        }
+
+        private void detachObserver() {
+            if (observer != null && observer.isAlive()) observer.removeOnPreDrawListener(this);
+            observer = null;
+        }
+    }
+
     private final class HideMonitor implements ViewTreeObserver.OnPreDrawListener, ViewTreeObserver.OnGlobalLayoutListener,
             View.OnAttachStateChangeListener {
         private final java.lang.ref.WeakReference<View> rootReference;
@@ -1459,10 +1691,17 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     @Override public void onActivityResumed(Activity activity) {
         trackWindow(activity.getWindow().getDecorView());
     }
-    @Override public void onActivityPaused(Activity activity) { }
+    @Override public void onActivityPaused(Activity activity) {
+        View decor = activity.getWindow().getDecorView();
+        for (VideoPreview preview : new ArrayList<>(videoPreviews)) {
+            View card = preview.root.get();
+            if (card == null || card.getRootView() == decor) preview.remove();
+        }
+    }
     @Override public void onActivityStopped(Activity activity) { }
     @Override public void onActivitySaveInstanceState(Activity activity, Bundle state) { }
     @Override public void onActivityDestroyed(Activity activity) {
+        onActivityPaused(activity);
         View root = activity.getWindow().getDecorView();
         WindowMonitor monitor = windowMonitors.remove(root);
         if (monitor != null) monitor.remove();
@@ -1685,6 +1924,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         if (application != null) application.unregisterActivityLifecycleCallbacks(this);
         mainHandler.post(() -> {
             cancelProgressDiagnostics();
+            for (VideoPreview preview : new ArrayList<>(videoPreviews)) preview.remove();
             removeAllHideMonitors();
             for (WindowMonitor monitor : windowMonitors.values()) monitor.remove();
             windowMonitors.clear();

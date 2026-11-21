@@ -8,6 +8,7 @@ import android.graphics.drawable.Drawable;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorManager;
+import android.view.TextureView;
 import android.view.View;
 import android.view.Gravity;
 import android.widget.Button;
@@ -15,10 +16,13 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.RelativeLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import com.douai.module.config.HomeUiCustomizationSettings;
 import com.douai.module.config.HomeUiIconFixtures;
 import com.douai.module.config.LocalOptions;
+import com.ss.android.ugc.aweme.view.CountingFrameLayout;
 import com.ss.android.ugc.aweme.homepage.tab.top.ui.tabstrip.item.HomeTopTabItemViewNew;
 import com.ss.android.ugc.aweme.homepage.tab.top.ui.titlebar.MainTitleBar;
 import com.ss.android.ugc.aweme.homepage.tab.ui.bottom.BottomTab;
@@ -36,6 +40,8 @@ import org.robolectric.shadows.ShadowChoreographer;
 import org.robolectric.shadows.ShadowLooper;
 import org.robolectric.shadows.ShadowSensor;
 import org.robolectric.shadows.ShadowSensorManager;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.ArrayList;
@@ -70,6 +76,153 @@ public class LiquidGlassControllerTest {
             assertEquals(3,navigation.getPaddingLeft());assertEquals(4,navigation.getPaddingTop());
             assertEquals(5,navigation.getPaddingRight());assertEquals(6,navigation.getPaddingBottom());
             assertEquals(View.VISIBLE,navigation.getVisibility());assertTrue(navigation.isClickable());
+        } finally {controller.close();a.finish();}
+    }
+    @Test public void aMonitorRefreshWalksTheWindowTreeOnceAndPureScrollReusesIt() throws Exception {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();
+        CountingFrameLayout root=new CountingFrameLayout(a);
+        ScrollView scroll=new ScrollView(a);LinearLayout content=new LinearLayout(a);
+        content.setOrientation(LinearLayout.VERTICAL);
+        for(int i=0;i<14;i++)content.addView(new TextView(a),new LinearLayout.LayoutParams(-1,100));
+        scroll.addView(content,new ScrollView.LayoutParams(-1,-2));
+        root.addView(scroll,new FrameLayout.LayoutParams(-1,-1));a.setContentView(root);
+        layout(a.getWindow().getDecorView());
+        LiquidGlassController controller=new LiquidGlassController(a,options(true,true,"{}",false),null);
+        try {
+            root.resetChildCountReads();controller.onActivityResumed(a);
+            root.resetChildCountReads();controller.onWindow(root);
+            controller.onWindowClosed(a.getWindow().getDecorView());
+            assertEquals("One collection reads the root's one child twice",2,root.childCountReads());
+
+            Object monitor=monitor(controller,root);
+            View firstRow=content.getChildAt(0),lastRow=content.getChildAt(9);
+            ShadowLooper.shadowMainLooper().idleFor(Duration.ofMillis(120));
+            layout(a.getWindow().getDecorView());invokeMonitor(monitor,"refresh");
+            assertTrue(((java.util.Collection<?>)monitorField(monitor,"motionCandidates")).contains(firstRow));
+            assertFalse(((java.util.Collection<?>)monitorField(monitor,"motionCandidates")).contains(lastRow));
+            scroll.scrollTo(0,400);assertEquals(400,scroll.getScrollY());root.resetChildCountReads();
+            invokeMonitor(monitor,"onScrollChanged");
+            ShadowLooper.shadowMainLooper().idleFor(Duration.ofMillis(120));
+            assertEquals("A scroll-only update reuses the discovered hierarchy",0,root.childCountReads());
+            assertFalse("Clipped controls stop moving",((java.util.Collection<?>)monitorField(monitor,"motionCandidates")).contains(firstRow));
+            assertTrue("Newly revealed controls can move",((java.util.Collection<?>)monitorField(monitor,"motionCandidates")).contains(lastRow));
+
+            FrameLayout added=new FrameLayout(a);added.addView(new TextView(a),new FrameLayout.LayoutParams(-1,48));
+            root.addView(added,new FrameLayout.LayoutParams(-1,80));
+            root.resetChildCountReads();invokeMonitor(monitor,"refresh");
+            assertEquals("A structural refresh performs one new collection",3,root.childCountReads());
+        } finally {controller.close();a.finish();}
+    }
+    @Test public void anIncompleteWindowSnapshotKeepsOwnedNavigationButReleasesDetachedMedia() throws Exception {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root=new FrameLayout(a);MainTitleBar navigation=new MainTitleBar(a);
+        Drawable original=new ColorDrawable(Color.BLACK);
+        navigation.setBackground(original);root.addView(navigation,new FrameLayout.LayoutParams(-1,48));
+        TextureView media=new TextureView(a);root.addView(media,new FrameLayout.LayoutParams(-1,-1));
+        a.setContentView(root);layout(a.getWindow().getDecorView());
+        LiquidGlassController controller=new LiquidGlassController(a,options(true,false,"{}",false),null);
+        try {
+            controller.onActivityResumed(a);assertNotSame(original,navigation.getBackground());
+            Object monitor=monitor(controller,a.getWindow().getDecorView());
+            assertSame(media,monitorField(monitor,"source"));
+            root.removeView(media);
+            for(int i=0;i<LiquidGlassTargets.MAX_NODES;i++)root.addView(new View(a));
+            root.getViewTreeObserver().dispatchOnGlobalLayout();
+            ShadowLooper.shadowMainLooper().idleFor(Duration.ofMillis(120));
+            assertNotSame("An incomplete tree cannot discard an attached owned binding",original,navigation.getBackground());
+            assertNull("An incomplete tree cannot reuse a detached capture source",monitorField(monitor,"source"));
+        } finally {controller.close();a.finish();}
+    }
+    @Test public void aKnownBottomDockIsStyledBeforeItsFirstDrawAfterReveal() throws Exception {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();
+        CountingFrameLayout root=new CountingFrameLayout(a);FrameLayout bottom=bottom(a);
+        FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(-1,48,Gravity.BOTTOM);
+        Drawable nativeBackground=new ColorDrawable(Color.BLACK);
+        RelativeLayout feed=new RelativeLayout(a),actions=new RelativeLayout(a);
+        feed.setId(0x7f0a01db);actions.setId(0x7f0a4000);
+        RelativeLayout.LayoutParams actionParams=new RelativeLayout.LayoutParams(80,48);
+        actionParams.addRule(RelativeLayout.ALIGN_PARENT_BOTTOM);actionParams.addRule(RelativeLayout.CENTER_HORIZONTAL);
+        feed.addView(actions,actionParams);root.addView(feed,new FrameLayout.LayoutParams(-1,-1));
+        bottom.setBackground(nativeBackground);bottom.setVisibility(View.GONE);root.addView(bottom,params);
+        a.setContentView(root);View decor=a.getWindow().getDecorView();layout(decor);
+        LiquidGlassController controller=new LiquidGlassController(a,options(true),null);
+        try {
+            controller.onActivityResumed(a);
+            assertSame(nativeBackground,bottom.getBackground());
+            bottom.setVisibility(View.VISIBLE);layout(decor);
+            root.resetChildCountReads();
+            assertTrue("Do not present the native dock layout before the themed layout commits",
+                    decor.getViewTreeObserver().dispatchOnPreDraw());
+            assertNotSame("A known dock must not wait for the 100 ms discovery task",nativeBackground,bottom.getBackground());
+            assertEquals("A reveal must reuse existing discovery",0,root.childCountReads());
+            assertTrue(params.height>=72);
+            layout(decor);
+            assertTrue("The dock's final layout must reserve room before drawing the action group",
+                    decor.getViewTreeObserver().dispatchOnPreDraw());
+            assertTrue(actionParams.bottomMargin>0);
+            layout(decor);
+            assertFalse("Ready geometry may be drawn immediately",decor.getViewTreeObserver().dispatchOnPreDraw());
+        } finally {controller.close();a.finish();}
+    }
+    @Test public void pendingFooterLayoutDoesNotPaintNewControlsAtTheirOldPosition() throws Exception {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root=new FrameLayout(a),bottom=bottom(a);
+        RelativeLayout feed=new RelativeLayout(a),actions=new RelativeLayout(a);
+        Button unrelated=new Button(a);
+        feed.setId(0x7f0a01db);actions.setId(0x7f0a4000);
+        RelativeLayout.LayoutParams actionParams=new RelativeLayout.LayoutParams(80,48);
+        actionParams.addRule(RelativeLayout.ALIGN_PARENT_BOTTOM);actionParams.addRule(RelativeLayout.CENTER_HORIZONTAL);
+        actions.setVisibility(View.GONE);actions.setAlpha(.65f);
+        feed.addView(actions,actionParams);feed.addView(unrelated,new RelativeLayout.LayoutParams(50,50));
+        root.addView(feed,new FrameLayout.LayoutParams(-1,-1));
+        bottom.setVisibility(View.GONE);root.addView(bottom,new FrameLayout.LayoutParams(-1,48,Gravity.BOTTOM));
+        a.setContentView(root);View decor=a.getWindow().getDecorView();layout(decor);
+        LiquidGlassController controller=new LiquidGlassController(a,options(true),null);
+        try {
+            controller.onActivityResumed(a);
+            assertFalse(decor.getViewTreeObserver().dispatchOnPreDraw());
+            actions.setVisibility(View.VISIBLE);bottom.setVisibility(View.VISIBLE);layout(decor);
+            assertTrue(decor.getViewTreeObserver().dispatchOnPreDraw());
+            layout(decor);
+            actionParams.height=56;actions.requestLayout();
+            assertFalse("A pending target alone must not cancel the window draw",decor.getViewTreeObserver().dispatchOnPreDraw());
+            assertEquals("The group must not be drawn at its obsolete position",0f,actions.getTransitionAlpha(),0f);
+            assertEquals(.65f,actions.getAlpha(),0f);
+            assertEquals(1f,unrelated.getTransitionAlpha(),0f);
+            assertEquals(View.VISIBLE,actions.getVisibility());
+            layout(decor);
+            assertTrue(decor.getViewTreeObserver().dispatchOnPreDraw());
+            assertTrue(actionParams.bottomMargin>0);
+            layout(decor);
+            assertFalse(decor.getViewTreeObserver().dispatchOnPreDraw());
+            assertEquals("The first stable layout exposes the group",1f,actions.getTransitionAlpha(),0f);
+            assertEquals(.65f,actions.getAlpha(),0f);
+
+            actions.setVisibility(View.GONE);bottom.setVisibility(View.GONE);layout(decor);
+            for(int i=0;i<3;i++){decor.getViewTreeObserver().dispatchOnPreDraw();layout(decor);}
+            actions.setVisibility(View.VISIBLE);bottom.setVisibility(View.VISIBLE);layout(decor);
+            decor.getViewTreeObserver().dispatchOnPreDraw();layout(decor);
+            actionParams.height=64;actions.requestLayout();
+            decor.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(0f,actions.getTransitionAlpha(),0f);
+            ShadowLooper.shadowMainLooper().idleFor(Duration.ofMillis(95));
+            assertEquals("A stalled layout must not leave controls hidden",1f,actions.getTransitionAlpha(),0f);
+        } finally {controller.close();a.finish();}
+    }
+    @Test public void aRevealedDockWithNewMediaIsNotStyledFromTheStaleInventory() throws Exception {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root=new FrameLayout(a),bottom=bottom(a);
+        Drawable nativeBackground=new ColorDrawable(Color.BLACK);
+        bottom.setBackground(nativeBackground);bottom.setVisibility(View.GONE);
+        root.addView(bottom,new FrameLayout.LayoutParams(-1,48,Gravity.BOTTOM));
+        a.setContentView(root);View decor=a.getWindow().getDecorView();layout(decor);
+        LiquidGlassController controller=new LiquidGlassController(a,options(true),null);
+        try {
+            controller.onActivityResumed(a);
+            bottom.addView(new TextureView(a),new FrameLayout.LayoutParams(30,30));
+            bottom.setVisibility(View.VISIBLE);layout(decor);
+            assertFalse(decor.getViewTreeObserver().dispatchOnPreDraw());
+            assertSame("The late media subtree must keep its native background",nativeBackground,bottom.getBackground());
         } finally {controller.close();a.finish();}
     }
     @Test public void hostOwnedBackgroundAndLayoutReplacementSurvivePauseAndClose() {
@@ -297,6 +450,16 @@ public class LiquidGlassControllerTest {
     private static void layout(View root,int width,int height) {
         root.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(height,View.MeasureSpec.EXACTLY));root.layout(0,0,width,height);
+    }
+    private static Object monitor(LiquidGlassController controller,View root) throws Exception {
+        Field windows=LiquidGlassController.class.getDeclaredField("windows");windows.setAccessible(true);
+        return ((Map<?,?>)windows.get(controller)).get(root);
+    }
+    private static void invokeMonitor(Object monitor,String callback) throws Exception {
+        Method method=monitor.getClass().getDeclaredMethod(callback);method.setAccessible(true);method.invoke(monitor);
+    }
+    private static Object monitorField(Object monitor,String name) throws Exception {
+        Field field=monitor.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(monitor);
     }
     private static FrameLayout bottom(Activity a) throws Exception {
         return (FrameLayout)Class.forName("X.1JgG").getConstructor(android.content.Context.class).newInstance(a);

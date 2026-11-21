@@ -87,6 +87,7 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
                             event("module_container_preserved", "main=false;ready=" + (list != null));
                             return result;
                         }
+                        reference.invalidateScan();
                         feature.queueRefresh(reference);
                         String family = cache.family(chain.getArg(0));
                         event("module_candidate", "family=" + family + ";result="
@@ -187,57 +188,106 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
     private void refresh(Owner reference, String source) throws ReflectiveOperationException {
         Object owner = reference.value.get();
         if (owner == null) return;
+        ViewGroup list = (ViewGroup) reference.access.list.get(owner);
+        Object registry = reference.access.registry.get(owner);
+        ScanSnapshot previous = reference.scan;
+        boolean wasCurrent = list != null && registry != null && previous != null
+                && previous.matches(list, registry, reference.generation);
         for (WeakReference<Binding> weak : bindings) {
             Binding binding = weak.get();
             if (binding != null && binding.owner == reference) apply(binding);
         }
         if (!reference.access.showsHome(owner)) {
+            reference.scan=wasCurrent?previous.withChildren(list,reference.generation):null;
             event("module_scope", "source=" + source + ";home=false;native_restored=true");
             return;
         }
-        ViewGroup list = (ViewGroup) reference.access.list.get(owner);
-        Object registry = reference.access.registry.get(owner);
         if (list == null || registry == null) {
+            reference.scan = null;
             event("module_pending", "source=" + source + ";reason=owner_not_ready");
             return;
         }
+        if (!"settings".equals(source) && wasCurrent && reference.cache.matchesComponents(registry, previous)
+                && refreshCached(reference, list, previous, source)) return;
+        reference.scan = null;
+        refreshFull(reference, list, registry, source);
+    }
+
+    private boolean refreshCached(Owner reference,ViewGroup list,ScanSnapshot snapshot,String source)
+            throws ReflectiveOperationException {
+        List<Object> candidates=snapshot.candidates();
+        List<Object> notificationInputs=snapshot.notificationInputs();
+        if(candidates==null || candidates.isEmpty() || notificationInputs==null)return false;
+        List<Binding> attached=attached(list);
+        if(attached.isEmpty())return false;
+        Set<ViewGroup> notifications=reference.cache.notificationsFromInputs(notificationInputs,list);
+        Set<ViewGroup> roots=Collections.newSetFromMap(new IdentityHashMap<>());
+        for(Object component:candidates)
+            if (!addCandidateRoots(reference.cache, component, list, roots)) return false;
+        roots.removeAll(notifications);
+        if(roots.isEmpty())return false;
+        for(ViewGroup root:roots) {
+            boolean bound=false;
+            for(Binding binding:attached)if(binding.view()==root && binding.owner==reference){bound=true;break;}
+            if(!bound)return false;
+        }
+        int visible=reconcile(attached,list,notifications,enabled(options)&&SidebarSettings.itemsEnabled(options),
+                SidebarSettings.selected(options),options);
+        reference.scan=snapshot.withChildren(list,reference.generation);
+        event("module_unique","cards="+attached.size()+";visible="+visible+";notifications="+notifications.size()+";source="+source);
+        event("module_scan","source="+source+";path=cache;components="+snapshot.components.size()+";candidates="+candidates.size()
+                +";matched="+roots.size()+";enabled="+enabled(options)+";selected="+SidebarSettings.selected(options).size());
+        return true;
+    }
+
+    private void refreshFull(Owner reference,ViewGroup list,Object registry,String source) throws ReflectiveOperationException {
         Set<ViewGroup> roots = Collections.newSetFromMap(new IdentityHashMap<>());
         CacheAccess cache = reference.cache;
         List<Object> components = cache.components(registry);
-        int candidates = 0;
-        for (Object component : components) {
-            if (!cache.componentType.isInstance(component)) continue;
-            Object dto = cache.module.get(component);
-            String family = cache.family(dto);
-            boolean combined = "combined_common".equals(family);
-            if (!"legacy_common".equals(family) && !combined) continue;
-            if (combined && !cache.combinedComponentType.isInstance(component)) continue;
-            candidates++;
-            List<Object> views = new ArrayList<>();
-            views.add(cache.view.get(component));
-            Object tabs = cache.views.get(component);
-            if (tabs instanceof Map<?, ?>) views.addAll(((Map<?, ?>) tabs).values());
-            for (Object view : views) {
-                if (!(view instanceof View)) continue;
-                ViewGroup root = combined ? cachedCombinedSectionRoot((View) view, list)
-                        : cachedSectionRoot((View) view, list);
-                if (root != null && java.util.Objects.equals(root.getTag(), cache.moduleKind.invoke(dto))) roots.add(root);
-            }
-        }
-        Set<ViewGroup> notifications = cache.notifications(components, list);
+        List<Object> candidates=new ArrayList<>(),notificationInputs=cache.notificationInputs(components);
+        for (Object component : components)
+            if (addCandidateRoots(cache, component, list, roots)) candidates.add(component);
+        Set<ViewGroup> notifications=cache.notificationsFromInputs(notificationInputs,list);
+        int candidateCount=candidates.size();
         roots.removeAll(notifications);
         for (ViewGroup root : roots) bind(root, reference, source);
-        List<Binding> attached = new ArrayList<>();
+        List<Binding> attached=attached(list);
+        int visible = reconcile(attached,list,notifications,enabled(options)&&SidebarSettings.itemsEnabled(options),
+                SidebarSettings.selected(options),options);
+        reference.scan=ScanSnapshot.capture(list,registry,reference.generation,components)
+                .withScanData(candidates,notificationInputs);
+        event("module_unique", "cards=" + attached.size() + ";visible=" + visible
+                + ";notifications=" + notifications.size() + ";source=" + source);
+        event("module_scan", "source=" + source + ";components=" + components.size()
+                + ";candidates=" + candidateCount + ";matched=" + roots.size()
+                + ";enabled=" + enabled(options) + ";selected=" + SidebarSettings.selected(options).size());
+    }
+
+    private static boolean addCandidateRoots(CacheAccess cache,Object component,ViewGroup list,Set<ViewGroup> roots)
+            throws ReflectiveOperationException {
+        if (!cache.componentType.isInstance(component)) return false;
+        Object dto=cache.module.get(component);
+        String family = cache.family(dto);
+        boolean combined = "combined_common".equals(family);
+        if (!"legacy_common".equals(family) && !combined) return false;
+        if (combined && !cache.combinedComponentType.isInstance(component)) return false;
+        List<Object> views=new ArrayList<>();views.add(cache.view.get(component));
+        Object tabs=cache.views.get(component);if(tabs instanceof Map<?,?>)views.addAll(((Map<?,?>)tabs).values());
+        for(Object view:views) {
+            if(!(view instanceof View))continue;
+            ViewGroup root=combined?cachedCombinedSectionRoot((View)view,list):cachedSectionRoot((View)view,list);
+            if(root!=null && java.util.Objects.equals(root.getTag(),cache.moduleKind.invoke(dto)))roots.add(root);
+        }
+        return true;
+    }
+
+    private List<Binding> attached(ViewGroup list) {
+        List<Binding> attached=new ArrayList<>();
         for (WeakReference<Binding> weak : bindings) {
             Binding binding = weak.get();
             if (binding != null && !binding.restored && binding.view().getParent() == list) attached.add(binding);
         }
-        int visible = reconcile(attached, list, notifications, enabled(options) && SidebarSettings.itemsEnabled(options), SidebarSettings.selected(options), options);
-        event("module_unique", "cards=" + attached.size() + ";visible=" + visible
-                + ";notifications=" + notifications.size() + ";source=" + source);
-        event("module_scan", "source=" + source + ";components=" + components.size()
-                + ";candidates=" + candidates + ";matched=" + roots.size()
-                + ";enabled=" + enabled(options) + ";selected=" + SidebarSettings.selected(options).size());
+        return attached;
     }
 
     /** Only the native grid under this owner's direct module child can establish cached identity. */
@@ -321,7 +371,73 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
         return result;
     }
 
-    private record Owner(WeakReference<Object> value, OwnerAccess access, CacheAccess cache) { }
+    private static final class Owner {
+        final WeakReference<Object> value;final OwnerAccess access;final CacheAccess cache;
+        long generation;ScanSnapshot scan;
+        Owner(WeakReference<Object> value,OwnerAccess access,CacheAccess cache){this.value=value;this.access=access;this.cache=cache;}
+        void invalidateScan(){generation++;scan=null;}
+    }
+
+    static final class ScanSnapshot {
+        private final WeakReference<ViewGroup> list;
+        private final WeakReference<Object> registry;
+        private final long generation;
+        private final List<WeakReference<View>> children;
+        private final List<WeakReference<Object>> components;
+        private final List<WeakReference<Object>> candidates,notificationInputs;
+        private ScanSnapshot(ViewGroup list,Object registry,long generation,List<WeakReference<View>> children,
+                             List<WeakReference<Object>> components,List<WeakReference<Object>> candidates,
+                             List<WeakReference<Object>> notificationInputs) {
+            this.list=new WeakReference<>(list);this.registry=new WeakReference<>(registry);this.generation=generation;
+            this.children=children;this.components=components;this.candidates=candidates;this.notificationInputs=notificationInputs;
+        }
+        static ScanSnapshot capture(ViewGroup list,Object registry,long generation,List<?> components) {
+            List<WeakReference<View>> children=new ArrayList<>(list.getChildCount());
+            for(int i=0;i<list.getChildCount();i++)children.add(new WeakReference<>(list.getChildAt(i)));
+            return new ScanSnapshot(list,registry,generation,children,weak(components),null,null);
+        }
+        boolean matches(ViewGroup list,Object registry,long generation) {
+            return this.list.get() == list && this.registry.get() == registry && this.generation == generation
+                    && matchesChildren(list);
+        }
+        private boolean matchesChildren(ViewGroup list) {
+            if (list.getChildCount() != children.size()) return false;
+            for (int i = 0; i < children.size(); i++)
+                if (children.get(i).get() != list.getChildAt(i)) return false;
+            return true;
+        }
+        boolean matchesComponents(android.util.ArrayMap<?, ?> entries) {
+            if (entries.size() != components.size()) return false;
+            for (int i = 0; i < entries.size(); i++) {
+                Object expected = components.get(i).get();
+                if (expected == null || expected != entries.valueAt(i)) return false;
+            }
+            return true;
+        }
+        List<Object> candidates(){return strong(candidates);}
+        List<Object> notificationInputs(){return strong(notificationInputs);}
+        ScanSnapshot withScanData(List<?> candidates,List<?> notificationInputs) {
+            return new ScanSnapshot(list.get(),registry.get(),generation,children,components,weak(candidates),weak(notificationInputs));
+        }
+        ScanSnapshot withChildren(ViewGroup list,long generation) {
+            if (this.list.get() != list || this.generation != generation) return null;
+            if (matchesChildren(list)) return this;
+            List<WeakReference<View>> current=new ArrayList<>(list.getChildCount());
+            for(int i=0;i<list.getChildCount();i++)current.add(new WeakReference<>(list.getChildAt(i)));
+            return new ScanSnapshot(list,registry.get(),generation,current,components,candidates,notificationInputs);
+        }
+        private static List<WeakReference<Object>> weak(List<?> values) {
+            List<WeakReference<Object>> result=new ArrayList<>(values.size());
+            for(Object value:values)result.add(new WeakReference<>(value));
+            return result;
+        }
+        private static List<Object> strong(List<WeakReference<Object>> references) {
+            if(references==null)return null;
+            List<Object> result=new ArrayList<>(references.size());
+            for(WeakReference<Object> reference:references){Object value=reference.get();if(value==null)return null;result.add(value);}
+            return result;
+        }
+    }
 
     private static final class OwnerAccess {
         final Method build, show, isDark;
@@ -394,12 +510,23 @@ public final class HomeSidebarModuleHook implements AutoCloseable {
             try { return new ArrayList<>(((Map<?, ?>) entries.get(registry)).values()); }
             finally { lock.unlock(); }
         }
-        Set<ViewGroup> notifications(List<Object> mainComponents, ViewGroup list) throws IllegalAccessException {
-            List<Object> all = new ArrayList<>(mainComponents);
-            for (Object component : mainComponents) {
-                if (!combinedComponentType.isInstance(component)) continue;
-                Object nested = combinedRegistry.get(component);
-                if (nested != null) all.addAll(components(nested));
+        boolean matchesComponents(Object registry, ScanSnapshot snapshot) throws IllegalAccessException {
+            Lock lock = (Lock) readLock.get(registry);
+            lock.lock();
+            try { return snapshot.matchesComponents((android.util.ArrayMap<?, ?>) entries.get(registry)); }
+            finally { lock.unlock(); }
+        }
+        List<Object> notificationInputs(List<Object> mainComponents) {
+            List<Object> result=new ArrayList<>();
+            for(Object component:mainComponents)
+                if(notificationType.isInstance(component) || combinedComponentType.isInstance(component))result.add(component);
+            return result;
+        }
+        Set<ViewGroup> notificationsFromInputs(List<Object> notificationInputs,ViewGroup list) throws IllegalAccessException {
+            List<Object> all=new ArrayList<>(notificationInputs);
+            for(Object component:notificationInputs)if(combinedComponentType.isInstance(component)) {
+                Object nested=combinedRegistry.get(component);
+                if(nested!=null)all.addAll(components(nested));
             }
             Set<ViewGroup> result = Collections.newSetFromMap(new IdentityHashMap<>());
             for (Object component : all) {

@@ -22,6 +22,9 @@ import android.widget.TextView;
 import com.douai.module.config.HomeUiCustomizationSettings;
 import com.douai.module.config.HomeUiIconFixtures;
 import com.douai.module.config.LocalOptions;
+import com.ss.android.ugc.aweme.feed.widget.DiggAnimationLayout;
+import com.ss.android.ugc.aweme.feed.widget.DiggAnimationView;
+import com.ss.android.ugc.aweme.feed.widget.DiggAnimationViewV2;
 import com.ss.android.ugc.aweme.homepage.tab.ui.bottom.BottomTab;
 import com.ss.android.ugc.aweme.homepage.tab.ui.bottom.BottomTab.OwnerSelectedTab;
 import com.ss.android.ugc.aweme.homepage.tab.top.ui.tabstrip.item.HomeTopTabItemViewNew;
@@ -309,6 +312,49 @@ public class HomeUiCustomizationTest {
             assertSame("Switching the theme off restores the latest host drawable",latest,like.getDrawable());
             assertEquals(View.VISIBLE,like.getVisibility());assertEquals(1f,like.getAlpha(),0f);assertSame(params,like.getLayoutParams());
             assertEquals(ImageView.ScaleType.CENTER_CROP,like.getScaleType());
+        } finally {custom.close();a.finish();}
+    }
+    @Test public void likeContainerStylesItsIdlessNativeChildAndRestoresItWhenReparented() {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
+        FrameLayout likeFrame=new FrameLayout(a);likeFrame.setId(0x7f0a30d6);root.addView(likeFrame);
+        DiggAnimationLayout layout=new DiggAnimationLayout(a);layout.setId(0x7f0a30ca);likeFrame.addView(layout);
+        DiggAnimationView child=new DiggAnimationView(a);Drawable host=new ColorDrawable(Color.RED);
+        child.setImageDrawable(host);child.setClickable(true);layout.addView(child);
+        ImageView unrelated=new ImageView(a);Drawable unrelatedHost=new ColorDrawable(Color.MAGENTA);
+        unrelated.setImageDrawable(unrelatedHost);layout.addView(unrelated);
+        FrameLayout lookalike=new FrameLayout(a);lookalike.setId(0x7f0a30ca);likeFrame.addView(lookalike);
+        DiggAnimationView wrongParent=new DiggAnimationView(a);Drawable wrongHost=new ColorDrawable(Color.YELLOW);
+        wrongParent.setImageDrawable(wrongHost);lookalike.addView(wrongParent);
+        a.setContentView(root);layoutRoot(root,360,800);
+        String json=HomeUiCustomizationSettings.putIcons("{}","feed_like",fourIcons());
+        HomeUiCustomization custom=new HomeUiCustomization(root,options(json,false),null);
+        try {
+            assertEquals(View.NO_ID,child.getId());
+            assertEquals(Color.BLUE,drawColor(child.getDrawable()));
+            child.setSelected(true);custom.sync();assertEquals(Color.GREEN,drawColor(child.getDrawable()));
+            assertTrue(child.isClickable());assertSame(unrelatedHost,unrelated.getDrawable());assertSame(wrongHost,wrongParent.getDrawable());
+            layout.removeView(child);root.addView(child);custom.sync();assertSame(host,child.getDrawable());
+            DiggAnimationView replacement=new DiggAnimationView(a);Drawable latest=new ColorDrawable(Color.CYAN);
+            replacement.setImageDrawable(latest);layout.addView(replacement);
+            custom.refresh();assertEquals(Color.BLUE,drawColor(replacement.getDrawable()));
+            custom.close();assertSame(latest,replacement.getDrawable());assertSame(host,child.getDrawable());
+        } finally {custom.close();a.finish();}
+    }
+    @Test public void likeContainerWaitsForItsIdlessLottieChildBeforeReplacingArtwork() {
+        Activity a=Robolectric.buildActivity(Activity.class).setup().get();FrameLayout root=new FrameLayout(a);
+        FrameLayout likeFrame=new FrameLayout(a);likeFrame.setId(0x7f0a30d6);root.addView(likeFrame);
+        DiggAnimationLayout layout=new DiggAnimationLayout(a);layout.setId(0x7f0a30ca);likeFrame.addView(layout);
+        DiggAnimationViewV2 child=new DiggAnimationViewV2(a);
+        Drawable placeholder=new ColorDrawable(Color.GRAY),host=new ColorDrawable(Color.RED);
+        child.setHostPlaceholder(placeholder);layout.addView(child);
+        a.setContentView(root);layoutRoot(root,360,800);
+        String json=HomeUiCustomizationSettings.putIcons("{}","feed_like",fourIcons());
+        HomeUiCustomization custom=new HomeUiCustomization(root,options(json,false),null);
+        try {
+            assertSame(placeholder,child.getDrawable());
+            child.completeComposition(host);assertNotNull(child.getComposition());
+            child.setSelected(true);custom.sync();assertEquals(Color.GREEN,drawColor(child.getDrawable()));
+            custom.close();assertSame(host,child.getDrawable());
         } finally {custom.close();a.finish();}
     }
     private static int[] drawnBounds(ImageView image) {

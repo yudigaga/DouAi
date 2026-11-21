@@ -2,10 +2,18 @@ package com.douai.module.feature;
 
 import android.app.Activity;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.SurfaceView;
+import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.graphics.Matrix;
 import android.widget.FrameLayout;
+import com.douai.module.scan.HostScanReport;
+import com.douai.module.scan.RuleScanResult;
+import com.ss.android.ugc.aweme.feed.adapter.IFeedPlayerView;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -15,6 +23,67 @@ import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class) @Config(manifest=Config.NONE,sdk=35)
 public class FeedVideoFramingTest {
+    @Test public void lateHostLayoutIsReconciledBeforeDrawWithoutPolling() throws Throwable {
+        try (FramingFixture f=new FramingFixture()) {
+            f.select();
+            ViewTreeObserver tree=f.holder.w.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.25f,f.surface.getScaleY(),0);
+            float translation=f.surface.getTranslationY();
+            assertEquals(0f,f.surface.getTop()+(1-f.surface.getScaleY())*f.surface.getPivotY()+translation,0);
+
+            int reads=f.holder.workReads;
+            tree.dispatchOnGlobalLayout();
+            tree.dispatchOnGlobalLayout();
+            f.surface.layout(0,120,270,600); // Host placement committed after global layout observers.
+            assertEquals(120,f.surface.getTop());
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(translation-60f,f.surface.getTranslationY(),0);
+            assertEquals(reads+1,f.holder.workReads);
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(reads+1,f.holder.workReads);
+        }
+    }
+
+    @Test public void disableCancelsQueuedFramingAndRestoresTheNativeSurface() throws Throwable {
+        try (FramingFixture f=new FramingFixture()) {
+            f.select();
+            ViewTreeObserver tree=f.holder.w.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.25f,f.surface.getScaleX(),0);
+            tree.dispatchOnGlobalLayout();
+            f.framing.setEnabled(false);
+            int reads=f.holder.workReads;
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(reads,f.holder.workReads);
+            assertEquals(1f,f.surface.getScaleX(),0);
+        }
+    }
+
+    @Test public void detachingClearsTheOldDrawAndReattachingPreparesOneNewDraw() throws Throwable {
+        try (FramingFixture f=new FramingFixture()) {
+            f.select();
+            FrameLayout card=f.holder.w;
+            ViewTreeObserver tree=card.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.25f,f.surface.getScaleX(),0);
+            tree.dispatchOnGlobalLayout();
+            ViewGroup parent=(ViewGroup)card.getParent();
+            parent.removeView(card);
+            int reads=f.holder.workReads;
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(reads,f.holder.workReads);
+            assertEquals(1f,f.surface.getScaleX(),0);
+
+            parent.addView(card);
+            card.layout(0,0,270,600);
+            f.surface.layout(0,60,270,540);
+            assertFalse(card.getViewTreeObserver().dispatchOnPreDraw());
+            assertEquals(reads+1,f.holder.workReads);
+            assertEquals(1.25f,f.surface.getScaleX(),0);
+        }
+    }
+
     @Test public void modestCropFillsWideMismatchFitsAndUnknownRemainsUntouched() {
         assertArrayEquals(new int[]{1350,2400}, FeedVideoFraming.size(1080,1920,1080,2400)); // 80% retained
         assertArrayEquals(new int[]{1080,608}, FeedVideoFraming.size(1920,1080,1080,2400));
@@ -123,6 +192,83 @@ public class FeedVideoFramingTest {
         assertFalse(g.emit(b,124,4000));
     }
 
+    @Test public void anIncomingRendererIsFramedBeforeSelectionAndRestoredOnSwipeReversal() throws Throwable {
+        try (FramingFixture f=new FramingFixture(true)) {
+            f.select();
+            Holder next=f.nextCard();
+            SurfaceView media=(SurfaceView)next.player.getVideoView();
+            f.bind(next,next.work);
+            ViewTreeObserver tree=f.pager.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals("Offscreen preparation may not change the view",1f,media.getScaleX(),0);
+            next.w.layout(0,100,270,700);
+            assertSame(f.pager,next.w.getParent());
+            assertTrue(next.w.isShown() && media.isAttachedToWindow());
+            android.graphics.Rect clip=new android.graphics.Rect(), viewport=new android.graphics.Rect();
+            assertTrue("Fixture card must enter the pager",next.w.getGlobalVisibleRect(clip)
+                    && f.pager.getGlobalVisibleRect(viewport) && android.graphics.Rect.intersects(clip,viewport));
+            assertTrue("Verified bind hook registration",f.harness.hooks.containsKey(Holder.class.getMethod("bind",Work.class)));
+            assertSame(tree,next.w.getViewTreeObserver());
+            assertEquals(270,media.getWidth());
+            assertEquals(480,media.getHeight());
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals("The verified renderer is already framed on its first visible traversal",1.25f,media.getScaleX(),0);
+            assertSame(f.holder,f.holder.B2.mFeedContext.current);
+            int reads=next.workReads;
+            for (int i=0;i<5;i++) assertFalse(tree.dispatchOnPreDraw());
+            assertEquals("Stable paint does not re-read the work or player",reads,next.workReads);
+            next.w.layout(0,600,270,1200);
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals("An aborted swipe releases the incoming transform",1f,media.getScaleX(),0);
+        }
+    }
+
+    @Test public void selectingTheSameIncomingOwnerKeepsTheFrameButRebindFirstRestoresIt() throws Throwable {
+        try (FramingFixture f=new FramingFixture(true)) {
+            f.select();
+            Holder next=f.nextCard();
+            SurfaceView media=(SurfaceView)next.player.getVideoView();
+            f.bind(next,next.work);
+            next.w.layout(0,100,270,700);
+            ViewTreeObserver tree=f.pager.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.25f,media.getScaleX(),0);
+            next.beforeBind=()->assertEquals("Release old view state before host reuse",1f,media.getScaleX(),0);
+            f.harness.invoke(Holder.class.getMethod("bind",Work.class,int.class),next,new Work(),1);
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.25f,media.getScaleX(),0);
+            f.holder.B2.mFeedContext.current=next;
+            f.harness.invoke(Holder.class.getMethod("selected"),next);
+            assertEquals("The same selected binding never flashes at its native size",1.25f,media.getScaleX(),0);
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.25f,media.getScaleX(),0);
+            f.framing.setEnabled(false);
+            assertEquals(1f,media.getScaleX(),0);
+        }
+    }
+
+    @Test public void programmaticSettlingDoesNotStartAnIncomingTransform() throws Throwable {
+        try (FramingFixture f=new FramingFixture(true)) {
+            f.select();
+            Holder next=f.nextCard();
+            SurfaceView media=(SurfaceView)next.player.getVideoView();
+            f.bind(next,next.work);
+            f.pager.state=2; // Programmatic settling, with no preceding user drag.
+            next.w.layout(0,100,270,700);
+            ViewTreeObserver tree=f.pager.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());
+            tree.dispatchOnGlobalLayout();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1f,media.getScaleX(),0);
+            next.w.layout(0,600,270,1200);
+            assertFalse(tree.dispatchOnPreDraw());
+            f.pager.state=1;
+            next.w.layout(0,100,270,700);
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.25f,media.getScaleX(),0);
+        }
+    }
+
     @Test public void rendererMustBelongToCardAndLeaveRotatedPinchedOrUnclippedLayoutsAlone() {
         Activity a=Robolectric.buildActivity(Activity.class).setup().get();
         try {
@@ -141,4 +287,192 @@ public class FeedVideoFramingTest {
             assertFalse(g.frame(surface,card,1920,1080)); // host plane doesn't match supplied video's aspect
         } finally {a.finish();}
     }
+
+    @Test public void framingDenialsDistinguishNativeLayersFromWrongAncestry() throws Exception {
+        try (FramingFixture f=new FramingFixture()) {
+            FeedVideoFraming.Geometry geometry=new FeedVideoFraming.Geometry();
+            f.surface.setAnimation(new android.view.animation.AlphaAnimation(1f,1f));
+            assertFalse(geometry.frame(f.surface,f.holder.w,270,480));
+            assertEquals("native_animation",geometry.reason);
+            f.surface.clearAnimation();
+            f.surface.setClipBounds(new android.graphics.Rect(0,0,270,400));
+            assertFalse(geometry.frame(f.surface,f.holder.w,270,480));
+            assertEquals("native_clip",geometry.reason);
+            f.surface.setClipBounds(null);
+            f.surface.setTranslationY(10f);
+            assertFalse(geometry.frame(f.surface,f.holder.w,270,480));
+            assertEquals("native_translation",geometry.reason);
+            f.surface.setTranslationY(0f);
+            assertNull(f.surface.getClipBounds());
+            f.holder.w.setClipBounds(new android.graphics.Rect(0,0,270,590));
+            assertFalse(geometry.frame(f.surface,f.holder.w,270,480));
+            assertEquals("native_clip",geometry.reason);
+            assertEquals("card",geometry.blockedLayer);
+            FrameLayout unrelated=new FrameLayout(f.activity);
+            unrelated.layout(0,0,270,600);
+            assertFalse(geometry.frame(f.surface,unrelated,270,480));
+            assertEquals("renderer_outside_card",geometry.reason);
+            assertEquals("ancestry",geometry.blockedLayer);
+            assertEquals(1f,f.surface.getScaleX(),0f);
+        }
+    }
+
+    @Test public void onlyVerifiedColourBandsAreSuppressedWhileVideoIsEnlargedToFill() throws Exception {
+        try (FramingFixture f=new FramingFixture()) {
+            FrameLayout card=f.holder.w;
+            View overlay=new View(f.activity);
+            card.addView(overlay,new FrameLayout.LayoutParams(270,90));
+            com.ss.android.ugc.aweme.view.MeasureOnceCheckDrawChildRelativeLayout decoration=
+                    new com.ss.android.ugc.aweme.view.MeasureOnceCheckDrawChildRelativeLayout(f.activity);
+            decoration.setId(0x7f0a3ffa);
+            FrameLayout colours=new FrameLayout(f.activity);
+            colours.setId(0x7f0a3fac);
+            decoration.addView(colours,new android.widget.RelativeLayout.LayoutParams(-1,-1));
+            card.addView(decoration,new FrameLayout.LayoutParams(-1,-1));
+            for (int gravity:new int[]{Gravity.TOP,Gravity.BOTTOM}) {
+                android.widget.ImageView band=new android.widget.ImageView(f.activity);
+                band.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+                band.setImageDrawable(new android.graphics.drawable.ColorDrawable(0xff75675f));
+                colours.addView(band,new FrameLayout.LayoutParams(270,70,gravity|Gravity.CENTER_HORIZONTAL));
+            }
+            decoration.layout(0,0,270,600);
+            colours.layout(0,0,270,600);
+            FeedVideoFraming.Geometry geometry=new FeedVideoFraming.Geometry();
+            assertTrue(geometry.frame(f.surface,card,270,480));
+            geometry.syncColouring(card,f.surface);
+            assertEquals(0f,colours.getTransitionAlpha(),0f);
+            assertEquals(1f,overlay.getTransitionAlpha(),0f);
+            assertEquals(View.VISIBLE,colours.getVisibility());
+            assertEquals(1f,colours.getAlpha(),0f);
+
+            f.surface.layout(0,225,270,375);
+            assertTrue(geometry.frame(f.surface,card,270,150));
+            geometry.syncColouring(card,f.surface);
+            assertEquals("Horizontal fit still owns its native fill",1f,colours.getTransitionAlpha(),0f);
+
+            f.surface.layout(0,60,270,540);
+            assertTrue(geometry.frame(f.surface,card,270,480));
+            colours.addView(new View(f.activity),new FrameLayout.LayoutParams(30,30));
+            geometry.syncColouring(card,f.surface);
+            assertEquals("Unexpected children preserve native behavior",1f,colours.getTransitionAlpha(),0f);
+            colours.removeViewAt(2);
+            geometry.syncColouring(card,f.surface);
+            assertEquals(0f,colours.getTransitionAlpha(),0f);
+            colours.setTransitionAlpha(.5f);
+            geometry.restore();
+            assertEquals("Restore must yield to a newer native value",.5f,colours.getTransitionAlpha(),0f);
+        }
+    }
+
+    private static final class FramingFixture implements AutoCloseable {
+        final Activity activity=Robolectric.buildActivity(Activity.class).setup().visible().get();
+        final Holder holder=new Holder();
+        final SurfaceView surface=new SurfaceView(activity);
+        final Pager pager;
+        final VideoPageEntryHookTest.Harness harness=new VideoPageEntryHookTest.Harness();
+        final FeedVideoFraming framing;
+
+        FramingFixture() throws Exception {
+            this(false);
+        }
+        FramingFixture(boolean incoming) throws Exception {
+            holder.w=visibleCard(activity);
+            holder.B2.mFeedContext.current=holder;
+            holder.player=()->surface;
+            holder.w.addView(surface,new FrameLayout.LayoutParams(270,480));
+            pager=incoming?new Pager(activity):null;
+            if (pager==null) activity.setContentView(holder.w);
+            else {
+                holder.B2.mFeedContext.f=pager;
+                pager.addView(holder.w,new FrameLayout.LayoutParams(270,600));
+                activity.setContentView(pager);
+                View decor=activity.getWindow().getDecorView();
+                decor.measure(View.MeasureSpec.makeMeasureSpec(270,View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(600,View.MeasureSpec.EXACTLY));
+                decor.layout(0,0,270,600);pager.layout(0,0,270,600);
+            }
+            holder.w.layout(0,0,270,600);
+            surface.layout(0,60,270,540);
+            surface.setPivotY(240f);
+            List<RuleScanResult> results=new ArrayList<>();
+            add(results,"feed_holder_page_selected",Holder.class,"selected");
+            add(results,"feed_holder_resume",Holder.class,"resume");
+            add(results,"feed_holder_pause",Holder.class,"pause");
+            add(results,"feed_aweme_accessor",Holder.class,"getAweme");
+            add(results,"auto_slide_current_holder",Panel.class,"currentHolder");
+            add(results,"auto_slide_comments_showing",Dialog.class,"comments",boolean.class);
+            if (incoming) {
+                add(results,"feed_item_bind_aweme",Holder.class,"bind",Work.class);
+                add(results,"feed_item_bind_aweme_position",Holder.class,"bind",Work.class,int.class);
+                add(results,"auto_slide_pager_touch",Pager.class,"dispatchTouchEvent",MotionEvent.class);
+                add(results,"auto_slide_scroll_state",Pager.class,"getScrollState");
+            }
+            framing=FeedVideoFraming.install(harness.framework,new HostScanReport("test",results,false),
+                    getClass().getClassLoader(),true,s->{});
+        }
+
+        private static void add(List<RuleScanResult> results,String id,Class<?> owner,String name,Class<?>... args)
+                throws NoSuchMethodException {
+            VideoPageEntryHookTest.add(results,id,owner.getMethod(name,args));
+        }
+
+        void select() throws Throwable {harness.invoke(Holder.class.getMethod("selected"),holder);}
+        void bind(Holder target,Work work) throws Throwable {harness.invoke(Holder.class.getMethod("bind",Work.class),target,work);}
+        Holder nextCard() {
+            Holder next=new Holder();
+            next.B2.mFeedContext=holder.B2.mFeedContext;
+            next.w=visibleCard(activity);
+            SurfaceView media=new SurfaceView(activity);
+            next.player=()->media;
+            next.w.addView(media,new FrameLayout.LayoutParams(270,480,Gravity.CENTER));
+            pager.addView(next.w,new FrameLayout.LayoutParams(270,600));
+            next.w.measure(View.MeasureSpec.makeMeasureSpec(270,View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(600,View.MeasureSpec.EXACTLY));
+            next.w.layout(0,600,270,1200);
+            return next;
+        }
+        @Override public void close(){framing.close();activity.finish();}
+    }
+
+    public static class Holder {
+        public FrameLayout w;
+        public final Params B2=new Params();
+        private Work work=new Work();
+        Runnable beforeBind;
+        IFeedPlayerView player;
+        int workReads;
+
+        public void selected(){}
+        public void resume(){}
+        public void pause(){}
+        public void bind(Work bound){if(beforeBind!=null)beforeBind.run();work=bound;}
+        public void bind(Work bound,int position){bind(bound);}
+        public Work getAweme(){workReads++;return work;}
+        public IFeedPlayerView getFeedPlayerView(){return player;}
+    }
+
+    public static class Pager extends FrameLayout {
+        int state=1;
+        Pager(Activity owner){super(owner);}
+        @Override public boolean dispatchTouchEvent(MotionEvent event){return super.dispatchTouchEvent(event);}
+        public int getScrollState(){return state;}
+    }
+    public static class Params {public Panel mFeedContext=new Panel();}
+    public static class Panel {
+        public final Dialog L0=new Dialog();
+        public Pager f;
+        Holder current;
+        public Holder currentHolder(){return current;}
+    }
+    public static class Dialog {
+        public boolean comments(boolean unused){return false;}
+        public void LJJIJIIJIL(String name,boolean show){}
+    }
+    public static class Work {
+        public int getAwemeType(){return 0;}
+        public boolean isLive(){return false;}
+        public boolean getAd(){return false;}
+        public Video getVideo(){return new Video();}
+    }
+    public static class Video {public final int t=270,s=480;}
 }

@@ -7,6 +7,7 @@ import android.content.ContextWrapper;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -29,6 +30,8 @@ import java.util.function.Consumer;
 
 /** Window-scoped native surfaces; does not claim to restyle opaque renderer internals. */
 public final class LiquidGlassController implements Application.ActivityLifecycleCallbacks, AutoCloseable {
+    private static final int MAX_CACHED_NAVIGATION_NODES=256;
+    private static final long REVEAL_TIMEOUT_MS=80;
     private final Application app;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final Consumer<String> log;
@@ -188,19 +191,32 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
         final Set<View> rejectedLayouts=Collections.newSetFromMap(new IdentityHashMap<>());
         final Map<View,Long> clearanceRejected=new IdentityHashMap<>();
         final ArrayList<View> navigation=new ArrayList<>();
+        final Set<View> previouslyDrawableNavigation=Collections.newSetFromMap(new IdentityHashMap<>());
+        final Set<View> hiddenRevealControls=Collections.newSetFromMap(new IdentityHashMap<>());
+        final Set<View> revealControls=Collections.newSetFromMap(new IdentityHashMap<>());
+        final Set<View> maskedRevealControls=Collections.newSetFromMap(new IdentityHashMap<>());
+        View hiddenDock,revealingDock;
+        boolean revealInventoryDirty;
+        final Runnable finishReveal=this::finishControlReveal;
         final ArrayList<View> motionCandidates=new ArrayList<>();
         int viewportWidth=-1,viewportHeight=-1;
         final Set<String> loggedTargets=new java.util.HashSet<>();
         final java.util.function.BiConsumer<Float,Float> lightCallback=(x,y)->{
             for(Binding binding:bindings.values())binding.glass.setLight(x,y);
         };
-        ViewTreeObserver observer;boolean disposed,loggedOpaque,loggedBudget,scanScheduled;View source;
+        ViewTreeObserver observer;boolean disposed,loggedOpaque,loggedBudget,scanScheduled,scanNeedsDiscovery;View source;
+        LiquidGlassTargets.TreeSnapshot treeSnapshot;
         String lastSummary="",lastMotionState="",lastClearanceGeometry="",lastClearanceScope="";
         long lastClearanceGeometryAt;
         long cancelledDraws;int drawCancelStreak;
         boolean clearanceGeometryScheduled;
         final Runnable reportClearanceGeometry=this::emitClearanceGeometry;
-        final Runnable scan=()->{scanScheduled=false;refresh();};
+        final Runnable scan=()->{
+            scanScheduled=false;
+            boolean discover=scanNeedsDiscovery || treeSnapshot==null;
+            scanNeedsDiscovery=false;
+            refresh(discover);
+        };
         final Runnable capture=new Runnable(){@Override public void run(){
             if(disposed || source==null)return;
             if(root.isShown() && foregroundWindow(Monitor.this))backdrop.refresh();
@@ -215,14 +231,14 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
             observer.addOnGlobalLayoutListener(this);observer.addOnScrollChangedListener(this);
             observer.addOnWindowFocusChangeListener(this);observer.addOnPreDrawListener(this);refresh();
         }
-        @Override public void onGlobalLayout(){schedule();}
-        @Override public void onScrollChanged(){schedule();}
+        @Override public void onGlobalLayout(){revealInventoryDirty=true;schedule();}
+        @Override public void onScrollChanged(){schedule(false);}
         @Override public boolean onPreDraw() {
             if(disposed)return true;
             try {
                 syncViewport();
                 customization.sync();
-                boolean changed=false,layoutChanged=false;
+                boolean changed=bindRevealedNavigation(),layoutChanged=changed;
                 for(java.util.Iterator<Map.Entry<View,Binding>> iterator=bindings.entrySet().iterator();iterator.hasNext();) {
                     Map.Entry<View,Binding> entry=iterator.next();
                     if(!LiquidGlassTargets.geometrySafe(entry.getKey(),root,LiquidGlassTargets.floating(entry.getKey()),
@@ -242,6 +258,7 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
                     }
                 }
                 layoutChanged|=syncClearance();
+                updateControlReveal(layoutChanged);
                 if(changed)updateMotion();
                 if(layoutChanged){cancelledDraws++;drawCancelStreak++;}else drawCancelStreak=0;
                 return !layoutChanged;
@@ -251,14 +268,98 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
             return true;
         }
         @Override public void onWindowFocusChanged(boolean focused) {
+            if(!focused && revealingDock!=null)finishControlReveal();
             main.removeCallbacks(capture);if(focused && source!=null)capture.run();updateMotion();
         }
-        void schedule(){if(disposed || scanScheduled)return;scanScheduled=true;main.postDelayed(scan,100);}
+        void schedule(){schedule(true);}
+        void schedule(boolean discovery) {
+            if(disposed)return;
+            scanNeedsDiscovery|=discovery;
+            if(scanScheduled)return;
+            scanScheduled=true;main.postDelayed(scan,100);
+        }
         int motionMargin(){return settings.gravity?Math.round(10*root.getResources().getDisplayMetrics().density):0;}
         void syncViewport() {
             if(viewportWidth!=root.getWidth() || viewportHeight!=root.getHeight()) {
                 viewportWidth=root.getWidth();viewportHeight=root.getHeight();rejectedLayouts.clear();clearanceRejected.clear();
             }
+        }
+        private boolean isDrawableNavigation(View view) {
+            return view.getVisibility()==View.VISIBLE && view.isAttachedToWindow() && view.isLaidOut()
+                    && view.getWidth()>0 && view.getHeight()>0;
+        }
+        boolean bindRevealedNavigation() {
+            if(treeSnapshot==null || treeSnapshot.truncated || navigation.size()>LiquidGlassTargets.MAX_TARGETS)return false;
+            boolean revealed=false;
+            for(View view:navigation) {
+                if(!isDrawableNavigation(view)){previouslyDrawableNavigation.remove(view);continue;}
+                if(previouslyDrawableNavigation.add(view) && !bindings.containsKey(view) && !rejectedLayouts.contains(view)
+                        && !clearanceRejected.containsKey(view) && withinRoot(view))revealed=true;
+            }
+            if(!revealed)return false;
+            // A dock restored from GONE must not wait for discovery to apply the glass layout.
+            return syncBindings(LiquidGlassTargets.select(root,treeSnapshot,root==owner.getWindow().getDecorView()),true);
+        }
+        private void updateControlReveal(boolean layoutChanged) {
+            if(Build.VERSION.SDK_INT<29)return;
+            View dock=null;
+            if(root==owner.getWindow().getDecorView() && treeSnapshot!=null && !treeSnapshot.truncated
+                    && navigation.size()<=LiquidGlassTargets.MAX_TARGETS) {
+                for(View view:navigation)if(LiquidGlassTargets.hasClass(view,"X.1JgG")
+                        && view.isAttachedToWindow() && withinRoot(view)) {
+                    if(dock!=null){dock=null;break;}
+                    dock=view;
+                }
+            }
+            if(dock==null) {
+                if(hiddenDock!=null || revealingDock!=null){hiddenDock=null;finishControlReveal();}
+                return;
+            }
+            if(!dock.isShown() || dock.getAlpha()<=0) {
+                if(revealingDock!=null)finishControlReveal();
+                if(hiddenDock!=dock || revealInventoryDirty) {
+                    hiddenDock=dock;revealInventoryDirty=false;
+                    clearance.rememberHiddenControls(hiddenRevealControls);
+                }
+                return;
+            }
+            if(revealingDock!=null && revealingDock!=dock)finishControlReveal();
+            if(hiddenDock!=null && hiddenDock!=dock){hiddenDock=null;hiddenRevealControls.clear();}
+            if(hiddenDock==dock && bindings.containsKey(dock)) {
+                hiddenDock=null;
+                if(!hiddenRevealControls.isEmpty()) {
+                    revealingDock=dock;
+                    main.postDelayed(finishReveal,REVEAL_TIMEOUT_MS);
+                }
+            }
+            if(revealingDock!=dock)return;
+            if(!layoutChanged && !clearance.awaitingTargetLayout()) {
+                finishControlReveal();return;
+            }
+            if(layoutChanged)return; // This draw was already cancelled by the normal layout path.
+            clearance.retainRevealingControls(hiddenRevealControls,revealControls);
+            for(java.util.Iterator<View> it=maskedRevealControls.iterator();it.hasNext();) {
+                View view=it.next();
+                if(!revealControls.contains(view)) {
+                    restoreRevealAlpha(view);
+                    it.remove();
+                }
+            }
+            for(View view:revealControls)if(view.getTransitionAlpha()==1f && !maskedRevealControls.contains(view)) {
+                // Keep logical alpha and visibility intact for clearance and native touch routing.
+                maskedRevealControls.add(view);
+                view.setTransitionAlpha(0f);
+            }
+        }
+        private void finishControlReveal() {
+            main.removeCallbacks(finishReveal);
+            if(Build.VERSION.SDK_INT>=29)for(View view:maskedRevealControls)restoreRevealAlpha(view);
+            maskedRevealControls.clear();revealControls.clear();hiddenRevealControls.clear();revealingDock=null;
+        }
+        @androidx.annotation.RequiresApi(29)
+        private void restoreRevealAlpha(View view) {
+            try {if(view.getTransitionAlpha()==0f)view.setTransitionAlpha(1f);}
+            catch(RuntimeException | LinkageError ignored){/* Do not escape a delayed cleanup into the host. */}
         }
         boolean syncClearance() {
             clearance.setProgressMotionMargin(motionMargin());
@@ -308,52 +409,60 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
                 }
             } catch(RuntimeException|LinkageError ignored) { /* Diagnostics must not fail a rebuilding host window. */ }
         }
-        void refresh() {
+        void refresh(){refresh(true);}
+        void refresh(boolean discover) {
             if(disposed || !settings.enabled)return;
+            boolean structural=discover || treeSnapshot==null;
+            if(structural)scanNeedsDiscovery=false;
             try {
                 syncViewport();
-                customization.refresh();
-                java.util.List<View> nodes=LiquidGlassTargets.nodes(root);
-                motionCandidates.clear();motionCandidates.addAll(LiquidGlassTargets.motionTargets(root));
-                navigation.clear();
-                for(View node:nodes)if(node!=root && LiquidGlassTargets.floating(node))navigation.add(node);
-                clearance.discover(nodes);syncClearance();
-                LiquidGlassTargets.Selection selection=LiquidGlassTargets.select(root,root==owner.getWindow().getDecorView());
-                Map<View,Boolean> targets=selection.targets;
+                if(structural) {
+                    revealInventoryDirty=true;
+                    treeSnapshot=LiquidGlassTargets.snapshot(root);
+                    customization.refresh(treeSnapshot);
+                    if(!treeSnapshot.truncated) {
+                        navigation.clear();
+                        for(View node:treeSnapshot.nodes)if(node!=root && LiquidGlassTargets.floating(node))navigation.add(node);
+                        previouslyDrawableNavigation.retainAll(navigation);
+                        clearance.discover(treeSnapshot.nodes);
+                    }
+                } else {
+                    customization.sync();
+                }
+                motionCandidates.clear();
+                if(settings.gravity)motionCandidates.addAll(LiquidGlassTargets.motionTargets(root,treeSnapshot));
+                LiquidGlassTargets.Selection selection=LiquidGlassTargets.select(root,treeSnapshot,
+                        root==owner.getWindow().getDecorView());
                 if(!loggedBudget && (selection.treeLimited || selection.targetLimited)) {
                     loggedBudget=true;log.accept("liquid_glass: coverage_limited="+(selection.treeLimited?"tree_budget":"surface_budget"));
                 }
-                for(View old:new ArrayList<>(bindings.keySet())) {
-                    Binding binding=bindings.get(old);
-                    if(!targets.containsKey(old) || !binding.owned()
-                            || binding.clearanceFallback && !clearanceRejected.containsKey(old)) {
-                        binding.close();bindings.remove(old);
-                    }
-                }
-                for(Map.Entry<View,Boolean> target:targets.entrySet())if(!bindings.containsKey(target.getKey())
-                        && !rejectedLayouts.contains(target.getKey()) && !clearanceRejected.containsKey(target.getKey())) {
-                    bindings.put(target.getKey(),new Binding(target.getKey(),target.getValue(),backdrop));
-                    View view=target.getKey();String observation="class="+view.getClass().getName()
-                            +";id="+Integer.toHexString(view.getId())+";size="+view.getWidth()+"x"+view.getHeight()
-                            +";floating="+target.getValue();
-                    if(loggedTargets.size()<32 && loggedTargets.add(observation))log.accept(observation);
+                boolean incomplete=selection.treeLimited || selection.targetLimited;
+                syncBindings(selection,!structural);
+                if(navigation.size()<=LiquidGlassTargets.MAX_TARGETS)for(View view:navigation) {
+                    if(isDrawableNavigation(view))previouslyDrawableNavigation.add(view);
+                    else previouslyDrawableNavigation.remove(view);
                 }
                 for(Binding binding:bindings.values())binding.refreshLayout(customization.labels(binding.view),motionMargin());
                 syncClearance();
-                View next=null;long area=0;
-                android.graphics.Rect visible=new android.graphics.Rect();
-                for(View node:bindings.isEmpty()?Collections.<View>emptyList():nodes) {
-                    if(LiquidGlassTargets.opaque(node) && !loggedOpaque){
-                        log.accept("liquid_glass: opaque_renderer_compatibility_only="+node.getClass().getName());loggedOpaque=true;
+                View next=null;
+                if(!bindings.isEmpty()) {
+                    android.graphics.Rect visible=new android.graphics.Rect();
+                    long area=0;
+                    if(incomplete) {
+                        if(visibleMedia(source,visible))next=source;
+                    } else for(View node:treeSnapshot.nodes) {
+                        if(LiquidGlassTargets.opaque(node) && !loggedOpaque){
+                            log.accept("liquid_glass: opaque_renderer_compatibility_only="+node.getClass().getName());loggedOpaque=true;
+                        }
+                        if(LiquidGlassTargets.isMedia(node) && visibleMedia(node,visible)) {
+                            long candidate=(long)visible.width()*visible.height();
+                            if(candidate>area){next=node;area=candidate;}
+                        }
                     }
-                    if(LiquidGlassTargets.isMedia(node) && node.isShown() && node.getGlobalVisibleRect(visible)) {
-                        long candidate=(long)visible.width()*visible.height();
-                        if(candidate>area){next=node;area=candidate;}
+                    if(next==null && root!=owner.getWindow().getDecorView()) {
+                        Monitor underlying=windows.get(owner.getWindow().getDecorView());
+                        if(underlying!=null && !underlying.disposed && underlying.visibleMedia(underlying.source,visible))next=underlying.source;
                     }
-                }
-                if(next==null && !bindings.isEmpty() && root!=owner.getWindow().getDecorView()) {
-                    Monitor underlying=windows.get(owner.getWindow().getDecorView());
-                    if(underlying!=null && !underlying.disposed)next=underlying.source;
                 }
                 if(next!=source){main.removeCallbacks(capture);source=next;backdrop.setSource(source);if(source!=null)capture.run();
                     if(root==owner.getWindow().getDecorView())for(Monitor peer:windows.values()) {
@@ -369,17 +478,62 @@ public final class LiquidGlassController implements Application.ActivityLifecycl
                 log.accept("liquid_glass: window_disabled="+failure.getClass().getSimpleName());close();updateMotion();
             }
         }
+        boolean syncBindings(LiquidGlassTargets.Selection selection,boolean cached) {
+            boolean incomplete=selection.treeLimited || selection.targetLimited,changed=false;
+            for(java.util.Iterator<Map.Entry<View,Binding>> it=bindings.entrySet().iterator();it.hasNext();) {
+                Map.Entry<View,Binding> entry=it.next();View view=entry.getKey();Binding binding=entry.getValue();
+                if(!binding.owned()
+                        || (incomplete ? !view.isAttachedToWindow() || !withinRoot(view) : !selection.targets.containsKey(view))
+                        || binding.clearanceFallback && !clearanceRejected.containsKey(view)) {
+                    binding.close();it.remove();changed=true;
+                }
+            }
+            int[] remaining=cached?new int[]{MAX_CACHED_NAVIGATION_NODES}:null;
+            if(!incomplete)for(Map.Entry<View,Boolean> target:selection.targets.entrySet()) {
+                View view=target.getKey();
+                if(bindings.containsKey(view) || rejectedLayouts.contains(view) || clearanceRejected.containsKey(view))continue;
+                if(cached && (!isDrawableNavigation(view) || !withinRoot(view) || !navigationSubtreeSafe(view,0,remaining)))continue;
+                bindings.put(view,new Binding(view,target.getValue(),backdrop));changed=true;
+                String observation="class="+view.getClass().getName()+";id="+Integer.toHexString(view.getId())
+                        +";size="+view.getWidth()+"x"+view.getHeight()+";floating="+target.getValue();
+                if(loggedTargets.size()<32 && loggedTargets.add(observation))log.accept(observation);
+            }
+            return changed;
+        }
+        private boolean navigationSubtreeSafe(View view,int depth,int[] remaining) {
+            // A hidden dock can acquire media after the cached window snapshot was taken.
+            if(view==null || --remaining[0]<0 || depth>40 || LiquidGlassTargets.isMedia(view)
+                    || LiquidGlassTargets.opaque(view))return false;
+            if(view instanceof android.view.ViewGroup) {
+                android.view.ViewGroup group=(android.view.ViewGroup)view;
+                int count=group.getChildCount();
+                if(count>remaining[0])return false;
+                for(int i=0;i<count;i++)if(!navigationSubtreeSafe(group.getChildAt(i),depth+1,remaining))return false;
+            }
+            return true;
+        }
+        private boolean visibleMedia(View view,android.graphics.Rect visible) {
+            return view!=null && view.isAttachedToWindow() && withinRoot(view) && view.isShown() && view.getGlobalVisibleRect(visible);
+        }
+        private boolean withinRoot(View view) {
+            for(int depth=0;view!=null && depth<=64;depth++) {
+                if(view==root)return true;
+                view=view.getParent() instanceof View?(View)view.getParent():null;
+            }
+            return false;
+        }
         @Override public void onViewAttachedToWindow(View view){observer=root.getViewTreeObserver();schedule();}
         @Override public void onViewDetachedFromWindow(View view){close();known.remove(root);updateMotion();}
         @Override public void close() {
             if(disposed)return;disposed=true;main.removeCallbacks(scan);main.removeCallbacks(capture);main.removeCallbacks(reportClearanceGeometry);
-            scanScheduled=false;clearanceGeometryScheduled=false;
+            hiddenDock=null;finishControlReveal();
+            scanScheduled=false;scanNeedsDiscovery=false;clearanceGeometryScheduled=false;treeSnapshot=null;
             root.removeOnAttachStateChangeListener(this);
             ViewTreeObserver live=observer!=null && observer.isAlive()?observer:root.getViewTreeObserver();
             if(live.isAlive()){live.removeOnGlobalLayoutListener(this);live.removeOnScrollChangedListener(this);
                 live.removeOnWindowFocusChangeListener(this);live.removeOnPreDrawListener(this);}
             motion.close();clearance.close();for(Binding binding:bindings.values())binding.close();bindings.clear();
-            navigation.clear();motionCandidates.clear();rejectedLayouts.clear();clearanceRejected.clear();customization.close();backdrop.close();windows.remove(root);
+            navigation.clear();previouslyDrawableNavigation.clear();motionCandidates.clear();rejectedLayouts.clear();clearanceRejected.clear();customization.close();backdrop.close();windows.remove(root);
         }
     }
 

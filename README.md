@@ -16,11 +16,11 @@
 
 DouAi 是面向抖音的增强模块，作者 **yudigaga**，使用 libxposed API 102。
 
-当前正式版：**0.2.93 / 194**。
+当前正式版：**0.3.1 / 202**。
 
-[下载 APK](https://github.com/yudigaga/DouAi/releases/download/v0.2.93/DouAi-0.2.93-release.apk) · [LSPosed 下载](https://github.com/Xposed-Modules-Repo/io.github.yudigaga.douai/releases/download/194-0.2.93/DouAi-0.2.93-release.apk)
+[下载 APK](https://github.com/yudigaga/DouAi/releases/download/v0.3.1/DouAi-0.3.1-release.apk) · [LSPosed 下载](https://github.com/Xposed-Modules-Repo/io.github.yudigaga.douai/releases/download/202-0.3.1/DouAi-0.3.1-release.apk)
 
-本版整理设置首页和重复入口，新增“最近配置”状态，并改进抖音 41 的液态玻璃、重力感应布局和两态内置图标。更新与验证范围见 [0.2.93 发布记录](docs/release-0.2.93.md)。
+本版调整抖音 41 竖屏视频铺满后的原生边缘色带遮罩，改进侧栏与控件恢复，并完善九宫格双击点赞和导航图标。手动切页偶发短黑增加诊断。更新与验证范围见 [0.3.1 发布记录](docs/release-0.3.1.md)。
 
 ## 核心功能
 
@@ -71,7 +71,7 @@ DouAi 是面向抖音的增强模块，作者 **yudigaga**，使用 libxposed AP
 
 - [文档目录](docs/README.md)：查找功能说明与历史记录。
 - [完整帮助](docs/help.md)：设置入口和操作说明。
-- [0.2.93 发布记录](docs/release-0.2.93.md)：本版变化、下载及验证边界。
+- [0.3.1 发布记录](docs/release-0.3.1.md)：本版变化、下载及验证边界。
 - [构建与发布](docs/releasing.md)：构建方式、签名及发布状态。
 - [个人内容年志](docs/portrait-analysis.md)：统计口径、数据与解释边界。
 

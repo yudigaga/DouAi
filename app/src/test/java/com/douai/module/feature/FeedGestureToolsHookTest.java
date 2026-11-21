@@ -110,16 +110,23 @@ public final class FeedGestureToolsHookTest {
             assertEquals(2, f.componentToggles);
         }
     }
+    private interface NativeTap { void run(MotionEvent event) throws Throwable; }
     public static final class Panel {
         public Holder current;
         public IPlayerManager currentPlayer = new PlayerManager(new FakeFeedWrapper(1.25f));
         int nativeDoubleTaps;
+        int nativeDiggs;
+        NativeTap nativeDoubleTapBody;
         View playControl;
         int hidePlayControlCalls;
         int showPlayControlCalls;
         public Holder currentHolder() { return current; }
         public IPlayerManager player() { return currentPlayer; }
-        public void doubleTap(MotionEvent event) { nativeDoubleTaps++; }
+        public void doubleTap(MotionEvent event) throws Throwable {
+            nativeDoubleTaps++;
+            if (nativeDoubleTapBody != null) nativeDoubleTapBody.run(event);
+        }
+        public void bigDigg(MotionEvent event, Holder holder, Aweme work) { nativeDiggs++; }
         public void togglePlayback(Aweme aweme, boolean fromTap, boolean updateUi) {
             FakeFeedWrapper delegate = ((PlayerManager) currentPlayer).delegate;
             delegate.playing = !delegate.playing;
@@ -136,17 +143,91 @@ public final class FeedGestureToolsHookTest {
 
     @Test public void configuredLikeRunsAheadOfDisabledNativeDoubleTapOnlyInItsRegion() throws Throwable {
         HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
-        try (Fixture f = new Fixture(Map.of("double_tap_top_left", "like", "disable_double_tap_like", true), false, true)) {
+        Map<String, Object> options = Map.of("double_tap_top_left", "like", "double_tap_top_right", "toggle_components",
+                "disable_double_tap_like", true);
+        try (Fixture f = new Fixture(options, false, true);
+             HostBehaviorHooks suppression = f.suppressDoubleTaps(options)) {
             List<String> requests = new ArrayList<>();
             f.holder.aid = "123";
+            f.holder.downloadAweme = new Aweme("123");
+            f.panel.nativeDoubleTapBody = event -> {
+                Method digg = Panel.class.getMethod("bigDigg", MotionEvent.class, Holder.class, Aweme.class);
+                MotionEvent otherEvent = MotionEvent.obtain(event);
+                try { f.harness.downstream.invoke(digg, f.panel, otherEvent, f.holder, f.holder.downloadAweme); }
+                finally { otherEvent.recycle(); }
+                f.harness.downstream.invoke(digg, f.panel, event, new Holder(), f.holder.downloadAweme);
+                f.harness.downstream.invoke(digg, f.panel, event, f.holder, new Aweme("123"));
+                Panel otherPanel = new Panel();
+                f.harness.downstream.invoke(digg, otherPanel, event, f.holder, f.holder.downloadAweme);
+                assertEquals(0, otherPanel.nativeDiggs);
+                f.harness.downstream.invoke(digg, f.panel, event, f.holder, f.holder.downloadAweme);
+                f.harness.downstream.invoke(digg, f.panel, event, f.holder, f.holder.downloadAweme);
+            };
             f.hook.setManualLike((owner,id) -> { assertSame(f.activity,owner); requests.add(id); });
-            f.select(); f.harness.suppressNativeDoubleTap = true;
+            f.select();
+            assertTrue(suppression.supports("disable_double_tap_like"));
             assertEquals(Integer.valueOf(XposedInterface.PRIORITY_HIGHEST),
                     f.harness.priorities.get(Panel.class.getMethod("doubleTap",MotionEvent.class)));
-            f.doubleTap(0,0); ShadowLooper.idleMainLooper();
-            assertEquals(List.of("123"),requests); assertEquals(0,f.panel.nativeDoubleTaps);
             f.doubleTap(2,2); ShadowLooper.idleMainLooper();
-            assertEquals(1,requests.size()); assertEquals(0,f.panel.nativeDoubleTaps);
+            assertEquals(0,f.panel.nativeDoubleTaps);
+            f.doubleTap(0,0); ShadowLooper.idleMainLooper();
+            assertTrue(requests.isEmpty());
+            assertEquals(1,f.panel.nativeDoubleTaps);
+            assertEquals(1,f.panel.nativeDiggs);
+            f.doubleTap(2,0); ShadowLooper.idleMainLooper();
+            assertEquals(1,f.componentToggles);
+            f.doubleTap(2,2); ShadowLooper.idleMainLooper();
+            assertEquals(1,f.panel.nativeDoubleTaps);
+            assertEquals(1,f.panel.nativeDiggs);
+            f.panel.current = new Holder();
+            f.doubleTap(0,0); ShadowLooper.idleMainLooper();
+            assertEquals("A stale gesture selection cannot authorize the current host card",1,f.panel.nativeDoubleTaps);
+            f.panel.current = f.holder;
+            f.panel.nativeDoubleTapBody = null;
+            suppression.setOptions(new LocalOptions(Map.of("disable_double_tap_like", false)));
+            f.doubleTap(2,2);
+            assertEquals(2,f.panel.nativeDoubleTaps);
+            suppression.setOptions(new LocalOptions(options));
+            f.doubleTap(2,2);
+            assertEquals(2,f.panel.nativeDoubleTaps);
+        }
+    }
+
+    @Test public void configuredLikeClearsItsScopedPermissionWhenTheHostThrows() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        Map<String, Object> options = Map.of("double_tap_top_left", "like", "disable_double_tap_like", true);
+        try (Fixture f = new Fixture(options, false, true);
+             HostBehaviorHooks suppression = f.suppressDoubleTaps(options)) {
+            f.holder.downloadAweme = new Aweme("123");
+            RuntimeException expected = new IllegalStateException("native failure");
+            f.panel.nativeDoubleTapBody = event -> { throw expected; };
+            f.select();
+            MotionEvent tap = MotionEvent.obtain(0, 0, MotionEvent.ACTION_UP, 50, 100, 0);
+            try {
+                Method doubleTap = Panel.class.getMethod("doubleTap", MotionEvent.class);
+                assertSame(expected,org.junit.Assert.assertThrows(RuntimeException.class,
+                        () -> f.harness.invoke(doubleTap, f.panel, tap)));
+                f.harness.downstream.invoke(Panel.class.getMethod("bigDigg", MotionEvent.class, Holder.class, Aweme.class),
+                        f.panel, tap, f.holder, f.holder.downloadAweme);
+                assertEquals(0,f.panel.nativeDiggs);
+                assertEquals(1,f.panel.nativeDoubleTaps);
+            } finally { tap.recycle(); }
+        }
+    }
+
+    @Test public void configuredLikeDelegatesOnceWhenNativeDoubleTapIsAllowed() throws Throwable {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_410);
+        try (Fixture f = new Fixture(Map.of("double_tap_top_left", "like", "disable_double_tap_like", false), false, true)) {
+            List<String> requests = new ArrayList<>();
+            f.holder.aid = "123";
+            f.hook.setManualLike((owner,id) -> requests.add(id));
+            f.select();
+            f.doubleTap(0,0); ShadowLooper.idleMainLooper();
+            assertEquals(1,f.panel.nativeDoubleTaps);
+            assertTrue("A routed native double tap cannot also submit a manual like",requests.isEmpty());
+            f.doubleTap(2,2); ShadowLooper.idleMainLooper();
+            assertEquals(2,f.panel.nativeDoubleTaps);
+            assertTrue(requests.isEmpty());
         }
     }
 
@@ -2728,6 +2809,15 @@ public final class FeedGestureToolsHookTest {
             ShadowLooper.idleMainLooper();
         }
 
+        HostBehaviorHooks suppressDoubleTaps(Map<String, ?> values) throws Exception {
+            harness.downstream = new Harness();
+            List<RuleScanResult> results = new ArrayList<>();
+            add(results, "adv_ui_double_tap", Panel.class.getMethod("doubleTap", MotionEvent.class));
+            add(results, "adv_ui_big_digg", Panel.class.getMethod("bigDigg", MotionEvent.class, Holder.class, Aweme.class));
+            return HostBehaviorHooks.install(harness.downstream.framework, new HostScanReport("fixture",results,false),
+                    getClass().getClassLoader(), null, new LocalOptions(values), ignored -> { });
+        }
+
         void longPress(int column, int row) throws Throwable {
             int[] location = new int[2];
             touch.getLocationOnScreen(location);
@@ -2865,7 +2955,7 @@ public final class FeedGestureToolsHookTest {
     private static final class Harness {
         final Map<Method, XposedInterface.Hooker> interceptors = new HashMap<>();
         final Map<Method, Integer> priorities = new HashMap<>();
-        boolean suppressNativeDoubleTap;
+        Harness downstream;
         final XposedInterface framework = (XposedInterface) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[] { XposedInterface.class }, (proxy, operation, values) -> {
                     if (!operation.getName().equals("hook")) return null;
@@ -2903,8 +2993,10 @@ public final class FeedGestureToolsHookTest {
                             case "getArg": return arguments[(Integer) values[0]];
                             case "getArgs": return Arrays.asList(arguments);
                             case "proceed":
-                                if (suppressNativeDoubleTap && target.getName().equals("doubleTap")) return null;
-                                try { return target.invoke(owner, values == null ? arguments : (Object[]) values[0]); }
+                                Object[] next = values == null ? arguments : (Object[]) values[0];
+                                if (downstream != null && downstream.interceptors.containsKey(target))
+                                    return downstream.invoke(target, owner, next);
+                                try { return target.invoke(owner, next); }
                                 catch (InvocationTargetException failure) { throw failure.getCause(); }
                             default: return null;
                         }

@@ -80,7 +80,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
         context=ModuleTheme.themedContext(baseContext);this.store=store;this.miuix=miuix;
         this.presenter=presenter;this.files=files;this.picker=picker;this.worker=worker;activity=activity(context);
         LinearLayout body=column();body.setPadding(dp(12),dp(4),dp(12),dp(12));
-        body.addView(text("每个位置可分别设置未选中、已选中两态图标，日夜共用，并查看实际 WebP 预览。内置图标保留所提供的未选中、已选中原始图片，可按位置一键保存；已保存的旧图标、自定义图标与夜间数据在主动应用前保持原样。导入的 SVG / WebP 保留原色。SVG 源文件不超过 256 KiB，最长边转为256像素；最终静态 WebP 不超过32 KiB。导航项可整项隐藏或显示；右侧 Feed 仅保留图片替换。",13),matchWrap());
+        body.addView(text("每个位置可分别设置未选中、已选中两态图标，日夜共用，并查看实际 WebP 预览。内置图标按位置匹配未选中线框和选中实心图形，可一键保存；已保存的旧图标、自定义图标与夜间数据在主动应用前保持原样。导入的 SVG / WebP 保留原色。SVG 源文件不超过 256 KiB，最长边转为256像素；最终静态 WebP 不超过32 KiB。导航项可整项隐藏或显示；右侧 Feed 仅保留图片替换。",13),matchWrap());
         status=text("请选择图标位置。上导航保留最近识别的首页频道；未出现时，请先返回首页，再从抖音内打开此页。",13);
         status.setTag("home.icons.status");status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setPadding(0,dp(12),0,dp(8));body.addView(status,matchWrap());
@@ -307,7 +307,7 @@ final class HomeIconSettingsDialog implements AutoCloseable {
         boolean disposed;
         Editor(HomeUiCustomization.Target target) {
             this.target=target;LinearLayout body=column();body.setPadding(dp(12),dp(8),dp(12),dp(12));
-            body.addView(text("内置图标按当前位置匹配所提供的未选中、已选中原始图片，点击保存即可应用。两态日夜共用；已保存的旧图标、自定义图片与夜间兼容数据在主动应用前保持原样。点按可导入保留原色的自定义图标或恢复原图。下方显示已保存图片的实际 WebP 预览。",13),matchWrap());
+            body.addView(text("内置图标按当前位置匹配未选中线框和选中实心图形。两态日夜共用；已保存的旧图标、自定义图片与夜间兼容数据在主动应用前保持原样。点按可导入保留原色的自定义图标或恢复原图。下方显示已保存图片的实际 WebP 预览。",13),matchWrap());
             if(target.navigation) {
                 visibilityStatus=text("",13);visibilityStatus.setTag("home.icons.visibility.status");
                 visibilityStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);body.addView(visibilityStatus,matchWrap());

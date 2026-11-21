@@ -24,6 +24,7 @@ import java.util.function.Function;
 
 /** Window-owned clearance for the verified 41.0.0 bottom UI dock; never owns video or transforms. */
 public final class NavigationGlassClearance implements AutoCloseable {
+    private static final int MAX_REVEAL_CONTROLS=96;
     private static final int CARRIER=0x7f0a15bb,PROGRESS=0x7f0a16b2,ABOVE=0x7f0a3ff1;
     private static final int METADATA=0x7f0a3ffc,RIGHT=0x7f0a4000,PARENT=0x7f0a01db;
     private static final int DANMAKU_ICON=0x7f0a2da7,DANMAKU_FRAME=0x7f0a2dab;
@@ -338,6 +339,49 @@ public final class NavigationGlassClearance implements AutoCloseable {
     }
     public long inputRevision(){return revision;}
     boolean retryReady(){return !closed && "applied".equals(syncState);}
+    boolean awaitingTargetLayout(){return "pending_target_layout".equals(syncState);}
+
+    void rememberHiddenControls(Set<View> hidden) {
+        hidden.clear();
+        Branch branch=singleRevealBranch();
+        if(branch==null)return;
+        for(View view:branch.capacityNodes) {
+            if((branch.observed.contains(view) || ownsContentBounds(view)) && layoutHidden(view))hidden.add(view);
+        }
+    }
+
+    private boolean layoutHidden(View view) {
+        // GONE transitions request layout; opacity-only changes need not invalidate the cached snapshot.
+        for(int depth=0;view!=null && view!=root && depth<=40;depth++) {
+            if(view.getVisibility()==View.GONE)return true;
+            view=view.getParent() instanceof View?(View)view.getParent():null;
+        }
+        return false;
+    }
+
+    void retainRevealingControls(Set<View> previouslyHidden,Set<View> visible) {
+        visible.clear();
+        Branch branch=singleRevealBranch();
+        if(branch==null || !branch.structureIntact())return;
+        for(View view:branch.capacityNodes) {
+            if(!previouslyHidden.contains(view) || !painted(view) || !view.isAttachedToWindow())continue;
+            boolean protectedSubtree=false;
+            for(View protectedView:branch.protectedNodes)if(within(protectedView,view) || within(view,protectedView)){
+                protectedSubtree=true;break;
+            }
+            if(!protectedSubtree)visible.add(view);
+        }
+    }
+
+    private Branch singleRevealBranch() {
+        if(closed || branches.size()>8)return null;
+        Branch selected=null;
+        for(Branch branch:branches.values())if(branchInViewport(branch)) {
+            if(selected!=null || branch.unsafe || branch.capacityNodes.size()>MAX_REVEAL_CONTROLS)return null;
+            selected=branch;
+        }
+        return selected;
+    }
     int windowProgressCount(){return windowProgress.size();}
     public String fallbackDetail(){return fallbackDetail;}
 
