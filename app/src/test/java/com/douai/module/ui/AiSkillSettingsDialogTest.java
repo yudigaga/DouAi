@@ -3,6 +3,7 @@ package com.douai.module.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.text.method.PasswordTransformationMethod;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.Spinner;
@@ -93,6 +94,47 @@ public final class AiSkillSettingsDialogTest {
         assertEquals(SkillResult.Type.IMAGE, service.outputType());
         assertFalse(services.isAuthorized(service));
         assertTrue(((TextView) view("skills.service.fixture-image")).getText().toString().contains("图片"));
+    }
+
+    @Test public void pendingListOpensTheExactSkillConfiguration() {
+        enterAndGenerate("生图", "skills.generate.mock");
+        String name = store.pending().get(0).name();
+        assertTrue(view("skills.pending." + name + ".configure").performClick());
+        AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
+        TextView scopedName = detail.getWindow().getDecorView().findViewWithTag("skills.detail.name");
+        assertNotNull(scopedName);
+        assertEquals("/" + name, scopedName.getText().toString());
+        assertNull(detail.getWindow().getDecorView().findViewWithTag("skills.service.register"));
+        assertTrue(store.list().isEmpty());
+        detail.dismiss();
+    }
+
+    @Test public void configurationMasksKeyAndRequiresAuthorizationToConnectMock() {
+        enterAndGenerate("生图", "skills.generate.mock");
+        String name = store.pending().get(0).name();
+        assertTrue(view("skills.pending." + name + ".configure").performClick());
+        AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
+        View form = detail.getWindow().getDecorView();
+        EditText key = form.findViewWithTag("skills.detail.key");
+        assertTrue(key.getTransformationMethod() instanceof PasswordTransformationMethod);
+        assertFalse(key.isSaveEnabled());
+        assertNull(form.findViewWithTag("skills.detail.authorize"));
+
+        ((Spinner) form.findViewWithTag("skills.detail.adapter")).setSelection(1);
+        assertTrue(form.findViewWithTag("skills.detail.save").performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(store.list().isEmpty());
+        assertTrue(form.findViewWithTag("skills.detail.authorize").performClick());
+        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(review.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(store.list().isEmpty());
+
+        assertTrue(form.findViewWithTag("skills.detail.authorize").performClick());
+        confirm((AlertDialog) ShadowDialog.getLatestDialog());
+        assertEquals(name, store.list().get(0).name());
+        assertTrue(store.pending().isEmpty());
+        detail.dismiss();
     }
 
     @Test public void regeneratingTheSameSkillRequiresConfirmationBeforeReplacingVersion() {

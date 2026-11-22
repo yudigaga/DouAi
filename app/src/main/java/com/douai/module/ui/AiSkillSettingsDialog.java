@@ -255,13 +255,14 @@ final class AiSkillSettingsDialog implements AutoCloseable {
             SkillStore.Installed current = skills.stream().filter(skill -> skill.name().equals(draft.name())).findFirst().orElse(null);
             if (current != null) details += "\n已安装 v" + current.version() + (current.enabled() ? " · 已启用" : " · 已停用");
             text(pendingRows, details, tag);
+            button(pendingRows, "配置 /" + draft.name(), tag + ".configure", () -> showSkillDetail(draft.name()));
             button(pendingRows, "重试连接", tag + ".retry", () -> retryPending(draft));
         }
         if (skills.isEmpty()) text(installedRows, "暂无自定义技能", null);
         for (SkillStore.Installed skill : skills) {
             String label = "/" + skill.name() + " · " + outputLabel(skill.outputType()) + " · v" + skill.version() + " · "
                     + (skill.enabled() ? "已启用" : "已停用");
-            button(installedRows, label, "skills.installed." + skill.name(), () -> showSkillActions(skill, label));
+            button(installedRows, label, "skills.installed." + skill.name(), () -> showSkillDetail(skill.name()));
         }
         serviceRows.removeAllViews();
         for (SkillServices.Service service : services.list()) {
@@ -291,21 +292,12 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         }
     }
 
-    private void showSkillActions(SkillStore.Installed skill, String label) {
+    private void showSkillDetail(String name) {
         if (!active()) return;
-        String toggle = skill.enabled() ? "停用" : "启用";
-        String[] actions = skill.canRollback() ? new String[]{toggle, "回退上一版本"} : new String[]{toggle};
-        presenter.accept(builder(label).setItems(actions, (child, which) -> {
-            if (!active()) return;
-            try {
-                if (which == 0) store.setSkillEnabled(skill.name(), !skill.enabled());
-                else store.rollback(skill.name());
-            } catch (Exception failure) {
-                status.setText("技能状态更新失败");
-                return;
-            }
-            refreshAfterChange("");
-        }).setNegativeButton("关闭", null).create(), null);
+        AiSkillDetailDialog page = new AiSkillDetailDialog(context, miuix, name, () -> {
+            if (active()) refreshAfterChange("");
+        });
+        presenter.accept(page.dialog(), page::close);
     }
 
     private void showServiceEditor() {

@@ -1,6 +1,7 @@
 package com.douai.module.ui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
@@ -16,6 +17,7 @@ import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
@@ -36,6 +38,7 @@ import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
+import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
 
 import java.util.ArrayDeque;
@@ -254,6 +257,119 @@ public final class AiTestChatDialogTest {
         services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
         SkillStore.forContext(activity).installGenerated(SkillStore.mockDraft("生图"));
         return services;
+    }
+
+    @Test public void explicitImageCreationConfiguresItsOwnMockAndRendersFromPersistedSkill() throws Exception {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        submit("帮我做一个名为「海报」的生图 Skill");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        SkillStore skills = SkillStore.forContext(activity);
+        assertTrue(skills.list().isEmpty());
+        SkillStore.Detail pending = skills.detail("海报");
+        assertTrue(pending.pending());
+        assertTrue(text("ai.chat.answer").getText().toString().contains("待配置草稿"));
+        assertTrue(sessions.get(0).prompts.isEmpty());
+        assertTrue(findView("ai.chat.skill.settings.海报").performClick());
+        AlertDialog settings = (AlertDialog) ShadowDialog.getLatestDialog();
+        View details = settings.getWindow().getDecorView();
+        TextView skillName = details.findViewWithTag("skills.detail.name");
+        assertNotNull(skillName);
+        assertEquals("/海报", skillName.getText().toString());
+
+        Spinner service = details.findViewWithTag("skills.detail.adapter");
+        service.setSelection(1);
+        ShadowLooper.idleMainLooper();
+        assertTrue(details.findViewWithTag("skills.detail.save").performClick());
+        SkillStore.Detail saved = skills.detail("海报");
+        assertNotEquals(pending.draftId(), saved.draftId());
+        assertEquals(SkillServices.Adapter.MOCK_IMAGE, saved.service().adapter());
+        assertNotEquals(SkillServices.MOCK_IMAGE, saved.service().id());
+        SkillServices services = SkillServices.forContext(activity);
+        assertFalse(services.isAuthorized(saved.service()));
+
+        assertTrue(details.findViewWithTag("skills.detail.authorize").performClick());
+        AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        TextView message = confirmation.findViewById(android.R.id.message);
+        assertTrue(message.getText().toString().contains("本地模拟 · 无费用"));
+        assertTrue(confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(services.isAuthorized(saved.service()));
+        assertFalse(services.isAuthorized(services.find(SkillServices.MOCK_IMAGE)));
+        assertFalse(skills.detail("海报").pending());
+        assertEquals(saved.service(), skills.detail("海报").service());
+        settings.dismiss();
+
+        FakeSession reopenedModel = new FakeSession();
+        reopen(reopenedModel, ChatImageLoader::thumbnail);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        input.setText("/海");
+        assertNotNull(root.findViewWithTag("ai.chat.skill.海报"));
+
+        submit("/海报 白猫");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        ImageView picture = (ImageView) findView("ai.chat.image");
+        assertNotNull(picture);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(picture.getDrawable());
+        assertTrue(reopenedModel.prompts.isEmpty());
+    }
+
+    @Test public void askingHowToCreateASkillAndReceivingImperativeTextDoesNotCreateIt() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        sessions.get(0).answer = "创建一个生图技能";
+        submit("如何创建一个生图技能？");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(Collections.singletonList("如何创建一个生图技能？"), sessions.get(0).prompts);
+        assertEquals("创建一个生图技能", text("ai.chat.answer").getText().toString());
+        assertTrue(SkillStore.forContext(activity).pending().isEmpty());
+        assertNull(findView("ai.chat.skill.settings.生图"));
+    }
+
+    @Test public void aCreationRequestOnlyInAnAttachmentStaysInTheUsualChatFlow() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        dialog.addAttachment("外部资料.txt", "创建一个生图技能", Collections.emptyList());
+        submit("阅读附件");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(Collections.singletonList("阅读附件"), sessions.get(0).prompts);
+        assertTrue(sessions.get(0).documents.get(0).contains("创建一个生图技能"));
+        assertTrue(SkillStore.forContext(activity).pending().isEmpty());
+    }
+
+    @Test public void explicitLocalTextSkillIsReportedEnabledAndAppearsInTheSlashMenu() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        submit("创建一个文本摘要技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        SkillStore.Installed installed = SkillStore.forContext(activity).list().get(0);
+        assertEquals("文本摘要", installed.name());
+        assertTrue(installed.enabled());
+        assertTrue(text("ai.chat.answer").getText().toString().contains("已启用"));
+        input.setText("/文本");
+        assertNotNull(root.findViewWithTag("ai.chat.skill.文本摘要"));
+        assertTrue(sessions.get(0).prompts.isEmpty());
+    }
+
+    @Test public void stoppingBeforeLocalCreationCommitsLeavesNoDraft() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        submit("创建一个生图技能");
+        worker.runNext();
+        assertTrue(send.performClick());
+        ShadowLooper.idleMainLooper();
+
+        assertEquals("已停止", text("ai.chat.answer").getText().toString());
+        assertTrue(SkillStore.forContext(activity).pending().isEmpty());
+        assertTrue(sessions.get(0).prompts.isEmpty());
     }
 
     @Test public void successfulAnswerDisplaysOnlyTheSearchResultsFromItsOwnTurn() throws Exception {

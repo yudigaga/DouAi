@@ -48,6 +48,9 @@ public final class SkillStore {
     private static final Pattern REQUESTED_NAME = Pattern.compile(
             "(?:名为|命名为|叫做)\\s*(?:[「“\"]([\\p{L}\\p{N}_-]{1,24})[」”\"]|([\\p{L}\\p{N}_-]{1,24})(?=\\s|[，。]|$))");
     private static final String NEEDS_IMAGE_SERVICE = "缺少已授权的图片服务";
+    private static final String NEEDS_OPERATION = "需要可校验的执行方式，目前支持文本摘要、模拟订单和图片";
+    private static final String NEEDS_REPLACEMENT = "离线校验通过，等待确认启用同名新版";
+    private static final String TRIAL_FAILED = "离线校验失败，草稿待配置";
     private static final int LIMIT = 96 * 1024;
 
     public record Installed(String name, int version, boolean enabled, boolean canRollback,
@@ -57,6 +60,15 @@ public final class SkillStore {
                           String pendingReason, int previousVersion, int latestVersion) {}
     public record Pending(String name, SkillResult.Type outputType, String reason) {}
     public record SaveResult(Installed installed, Pending pending) {}
+    public enum FieldState { FILLED, MISSING, NEEDS_AUTHORIZATION }
+    public record Field(String id, String label, boolean required, FieldState state) {}
+    public record Detail(String name, SkillResult.Type outputType, String draftId, String reason,
+                         List<Field> fields, SkillServices.Service service, boolean canAuthorize,
+                         boolean canReplace, int previousVersion, boolean installedEnabled, boolean canRollback) {
+        public boolean pending() { return !draftId.isEmpty(); }
+    }
+    private enum SaveMode { GENERATE, RECONNECT, CONVERSATION }
+    private record Configuration(List<Field> fields, boolean canAuthorize) {}
     record Available(AiSkills.Command command, int version) {}
     private record Draft(String name, String description, String documentation, String kind,
                          int maxInput, SkillResult.Type outputType, String serviceId, String trialInput,
@@ -150,6 +162,41 @@ public final class SkillStore {
         return new JSONObject().put("requirements", input).put("registeredServices", metadata).toString();
     }
 
+    public static boolean isExplicitCreation(String prompt) {
+        return SkillCreationRequest.requirement(prompt) != null;
+    }
+
+    public SaveResult createFromConversation(String prompt) throws Exception {
+        String requirement = SkillCreationRequest.requirement(prompt);
+        if (requirement == null) throw new IllegalArgumentException("请输入明确的 Skill 创建请求");
+        if (requiresImage(requirement)) return saveGenerated(mockDraft(requirement), null, SaveMode.CONVERSATION);
+        if (requirement.contains("摘要") || requirement.contains("总结")) {
+            return saveGenerated(localTextDraft(requirement, false), null, SaveMode.CONVERSATION);
+        }
+        if (requirement.contains("订单") && (requirement.contains("模拟") || requirement.contains("查询"))) {
+            return saveGenerated(localTextDraft(requirement, true), null, SaveMode.CONVERSATION);
+        }
+        String fallback = requirement.matches("[\\p{IsHan}]{1,24}") ? requirement : "新技能";
+        String json = new JSONObject().put("schemaVersion", 2).put("name", requestedName(requirement, fallback))
+                .put("description", "需要可校验的执行方式").put("documentation", "待补充受支持的技能用途。")
+                .put("execution", new JSONObject().put("kind", "unconfigured").put("maxInput", 4000)
+                        .put("outputType", "text"))
+                .put("trial", new JSONObject().put("input", "示例").put("expected", "待配置"))
+                .toString();
+        return saveGenerated(json, null, SaveMode.CONVERSATION);
+    }
+
+    private static String localTextDraft(String requirement, boolean orders) throws Exception {
+        JSONObject draft = new JSONObject(mockDraft(orders ? "查询模拟订单" : "摘要"));
+        String fallback = orders ? "模拟订单" : "文本摘要";
+        String name = requestedName(requirement, fallback);
+        return draft.put("name", name).toString();
+    }
+
+    private static String requestedName(String requirement, String fallback) {
+        Matcher name = REQUESTED_NAME.matcher(requirement);
+        return name.find() ? (name.group(1) == null ? name.group(2) : name.group(1)) : fallback;
+    }
     public static boolean requiresImage(String requirements) {
         if (requirements == null) return false;
         String input = requirements.trim();
@@ -159,8 +206,7 @@ public final class SkillStore {
     public static String mockDraft(String requirements) throws Exception {
         String input = text(requirements == null ? "" : requirements.trim(), 4000);
         if (requiresImage(input)) {
-            Matcher name = REQUESTED_NAME.matcher(input);
-            String command = name.find() ? (name.group(1) == null ? name.group(2) : name.group(1)) : "生图";
+            String command = requestedName(input, "生图");
             return new JSONObject().put("schemaVersion", 2).put("name", command)
                     .put("description", "根据提示词生成图片")
                     .put("documentation", "输入图片提示词，使用已授权的图片服务。")
@@ -202,6 +248,160 @@ public final class SkillStore {
         });
     }
 
+    public Detail detail(String name) {
+        return read(state -> detail(state, name));
+    }
+
+    public Detail saveConfiguration(String name, String draftId, SkillServices.Adapter adapter, String endpoint,
+                                    String modelName, int costUnits, String bearerToken) throws Exception {
+        return locked(state -> {
+            JSONObject entry = requirePending(state, name, draftId);
+            Draft draft = parse(entry.getString("definition"));
+            if (draft.outputType() != SkillResult.Type.IMAGE) throw new IllegalStateException("此草稿没有图片配置项");
+            SkillServices.Service saved = services.configureForSkill(entry.optString("serviceId", ""), name, adapter,
+                    endpoint, modelName, costUnits, bearerToken);
+            entry.put("serviceId", saved.id()).put("draftId", UUID.randomUUID().toString());
+            return advancePending(state, entry, draft, null);
+        });
+    }
+
+    public Detail authorizeConfiguration(String name, String draftId, SkillServices.Service expected) throws Exception {
+        return locked(state -> {
+            JSONObject entry = requirePending(state, name, draftId);
+            Draft draft = parse(entry.getString("definition"));
+            SkillServices.Service target = configured(entry, name);
+            if (target == null || !target.equals(expected) || !configuration(draft, target).canAuthorize()) {
+                throw new IllegalStateException("服务配置已变化或仍缺必填项");
+            }
+            services.authorize(target, target.costUnits());
+            return advancePending(state, entry, draft, null);
+        });
+    }
+
+    public Detail activateReplacement(String name, String draftId, int previousVersion) throws Exception {
+        if (previousVersion <= 0) throw new IllegalArgumentException("请确认要替换的版本");
+        return locked(state -> {
+            JSONObject entry = requirePending(state, name, draftId);
+            Draft draft = parse(entry.getString("definition"));
+            JSONObject active = state.getJSONObject("skills").optJSONObject(name);
+            if (active == null || activeRevision(active).getInt("version") != previousVersion
+                    || !NEEDS_REPLACEMENT.equals(entry.getString("reason"))) {
+                throw new IllegalStateException("当前技能版本或配置已变化");
+            }
+            return advancePending(state, entry, draft, previousVersion);
+        });
+    }
+
+    public Detail retryConfiguration(String name, String draftId) throws Exception {
+        return locked(state -> {
+            JSONObject entry = requirePending(state, name, draftId);
+            return advancePending(state, entry, parse(entry.getString("definition")), null);
+        });
+    }
+
+    private Detail advancePending(JSONObject state, JSONObject entry, Draft draft, Integer replaceVersion) throws Exception {
+        String name = draft.name();
+        SkillServices.Service service = resolve(state, draft, configured(entry, name));
+        Preview preview = preview(state, draft, service);
+        String reason = preview.pendingReason();
+        if (reason.isEmpty() && (service == null || authorized(service))) {
+            try {
+                verifyTrial(draft, service);
+            } catch (Exception failure) {
+                reason = TRIAL_FAILED;
+            }
+            if (reason.isEmpty() && service != null && !authorized(service)) {
+                reason = "服务待授权";
+            }
+            if (reason.isEmpty()) {
+                if (preview.previousVersion() > 0 && replaceVersion == null) {
+                    reason = NEEDS_REPLACEMENT;
+                } else {
+                    publish(state, draft, service);
+                    return detail(state, name);
+                }
+            }
+        }
+        if (reason.isEmpty()) reason = "服务待授权";
+        entry.put("reason", reason);
+        writeState(state);
+        return detail(state, name);
+    }
+
+    private Detail detail(JSONObject state, String name) throws Exception {
+        JSONObject entry = state.getJSONObject("drafts").optJSONObject(name);
+        JSONObject installed = state.getJSONObject("skills").optJSONObject(name);
+        Installed current = installed == null ? null : installed(name, installed);
+        int version = current == null ? 0 : current.version();
+        boolean enabled = current != null && current.enabled();
+        boolean rollback = current != null && current.canRollback();
+        if (entry == null) {
+            if (current == null) throw new IllegalStateException("技能不存在");
+            Executable execution = readExecution(revisionDirectory(activeRevision(installed)));
+            return new Detail(name, current.outputType(), "", enabled ? "已启用" : "已停用", Collections.emptyList(),
+                    execution.service(), false, false, version, enabled, rollback);
+        }
+        Draft draft = parse(entry.getString("definition"));
+        SkillServices.Service explicit = configured(entry, name);
+        SkillServices.Service target = explicit == null ? resolve(state, draft, null) : explicit;
+        Configuration status = configuration(draft, target);
+        String reason = entry.getString("reason");
+        boolean replace = version > 0 && NEEDS_REPLACEMENT.equals(reason)
+                && ("summary".equals(draft.kind()) || target != null && authorized(target));
+        return new Detail(name, draft.outputType(), draftIdentity(name, entry), reason, status.fields(), target,
+                explicit != null && status.canAuthorize(), replace, version, enabled, rollback);
+    }
+
+    private Configuration configuration(Draft draft, SkillServices.Service service) throws Exception {
+        List<Field> fields = new ArrayList<>();
+        if ("unconfigured".equals(draft.kind())) {
+            fields.add(required("operation", "受支持的执行方式", false));
+            return new Configuration(Collections.unmodifiableList(fields), false);
+        }
+        boolean needsImageFields = draft.outputType() == SkillResult.Type.IMAGE
+                && (service == null || service.adapter() == SkillServices.Adapter.OPENAI_IMAGES);
+        boolean filled = true;
+        if (needsImageFields) {
+            boolean endpoint = service != null && !service.endpoint().isEmpty();
+            boolean model = service != null && !service.modelName().isEmpty();
+            boolean key = service != null && services.hasCredential(service);
+            fields.add(required("endpoint", "API 地址", endpoint));
+            fields.add(required("model", "模型名", model));
+            fields.add(required("credential", "密钥", key));
+            filled = endpoint && model && key;
+        }
+        boolean usable = authorized(service);
+        if ("service".equals(draft.kind())) {
+            fields.add(new Field("authorization", "服务授权", true,
+                    usable ? FieldState.FILLED : FieldState.NEEDS_AUTHORIZATION));
+        }
+        return new Configuration(Collections.unmodifiableList(fields), filled && service != null && !usable);
+    }
+
+    private static Field required(String id, String label, boolean filled) {
+        return new Field(id, label, true, filled ? FieldState.FILLED : FieldState.MISSING);
+    }
+
+    private SkillServices.Service configured(JSONObject entry, String name) throws SkillServices.Failure {
+        if (entry == null || !entry.has("serviceId")) return null;
+        return services.scoped(entry.optString("serviceId", ""), name);
+    }
+
+    private static JSONObject requirePending(JSONObject state, String name, String draftId) throws Exception {
+        JSONObject entry = state.getJSONObject("drafts").optJSONObject(name);
+        if (entry == null || !draftIdentity(name, entry).equals(draftId)) {
+            throw new IllegalStateException("待配置草稿已变化，请重新打开");
+        }
+        return entry;
+    }
+
+    private static String draftIdentity(String name, JSONObject entry) throws Exception {
+        if (entry.has("draftId")) return entry.getString("draftId");
+        // Older pending image definitions had no ID. Keep their identity stable when opened or re-saved.
+        return UUID.nameUUIDFromBytes((name + "\n" + entry.getString("definition"))
+                .getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
     String unavailableReason(String name) {
         return read(state -> {
             JSONObject draft = state.getJSONObject("drafts").optJSONObject(name);
@@ -214,7 +414,7 @@ public final class SkillStore {
     }
     public Preview previewGenerated(String json) throws Exception {
         Draft draft = parse(json);
-        return locked(state -> preview(state, draft, resolve(draft)));
+        return locked(state -> preview(state, draft, resolve(state, draft, configuredDraft(state, draft, json))));
     }
 
     public Installed installGenerated(String json) throws Exception {
@@ -228,34 +428,41 @@ public final class SkillStore {
     }
 
     public SaveResult saveGenerated(String json, Preview confirmation) throws Exception {
-        return saveGenerated(json, confirmation, false);
+        return saveGenerated(json, confirmation, SaveMode.GENERATE);
     }
 
     public SaveResult connectPending(String json, Preview confirmation) throws Exception {
-        return saveGenerated(json, confirmation, true);
+        return saveGenerated(json, confirmation, SaveMode.RECONNECT);
     }
 
-    private SaveResult saveGenerated(String json, Preview confirmation, boolean reconnect) throws Exception {
+    private SaveResult saveGenerated(String json, Preview confirmation, SaveMode mode) throws Exception {
         Draft draft = parse(json);
         return locked(state -> {
-            if (reconnect) {
+            if (mode == SaveMode.CONVERSATION && !state.getBoolean("enabled")) {
+                throw new IllegalStateException("Skills 已停用");
+            }
+            if (mode == SaveMode.RECONNECT) {
                 JSONObject currentDraft = state.getJSONObject("drafts").optJSONObject(draft.name());
                 if (currentDraft == null || !json.equals(currentDraft.getString("definition"))) {
                     throw new IllegalStateException("待连接草稿已变化，请重新打开");
                 }
             }
-            SkillServices.Service service = resolve(draft);
+            SkillServices.Service service = resolve(state, draft, configuredDraft(state, draft, json));
             Preview current = preview(state, draft, service);
             if (!current.pendingReason().isEmpty()) return savePending(state, draft, json, current.pendingReason());
-            SkillResult simulated = trial(draft, service);
-            if (simulated.type() != draft.outputType()
-                    || (simulated instanceof SkillResult.Text text && !text.text().equals(draft.expected()))) {
-                throw new IllegalArgumentException("模拟试跑结果与预期不符");
+            try {
+                verifyTrial(draft, service);
+            } catch (Exception failure) {
+                if (mode == SaveMode.CONVERSATION) return savePending(state, draft, json, TRIAL_FAILED);
+                throw failure;
+            }
+            if (mode == SaveMode.CONVERSATION && current.needsConfirmation()) {
+                return savePending(state, draft, json, NEEDS_REPLACEMENT);
             }
             if ((current.needsConfirmation() || confirmation != null) && !current.equals(confirmation)) {
                 throw new IllegalStateException("技能版本或服务已变化，请重新预览并确认");
             }
-            if (service != null && !services.isAuthorized(service)) {
+            if (service != null && !authorized(service)) {
                 if (draft.outputType() == SkillResult.Type.IMAGE) return savePending(state, draft, json, NEEDS_IMAGE_SERVICE);
                 throw new IllegalStateException("请先授权登记的服务");
             }
@@ -264,12 +471,21 @@ public final class SkillStore {
     }
 
     private SaveResult savePending(JSONObject state, Draft draft, String json, String reason) throws Exception {
-        state.getJSONObject("drafts").put(draft.name(), new JSONObject()
-                .put("outputType", draft.outputType().wireName()).put("reason", reason).put("definition", json));
+        JSONObject drafts = state.getJSONObject("drafts");
+        JSONObject entry = drafts.optJSONObject(draft.name());
+        if (entry == null || !json.equals(entry.optString("definition"))) {
+            entry = new JSONObject().put("definition", json).put("draftId", UUID.randomUUID().toString());
+            drafts.put(draft.name(), entry);
+        }
+        entry.put("outputType", draft.outputType().wireName()).put("reason", reason);
         writeState(state);
         return new SaveResult(null, new Pending(draft.name(), draft.outputType(), reason));
     }
 
+    private SkillServices.Service configuredDraft(JSONObject state, Draft draft, String json) throws Exception {
+        JSONObject old = state.getJSONObject("drafts").optJSONObject(draft.name());
+        return old != null && json.equals(old.optString("definition")) ? configured(old, draft.name()) : null;
+    }
     SkillResult executeResult(String name, int version, String argument, SkillResult.Type expectedType) throws Exception {
         Executable definition = locked(state -> {
             JSONObject skill = skill(state, name);
@@ -288,26 +504,50 @@ public final class SkillStore {
         return result;
     }
 
-    private SkillServices.Service resolve(Draft draft) throws Exception {
-        if ("summary".equals(draft.kind())) return null;
+    private SkillServices.Service resolve(JSONObject state, Draft draft, SkillServices.Service explicit) throws Exception {
+        if (!"service".equals(draft.kind())) return null;
         if (draft.outputType() == SkillResult.Type.TEXT) {
             SkillServices.Service service = services.find(draft.serviceId());
             if (service.outputType() != SkillResult.Type.TEXT) throw new IllegalArgumentException("请选择文本服务");
             return service;
         }
 
+        if (explicit != null) return authorized(explicit) ? explicit : null;
+        JSONObject current = state.getJSONObject("skills").optJSONObject(draft.name());
+        if (current != null) {
+            SkillServices.Service previous = readExecution(revisionDirectory(activeRevision(current))).service();
+            if (imageBindingMatches(draft, previous) && authorized(previous)) return previous;
+        }
+        SkillServices.Service scoped = null;
         SkillServices.Service preferred = null;
         SkillServices.Service mock = null;
-        for (SkillServices.Service service : services.list()) {
-            if (service.outputType() != SkillResult.Type.IMAGE
-                    || (draft.serviceId() != null && !draft.serviceId().equals(service.id()))
-                    || !services.isAuthorized(service)) continue;
-            if (SkillServices.MOCK_IMAGE.equals(service.id())) mock = service;
+        for (SkillServices.Service service : services.listForSkill(draft.name())) {
+            if (!imageBindingMatches(draft, service) || !authorized(service)) continue;
+            if (!service.skillName().isEmpty()) {
+                if (scoped == null || service.id().compareTo(scoped.id()) < 0) scoped = service;
+            } else if (SkillServices.MOCK_IMAGE.equals(service.id())) mock = service;
             else if (preferred == null || service.id().compareTo(preferred.id()) < 0) preferred = service;
         }
+        if (scoped != null) return scoped;
         return preferred == null ? mock : preferred;
     }
 
+    private static boolean imageBindingMatches(Draft draft, SkillServices.Service service) {
+        return service != null && service.outputType() == SkillResult.Type.IMAGE
+                && (draft.serviceId() == null || draft.serviceId().equals(service.id()));
+    }
+
+    private boolean authorized(SkillServices.Service service) throws SkillServices.Failure {
+        return service != null && services.isAuthorized(service)
+                && (service.adapter() != SkillServices.Adapter.OPENAI_IMAGES || services.hasCredential(service));
+    }
+    private static void verifyTrial(Draft draft, SkillServices.Service service) throws Exception {
+        SkillResult simulated = trial(draft, service);
+        if (simulated.type() != draft.outputType()
+                || (simulated instanceof SkillResult.Text text && !text.text().equals(draft.expected()))) {
+            throw new IllegalArgumentException("模拟试跑结果与预期不符");
+        }
+    }
     private static SkillResult trial(Draft draft, SkillServices.Service service) throws Exception {
         checkArgument(draft.trialInput(), draft.maxInput());
         if (draft.outputType() == SkillResult.Type.IMAGE) return SkillServices.mockImageResult();
@@ -322,7 +562,8 @@ public final class SkillStore {
         JSONObject existing = state.getJSONObject("skills").optJSONObject(draft.name());
         int previous = existing == null ? 0 : activeRevision(existing).getInt("version");
         int latest = existing == null ? 0 : existing.getJSONArray("versions").length();
-        String pending = service == null && draft.outputType() == SkillResult.Type.IMAGE ? NEEDS_IMAGE_SERVICE : "";
+        String pending = "unconfigured".equals(draft.kind()) ? NEEDS_OPERATION
+                : service == null && draft.outputType() == SkillResult.Type.IMAGE ? NEEDS_IMAGE_SERVICE : "";
         boolean reviewTextService = draft.outputType() == SkillResult.Type.TEXT && service != null
                 && !SkillServices.MOCK_ORDERS.equals(service.id());
         return new Preview(draft.name(), service == null ? "" : service.label(), service == null ? "" : service.endpoint(),
@@ -353,7 +594,9 @@ public final class SkillStore {
                     .put("outputType", draft.outputType().wireName());
             if (service != null) {
                 definition.put("service", new JSONObject().put("id", service.id()).put("label", service.label())
-                        .put("endpoint", service.endpoint()).put("costUnits", service.costUnits()));
+                        .put("endpoint", service.endpoint()).put("costUnits", service.costUnits())
+                        .put("adapter", service.adapter().name()).put("modelName", service.modelName())
+                        .put("skillName", service.skillName()));
             }
             writeDocument(new File(target, "execution.json"), definition.toString());
             versions.put(revision);
@@ -385,7 +628,9 @@ public final class SkillStore {
             SkillResult.Type output = schema == 1 ? SkillResult.Type.TEXT
                     : SkillResult.Type.fromWire(text(run.get("outputType"), 8));
             String service = null;
-            if ("summary".equals(kind) && output == SkillResult.Type.TEXT) {
+            if ("unconfigured".equals(kind) && schema == 2 && output == SkillResult.Type.TEXT) {
+                keys(run, "kind", "maxInput", "outputType");
+            } else if ("summary".equals(kind) && output == SkillResult.Type.TEXT) {
                 if (schema == 1) keys(run, "kind", "maxInput");
                 else keys(run, "kind", "maxInput", "outputType");
             } else if ("service".equals(kind)) {
@@ -484,7 +729,9 @@ public final class SkillStore {
         if (!"service".equals(kind)) throw new IOException("技能类型不支持");
         JSONObject service = definition.getJSONObject("service");
         return new Executable(kind, maxInput, output, new SkillServices.Service(service.getString("id"),
-                service.getString("label"), service.getString("endpoint"), service.getInt("costUnits"), output));
+                service.getString("label"), service.getString("endpoint"), service.getInt("costUnits"), output,
+                SkillServices.Adapter.valueOf(service.optString("adapter", "GENERIC")),
+                service.optString("modelName", ""), service.optString("skillName", "")));
     }
 
     private <T> T read(StateAction<T> action) {

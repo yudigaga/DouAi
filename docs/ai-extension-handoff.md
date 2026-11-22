@@ -90,3 +90,31 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 最终专项回归 272 项通过，未使用真实付费 API。待独立验收真机布局、真实图片适配服务和签名产物。
+
+## 从对话创建与配置单条 Skill · 基于 `a35292a`
+
+用户可在 AI 联系人或工作 AI 的输入框发送「帮我做一个生图 Skill」。DouAi 本地生成可持久化声明，助手消息根据实际保存结果显示已启用、待配置或待确认替换，并打开同一条 Skill 的配置。普通提问、引用、附件内容和模型回复走原有流程。 [交互反馈](https://app.slack.com/archives/C0CK9FJ74UC/p1795323508798529)
+
+### 变更文件
+
+- `SkillCreationRequest.java`、`SkillStore.java` 识别手动输入的明确创建请求，保存草稿、缺项和授权状态，并在离线校验后发布命令。本地支持文本摘要、模拟订单和图片。其他明确创建请求会保留为待配置草稿，等待受支持的执行方式。
+- `AiTestChatDialog.java` 显示提交结果和缺项，打开草稿或已安装的对应条目。关闭或停止时，等待提交的创建操作会被丢弃。
+- `AiSkillDetailDialog.java`、`AiSkillSettingsDialog.java` 共用单条 Skill 设置。OpenAI Images 兼容适配器需要 HTTPS 地址、模型名、密钥和服务授权。本机模拟图片只需要向当前 Skill 授权。已填内容分步保存，密钥保留在本地凭据层。
+- `SkillServices.java` 保存专用配置，运行时核对服务、适配器、模型、费用和授权。OpenAI Images 兼容适配器按固定 HTTPS 地址发送 `{model,prompt}`，沿用已有的内联图片响应。适用的既有授权可自动复用。同名新版使用独立配置，确认替换后仍可回退原版本。
+- `ConversationSkillCreationTest.java`、`SkillServicesTest.java`、`AiSkillSettingsDialogTest.java`、`AiTestChatDialogTest.java`、`NativeAiConversationTest.java` 覆盖自然语句、设置定位、凭据隔离、分步保存、启用、回退以及两入口位图渲染。
+
+### 建议真机复测
+
+1. 在工作 AI 发送「帮我做一个生图 Skill」。无适用授权时，助手应显示草稿已保存，并列出 API 地址、模型名、密钥和授权的待办项。普通「如何创建一个生图 Skill？」保留正常对话行为。
+2. 点助手消息的「打开该技能设置」，确认标题为 `/生图`。关闭聊天后，从「扩展功能 → AI Skills」点同名草稿，确认草稿和已保存的配置还在。
+3. 离线验收时，在这条 Skill 选择「本地模拟图片」，保存并确认授权。完成后应直接启用，有同名旧版则先确认启用新版。回到两个入口分别执行 `/生图 一只白猫`，助手应显示固定样图。
+4. 发送「创建一个文本摘要技能」。检查自动启用，并试用 `/文本摘要 要点。结论。附录。`。对同名已启用的 Skill 再创建，检查旧版留在当前目录，并在显式确认后验证回退。
+
+本轮离线验证使用本机固定样图和传输替身。真实 HTTPS 适配、宿主界面和签名包待独立验收。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests 'com.douai.module.ai.*' --tests '*AiSkillSettingsDialogTest' --tests '*AiTestChatDialogTest' --tests '*NativeAiConversationTest' --tests '*ModuleSettingsActionSeparationTest' --tests '*ChatImageLoaderTest' --tests '*ConfigTransfer*Test' --tests '*IsolatedTextRequestTest' --tests '*ChatCompletionClientTest'
+```
+
+最终专项回归 292 项通过，0 失败，0 跳过。两个入口均覆盖自然语言创建、跳转同一条设置、模拟授权和助手位图显示。

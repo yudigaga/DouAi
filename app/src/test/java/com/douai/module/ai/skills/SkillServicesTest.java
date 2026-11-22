@@ -256,6 +256,94 @@ public final class SkillServicesTest {
         assertNull(guarded.getCause());
     }
 
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void scopedOpenAiProfileSavesPartialFieldsAndSendsModelAndPromptOnlyAfterApproval() throws Exception {
+        Fixture fixture = new Fixture();
+        String name = "单项图片";
+        SkillServices.Service partial = fixture.services.configureForSkill(null, name,
+                SkillServices.Adapter.OPENAI_IMAGES, "", "gpt-image-1", 2, "");
+        assertEquals("gpt-image-1", fixture.services.scoped(partial.id(), name).modelName());
+        assertNull(fixture.services.scoped(partial.id(), "其他技能"));
+        assertFalse(fixture.services.list().contains(partial));
+        assertFalse(fixture.services.listForSkill("其他技能").contains(partial));
+        assertTrue(fixture.services.listForSkill(name).contains(partial));
+        assertThrows(SkillServices.Failure.class, () -> fixture.services.find(partial.id()));
+        assertThrows(SkillServices.Failure.class, () -> fixture.services.authorize(partial, 2));
+
+        SkillServices.Service noKey = fixture.services.configureForSkill(partial.id(), name,
+                SkillServices.Adapter.OPENAI_IMAGES, IMAGE.endpoint(), partial.modelName(), 2, "");
+        assertEquals(SkillServices.Code.CREDENTIAL_REQUIRED,
+                failure(() -> fixture.services.authorize(noKey, 2)).code());
+        assertTrue(fixture.transport.endpoints.isEmpty());
+
+        SkillServices.Service ready = fixture.services.configureForSkill(partial.id(), name,
+                SkillServices.Adapter.OPENAI_IMAGES, IMAGE.endpoint(), partial.modelName(), 2, TOKEN_A);
+        assertTrue(fixture.services.hasCredential(ready));
+        assertFalse(fixture.services.isAuthorized(ready));
+        fixture.services.authorize(ready, 2);
+        fixture.transport.expectedBody = "{\"model\":\"gpt-image-1\",\"prompt\":\"DA-1001\"}";
+        fixture.transport.mediaType = "image/png";
+        fixture.transport.body = png();
+        assertTrue(fixture.services.executeResult(ready, "DA-1001") instanceof SkillResult.Image);
+        assertEquals(List.of(IMAGE.endpoint()), fixture.transport.endpoints);
+        assertEquals(List.of(TOKEN_A), fixture.transport.tokens);
+    }
+
+    @Test public void scopedExactApprovalDoesNotFollowModelEndpointOrAdapterEdits() throws Exception {
+        Fixture fixture = new Fixture();
+        SkillServices.Service active = fixture.services.configureForSkill("", "生图",
+                SkillServices.Adapter.OPENAI_IMAGES, IMAGE.endpoint(), "gpt-image-1", 2, TOKEN_A);
+        fixture.services.authorize(active, 2);
+        SkillServices.Service model = fixture.services.configureForSkill(active.id(), active.skillName(),
+                active.adapter(), active.endpoint(), "gpt-image-1.5", active.costUnits(), "");
+        assertFalse(fixture.services.isAuthorized(model));
+        assertTrue(fixture.services.hasCredential(model));
+        assertEquals(SkillServices.Code.CONFIRMATION_REQUIRED, failure(() -> fixture.services.authorize(active, 2)).code());
+        fixture.services.authorize(model, 2);
+
+        SkillServices.Service moved = fixture.services.configureForSkill(model.id(), model.skillName(),
+                model.adapter(), IMAGE.endpoint() + "-new", model.modelName(), 2, "");
+        assertFalse(fixture.services.hasCredential(moved));
+        assertFalse(fixture.services.isAuthorized(moved));
+        assertEquals(SkillServices.Code.CREDENTIAL_REQUIRED, failure(() -> fixture.services.authorize(moved, 2)).code());
+
+        SkillServices.Service mock = fixture.services.configureForSkill(moved.id(), moved.skillName(),
+                SkillServices.Adapter.MOCK_IMAGE, "", "", 0, "");
+        assertFalse(fixture.services.hasCredential(mock));
+        assertFalse(fixture.services.isAuthorized(mock));
+        assertTrue(fixture.transport.endpoints.isEmpty());
+    }
+
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void scopedMockNeedsItsOwnApprovalAndNeverUsesTransport() throws Exception {
+        Fixture fixture = new Fixture();
+        SkillServices.Service setup = fixture.services.configureForSkill("", "生图",
+                SkillServices.Adapter.MOCK_IMAGE, "", "", 0, "");
+        assertEquals(SkillServices.Code.CONFIRMATION_REQUIRED,
+                failure(() -> fixture.services.executeResult(setup, "DA-1001")).code());
+        fixture.services.authorize(setup, 0);
+        assertTrue(fixture.services.executeResult(setup, "DA-1001") instanceof SkillResult.Image);
+        assertTrue(fixture.transport.endpoints.isEmpty());
+        assertFalse(fixture.services.isAuthorized(fixture.services.find(SkillServices.MOCK_IMAGE)));
+    }
+
+    @Test public void scopedCredentialFromUnavailableVaultIsNotReportedOrApproved() throws Exception {
+        Fixture fixture = new Fixture();
+        SkillServices.Service setup = fixture.services.configureForSkill("", "生图",
+                SkillServices.Adapter.OPENAI_IMAGES, IMAGE.endpoint(), "gpt-image-1", 2, TOKEN_A);
+        SecretKey differentKey = KeyGenerator.getInstance("AES").generateKey();
+        SkillServices reopened = new SkillServices(fixture.directory, new AiCredentialVault(() -> differentKey),
+                fixture.transport);
+
+        assertFalse(reopened.hasCredential(setup));
+        SkillServices.Failure failure = failure(() -> reopened.authorize(setup, 2));
+        assertEquals(SkillServices.Code.CREDENTIAL_REQUIRED, failure.code());
+        assertFalse(failure.getMessage().contains(TOKEN_A));
+        assertNull(failure.getCause());
+        assertFalse(fixture.services.isAuthorized(setup));
+        assertTrue(fixture.transport.endpoints.isEmpty());
+    }
+
     private static byte[] png() {
         Bitmap bitmap = Bitmap.createBitmap(8, 6, Bitmap.Config.ARGB_8888);
         bitmap.eraseColor(0xFF27819C);
@@ -296,6 +384,7 @@ public final class SkillServicesTest {
         final List<String> tokens = new ArrayList<>();
         final List<SkillResult.Type> requestedTypes = new ArrayList<>();
         String reply = "{\"text\":\"已发货\"}";
+        String expectedBody = "{\"input\":\"DA-1001\"}";
         byte[] body;
         String mediaType = "application/json";
         int status = 200;
@@ -307,7 +396,7 @@ public final class SkillServicesTest {
             endpoints.add(endpoint);
             tokens.add(token);
             requestedTypes.add(type);
-            assertEquals("{\"input\":\"DA-1001\"}", request);
+            assertEquals(expectedBody, request);
             if (failure != null) throw failure;
             return new SkillServices.Response(status, mediaType, body == null ? reply.getBytes(StandardCharsets.UTF_8) : body);
         }

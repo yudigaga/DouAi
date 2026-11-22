@@ -40,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -49,10 +50,17 @@ public final class SkillServices {
     public static final String MOCK_ORDERS = "mock-orders";
     public static final String MOCK_IMAGE = "mock-image";
     public static final int MAX_COST_UNITS = 1_000_000;
-    public record Service(String id, String label, String endpoint, int costUnits, SkillResult.Type outputType) {
+    public enum Adapter { GENERIC, OPENAI_IMAGES, MOCK_IMAGE }
+
+    public record Service(String id, String label, String endpoint, int costUnits, SkillResult.Type outputType,
+                          Adapter adapter, String modelName, String skillName) {
+        public Service(String id, String label, String endpoint, int costUnits, SkillResult.Type outputType) {
+            this(id, label, endpoint, costUnits, outputType, Adapter.GENERIC, "", "");
+        }
         public Service(String id, String label, String endpoint, int costUnits) {
             this(id, label, endpoint, costUnits, SkillResult.Type.TEXT);
         }
+        private boolean scoped() { return !skillName.isEmpty(); }
     }
 
     public enum Code {
@@ -85,13 +93,16 @@ public final class SkillServices {
             new Service(MOCK_IMAGE, "模拟图片", "", 0, SkillResult.Type.IMAGE);
     private static final int VERSION = 1;
     private static final int MAX_SERVICES = 30;
+    private static final int MAX_SCOPED_SERVICES = 256;
     private static final int MAX_ARGUMENT = 4_000;
     private static final int MAX_WIRE_BYTES = 16 * 1024;
     private static final int MAX_IMAGE_WIRE_BYTES = 6 * 1024 * 1024;
     private static final int MAX_BASE64_CHARS = ((ChatImage.MAX_BYTES + 2) / 3) * 4;
-    private static final int MAX_FILE_BYTES = 256 * 1024;
+    private static final int MAX_FILE_BYTES = 2 * 1024 * 1024;
     private static final int DISARMED = -1;
     private static final Pattern ID = Pattern.compile("[a-z0-9][a-z0-9_-]{0,47}");
+    private static final Pattern SCOPED_ID = Pattern.compile("skill-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}");
+    private static final Pattern SKILL_NAME = Pattern.compile("[\\p{L}\\p{N}_-]{1,24}");
     private static final AiCredentialVault.Scope CREDENTIAL_SCOPE = AiCredentialVault.Scope.SKILL_SERVICE;
     // All instances targeting the same host app file share a lock. Never hold it during I/O to a service.
     private static final Object REGISTRY_LOCK = new Object();
@@ -116,13 +127,18 @@ public final class SkillServices {
     }
 
     public List<Service> list() throws Failure {
+        return listForSkill("");
+    }
+
+    public List<Service> listForSkill(String skillName) throws Failure {
         synchronized (REGISTRY_LOCK) {
             List<Service> result = new ArrayList<>();
             result.add(MOCK);
             result.add(MOCK_IMAGE_SERVICE);
             for (Registration registration : read().values()) {
                 Service service = registration.service();
-                if (!MOCK_IMAGE.equals(service.id())) result.add(service);
+                if (!MOCK_IMAGE.equals(service.id())
+                        && (!service.scoped() || service.skillName().equals(skillName))) result.add(service);
             }
             return Collections.unmodifiableList(result);
         }
@@ -133,21 +149,78 @@ public final class SkillServices {
         if (MOCK_IMAGE.equals(id)) return MOCK_IMAGE_SERVICE;
         synchronized (REGISTRY_LOCK) {
             Registration found = read().get(id);
-            if (found == null) throw problem(Code.INVALID_INPUT, "服务不存在");
+            if (found == null || found.service().scoped()) throw problem(Code.INVALID_INPUT, "服务不存在");
             return found.service();
         }
+    }
+
+    public Service scoped(String id, String skillName) throws Failure {
+        synchronized (REGISTRY_LOCK) {
+            Registration found = id == null ? null : read().get(id);
+            if (found == null || !found.service().scoped() || !found.service().skillName().equals(skillName)) return null;
+            return found.service();
+        }
+    }
+
+    public boolean hasCredential(Service expected) {
+        synchronized (REGISTRY_LOCK) {
+            try {
+                Registration found = expected == null ? null : read().get(expected.id());
+                return found != null && sameBinding(expected, found.service()) && !decrypt(found).isEmpty();
+            } catch (Failure unavailable) {
+                return false;
+            }
+        }
+    }
+
+    /** Saves a Skill-owned profile without approving its destination, model or cost. */
+    public Service configureForSkill(String id, String skillName, Adapter adapter, String endpoint,
+                                     String modelName, int costUnits, String bearer) throws Failure {
+        boolean create = id == null || id.isEmpty();
+        String serviceId = create ? "skill-" + UUID.randomUUID() : id;
+        Service service = new Service(serviceId, skillName, value(endpoint).trim(), costUnits, SkillResult.Type.IMAGE,
+                adapter, value(modelName).trim(), skillName);
+        validateScoped(service);
+        String token = value(bearer);
+        validateToken(token);
+        if (!token.isEmpty() && (service.endpoint().isEmpty() || service.adapter() == Adapter.MOCK_IMAGE)) {
+            throw problem(Code.INVALID_INPUT, "请先填写凭据所属的 HTTPS 地址");
+        }
+        edit(registrations -> {
+            Registration previous = registrations.get(service.id());
+            if (!create && (previous == null || !previous.service().skillName().equals(skillName))) {
+                throw problem(Code.INVALID_INPUT, "该配置不属于当前技能或已不存在");
+            }
+            if (create && (previous != null || scopedCount(registrations) >= MAX_SCOPED_SERVICES)) {
+                throw problem(Code.INVALID_INPUT, "技能服务配置已达到上限");
+            }
+            boolean sameDestination = previous != null && previous.service().adapter() == service.adapter()
+                    && previous.service().endpoint().equals(service.endpoint());
+            String ciphertext = sameDestination ? previous.ciphertext() : "";
+            if (!token.isEmpty()) {
+                verifyNoMetadataSecret(service, token);
+                ciphertext = encrypt(service, token);
+            } else if (!ciphertext.isEmpty() && !previous.service().modelName().equals(service.modelName())) {
+                verifyNoMetadataSecret(service, decrypt(previous));
+            }
+            int approval = previous != null && sameBinding(service, previous.service()) && token.isEmpty()
+                    ? previous.maximumCost() : DISARMED;
+            registrations.put(service.id(), new Registration(service, ciphertext, approval));
+        });
+        return service;
     }
 
     /** An empty credential field keeps the existing key only for the exact same HTTPS endpoint. */
     public void register(Service service, String bearerToken) throws Failure {
         validate(service);
-        String token = bearerToken == null ? "" : bearerToken;
-        if (!token.isEmpty() && !AiCredentialVault.validBearer(token)) {
-            throw problem(Code.INVALID_INPUT, "Bearer 密钥应为 8–2048 位有效字符");
-        }
+        String token = value(bearerToken);
+        validateToken(token);
         edit(registrations -> {
             Registration previous = registrations.get(service.id());
-            int externalCount = registrations.size() - (registrations.containsKey(MOCK_IMAGE) ? 1 : 0);
+            if (previous != null && previous.service().scoped()) {
+                throw problem(Code.INVALID_INPUT, "技能专用配置只能从所属技能管理");
+            }
+            int externalCount = sharedCount(registrations);
             if (previous == null && externalCount == MAX_SERVICES) {
                 throw problem(Code.INVALID_INPUT, "最多登记 30 个外部服务");
             }
@@ -189,6 +262,11 @@ public final class SkillServices {
             if (maximumCostUnits < current.service().costUnits()) {
                 throw problem(Code.CONFIRMATION_REQUIRED, "本次服务预算超出授权上限");
             }
+            if (current.service().adapter() == Adapter.MOCK_IMAGE && maximumCostUnits != 0) {
+                throw problem(Code.INVALID_INPUT, "本地模拟的费用上限必须为零");
+            }
+            requireComplete(current);
+            if (current.service().adapter() == Adapter.OPENAI_IMAGES) decrypt(current);
             registrations.put(expected.id(), new Registration(current.service(), current.ciphertext(), maximumCostUnits));
         });
     }
@@ -216,12 +294,6 @@ public final class SkillServices {
             try { return new SkillResult.Text(AiSkills.lookupOrder(argument)); }
             catch (IllegalArgumentException invalid) { throw problem(Code.INVALID_INPUT, invalid.getMessage()); }
         }
-        String request;
-        try { request = new JSONObject().put("input", argument).toString(); }
-        catch (JSONException malformed) { throw problem(Code.INVALID_INPUT, "无效的服务输入"); }
-        if (request.getBytes(StandardCharsets.UTF_8).length > MAX_WIRE_BYTES) {
-            throw problem(Code.INVALID_INPUT, "服务输入编码后不能超过 16 KiB");
-        }
         Registration grant;
         String token;
         boolean expectsImage = expected != null && expected.outputType() == SkillResult.Type.IMAGE;
@@ -231,12 +303,16 @@ public final class SkillServices {
             if (grant.maximumCost() < grant.service().costUnits()) {
                 throw problem(Code.CONFIRMATION_REQUIRED, "请先确认服务地址、权限与费用上限");
             }
+            requireComplete(grant);
             token = decrypt(grant);
             if (!token.isEmpty() && argument.contains(token)) {
                 throw problem(Code.INVALID_INPUT, "服务输入中不能包含已登记的凭据");
             }
         }
-        if (MOCK_IMAGE_SERVICE.equals(grant.service())) return mockImageResult();
+        if (MOCK_IMAGE_SERVICE.equals(grant.service()) || grant.service().adapter() == Adapter.MOCK_IMAGE) {
+            return mockImageResult();
+        }
+        String request = requestBody(grant.service(), argument);
         boolean paid = grant.service().costUnits() > 0;
         Response reply;
         try {
@@ -261,6 +337,21 @@ public final class SkillServices {
             throw problem(Code.REJECTED, "服务拒绝本次请求");
         }
         return expectsImage ? resultImage(reply, token) : new SkillResult.Text(resultText(reply, token));
+    }
+
+    private static String requestBody(Service service, String argument) throws Failure {
+        try {
+            JSONObject body = new JSONObject();
+            if (service.adapter() == Adapter.OPENAI_IMAGES) body.put("model", service.modelName()).put("prompt", argument);
+            else body.put("input", argument);
+            String request = body.toString();
+            if (request.getBytes(StandardCharsets.UTF_8).length > MAX_WIRE_BYTES) {
+                throw problem(Code.INVALID_INPUT, "服务输入编码后不能超过 16 KiB");
+            }
+            return request;
+        } catch (JSONException malformed) {
+            throw problem(Code.INVALID_INPUT, "无效的服务输入");
+        }
     }
 
     private static Response post(String endpoint, String token, String request, long deadline, SkillResult.Type type)
@@ -416,22 +507,25 @@ public final class SkillServices {
     }
 
     private static void verifyNoMetadataSecret(Service service, String token) throws Failure {
-        if (service.id().contains(token) || service.label().contains(token) || service.endpoint().contains(token)) {
-            throw problem(Code.INVALID_INPUT, "服务名称、标识或地址不能包含凭据");
+        if (service.id().contains(token) || service.label().contains(token) || service.endpoint().contains(token)
+                || service.modelName().contains(token) || service.skillName().contains(token)) {
+            throw problem(Code.INVALID_INPUT, "服务名称、标识、地址或模型不能包含凭据");
         }
     }
 
     private static Registration requireMatching(Map<String, Registration> entries, Service expected) throws Failure {
         Registration current = expected == null ? null : entries.get(expected.id());
         if (current == null || !sameBinding(expected, current.service())) {
-            throw problem(Code.CONFIRMATION_REQUIRED, "服务地址或费用已经变化，请重新确认");
+            throw problem(Code.CONFIRMATION_REQUIRED, "服务配置已经变化，请重新确认");
         }
         return current;
     }
 
     private static boolean sameBinding(Service expected, Service current) {
         return current.id().equals(expected.id()) && current.endpoint().equals(expected.endpoint())
-                && current.costUnits() == expected.costUnits() && current.outputType() == expected.outputType();
+                && current.costUnits() == expected.costUnits() && current.outputType() == expected.outputType()
+                && current.adapter() == expected.adapter() && current.modelName().equals(expected.modelName())
+                && current.skillName().equals(expected.skillName());
     }
 
     private static void validate(Service service) throws Failure {
@@ -439,11 +533,71 @@ public final class SkillServices {
                 || MOCK_ORDERS.equals(service.id()) || MOCK_IMAGE.equals(service.id())
                 || service.outputType() == null || service.label() == null || service.label().trim().isEmpty()
                 || service.label().length() > 80 || service.label().chars().anyMatch(Character::isISOControl)
+                || service.adapter() != Adapter.GENERIC || !"".equals(service.modelName()) || !"".equals(service.skillName())
                 || service.costUnits() < 0 || service.costUnits() > MAX_COST_UNITS) {
             throw problem(Code.INVALID_INPUT, "填写有效的服务标识、名称和费用");
         }
-        try { AiExtensionHttp.exactEndpoint(service.endpoint()); }
+        validateEndpoint(service.endpoint());
+    }
+
+    private static void validateScoped(Service service) throws Failure {
+        if (service.id() == null || !SCOPED_ID.matcher(service.id()).matches()
+                || service.skillName() == null || !SKILL_NAME.matcher(service.skillName()).matches()
+                || !service.skillName().equals(service.label()) || service.outputType() != SkillResult.Type.IMAGE
+                || service.endpoint() == null || service.modelName() == null
+                || service.costUnits() < 0 || service.costUnits() > MAX_COST_UNITS) {
+            throw problem(Code.INVALID_INPUT, "技能专用服务配置无效");
+        }
+        if (service.adapter() == Adapter.MOCK_IMAGE) {
+            if (!service.endpoint().isEmpty() || !service.modelName().isEmpty() || service.costUnits() != 0) {
+                throw problem(Code.INVALID_INPUT, "本地模拟不需要地址、模型或费用");
+            }
+        } else if (service.adapter() == Adapter.OPENAI_IMAGES) {
+            if (!service.endpoint().isEmpty()) validateEndpoint(service.endpoint());
+            if (service.modelName().length() > 256 || service.modelName().chars().anyMatch(Character::isISOControl)) {
+                throw problem(Code.INVALID_INPUT, "填写有效的图片模型名称");
+            }
+        } else {
+            throw problem(Code.INVALID_INPUT, "请选择支持图片输出的适配器");
+        }
+    }
+
+    private static void requireComplete(Registration registration) throws Failure {
+        Service service = registration.service();
+        if (service.adapter() != Adapter.OPENAI_IMAGES) return;
+        if (service.endpoint().isEmpty() || service.modelName().trim().isEmpty()) {
+            throw problem(Code.INVALID_INPUT, "请填写生图接口地址和模型名称");
+        }
+        if (registration.ciphertext().isEmpty()) {
+            throw problem(Code.CREDENTIAL_REQUIRED, "请先保存生图接口的 Bearer 密钥");
+        }
+    }
+
+    private static void validateEndpoint(String endpoint) throws Failure {
+        try { AiExtensionHttp.exactEndpoint(endpoint); }
         catch (IllegalArgumentException invalid) { throw problem(Code.INVALID_INPUT, invalid.getMessage()); }
+    }
+
+    private static String value(String value) { return value == null ? "" : value; }
+
+    private static void validateToken(String token) throws Failure {
+        if (!token.isEmpty() && !AiCredentialVault.validBearer(token)) {
+            throw problem(Code.INVALID_INPUT, "Bearer 密钥应为 8–2048 位有效字符");
+        }
+    }
+
+    private static int sharedCount(Map<String, Registration> registrations) {
+        int count = 0;
+        for (Registration item : registrations.values()) {
+            if (!item.service().scoped() && !MOCK_IMAGE.equals(item.service().id())) count++;
+        }
+        return count;
+    }
+
+    private static int scopedCount(Map<String, Registration> registrations) {
+        int count = 0;
+        for (Registration item : registrations.values()) if (item.service().scoped()) count++;
+        return count;
     }
 
     private LinkedHashMap<String, Registration> read() throws Failure {
@@ -459,26 +613,36 @@ public final class SkillServices {
             JSONObject document = new JSONObject(new String(bytes.toByteArray(), StandardCharsets.UTF_8));
             if (document.getInt("version") != VERSION) throw new JSONException("version");
             JSONArray stored = document.getJSONArray("services");
-            if (stored.length() > MAX_SERVICES + 1) throw new JSONException("size");
+            if (stored.length() > MAX_SERVICES + MAX_SCOPED_SERVICES + 1) throw new JSONException("size");
             for (int i = 0; i < stored.length(); i++) {
                 JSONObject entry = stored.getJSONObject(i);
                 SkillResult.Type outputType = entry.has("outputType")
                         ? SkillResult.Type.fromWire(entry.getString("outputType")) : SkillResult.Type.TEXT;
                 Service service = new Service(entry.getString("id"), entry.getString("label"),
-                        entry.getString("endpoint"), entry.getInt("costUnits"), outputType);
+                        entry.getString("endpoint"), entry.getInt("costUnits"), outputType,
+                        Adapter.valueOf(entry.optString("adapter", Adapter.GENERIC.name())),
+                        entry.optString("modelName", ""), entry.optString("skillName", ""));
                 String ciphertext = entry.getString("ciphertext");
                 int max = entry.getInt("maximumCost");
                 if (MOCK_IMAGE.equals(service.id())) {
                     if (!MOCK_IMAGE_SERVICE.equals(service) || !ciphertext.isEmpty() || max > 0) throw new IOException();
+                } else if (service.scoped()) {
+                    validateScoped(service);
+                    if ((!ciphertext.isEmpty() && service.endpoint().isEmpty())
+                            || (service.adapter() == Adapter.MOCK_IMAGE && max > 0)) throw new IOException();
                 } else {
                     validate(service);
                 }
+                Registration item = new Registration(service, ciphertext, max);
+                if (service.scoped() && max >= 0) requireComplete(item);
                 if (ciphertext.length() > 4096 || max < DISARMED || max > MAX_COST_UNITS
-                        || registrations.put(service.id(), new Registration(service, ciphertext, max)) != null) {
+                        || registrations.put(service.id(), item) != null) {
                     throw new JSONException("registration");
                 }
             }
-            if (registrations.size() > MAX_SERVICES && !registrations.containsKey(MOCK_IMAGE)) throw new IOException();
+            if (sharedCount(registrations) > MAX_SERVICES || scopedCount(registrations) > MAX_SCOPED_SERVICES) {
+                throw new IOException();
+            }
         } catch (NoSuchFileException absent) {
             return registrations;
         } catch (IOException | JSONException | RuntimeException corrupted) {
@@ -516,6 +680,8 @@ public final class SkillServices {
                 entries.put(new JSONObject().put("id", service.id()).put("label", service.label())
                         .put("endpoint", service.endpoint()).put("costUnits", service.costUnits())
                         .put("outputType", service.outputType().wireName())
+                        .put("adapter", service.adapter().name()).put("modelName", service.modelName())
+                        .put("skillName", service.skillName())
                         .put("ciphertext", item.ciphertext()).put("maximumCost", item.maximumCost()));
             }
             byte[] bytes = new JSONObject().put("version", VERSION).put("services", entries)

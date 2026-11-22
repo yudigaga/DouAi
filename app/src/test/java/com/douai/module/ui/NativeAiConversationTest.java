@@ -38,6 +38,7 @@ import com.douai.module.config.HostSettingsStore;
 import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostResourceProfile;
 import com.douai.module.feature.ChatImage;
+import com.douai.module.feature.ChatImageLoader;
 import com.douai.module.feature.TestChatMemory;
 import com.ss.android.ugc.aweme.im.business.chat.feature.title.component.ChatTitleUI;
 import com.ss.android.ugc.aweme.im.business.chat.msgcell.common.content.root.text.TextOnlyCellUI;
@@ -147,6 +148,49 @@ public final class NativeAiConversationTest {
         assertEquals(2, messageCount());
         assertNull(row(0).findViewWithTag("ai.chat.image"));
         assertNotNull(row(1).findViewWithTag("ai.chat.image"));
+    }
+
+    @Test public void explicitContactCreationConfiguresAndRendersItsOwnImageSkill() throws Exception {
+        dialog.dismiss();
+        open(new FakeSession(), null, ChatImageLoader::thumbnail);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        dialog.enableSkills(AiSkills.Entry.CONTACT);
+        submit("创建一个生图技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals("生图", SkillStore.forContext(activity).pending().get(0).name());
+        assertTrue(renderedText(1).contains("待配置草稿"));
+        View settings = row(1).findViewWithTag("ai.chat.skill.settings.生图");
+        assertNotNull(settings);
+        assertTrue(settings.performClick());
+        Dialog detailDialog = ShadowDialog.getLatestDialog();
+        View details = detailDialog.getWindow().getDecorView();
+        android.widget.TextView skillName = details.findViewWithTag("skills.detail.name");
+        assertNotNull(skillName);
+        assertEquals("/生图", skillName.getText().toString());
+        android.widget.Spinner adapter = details.findViewWithTag("skills.detail.adapter");
+        adapter.setSelection(1);
+        ShadowLooper.idleMainLooper();
+        assertTrue(details.findViewWithTag("skills.detail.save").performClick());
+        assertTrue(details.findViewWithTag("skills.detail.authorize").performClick());
+        android.app.AlertDialog review = (android.app.AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(review.getButton(android.app.AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(SkillStore.forContext(activity).detail("生图").pending());
+        detailDialog.dismiss();
+
+        submit("/生图 白猫");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(4, messageCount());
+        ImageView image = row(3).findViewWithTag("ai.chat.image");
+        assertNotNull(image);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(image.getDrawable());
+        assertTrue(session.prompts.isEmpty());
     }
 
     @Test public void legacyOriginalProfileKeepsNativeChatAndAlbumUsableAfterVersionSpoofing() throws Exception {
@@ -609,6 +653,11 @@ public final class NativeAiConversationTest {
     private void open(FakeSession selected) throws Exception { open(selected, null); }
 
     private void open(FakeSession selected, AiTestChatDialog.MediaLoader mediaLoader) throws Exception {
+        open(selected, mediaLoader, image -> null);
+    }
+
+    private void open(FakeSession selected, AiTestChatDialog.MediaLoader mediaLoader,
+                      AiTestChatDialog.ThumbnailLoader thumbnailLoader) throws Exception {
         session = selected;
         nativeViews = HostNativeChatViews.create(activity);
         worker = new ManualExecutor();
@@ -618,9 +667,9 @@ public final class NativeAiConversationTest {
                 .put("messageContactName", "小助手").put("apiEndpoint", "https://example.com/v1")
                 .put("modelName", "test-model"));
         dialog = mediaLoader == null ? new AiTestChatDialog(activity, config, () -> selected, worker, historyWorker,
-                false, image -> null, true, nativeViews)
+                false, thumbnailLoader, true, nativeViews)
                 : new AiTestChatDialog(activity, config, () -> selected, worker, historyWorker,
-                false, image -> null, true, nativeViews, mediaLoader);
+                false, thumbnailLoader, true, nativeViews, mediaLoader);
         dialog.setOwnerActivity(activity);
         dialog.show();
         send = nativeViews.root.findViewWithTag("ai.chat.send");
