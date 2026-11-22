@@ -4,6 +4,7 @@ import android.content.res.Configuration;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.MotionEvent;
@@ -11,6 +12,7 @@ import android.view.SurfaceView;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import com.douai.module.scan.HostScanReport;
@@ -21,6 +23,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import io.github.libxposed.api.XposedInterface;
@@ -31,6 +35,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     private static final int PAGER_DRAGGING=1;
     private final Handler ui=new Handler(Looper.getMainLooper());
     private final BehaviorHookGroup hooks,incomingHooks;
+    private final FeedRenderScaleHooks scaleHooks;
     private final Method getWork,getPlayer,getSurface,getVideo,getCurrent,comments;
     private final Field params,panel,dialogs,rootField,width,height;
     private Geometry geometry=new Geometry();
@@ -46,6 +51,9 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     private WeakReference<View> root=new WeakReference<>(null);
     private ViewTreeObserver observer;
     private ViewTreeObserver.OnPreDrawListener pendingFrame;
+    private boolean ordinaryFrameRequested;
+    private final AtomicLong layoutEpoch=new AtomicLong();
+    private LayoutRecovery pendingLayoutRecovery;
     private boolean observingAttachment;
     private volatile boolean enabled,closed;
 
@@ -77,12 +85,13 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             });
             hooks.add(api,pause,c->{Object result=c.proceed(),h=c.getThisObject();onMain(()->{if(holder.get()==h)leaveCurrent();});return result;});
             hooks.add(api,screenChange,c->{Object result=c.proceed();
-                if(enabled && !closed && "comment_panel".equals(c.getArg(0))) onMain(()->{clearIncoming();leaving.clear();requestFrame(true);});
+                if(enabled && !closed && "comment_panel".equals(c.getArg(0))) onMain(()->{invalidateLayoutRecovery();clearIncoming();leaving.clear();requestFrame(true);});
                 return result;
             });
         } catch(Exception | LinkageError failed){hooks.close();throw failed;}
         installRendererTrace(api,report,loader);
         installIncoming(api,report,loader,type);
+        scaleHooks=FeedRenderScaleHooks.install(api,loader,log,this::prepareLayoutRecovery);
     }
 
     private void installIncoming(XposedInterface api,HostScanReport report,ClassLoader loader,Class<?> holderType){
@@ -110,6 +119,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     private Object aroundBind(XposedInterface.Chain chain,Field pagerField,Method scrollState) throws Throwable {
         if(!enabled || closed || !incomingHooks.isActive() || Looper.myLooper()!=ui.getLooper())return chain.proceed();
         Object h=chain.getThisObject(),work=chain.getArg(0);
+        if(holder.get()==h)invalidateLayoutRecovery();
         try {
             View card=(View)rootField.get(h);
             Incoming old=findIncoming(card);
@@ -230,7 +240,9 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     private static Object dispatcher(Object feed){return HostTargets.read(HostTargets.read(feed,"V"),"m");}
     private static String workAid(Object work){Object aid=HostTargets.invoke(work,"getAid");return aid instanceof String?(String)aid:null;}
     void setEnabled(boolean value) {
-        if(enabled==value || closed)return;enabled=value;
+        if(enabled==value || closed)return;
+        layoutEpoch.incrementAndGet();
+        enabled=value;
         onMain(()->{if(closed)return;if(enabled){traceSelection(holder.get());observe();requestFrame(true);}else{stopObserving();geometry.restore();geometry.colours.clearTopBinding();clearIncoming();leaving.clear();firstFrames.clear();}});
     }
     private void select(Object h) {
@@ -263,14 +275,23 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         if(observer!=null && observer.isAlive())observer.removeOnGlobalLayoutListener(this);observer=null;
     }
     @Override public void onViewAttachedToWindow(View v){if(v==root.get() && enabled && !closed){traceSelection(holder.get());observe();requestFrame(true);}}
-    @Override public void onViewDetachedFromWindow(View v){if(v==root.get()){stopObservingDraws();geometry.restore();geometry.colours.clearTopBinding();firstFrames.deselected();}}
+    @Override public void onViewDetachedFromWindow(View v){if(v==root.get()){invalidateLayoutRecovery();stopObservingDraws();geometry.restore();geometry.colours.clearTopBinding();firstFrames.deselected();}}
     @Override public void onGlobalLayout(){requestFrame(false);}
-    private void requestFrame(boolean invalidate){
-        if(!enabled || closed || pendingFrame!=null || observer==null || !observer.isAlive())return;
+    private void requestFrame(boolean invalidate){requestFrame(invalidate,true);}
+    private void requestFrame(boolean invalidate,boolean ordinary){
+        if(!enabled || closed || observer==null || !observer.isAlive())return;
+        ordinaryFrameRequested|=ordinary;
+        if(pendingFrame!=null)return;
         // Other global layout listeners can still move the host render view in this traversal.
         pendingFrame=new ViewTreeObserver.OnPreDrawListener(){
             @Override public boolean onPreDraw(){
-                if(pendingFrame==this){cancelFrame();apply();}
+                if(pendingFrame==this){
+                    LayoutRecovery recovery=pendingLayoutRecovery;
+                    boolean regular=ordinaryFrameRequested;
+                    cancelFrame();
+                    if(canRecoverLayout(recovery,true))apply(recovery,regular);
+                    else if(regular)apply(null,true);
+                }
                 return true;
             }
         };
@@ -280,13 +301,97 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     private void cancelFrame(){
         if(pendingFrame!=null && observer!=null && observer.isAlive())observer.removeOnPreDrawListener(pendingFrame);
         pendingFrame=null;
+        ordinaryFrameRequested=false;
+        pendingLayoutRecovery=null;
     }
-    private void apply(){
+
+    Runnable prepareLayoutRecovery(View render,Object work,Object video){
+        if(!enabled || closed || Looper.myLooper()!=ui.getLooper() || render==null
+                || geometry.target.get()!=render || !incomingHooks.isActive())return null;
+        Object h=holder.get();
+        View card=root.get();
+        if(h==null || card==null)return null;
+        try {
+            if(work==null || video==null || getWork.invoke(h)!=work || getVideo.invoke(work)!=video){
+                // A later host layout can touch the renderer before its next work is bound.
+                invalidateLayoutRecovery();
+                return null;
+            }
+            if(!geometry.ownsFilledRenderer(render))return null;
+            Object item=params.get(h), feed=feed(h);
+            Object player=getPlayer.invoke(h);
+            IBinder window=card.getWindowToken();
+            List<View> ancestry=rendererAncestry(render,card);
+            if(item==null || player==null || window==null || ancestry==null)return null;
+            LayoutRecovery recovery=new LayoutRecovery(layoutEpoch.get(),geometry,geometry.scale,
+                    h,item,feed,work,video,player,card,render,window,ancestry,card.getParent());
+            if(!sameLayoutBinding(recovery))return null;
+            return ()->{
+                if(canRecoverLayout(recovery,false) && observer!=null && observer.isAlive()
+                        && observer==recovery.card().getViewTreeObserver()){
+                    pendingLayoutRecovery=recovery;
+                    requestFrame(false,false);
+                }
+            };
+        }catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){return null;}
+    }
+
+    private boolean canRecoverLayout(LayoutRecovery recovery,boolean drawing){
+        if(recovery==null || Looper.myLooper()!=ui.getLooper())return false;
+        try {
+            View render=recovery.render();
+            return recovery.geometry().hasResetRenderer(render,recovery.ownedScale())
+                    && (!drawing || (!recovery.card().isLayoutRequested() && !render.isLayoutRequested()))
+                    && sameLayoutBinding(recovery);
+        }catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){return false;}
+    }
+
+    private boolean sameLayoutBinding(LayoutRecovery recovery) throws ReflectiveOperationException {
+        View card=recovery.card(),render=recovery.render();
+        Object h=recovery.holder(),feed=recovery.feed();
+        if(!enabled || closed || layoutEpoch.get()!=recovery.epoch() || geometry!=recovery.geometry()
+                || holder.get()!=h || root.get()!=card || rootField.get(h)!=card || params.get(h)!=recovery.item()
+                || !card.isAttachedToWindow() || !render.isAttachedToWindow() || !card.isShown() || !render.isShown()
+                || card.getWindowToken()!=recovery.window() || render.getWindowToken()!=recovery.window()
+                || card.getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT
+                || card.getParent()!=recovery.cardParent() || !recovery.hasSameAncestry()
+                || !getCurrent.getDeclaringClass().isInstance(feed) || feed(h)!=feed
+                || getCurrent.invoke(feed)!=h || getWork.invoke(h)!=recovery.work()
+                || getVideo.invoke(recovery.work())!=recovery.video() || !commentsClosed(feed))return false;
+        Object player=getPlayer.invoke(h);
+        return player==recovery.player() && getSurface.invoke(player)==render;
+    }
+
+    private static List<View> rendererAncestry(View render,View card){
+        ArrayList<View> path=new ArrayList<>();
+        for(View view=render;view!=null && path.size()<32;){
+            path.add(view);
+            if(view==card)return path;
+            view=view.getParent() instanceof View parent?parent:null;
+        }
+        return null;
+    }
+
+    private void invalidateLayoutRecovery(){
+        layoutEpoch.incrementAndGet();
+        pendingLayoutRecovery=null;
+    }
+
+    private record LayoutRecovery(long epoch,Geometry geometry,float ownedScale,Object holder,Object item,
+                                  Object feed,Object work,Object video,Object player,View card,View render,
+                                  IBinder window,List<View> ancestry,ViewParent cardParent) {
+        boolean hasSameAncestry(){
+            for(int i=1;i<ancestry.size();i++)if(ancestry.get(i-1).getParent()!=ancestry.get(i))return false;
+            return true;
+        }
+    }
+
+    private void apply(LayoutRecovery recovery,boolean ordinary){
         if(!enabled || closed)return;
-        try { if(!applyToCurrent()) geometry.restore(); }
-        catch(ReflectiveOperationException | RuntimeException | LinkageError ignored){geometry.restore();}
+        try { if(!applyToCurrent(recovery) && ordinary) geometry.restore(); }
+        catch(ReflectiveOperationException | RuntimeException | LinkageError ignored){if(ordinary)geometry.restore();}
     }
-    private boolean applyToCurrent() throws ReflectiveOperationException {
+    private boolean applyToCurrent(LayoutRecovery recovery) throws ReflectiveOperationException {
         Object h=holder.get();View card=root.get();
         if(h==null || card==null || !card.isAttachedToWindow() || !card.isShown()
                 || card.getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT)return false;
@@ -307,7 +412,13 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         View render=(View)getSurface.invoke(player);
         if(!geometry.changed() && !leaving.empty())geometry=leaving.take(card);
         int sw=width.getInt(video),sh=height.getInt(video);
-        boolean applied=geometry.frame(render,card,sw,sh);
+        boolean recoverScale=recovery!=null && recovery.render()==render
+                && recovery.geometry()==geometry && layoutEpoch.get()==recovery.epoch()
+                && recovery.holder()==h && recovery.card()==card && recovery.feed()==feed
+                && recovery.work()==work && recovery.video()==video && recovery.player()==player
+                && geometry.hasResetRenderer(render,recovery.ownedScale());
+        if(recovery!=null && !recoverScale)return false;
+        boolean applied=geometry.frame(render,card,sw,sh,recoverScale);
         Geometry appliedGeometry=geometry;
         if(applied && geometry.syncColouring(card,render,h,feed,work,()->topCoverage(appliedGeometry,h,feed,work,card,render))
                 && DebugLog.isEnabled())
@@ -477,8 +588,19 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         int rawX,rawY;
         String reason="unmeasured",blockedLayer="none";
         boolean changed(){return target.get()!=null && (scale!=1 || tx!=0 || ty!=0);}
+        boolean ownsFilledRenderer(View render){
+            return render!=null && coversNativeVerticalGap && target.get()==render && scale>1f && clean(render);
+        }
+        boolean hasResetRenderer(View render,float ownedScale){
+            return render!=null && coversNativeVerticalGap && target.get()==render && scale==ownedScale && scale>1f
+                    && transformRejection(render,1f)==null;
+        }
         boolean frame(View render,View card,int srcW,int srcH) {
-            rawX=rawY=Integer.MIN_VALUE;reason="unsupported_surface_or_clip";blockedLayer="none";coversNativeVerticalGap=false;
+            return frame(render,card,srcW,srcH,false);
+        }
+        private boolean frame(View render,View card,int srcW,int srcH,boolean recoverScale) {
+            rawX=rawY=Integer.MIN_VALUE;reason="unsupported_surface_or_clip";blockedLayer="none";
+            if(!recoverScale)coversNativeVerticalGap=false;
             if(!(render instanceof SurfaceView || render instanceof TextureView) || !(card instanceof ViewGroup)
                     || !render.isAttachedToWindow() || !((ViewGroup)card).getClipChildren()
                     || !((ViewGroup)card).getClipToPadding() || render.getWidth()<=0 || render.getHeight()<=0)return false;
@@ -503,7 +625,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
                 if(!(v.getParent() instanceof ViewGroup))return reject("renderer_outside_card","ancestry");
                 // A clip in an unrelated window branch must not mask a wrong-card rejection.
                 if(rejected==null){
-                    rejected=transformRejection(v);
+                    rejected=recoverScale && v==render?transformRejection(v,1f):transformRejection(v);
                     if(rejected!=null)rejectedLayer=v==render?"render":"media_parent";
                 }
                 ViewGroup p=(ViewGroup)v.getParent();
@@ -554,13 +676,15 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             }
             float dx=centerX-cx-(s-1)*(cx-layerX-layer.getPivotX());
             float dy=centerY-cy-(s-1)*(cy-layerY-layer.getPivotY());
+            boolean fills=s>1f && rh<h && rw*s+.5f>=w && rh*s+.5f>=h;
+            if(recoverScale && (layer!=render || !fills))return reject("layout_reset_not_fill","render");
             if(target.get()!=layer){restore();target=new WeakReference<>(layer);}
             if(layer.getScaleX()!=s)layer.setScaleX(s);
             if(layer.getScaleY()!=s)layer.setScaleY(s);
             if(layer.getTranslationX()!=dx)layer.setTranslationX(dx);
             if(layer.getTranslationY()!=dy)layer.setTranslationY(dy);
             scale=s;tx=dx;ty=dy;reason=constrained?"centered_in_clip":"centered";
-            coversNativeVerticalGap=s>1f && rh<h && rw*s+.5f>=w && rh*s+.5f>=h;
+            coversNativeVerticalGap=fills;
             return true;
         }
         boolean syncColouring(View card,View render){return colours.sync(card,render.getWidth(),coversNativeVerticalGap);}
@@ -599,11 +723,14 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         private boolean reject(String code,String layer){reason=code;blockedLayer=layer;return false;}
         private boolean clean(View v) {return transformRejection(v)==null;}
         private String transformRejection(View v) {
+            return transformRejection(v,v==target.get()?scale:1f);
+        }
+        private String transformRejection(View v,float expectedScale) {
             boolean ours=v==target.get();
             if(v.getRotation()!=0 || v.getRotationX()!=0 || v.getRotationY()!=0)return "native_rotation";
             if(v.getAnimation()!=null)return "native_animation";
             if(v.getClipBounds()!=null || v.getClipToOutline())return "native_clip";
-            if(v.getScaleX()!=(ours?scale:1) || v.getScaleY()!=(ours?scale:1))return "native_scale";
+            if(v.getScaleX()!=expectedScale || v.getScaleY()!=expectedScale)return "native_scale";
             if(v.getTranslationX()!=(ours?tx:0) || v.getTranslationY()!=(ours?ty:0))return "native_translation";
             return null;
         }
@@ -677,13 +804,14 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         }
     }
     private void leaveCurrent(){
+        invalidateLayoutRecovery();
         stopObserving();
         firstFrames.deselected();
         if(enabled&&!closed)leaving.leave(root.get(),geometry);
         else {geometry.restore();geometry.colours.clearTopBinding();}
         geometry=new Geometry();holder.clear();root.clear();
     }
-    private void unbind(){stopObserving();geometry.restore();geometry.colours.clearTopBinding();holder.clear();root.clear();firstFrames.clear();}
+    private void unbind(){invalidateLayoutRecovery();stopObserving();geometry.restore();geometry.colours.clearTopBinding();holder.clear();root.clear();firstFrames.clear();}
     private void onMain(Runnable r){if(Looper.myLooper()==Looper.getMainLooper())r.run();else ui.post(r);}
-    @Override public void close(){closed=true;incomingHooks.close();hooks.close();onMain(()->{unbind();clearIncoming();leaving.clear();});}
+    @Override public void close(){closed=true;scaleHooks.close();incomingHooks.close();hooks.close();onMain(()->{unbind();clearIncoming();leaving.clear();});}
 }

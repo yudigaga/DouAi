@@ -8,6 +8,7 @@ import android.view.SurfaceView;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.graphics.Matrix;
+import android.graphics.Rect;
 import android.widget.FrameLayout;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -57,6 +58,134 @@ public class FeedVideoFramingTest {
             assertFalse(tree.dispatchOnPreDraw());
             assertEquals(reads,f.holder.workReads);
             assertEquals(1f,f.surface.getScaleX(),0);
+        }
+    }
+
+    @Test public void verifiedHostLayoutResetReframesNewBoundsBeforeDraw() throws Throwable {
+        try (FramingFixture f=new FramingFixture(true)) {
+            ViewTreeObserver tree=f.selectFramed();
+            Runnable completion=f.prepareLayoutRecovery();
+            assertNotNull(completion);
+
+            f.holder.w.layout(0,0,270,570);
+            f.surface.layout(0,80,270,560);
+            f.surface.setScaleX(1f);
+            f.surface.setScaleY(1f);
+            completion.run();
+
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.1875f,f.surface.getScaleX(),0f);
+            assertEquals(1.1875f,f.surface.getScaleY(),0f);
+            assertEquals(-35f,f.surface.getTranslationY(),0f);
+        }
+    }
+
+    @Test public void layoutRecoveryRequiresTheExactRendererWorkAndVideoAndACompleteReset() throws Throwable {
+        try (FramingFixture f=new FramingFixture(true)) {
+            ViewTreeObserver tree=f.selectFramed();
+            Work work=f.holder.work;
+            Video video=work.getVideo();
+            SurfaceView other=new SurfaceView(f.activity);
+            f.holder.w.addView(other,new FrameLayout.LayoutParams(270,480));
+            other.layout(0,60,270,540);
+            assertNull(f.framing.prepareLayoutRecovery(other,work,video));
+            assertNull(f.framing.prepareLayoutRecovery(f.surface,new Work(),video));
+            assertNull(f.framing.prepareLayoutRecovery(f.surface,work,new Video()));
+
+            Runnable completion=f.prepareLayoutRecovery();
+            assertNotNull(completion);
+            f.surface.setScaleX(1f);
+            completion.run();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1f,f.surface.getScaleX(),0f);
+            assertEquals(1.25f,f.surface.getScaleY(),0f);
+        }
+    }
+
+    @Test public void disablingFramingCancelsPendingLayoutRecovery() throws Throwable {
+        try (FramingFixture f=new FramingFixture(true)) {
+            ViewTreeObserver tree=f.selectFramed();
+            Runnable completion=f.prepareLayoutRecovery();
+            assertNotNull(completion);
+            f.surface.setScaleX(1f);
+            f.surface.setScaleY(1f);
+            completion.run();
+            f.framing.setEnabled(false);
+
+            assertNull(f.prepareLayoutRecovery());
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1f,f.surface.getScaleX(),0f);
+            assertEquals(1f,f.surface.getScaleY(),0f);
+        }
+    }
+
+    @Test public void layoutRecoveryLeavesNativeFitAndLateClipAlone() throws Throwable {
+        for(boolean addClip:new boolean[]{false,true}){
+            try(FramingFixture f=new FramingFixture(true)){
+                ViewTreeObserver tree=f.selectFramed();
+                Runnable completion=f.prepareLayoutRecovery();
+                assertNotNull(completion);
+                f.surface.setScaleX(1f);
+                f.surface.setScaleY(1f);
+                completion.run();
+                Rect clip=new Rect(1,1,269,479);
+                if(addClip)f.surface.setClipBounds(clip);
+                else f.holder.w.layout(0,0,270,780);
+
+                assertFalse(tree.dispatchOnPreDraw());
+                assertEquals(1f,f.surface.getScaleX(),0f);
+                assertEquals(1f,f.surface.getScaleY(),0f);
+                if(addClip)assertEquals(clip,f.surface.getClipBounds());
+            }
+        }
+    }
+
+    @Test public void laterLayoutForDifferentWorkCancelsQueuedRecoveryOnTheSameView() throws Throwable {
+        try(FramingFixture f=new FramingFixture(true)){
+            ViewTreeObserver tree=f.selectFramed();
+            Runnable completion=f.prepareLayoutRecovery();
+            assertNotNull(completion);
+            f.surface.setScaleX(1f);
+            f.surface.setScaleY(1f);
+            completion.run();
+            Work next=new Work();
+            assertNull(f.framing.prepareLayoutRecovery(f.surface,next,next.getVideo()));
+
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1f,f.surface.getScaleX(),0f);
+            assertEquals(1f,f.surface.getScaleY(),0f);
+        }
+    }
+
+    @Test public void layoutRecoveryDoesNotSurviveAnInterveningSelectionOrSameWorkRebind() throws Throwable {
+        for(boolean sameWorkRebind:new boolean[]{false,true}) {
+            try (FramingFixture f=new FramingFixture(true)) {
+                ViewTreeObserver tree=f.selectFramed();
+                Runnable obsolete=f.prepareLayoutRecovery();
+                assertNotNull(obsolete);
+                if(sameWorkRebind) {
+                    f.bind(f.holder,f.holder.work);
+                } else {
+                    Holder other=f.nextCard();
+                    other.w.layout(0,0,270,600);
+                    Panel panel=f.holder.B2.mFeedContext;
+                    panel.current=other;
+                    f.harness.invoke(Holder.class.getMethod("selected"),other);
+                    panel.current=f.holder;
+                    f.select();
+                }
+                // Consume the legitimate draw scheduled by the replacement selection or binding.
+                assertFalse(tree.dispatchOnPreDraw());
+                assertEquals(1.25f,f.surface.getScaleX(),0f);
+                assertEquals(1.25f,f.surface.getScaleY(),0f);
+
+                f.surface.setScaleX(1f);
+                f.surface.setScaleY(1f);
+                obsolete.run();
+                assertFalse(tree.dispatchOnPreDraw());
+                assertEquals(1f,f.surface.getScaleX(),0f);
+                assertEquals(1f,f.surface.getScaleY(),0f);
+            }
         }
     }
 
@@ -492,6 +621,17 @@ public class FeedVideoFramingTest {
         }
 
         void select() throws Throwable {harness.invoke(Holder.class.getMethod("selected"),holder);}
+        ViewTreeObserver selectFramed() throws Throwable {
+            select();
+            ViewTreeObserver tree=holder.w.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1.25f,surface.getScaleX(),0f);
+            assertEquals(1.25f,surface.getScaleY(),0f);
+            return tree;
+        }
+        Runnable prepareLayoutRecovery() {
+            return framing.prepareLayoutRecovery(surface,holder.work,holder.work.getVideo());
+        }
         void bind(Holder target,Work work) throws Throwable {harness.invoke(Holder.class.getMethod("bind",Work.class),target,work);}
         Holder nextCard() {
             Holder next=new Holder();
@@ -544,10 +684,11 @@ public class FeedVideoFramingTest {
         public void LJJIJIIJIL(String name,boolean show){}
     }
     public static class Work {
+        private final Video video=new Video();
         public int getAwemeType(){return 0;}
         public boolean isLive(){return false;}
         public boolean getAd(){return false;}
-        public Video getVideo(){return new Video();}
+        public Video getVideo(){return video;}
     }
     public static class Video {public final int t=270,s=480;}
 }
