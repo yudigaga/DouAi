@@ -19,6 +19,8 @@ import android.widget.ListView;
 import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.SkillServices;
+import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.feature.ChatImage;
 import com.douai.module.feature.ChatImageLoader;
@@ -184,6 +186,74 @@ public final class AiTestChatDialogTest {
 
         assertEquals("已停止", text("ai.chat.answer").getText().toString());
         assertEquals("/查询 DA-1001", input.getText().toString());
+    }
+
+    @Test public void imageSkillDisplaysAnAssistantBitmapAndReusesTheTranscriptImageBudget() throws Exception {
+        installMockImageSkill();
+        FakeSession model = new FakeSession();
+        reopen(model, ChatImageLoader::thumbnail);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        ChatImage largeAttachment = new ChatImage("image/png", new byte[ChatImage.MAX_BYTES]);
+        for (int index = 0; index < 4; index++) dialog.addImage(largeAttachment);
+        submit("原有图片占满会话预算");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        submit("/生图 白猫");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(2, messageCount());
+        ListView list = messages();
+        View user = list.getAdapter().getView(0, null, list);
+        View answer = list.getAdapter().getView(1, null, list);
+        assertNull(user.findViewWithTag("ai.chat.image"));
+        ImageView image = answer.findViewWithTag("ai.chat.image");
+        assertNotNull(image);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(image.getDrawable());
+        assertEquals(Collections.singletonList("原有图片占满会话预算"), model.prompts);
+    }
+
+    @Test public void anImageSkillRevokedWhileQueuedProducesNoImageOrRetry() throws Exception {
+        SkillServices services = installMockImageSkill();
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        submit("/生图 白猫");
+        services.revoke(services.find(SkillServices.MOCK_IMAGE));
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(2, messageCount());
+        ListView list = messages();
+        View answer = list.getAdapter().getView(1, null, list);
+        assertNull(answer.findViewWithTag("ai.chat.image"));
+        assertEquals(View.GONE, answer.findViewWithTag("ai.chat.retry").getVisibility());
+        assertEquals("", input.getText().toString());
+        assertTrue(sessions.get(0).prompts.isEmpty());
+    }
+
+    @Test public void clearingTheChatDropsAnImageResultQueuedForRendering() throws Exception {
+        installMockImageSkill();
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        submit("/生图 白猫");
+        worker.runNext();
+        assertTrue(root.findViewWithTag("ai.chat.clear").performClick());
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(0, messageCount());
+        assertNull(findView("ai.chat.image"));
+        assertTrue(sessions.get(0).prompts.isEmpty());
+    }
+
+    private SkillServices installMockImageSkill() throws Exception {
+        SkillServices services = SkillServices.forContext(activity);
+        services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
+        SkillStore.forContext(activity).installGenerated(SkillStore.mockDraft("生图"));
+        return services;
     }
 
     @Test public void successfulAnswerDisplaysOnlyTheSearchResultsFromItsOwnTurn() throws Exception {

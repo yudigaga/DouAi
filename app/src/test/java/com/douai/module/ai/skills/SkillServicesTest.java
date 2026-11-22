@@ -1,5 +1,8 @@
 package com.douai.module.ai.skills;
 
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+
 import com.douai.module.ai.AiCredentialVault;
 import com.douai.module.ai.AiExtensionHttp;
 
@@ -9,11 +12,14 @@ import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.GraphicsMode;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 
 import javax.crypto.KeyGenerator;
@@ -30,6 +36,8 @@ public final class SkillServicesTest {
             new SkillServices.Service("shipping", "物流查询", "https://example.com/track", 2);
     private static final SkillServices.Service UPDATED =
             new SkillServices.Service("shipping", "物流查询", "https://example.com/track-v2", 2);
+    private static final SkillServices.Service IMAGE = new SkillServices.Service("illustrate", "示例图片",
+            "https://example.com/image", 2, SkillResult.Type.IMAGE);
 
     @Rule public final TemporaryFolder files = new TemporaryFolder();
 
@@ -134,6 +142,130 @@ public final class SkillServicesTest {
         assertTrue(fixture.transport.endpoints.isEmpty());
     }
 
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void imageServiceNormalizesRawImageToAnInlineChatImage() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.services.register(IMAGE, "");
+        fixture.services.authorize(IMAGE, 2);
+        fixture.transport.mediaType = "image/png";
+        fixture.transport.body = png();
+
+        SkillResult.Image result = (SkillResult.Image) fixture.services.executeResult(IMAGE, "DA-1001");
+        assertEquals(SkillResult.Type.IMAGE, result.type());
+        assertEquals("image/jpeg", result.image().mimeType);
+        byte[] bytes = Base64.getDecoder().decode(result.image().base64Data);
+        Bitmap decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+        assertNotNull(decoded);
+        assertEquals(8, decoded.getWidth());
+        decoded.recycle();
+        assertEquals(List.of(SkillResult.Type.IMAGE), fixture.transport.requestedTypes);
+    }
+
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void explicitAndCommonInlineBase64ResponsesProduceImages() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.services.register(IMAGE, "");
+        fixture.services.authorize(IMAGE, 2);
+        String encoded = Base64.getEncoder().encodeToString(png());
+        fixture.transport.reply = "{\"mimeType\":\"image/png\",\"imageBase64\":\"" + encoded + "\"}";
+        assertTrue(fixture.services.executeResult(IMAGE, "DA-1001") instanceof SkillResult.Image);
+        fixture.transport.reply = "{\"data\":[{\"b64_json\":\"" + encoded + "\"}]}";
+        assertTrue(fixture.services.executeResult(IMAGE, "DA-1001") instanceof SkillResult.Image);
+        assertEquals(2, fixture.transport.endpoints.size());
+    }
+
+    @Test public void textUrlOnlyAndInvalidRepliesAreRejectedWithoutReplayingAnyRequest() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.services.register(IMAGE, "");
+        fixture.services.authorize(IMAGE, 2);
+        fixture.transport.mediaType = "text/plain";
+        fixture.transport.reply = "只返回文字";
+        assertEquals(SkillServices.Code.IMAGE_MISSING,
+                failure(() -> fixture.services.executeResult(IMAGE, "DA-1001")).code());
+        fixture.transport.mediaType = "application/json";
+        fixture.transport.reply = "{\"data\":[{\"url\":\"https://images.example.test/file.png\"}]}";
+        assertEquals(SkillServices.Code.IMAGE_MISSING,
+                failure(() -> fixture.services.executeResult(IMAGE, "DA-1001")).code());
+        fixture.transport.reply = "{\"mimeType\":\"image/png\",\"imageBase64\":\"invalid!\"}";
+        assertEquals(SkillServices.Code.IMAGE_INVALID,
+                failure(() -> fixture.services.executeResult(IMAGE, "DA-1001")).code());
+        assertEquals(List.of(IMAGE.endpoint(), IMAGE.endpoint(), IMAGE.endpoint()), fixture.transport.endpoints);
+    }
+
+    @Test public void outputTypeChangeDisarmsExactSameAddressAndLegacyTextExecuteDoesNotPostImageRequest()
+            throws Exception {
+        Fixture fixture = new Fixture();
+        SkillServices.Service formerlyText = new SkillServices.Service(
+                IMAGE.id(), IMAGE.label(), IMAGE.endpoint(), IMAGE.costUnits());
+        fixture.services.register(formerlyText, TOKEN_A);
+        fixture.services.authorize(formerlyText, 2);
+        fixture.services.register(IMAGE, "");
+
+        assertFalse(fixture.services.isAuthorized(IMAGE));
+        assertEquals(SkillServices.Code.CONFIRMATION_REQUIRED,
+                failure(() -> fixture.services.authorize(formerlyText, 2)).code());
+        fixture.services.authorize(IMAGE, 2);
+        assertEquals(SkillServices.Code.INVALID_INPUT, failure(() -> fixture.services.execute(IMAGE, "DA-1001")).code());
+        assertTrue(fixture.transport.endpoints.isEmpty());
+    }
+
+    @Test public void legacyRegistryWithoutAnOutputTypeKeepsTextApproval() throws Exception {
+        Fixture fixture = new Fixture();
+        Files.writeString(new File(fixture.directory, "skill-services.json").toPath(), """
+                {"version":1,"services":[{"id":"shipping","label":"物流查询",
+                "endpoint":"https://example.com/track","costUnits":2,"ciphertext":"","maximumCost":2}]}
+                """, StandardCharsets.UTF_8);
+
+        SkillServices.Service service = fixture.services.find(ORDERS.id());
+        assertEquals(SkillResult.Type.TEXT, service.outputType());
+        assertTrue(fixture.services.isAuthorized(service));
+        assertEquals("已发货", fixture.services.execute(service, "DA-1001"));
+        assertEquals(List.of(SkillResult.Type.TEXT), fixture.transport.requestedTypes);
+    }
+
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void mockImageNeedsPersistedOptInAndCanBeRevokedWithoutUsingNetwork() throws Exception {
+        Fixture fixture = new Fixture();
+        SkillServices.Service mock = fixture.services.find(SkillServices.MOCK_IMAGE);
+        assertTrue(fixture.services.list().contains(mock));
+        assertFalse(fixture.services.isAuthorized(mock));
+        assertEquals(SkillServices.Code.CONFIRMATION_REQUIRED,
+                failure(() -> fixture.services.executeResult(mock, "DA-1001")).code());
+        fixture.services.authorize(mock, 0);
+
+        SkillServices reopened = new SkillServices(fixture.directory, fixture.vault, fixture.transport);
+        assertTrue(reopened.executeResult(mock, "DA-1001") instanceof SkillResult.Image);
+        reopened.revoke(mock);
+        assertFalse(fixture.services.isAuthorized(mock));
+        assertTrue(fixture.transport.endpoints.isEmpty());
+    }
+
+    @Test public void imageCredentialEchoAndUnauthorizedStatusUseSafeFailures() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.services.register(IMAGE, TOKEN_A);
+        fixture.services.authorize(IMAGE, 2);
+        fixture.transport.status = 401;
+        assertEquals(SkillServices.Code.CREDENTIAL_REQUIRED,
+                failure(() -> fixture.services.executeResult(IMAGE, "DA-1001")).code());
+        fixture.transport.status = 200;
+        String encoded = Base64.getEncoder().encodeToString(TOKEN_A.getBytes(StandardCharsets.UTF_8));
+        fixture.transport.reply = "{\"mimeType\":\"image/png\",\"imageBase64\":\"" + encoded + "\"}";
+        SkillServices.Failure guarded = failure(() -> fixture.services.executeResult(IMAGE, "DA-1001"));
+        assertEquals(SkillServices.Code.REJECTED, guarded.code());
+        assertFalse(guarded.getMessage().contains(TOKEN_A));
+        assertNull(guarded.getCause());
+    }
+
+    private static byte[] png() {
+        Bitmap bitmap = Bitmap.createBitmap(8, 6, Bitmap.Config.ARGB_8888);
+        bitmap.eraseColor(0xFF27819C);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try {
+            assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output));
+            return output.toByteArray();
+        } finally { bitmap.recycle(); }
+    }
+
     private interface Operation { void run() throws Exception; }
 
     private static SkillServices.Failure failure(Operation operation) throws Exception {
@@ -162,16 +294,22 @@ public final class SkillServicesTest {
     private static final class FakeTransport implements SkillServices.Transport {
         final List<String> endpoints = new ArrayList<>();
         final List<String> tokens = new ArrayList<>();
+        final List<SkillResult.Type> requestedTypes = new ArrayList<>();
         String reply = "{\"text\":\"已发货\"}";
+        byte[] body;
+        String mediaType = "application/json";
+        int status = 200;
         AiExtensionHttp.Failure failure;
 
-        @Override public SkillServices.Response post(String endpoint, String token, String request, long deadlineNanos)
+        @Override public SkillServices.Response post(String endpoint, String token, String request,
+                                                     long deadlineNanos, SkillResult.Type type)
                 throws AiExtensionHttp.Failure {
             endpoints.add(endpoint);
             tokens.add(token);
+            requestedTypes.add(type);
             assertEquals("{\"input\":\"DA-1001\"}", request);
             if (failure != null) throw failure;
-            return new SkillServices.Response(200, "application/json", reply);
+            return new SkillServices.Response(status, mediaType, body == null ? reply.getBytes(StandardCharsets.UTF_8) : body);
         }
     }
 }

@@ -10,14 +10,17 @@ import android.text.InputFilter;
 import android.text.InputType;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
@@ -28,6 +31,7 @@ import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
 
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -42,24 +46,32 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     private final SkillStore store;
     private final SkillServices services;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService worker;
     private final AlertDialog dialog;
     private final EditText requirements;
     private final TextView status;
     private final Button generate;
     private final Button simulate;
+    private final LinearLayout pendingRows;
     private final LinearLayout installedRows;
     private final LinearLayout serviceRows;
     private ChatCompletionClient.IsolatedTextRequest generation;
     private Future<?> generationTask;
+    private boolean busy;
     private boolean closed;
 
     AiSkillSettingsDialog(Context context, SettingsStore settings, boolean miuix,
                           BiConsumer<Dialog, Runnable> presenter) {
+        this(context, settings, miuix, presenter, Executors.newSingleThreadExecutor());
+    }
+
+    AiSkillSettingsDialog(Context context, SettingsStore settings, boolean miuix,
+                          BiConsumer<Dialog, Runnable> presenter, ExecutorService worker) {
         this.context = context;
         this.settings = settings;
         this.miuix = miuix;
         this.presenter = presenter;
+        this.worker = worker;
         store = SkillStore.forContext(context);
         services = SkillServices.forContext(context);
 
@@ -73,12 +85,15 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         content.addView(MiuixFormControls.viewFor(enabled), matchWrap());
 
         section(content, "生成或更新技能");
-        requirements = input(content, "描述技能名称、参数和用途", "skills.requirements",
+        requirements = input(content, "描述想要的技能，例如生图", "skills.requirements",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE, 4000, false);
         generate = button(content, "选择模型生成", "skills.generate.model", this::chooseModel);
         simulate = button(content, "离线模拟生成", "skills.generate.mock", () -> generate(null, null));
         status = text(content, "", "skills.status");
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+
+        pendingRows = column();
+        content.addView(pendingRows, matchWrap());
 
         section(content, "自定义技能");
         installedRows = column();
@@ -107,7 +122,13 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     }
 
     private void chooseModel() {
-        if (!active() || generation != null || description().isEmpty()) return;
+        if (!active() || busy) return;
+        String description = description();
+        if (description.isEmpty()) return;
+        if (SkillStore.requiresImage(description)) {
+            generate(null, null);
+            return;
+        }
         AiModelSettings available;
         try { available = AiModelSettings.read(settings); }
         catch (RuntimeException invalid) {
@@ -133,60 +154,89 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     }
 
     private void generate(AiModelSettings modelSettings, String modelId) {
-        if (!active() || generation != null) return;
+        if (!active() || busy) return;
         String description = description();
         if (description.isEmpty()) return;
-        ChatCompletionClient.IsolatedTextRequest request = new ChatCompletionClient.IsolatedTextRequest();
+        boolean offline = modelId == null || SkillStore.requiresImage(description);
+        ChatCompletionClient.IsolatedTextRequest request = offline ? null : new ChatCompletionClient.IsolatedTextRequest();
+        prepareDraft(() -> offline ? SkillStore.mockDraft(description) : request.execute(modelSettings, modelId,
+                SkillStore.GENERATION_INSTRUCTION, store.generationPrompt(description),
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048), request, "正在生成并校验…", false);
+    }
+
+    private void retryPending(SkillStore.Pending pending) {
+        if (!active() || busy) return;
+        prepareDraft(() -> store.pendingDefinition(pending.name()), null, "正在检查技能服务…", true);
+    }
+
+    private void prepareDraft(Callable<String> definition, ChatCompletionClient.IsolatedTextRequest request, String message, boolean reconnect) {
         generation = request;
         setGenerating(true);
-        status.setText("正在生成并校验…");
+        status.setText(message);
         generationTask = worker.submit(() -> {
             try {
-                String draft = modelId == null ? SkillStore.mockDraft(description) : request.execute(modelSettings, modelId,
-                        SkillStore.GENERATION_INSTRUCTION, store.generationPrompt(description),
-                        System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048);
+                String draft = definition.call();
                 SkillStore.Preview preview = store.previewGenerated(draft);
-                main.post(() -> finishGeneration(request, draft, preview));
+                main.post(() -> finishGeneration(request, draft, preview, reconnect));
             } catch (Exception failure) {
-                main.post(() -> finishGeneration(request, null, null));
+                main.post(() -> finishGeneration(request, null, null, reconnect));
             }
         });
     }
 
-    private void finishGeneration(ChatCompletionClient.IsolatedTextRequest request, String draft, SkillStore.Preview preview) {
+    private void finishGeneration(ChatCompletionClient.IsolatedTextRequest request, String draft, SkillStore.Preview preview, boolean reconnect) {
         if (!active() || generation != request) return;
         generation = null;
         generationTask = null;
         setGenerating(false);
         if (preview == null) {
             status.setText("生成或校验失败，已安装的技能版本保留");
-        } else if (preview.needsConfirmation()) {
-            status.setText("");
-            presenter.accept(builder("确认技能的服务权限")
-                    .setMessage("技能 /" + preview.name() + "\n" + target(preview.serviceLabel(),
-                            preview.endpoint(), preview.costUnits()))
-                    .setNegativeButton("取消", null)
-                    .setPositiveButton("确认并启用", (child, which) -> install(draft, preview))
-                    .create(), null);
+        } else if (preview.pendingReason().isEmpty() && preview.needsConfirmation()) {
+            reviewDraft(draft, preview, reconnect);
         } else {
-            install(draft, null);
+            save(draft, null, reconnect);
         }
     }
 
-    private void install(String draft, SkillStore.Preview confirmation) {
+    private void reviewDraft(String draft, SkillStore.Preview preview, boolean reconnect) {
+        boolean updating = preview.previousVersion() > 0;
+        String details = "技能 /" + preview.name();
+        if (updating) details += "\n当前版本 v" + preview.previousVersion() + "，启用新版后可回退。";
+        if (preview.serviceLabel() != null && !preview.serviceLabel().isEmpty()) {
+            details += "\n" + target(preview.serviceId(), preview.serviceLabel(), preview.endpoint(),
+                    preview.costUnits(), preview.outputType());
+        } else {
+            details += "\n输出 " + outputLabel(preview.outputType());
+        }
+        status.setText("");
+        presenter.accept(builder(updating ? "确认更新技能" : "确认技能的服务权限")
+                .setMessage(details).setNegativeButton("取消", null)
+                .setPositiveButton(updating ? "启用新版" : "确认并启用", (child, which) -> save(draft, preview, reconnect))
+                .create(), null);
+    }
+
+    private void save(String draft, SkillStore.Preview confirmation, boolean reconnect) {
         if (!active()) return;
-        SkillStore.Installed installed;
+        SkillStore.SaveResult result;
         try {
-            installed = confirmation == null ? store.installGenerated(draft)
-                    : store.installGenerated(draft, confirmation);
+            result = reconnect ? store.connectPending(draft, confirmation) : store.saveGenerated(draft, confirmation);
         } catch (Exception failure) {
             status.setText("技能试跑或保存失败，已安装的技能版本保留");
             return;
         }
-        refreshAfterChange("已安装 /" + installed.name() + " · v" + installed.version());
+        SkillStore.Pending pending = result.pending();
+        if (pending != null) {
+            refreshAfterChange("已保存待连接草稿 /" + pending.name() + "\n" + pending.reason());
+            return;
+        }
+        SkillStore.Installed installed = result.installed();
+        String service = installed.serviceLabel();
+        refreshAfterChange("已安装 /" + installed.name() + " · v" + installed.version()
+                + (service == null || service.isEmpty() ? "" : " · " + service));
     }
 
     private void setGenerating(boolean busy) {
+        this.busy = busy;
         generate.setEnabled(!busy);
         simulate.setEnabled(!busy);
         requirements.setEnabled(!busy);
@@ -195,9 +245,21 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     private void refresh() throws SkillServices.Failure {
         installedRows.removeAllViews();
         List<SkillStore.Installed> skills = store.list();
+        pendingRows.removeAllViews();
+        List<SkillStore.Pending> pending = store.pending();
+        if (!pending.isEmpty()) section(pendingRows, "待连接草稿");
+        for (SkillStore.Pending draft : pending) {
+            String tag = "skills.pending." + draft.name();
+            String details = "/" + draft.name() + " · " + outputLabel(draft.outputType()) + "\n" + draft.reason();
+            if (draft.outputType() == SkillResult.Type.IMAGE) details += "\n请先在技能服务中授权兼容的图片服务。";
+            SkillStore.Installed current = skills.stream().filter(skill -> skill.name().equals(draft.name())).findFirst().orElse(null);
+            if (current != null) details += "\n已安装 v" + current.version() + (current.enabled() ? " · 已启用" : " · 已停用");
+            text(pendingRows, details, tag);
+            button(pendingRows, "重试连接", tag + ".retry", () -> retryPending(draft));
+        }
         if (skills.isEmpty()) text(installedRows, "暂无自定义技能", null);
         for (SkillStore.Installed skill : skills) {
-            String label = "/" + skill.name() + " · v" + skill.version() + " · "
+            String label = "/" + skill.name() + " · " + outputLabel(skill.outputType()) + " · v" + skill.version() + " · "
                     + (skill.enabled() ? "已启用" : "已停用");
             button(installedRows, label, "skills.installed." + skill.name(), () -> showSkillActions(skill, label));
         }
@@ -209,9 +271,15 @@ final class AiSkillSettingsDialog implements AutoCloseable {
                 continue;
             }
             boolean authorized = services.isAuthorized(service);
-            text(serviceRows, service.label() + " · " + service.id() + "\n" + service.endpoint(), tag);
-            button(serviceRows, authorized ? "已授权" : "授权此服务", tag + ".authorize",
-                    () -> authorize(service)).setEnabled(!authorized);
+            boolean localImage = SkillServices.MOCK_IMAGE.equals(service.id());
+            text(serviceRows, service.label() + " · " + outputLabel(service.outputType()) + "\n"
+                    + (localImage ? "本地模拟" : service.id() + " · " + service.endpoint()), tag);
+            if (localImage && authorized) {
+                button(serviceRows, "撤销模拟服务授权", tag + ".revoke", () -> revoke(service));
+            } else {
+                button(serviceRows, authorized ? "已授权" : "授权此服务", tag + ".authorize",
+                        () -> authorize(service)).setEnabled(!authorized);
+            }
         }
     }
 
@@ -247,6 +315,16 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         EditText label = input(fields, "显示名称", "skills.service.label", InputType.TYPE_CLASS_TEXT, 80, false);
         EditText endpoint = input(fields, "HTTPS 地址", "skills.service.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
+        Spinner output = miuix ? MiuixFormControls.spinner(context) : new Spinner(context);
+        output.setTag("skills.service.output");
+        output.setContentDescription("服务输出类型");
+        ArrayAdapter<String> outputs = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item,
+                new String[]{outputLabel(SkillResult.Type.TEXT), outputLabel(SkillResult.Type.IMAGE)});
+        outputs.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        output.setAdapter(outputs);
+        output.setSelection(0);
+        if (!miuix) text(fields, "服务输出类型", null);
+        fields.addView(MiuixFormControls.viewFor(output), matchWrap());
         EditText cost = input(fields, "每次调用费用单位", "skills.service.cost", InputType.TYPE_CLASS_NUMBER, 9, false);
         EditText token = input(fields, "Bearer 密钥（可选）", "skills.service.token",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 4096, true);
@@ -265,7 +343,8 @@ final class AiSkillSettingsDialog implements AutoCloseable {
             try {
                 int units = Integer.parseInt(cost.getText().toString().trim());
                 SkillServices.Service service = new SkillServices.Service(id.getText().toString().trim(),
-                        label.getText().toString().trim(), endpoint.getText().toString().trim(), units);
+                        label.getText().toString().trim(), endpoint.getText().toString().trim(), units,
+                        output.getSelectedItemPosition() == 1 ? SkillResult.Type.IMAGE : SkillResult.Type.TEXT);
                 services.register(service, token.getText().toString());
             } catch (Exception failure) {
                 token.setText("");
@@ -281,7 +360,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     private void authorize(SkillServices.Service service) {
         if (!active()) return;
         presenter.accept(builder("授权技能服务")
-                .setMessage(target(service.label(), service.endpoint(), service.costUnits()))
+                .setMessage(target(service.id(), service.label(), service.endpoint(), service.costUnits(), service.outputType()))
                 .setNegativeButton("取消", null)
                 .setPositiveButton("确认授权", (child, which) -> {
                     if (!active()) return;
@@ -295,9 +374,22 @@ final class AiSkillSettingsDialog implements AutoCloseable {
                 }).create(), null);
     }
 
-    private static String target(String label, String endpoint, int units) {
-        return label + "\n目标 " + endpoint + "\n每次调用最多 " + units + " 费用单位";
+    private void revoke(SkillServices.Service service) {
+        if (!active()) return;
+        try { services.revoke(service); }
+        catch (SkillServices.Failure failure) {
+            status.setText("撤销授权失败");
+            return;
+        }
+        refreshAfterChange("已撤销模拟服务授权");
     }
+
+    private static String target(String id, String label, String endpoint, int units, SkillResult.Type type) {
+        String destination = SkillServices.MOCK_IMAGE.equals(id) ? "本地模拟" : "目标 " + endpoint;
+        return label + "\n输出 " + outputLabel(type) + "\n" + destination + "\n每次调用最多 " + units + " 费用单位";
+    }
+
+    private static String outputLabel(SkillResult.Type type) { return type == SkillResult.Type.IMAGE ? "图片" : "文本"; }
 
     private AlertDialog.Builder builder(String title) { return new MiuixDialogBuilder(context, miuix).setTitle(title); }
 

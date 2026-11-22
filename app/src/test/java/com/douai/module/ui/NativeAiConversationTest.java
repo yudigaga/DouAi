@@ -29,6 +29,9 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ImageView;
 
+import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.SkillServices;
+import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.HostSettingsStore;
@@ -130,6 +133,20 @@ public final class NativeAiConversationTest {
         } finally {
             opened.dismiss();
         }
+    }
+
+    @Test public void contactImageSkillUsesTheNativeAssistantRow() throws Exception {
+        SkillServices services = SkillServices.forContext(activity);
+        services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
+        SkillStore.forContext(activity).installGenerated(SkillStore.mockDraft("生图"));
+        dialog.enableSkills(AiSkills.Entry.CONTACT);
+        submit("/生图 白猫");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(2, messageCount());
+        assertNull(row(0).findViewWithTag("ai.chat.image"));
+        assertNotNull(row(1).findViewWithTag("ai.chat.image"));
     }
 
     @Test public void legacyOriginalProfileKeepsNativeChatAndAlbumUsableAfterVersionSpoofing() throws Exception {

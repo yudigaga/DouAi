@@ -15,7 +15,11 @@ import java.util.regex.Pattern;
 public final class AiSkills {
     public enum Entry { CONTACT, WORK }
 
-    public record Command(String name, String description) {}
+    public record Command(String name, String description, SkillResult.Type outputType) {
+        public Command(String name, String description) {
+            this(name, description, SkillResult.Type.TEXT);
+        }
+    }
 
     public static final class CommandUnavailable extends IllegalStateException {
         CommandUnavailable(String message) { super(message); }
@@ -124,6 +128,8 @@ public final class AiSkills {
                     return new Invocation(skill.command(), argument, skill.version());
                 }
             }
+            String unavailableReason = store.unavailableReason(matcher.group(1));
+            if (unavailableReason != null) throw new CommandUnavailable(unavailableReason);
             if (store.mcp() != null && matcher.group(1).startsWith("mcp-")) {
                 try {
                     for (McpRegistry.Binding binding : store.mcp().bindings()) {
@@ -153,15 +159,22 @@ public final class AiSkills {
     }
 
     public static String execute(Invocation call, SkillStore store) throws Exception {
+        if (call.command().outputType() != SkillResult.Type.TEXT) throw new IllegalStateException("此技能返回图片");
+        SkillResult result = executeResult(call, store);
+        if (result instanceof SkillResult.Text text) return text.text();
+        throw new IllegalStateException("此技能返回图片");
+    }
+
+    public static SkillResult executeResult(Invocation call, SkillStore store) throws Exception {
         if (store != null && !store.enabled()) throw new IllegalStateException("技能已停用");
         if (call.mcpBinding() != null) {
             if (store == null || store.mcp() == null) throw new IllegalStateException("MCP 绑定不可用");
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            return store.mcp().execute(call.mcpBinding(), call.argument(), deadline);
+            return new SkillResult.Text(store.mcp().execute(call.mcpBinding(), call.argument(), deadline));
         }
-        if (call.localBuiltIn()) return execute(call);
+        if (call.localBuiltIn()) return new SkillResult.Text(execute(call));
         if (store == null) throw new IllegalStateException("技能不可用");
-        return store.execute(call.command().name(), call.version(), call.argument());
+        return store.executeResult(call.command().name(), call.version(), call.argument(), call.command().outputType());
     }
 
     public static String execute(Invocation call) {

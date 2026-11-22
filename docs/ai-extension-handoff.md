@@ -62,3 +62,31 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 最终针对性回归 594 项，无失败，跳过 0 项。
 
 独立真机验收可依次覆盖两种聊天布局、离线模拟生成与回退、MCP 文件选择器与真实服务、Android Keystore、既有模型协议的真实账号，以及子代理的停止按钮和权限提示。
+
+## 图片结果修订 · 基于 `510f197`
+
+真机反馈对应的路径会把“生图”当作文本技能生成，文本试跑也能通过。当前声明与执行层都有文本、图片两种结果类型。旧版执行定义及旧服务登记按文本读取。 [真机反馈](https://app.slack.com/archives/C0CK9FJ74UC/p1795320078558119)
+
+### 变更文件
+
+- `SkillResult.java`、`AiSkills.java`、`SkillStore.java` 定义并校验结果类型。图片需求走本地生成，用本地样图试跑。缺少已授权服务时持久保存待连接草稿，草稿不出现在斜杠菜单。同名已安装版本仅在用户确认后切换，旧版可回退。
+- `SkillServices.java`、`AiExtensionHttp.java` 在原有服务登记与凭据层上增加输出类型，沿用同一 HTTPS 请求和授权。输出类型变化会清除原授权。拒绝纯文字、缺少内联图片、非法 Base64 或无法解码的图片。已发送的请求超时后不会重发。
+- `AiSkillSettingsDialog.java` 显示待连接原因、输出类型及重试连接。可以登记图片服务，或授权和撤销本机模拟图片。新图片草稿优先匹配显式服务 ID。未指定时按 ID 稳定选取已授权的真实图片服务，本机模拟服务作为回退。安装回执显示已绑定的服务。
+- `AiTestChatDialog.java` 在两个聊天入口显示助手图片，复用现有缩略图、取消、结果丢弃和会话内存上限。图片结果仅保留在当前会话。
+- `SkillImageDraftTest.java`、`SkillStoreTest.java`、`SkillServicesTest.java`、`AiSkillSettingsDialogTest.java`、`AiTestChatDialogTest.java`、`NativeAiConversationTest.java` 覆盖本地生成、版本与授权、协议响应、显示及取消。
+
+### 建议真机复测
+
+1. 打开「扩展功能 → AI Skills」，在未授权任何图片服务时只输入“生图”并生成。应显示缺少已授权图片服务的新草稿。此前没有同名技能时，两个入口的菜单都不应出现 `/生图`。此前已安装同名文本技能时，它仍保留原版本。
+2. 授权「模拟图片」，在待连接草稿点「重试连接」。如果有同名旧版，确认启用新版，随后通过回退验证旧文本仍可用。可以用“名为「封面设计」的生图技能”验证自定义命令名。
+3. 在 AI 联系人和工作 AI 各运行 `/生图 一只白猫`，检查助手消息可见并成功显示固定样图。撤销「模拟图片」的授权后再次执行，应显示授权错误。模拟图片使用固定本地样图，适合全程离线验收。
+4. 回归 `/摘要`、`/查询` 和普通文本对话。若独立验收使用模拟 HTTPS 适配端点，分别返回纯文字、坏图片和发出后超时，检查错误提示与请求计数。
+
+登记的图片接口使用 HTTPS `POST {"input":"提示词"}`。支持 PNG、JPEG、WebP、GIF 响应，或 JSON 内联 `{mimeType,imageBase64}`、`data[0].b64_json`。服务只提供图片 URL 时会提示缺少内联图片。需要自定义请求结构的供应商可通过符合此约定的适配服务接入。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests 'com.douai.module.ai.*' --tests '*AiSkillSettingsDialogTest' --tests '*AiTestChatDialogTest' --tests '*NativeAiConversationTest' --tests '*ModuleSettingsActionSeparationTest' --tests '*ChatImageLoaderTest' --tests '*ConfigTransfer*Test' --tests '*IsolatedTextRequestTest' --tests '*ChatCompletionClientTest'
+```
+
+最终专项回归 272 项通过，未使用真实付费 API。待独立验收真机布局、真实图片适配服务和签名产物。

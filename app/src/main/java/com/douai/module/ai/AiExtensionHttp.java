@@ -41,7 +41,8 @@ public final class AiExtensionHttp {
         T read(int status, Headers headers, InputStream body) throws IOException;
     }
 
-    private static final int MAX_BODY_BYTES = 1024 * 1024;
+    private static final int MAX_REQUEST_BYTES = 1024 * 1024;
+    private static final int MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
     private static final ThreadPoolExecutor IO = pool(4, "DouAi-extension-http");
     private static final ThreadPoolExecutor CLEANUP = pool(2, "DouAi-extension-cleanup");
 
@@ -66,8 +67,8 @@ public final class AiExtensionHttp {
     public static <T> T request(String endpoint, String method, Map<String, String> headers, byte[] body,
                                 long deadlineNanos, int maxResponseBytes, ResponseReader<T> reader) throws Failure {
         URI uri = exactEndpoint(endpoint);
-        if (maxResponseBytes < 1 || maxResponseBytes > MAX_BODY_BYTES
-                || body != null && (body.length > MAX_BODY_BYTES || !"POST".equals(method))
+        if (maxResponseBytes < 1 || maxResponseBytes > MAX_RESPONSE_BYTES
+                || body != null && (body.length > MAX_REQUEST_BYTES || !"POST".equals(method))
                 || !("GET".equals(method) || "POST".equals(method) || "DELETE".equals(method))) {
             throw new IllegalArgumentException("无效的 HTTP 请求设置");
         }
@@ -101,11 +102,16 @@ public final class AiExtensionHttp {
     }
 
     public static String readUtf8(InputStream body) throws IOException {
+        return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(readBytes(body))).toString();
+    }
+
+    /** Reads the bounded stream passed by request to a ResponseReader. */
+    public static byte[] readBytes(InputStream body) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         byte[] buffer = new byte[2048];
         int count;
         while ((count = body.read(buffer)) != -1) bytes.write(buffer, 0, count);
-        return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes.toByteArray())).toString();
+        return bytes.toByteArray();
     }
 
     private static <T> T exchange(URI uri, String method, Map<String, String> headers, byte[] body,

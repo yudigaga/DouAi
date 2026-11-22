@@ -43,6 +43,7 @@ import com.douai.module.ai.mcp.McpClient;
 import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.AiSubAgents;
+import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
@@ -57,7 +58,6 @@ import com.douai.module.feature.TestChatMemory;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixChatEditorSurface;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -152,7 +152,6 @@ final class AiTestChatDialog extends Dialog {
     private HostAccountAvatar accountAvatar;
     private ImageView profileAvatar;
     private HorizontalScrollView quickReplies;
-    private final ArrayDeque<List<ChatImage>> visibleImages = new ArrayDeque<>();
     private int visibleImageBytes;
     private Future<?> restoreLoad;
     private Future<?> historyClear;
@@ -727,11 +726,9 @@ final class AiTestChatDialog extends Dialog {
             ChatMessage user = addMessage("我", prompt, true, images);
             for (Document document : documents) user.documentLabels.add(document.name);
             for (PendingAttachment attachment : selected) user.documentLabels.add(attachment.name);
-            visibleImages.addLast(user.images);
-            visibleImageBytes += imageBytes(user.images);
-            trimVisibleHistory();
             answer = addMessage(assistantName, "正在回复…", false, Collections.emptyList());
             answer.sourceUser = user;
+            trimVisibleHistory();
         }
         answer.text = skill != null ? "正在运行技能…" : selected.isEmpty() ? "正在回复…" : "正在读取附件…";
         if (answer.videos != null) { answer.videos.close(); answer.videos = null; }
@@ -758,6 +755,7 @@ final class AiTestChatDialog extends Dialog {
         turn.trace.stage("queued", "input_chars=" + prompt.length() + ";images=" + images.size() + ";documents=" + documents.size() + ";attachments=" + selected.size());
         request = worker.submit(turn.trace.wrap(() -> {
             String reply = null;
+            ChatImage generatedImage = null;
             Exception error = null;
             try {
                 synchronized (turn) {
@@ -783,7 +781,15 @@ final class AiTestChatDialog extends Dialog {
                         reply = AiSubAgents.run(AiModelSettings.read(selectedSettings), subAgent,
                                 turn.skill.argument(), delegationDeadline);
                     } else {
-                        reply = AiSkills.execute(turn.skill, activeSkillStore);
+                        SkillResult result = AiSkills.executeResult(turn.skill, activeSkillStore);
+                        if (result instanceof SkillResult.Image image) {
+                            generatedImage = image.image();
+                            reply = "";
+                        } else if (result instanceof SkillResult.Text text) {
+                            reply = text.text();
+                        } else {
+                            throw new IllegalStateException("技能返回了未知的结果类型");
+                        }
                     }
                     turn.checkStopped();
                 } else {
@@ -807,8 +813,9 @@ final class AiTestChatDialog extends Dialog {
             catch (Exception failure) { error = failure; }
             catch (OutOfMemoryError failure) { error = new IllegalArgumentException("附件过大，无法读取"); }
             String result = reply;
+            ChatImage image = generatedImage;
             Exception failure = error;
-            main.post(turn.trace.wrap(() -> finishRequest(turn, result, failure)));
+            main.post(turn.trace.wrap(() -> finishRequest(turn, result, image, failure)));
         }));
     }
 
@@ -912,19 +919,18 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void trimVisibleHistory() {
-        while (visibleImages.size() > 1 && (visibleImages.size() > MAX_VISIBLE_TURNS
+        while (transcript.size() > 2 && (transcript.size() / 2 > MAX_VISIBLE_TURNS
                 || visibleImageBytes > MAX_VISIBLE_IMAGE_BYTES)) {
-            List<ChatImage> removed = visibleImages.removeFirst();
-            visibleImageBytes -= imageBytes(removed);
             ChatMessage first = transcript.remove(0);
             ChatMessage second = transcript.remove(0);
+            visibleImageBytes -= imageBytes(first.images) + imageBytes(second.images);
             if (first.videos != null) first.videos.close();
             if (second.videos != null) second.videos.close();
         }
         evictUnusedThumbnails();
     }
 
-    private void finishRequest(RequestTurn turn, String reply, Exception failure) {
+    private void finishRequest(RequestTurn turn, String reply, ChatImage generatedImage, Exception failure) {
         // A cancelled/closed conversation must not receive a late response.
         if (disposed || turn.ticket != generation) return;
         busy = false;
@@ -934,6 +940,11 @@ final class AiTestChatDialog extends Dialog {
         if (failure == null && (turn.skill == null || !turn.stopRequested)) {
             answer.text = reply;
             answer.color = TEXT;
+            if (generatedImage != null) {
+                answer.images.add(generatedImage);
+                visibleImageBytes += generatedImage.sizeBytes();
+                trimVisibleHistory();
+            }
             if (turn.skill == null && !turn.stopRequested) {
                 answer.videos = searchVideoCards.group(turn.searchResults, turn.searchBridge, turn.analytics);
             }
@@ -1008,7 +1019,6 @@ final class AiTestChatDialog extends Dialog {
         session = sessions.create();
         transcript.clear();
         messageRows.notifyDataSetChanged();
-        visibleImages.clear();
         visibleImageBytes = 0;
         draftImages.clear();
         draftDocuments.clear();
@@ -1094,6 +1104,7 @@ final class AiTestChatDialog extends Dialog {
     private ChatMessage addMessage(String role, String text, boolean user, List<ChatImage> images) {
         ChatMessage message = new ChatMessage(role, text, user, images);
         transcript.add(message);
+        visibleImageBytes += imageBytes(message.images);
         messageRows.notifyDataSetChanged();
         return message;
     }
@@ -1421,7 +1432,7 @@ final class AiTestChatDialog extends Dialog {
 
     private boolean retains(ChatImage image) {
         if (draftImages.contains(image)) return true;
-        for (List<ChatImage> images : visibleImages) if (images.contains(image)) return true;
+        for (ChatMessage message : transcript) if (message.images.contains(image)) return true;
         return false;
     }
 
@@ -1640,6 +1651,8 @@ final class AiTestChatDialog extends Dialog {
             body.setTag(message.user ? "ai.chat.user" : "ai.chat.answer");
             body.setText(message.text);
             body.setTextColor(message.color);
+            body.setVisibility(!message.user && !message.images.isEmpty() && TextUtils.isEmpty(message.text)
+                    ? GONE : VISIBLE);
             if (nativeBubble != null) {
                 nativeBubble.view.setTag(message.user ? "ai.chat.user" : "ai.chat.answer");
                 int rowWidth = messages.getWidth() > 0 ? messages.getWidth()
@@ -1658,7 +1671,9 @@ final class AiTestChatDialog extends Dialog {
                     : "已保存的附件：" + TextUtils.join("、", message.documentLabels));
             images.removeAllViews();
             for (ChatImage image : message.images) {
-                images.addView(preview(image), new LayoutParams(dp(128), dp(96)));
+                ImageView thumbnail = preview(image);
+                if (!message.user) thumbnail.setContentDescription("生成的图片");
+                images.addView(thumbnail, new LayoutParams(dp(128), dp(96)));
             }
             int rowWidthForVideos = messages.getWidth() > 0 ? messages.getWidth()
                     : getContext().getResources().getDisplayMetrics().widthPixels;
@@ -1743,8 +1758,6 @@ final class AiTestChatDialog extends Dialog {
                     if (item.getValue() != null) thumbnails.put(item.getKey(), item.getValue());
                 }
                 for (TestChatMemory.Turn turn : retained) {
-                    visibleImages.addLast(turn.images);
-                    visibleImageBytes += imageBytes(turn.images);
                     ChatMessage user = addMessage("我", turn.prompt, true, turn.images);
                     if (!turn.document.isEmpty()) {
                         user.documentLabels.add("文本");

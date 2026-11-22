@@ -31,7 +31,8 @@ public class SkillStoreTest {
         assertThrows(IllegalArgumentException.class, () ->
                 store.installGenerated(draft("非法命令", "测试").replace("\"summary\"", "\"shell\"")));
         assertEquals(1, store.list().get(0).version());
-        assertEquals(2, store.installGenerated(draft("第二版", "测试")).version());
+        String second = draft("第二版", "测试");
+        assertEquals(2, store.installGenerated(second, store.previewGenerated(second)).version());
         File[] revisions = new File(root, "versions").listFiles();
         assertNotNull(revisions);
         assertEquals(2, revisions.length);
@@ -40,7 +41,33 @@ public class SkillStoreTest {
             assertTrue(Files.readString(new File(revision, "execution.json").toPath()).contains("\"kind\":\"summary\""));
         }
         assertEquals(1, store.rollback("检查").version());
-        assertEquals(3, store.installGenerated(draft("第三版", "测试")).version());
+        String third = draft("第三版", "测试");
+        assertEquals(3, store.installGenerated(third, store.previewGenerated(third)).version());
+    }
+
+    @Test public void aPersistedV1TextExecutionAndCatalogRemainUsable() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = new SkillStore(root, SkillServices.forContext(RuntimeEnvironment.getApplication()));
+        store.installGenerated(draft("旧文字", "测试"));
+        File revision = new File(root, "versions").listFiles()[0];
+        var execution = new File(revision, "execution.json").toPath();
+        var definition = new org.json.JSONObject(Files.readString(execution));
+        definition.put("schemaVersion", 1).remove("outputType");
+        Files.writeString(execution, definition.toString());
+
+        var catalog = new File(root, "catalog.json").toPath();
+        var index = new org.json.JSONObject(Files.readString(catalog));
+        index.remove("drafts");
+        var metadata = index.getJSONObject("skills").getJSONObject("检查").getJSONArray("versions").getJSONObject(0);
+        metadata.remove("outputType");
+        metadata.remove("serviceLabel");
+        Files.writeString(catalog, index.toString());
+
+        for (AiSkills.Entry entry : AiSkills.Entry.values()) {
+            var invocation = AiSkills.match(entry, "/检查 旧版参数", store);
+            assertEquals(SkillResult.Type.TEXT, invocation.command().outputType());
+            assertEquals("旧版参数", AiSkills.execute(invocation, store));
+        }
     }
 
     @Test public void reloadedStateControlsBothEntriesAndDisablesQueuedVersion() throws Exception {
@@ -76,9 +103,9 @@ public class SkillStoreTest {
         java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
         SkillServices services = new SkillServices(root,
                 new com.douai.module.ai.AiCredentialVault(() -> new javax.crypto.spec.SecretKeySpec(new byte[32], "AES")),
-                (endpoint, token, request, deadline) -> {
+                (endpoint, token, request, deadline, outputType) -> {
                     calls.incrementAndGet();
-                    return new SkillServices.Response(200, "text/plain", "已完成");
+                    return new SkillServices.Response(200, "text/plain", "已完成".getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 });
         SkillStore store = new SkillStore(new File(root, "skills"), services);
         SkillServices.Service old = new SkillServices.Service("lookup", "查询", "https://before.example/api", 1);
