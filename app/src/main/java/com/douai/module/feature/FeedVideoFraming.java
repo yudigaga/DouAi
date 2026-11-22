@@ -21,6 +21,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import io.github.libxposed.api.XposedInterface;
 
@@ -114,7 +115,10 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             Incoming old=findIncoming(card);
             if(old!=null)old.remove(true);
             leaving.restore(card);
-            if(card!=null && card==root.get() && holder.get()==h && getWork.invoke(h)!=work)geometry.restore();
+            if(card!=null && card==root.get() && holder.get()==h){
+                geometry.colours.clearTopBinding();
+                if(getWork.invoke(h)!=work)geometry.restore();
+            }
         }catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){/* Preserve the host bind. */}
         Object result=chain.proceed();
         try {
@@ -227,7 +231,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     private static String workAid(Object work){Object aid=HostTargets.invoke(work,"getAid");return aid instanceof String?(String)aid:null;}
     void setEnabled(boolean value) {
         if(enabled==value || closed)return;enabled=value;
-        onMain(()->{if(closed)return;if(enabled){traceSelection(holder.get());observe();requestFrame(true);}else{stopObserving();geometry.restore();clearIncoming();leaving.clear();firstFrames.clear();}});
+        onMain(()->{if(closed)return;if(enabled){traceSelection(holder.get());observe();requestFrame(true);}else{stopObserving();geometry.restore();geometry.colours.clearTopBinding();clearIncoming();leaving.clear();firstFrames.clear();}});
     }
     private void select(Object h) {
         if(closed)return;
@@ -259,7 +263,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         if(observer!=null && observer.isAlive())observer.removeOnGlobalLayoutListener(this);observer=null;
     }
     @Override public void onViewAttachedToWindow(View v){if(v==root.get() && enabled && !closed){traceSelection(holder.get());observe();requestFrame(true);}}
-    @Override public void onViewDetachedFromWindow(View v){if(v==root.get()){stopObservingDraws();geometry.restore();firstFrames.deselected();}}
+    @Override public void onViewDetachedFromWindow(View v){if(v==root.get()){stopObservingDraws();geometry.restore();geometry.colours.clearTopBinding();firstFrames.deselected();}}
     @Override public void onGlobalLayout(){requestFrame(false);}
     private void requestFrame(boolean invalidate){
         if(!enabled || closed || pendingFrame!=null || observer==null || !observer.isAlive())return;
@@ -304,12 +308,28 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         if(!geometry.changed() && !leaving.empty())geometry=leaving.take(card);
         int sw=width.getInt(video),sh=height.getInt(video);
         boolean applied=geometry.frame(render,card,sw,sh);
-        if(applied && geometry.syncColouring(card,render) && DebugLog.isEnabled())
+        Geometry appliedGeometry=geometry;
+        if(applied && geometry.syncColouring(card,render,h,feed,work,()->topCoverage(appliedGeometry,h,feed,work,card,render))
+                && DebugLog.isEnabled())
             DouAiLog.event("hide_video_black_edges","free_space_colour_bands","redundant_after_fill",
                     "work_ref="+DouAiLog.reference(workAid(work))+";presentation=unverified");
         report(work,render,card,sw,sh,applied);
         return applied;
     }
+
+    private boolean topCoverage(Geometry expected,Object h,Object feed,Object work,View card,View render) {
+        if(!enabled || closed || geometry!=expected || holder.get()!=h || root.get()!=card
+                || !expected.coversNativeVerticalGap)return false;
+        try {
+            Object player=getPlayer.invoke(h);
+            return rootField.get(h)==card && feed(h)==feed && getCurrent.invoke(feed)==h && getWork.invoke(h)==work
+                    && commentsClosed(feed) && player!=null && getSurface.invoke(player)==render
+                    && expected.fullCoverage(card,render);
+        }catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable){
+            return false;
+        }
+    }
+
     private void report(Object work,View render,View card,int sw,int sh,boolean applied){
         int cw=card.getWidth()-card.getPaddingLeft()-card.getPaddingRight();
         int ch=card.getHeight()-card.getPaddingTop()-card.getPaddingBottom();
@@ -448,6 +468,10 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
         private WeakReference<View> target=new WeakReference<>(null);
         private final Matrix matrix=new Matrix();
         private final FeedColourBandLease colours=new FeedColourBandLease();
+        private Rect coverageCard,coverageRenderer;
+        private WeakReference<Object> colourHolder=new WeakReference<>(null),colourFeed=new WeakReference<>(null),
+                colourWork=new WeakReference<>(null);
+        private WeakReference<View> colourCard=new WeakReference<>(null),colourRender=new WeakReference<>(null);
         private float scale=1,tx,ty;
         private boolean coversNativeVerticalGap;
         int rawX,rawY;
@@ -540,6 +564,38 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             return true;
         }
         boolean syncColouring(View card,View render){return colours.sync(card,render.getWidth(),coversNativeVerticalGap);}
+        boolean syncColouring(View card,View render,Object holder,Object feed,Object work,BooleanSupplier fullCoverage){
+            if(colourCard.get()!=card || colourRender.get()!=render || colourHolder.get()!=holder
+                    || colourFeed.get()!=feed || colourWork.get()!=work){
+                colours.clearTopBinding();
+                colourCard=new WeakReference<>(card);
+                colourRender=new WeakReference<>(render);
+                colourHolder=new WeakReference<>(holder);
+                colourFeed=new WeakReference<>(feed);
+                colourWork=new WeakReference<>(work);
+            }
+            return colours.sync(card,render.getWidth(),coversNativeVerticalGap,fullCoverage);
+        }
+        boolean fullCoverage(View card,View render){
+            View layer=target.get();
+            if(layer==null || !card.isShown() || !render.isShown()
+                    || card.getWindowToken()==null || render.getWindowToken()!=card.getWindowToken()
+                    || card.getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT)
+                return false;
+            boolean ownsLayer=false;
+            View view=render;
+            for(int depth=0;view!=null && depth<32;depth++){
+                if(!clean(view) || view.getAlpha()<=0f)return false;
+                ownsLayer|=view==layer;
+                if(view==card)break;
+                view=view.getParent() instanceof View parent?parent:null;
+            }
+            if(view!=card || !ownsLayer)return false;
+            if(coverageCard==null){coverageCard=new Rect();coverageRenderer=new Rect();}
+            return card.getGlobalVisibleRect(coverageCard) && render.getGlobalVisibleRect(coverageRenderer)
+                    && !coverageCard.isEmpty() && coverageCard.width()>=card.getWidth() && coverageCard.height()>=card.getHeight()
+                    && coverageRenderer.contains(coverageCard);
+        }
         private boolean reject(String code,String layer){reason=code;blockedLayer=layer;return false;}
         private boolean clean(View v) {return transformRejection(v)==null;}
         private String transformRejection(View v) {
@@ -552,7 +608,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             return null;
         }
         void restore(){
-            colours.restore();
+            colours.suspend();
             coversNativeVerticalGap=false;
             View v=target.get();
             if(v!=null){
@@ -580,6 +636,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
             return result!=null?result:new Geometry();
         }
         void leave(View card,Geometry geometry){
+            geometry.colours.releaseTranslatedTop();
             if(card==null || !geometry.changed()){geometry.restore();return;}
             Lease l=new Lease(card,geometry);
             if(!l.visible()){geometry.restore();return;}
@@ -612,7 +669,7 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
                 if(released)return;released=true;
                 View v=card.get();if(v!=null)v.removeOnAttachStateChangeListener(this);
                 ViewTreeObserver o=tree==null?null:tree.get();if(o!=null && o.isAlive())o.removeOnPreDrawListener(this);
-                list.remove(this);if(restore)geometry.restore();
+                list.remove(this);if(restore){geometry.restore();geometry.colours.clearTopBinding();}
             }
             public boolean onPreDraw(){if(!released&&!visible())release(true);return true;}
             public void onViewAttachedToWindow(View ignored){}
@@ -622,10 +679,11 @@ final class FeedVideoFraming implements AutoCloseable, ViewTreeObserver.OnGlobal
     private void leaveCurrent(){
         stopObserving();
         firstFrames.deselected();
-        if(enabled&&!closed)leaving.leave(root.get(),geometry);else geometry.restore();
+        if(enabled&&!closed)leaving.leave(root.get(),geometry);
+        else {geometry.restore();geometry.colours.clearTopBinding();}
         geometry=new Geometry();holder.clear();root.clear();
     }
-    private void unbind(){stopObserving();geometry.restore();holder.clear();root.clear();firstFrames.clear();}
+    private void unbind(){stopObserving();geometry.restore();geometry.colours.clearTopBinding();holder.clear();root.clear();firstFrames.clear();}
     private void onMain(Runnable r){if(Looper.myLooper()==Looper.getMainLooper())r.run();else ui.post(r);}
     @Override public void close(){closed=true;incomingHooks.close();hooks.close();onMain(()->{unbind();clearIncoming();leaving.clear();});}
 }

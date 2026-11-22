@@ -364,6 +364,81 @@ public class FeedVideoFramingTest {
         }
     }
 
+    @Test @Config(qualifiers="w360dp-h800dp-port")
+    public void translatedUpperBandTracksTheRealCurrentBindingAndReleasesBeforeSameWorkRebind() throws Throwable {
+        try (FramingFixture f=new FramingFixture(true)) {
+            FrameLayout card=f.holder.w;
+            com.ss.android.ugc.aweme.view.MeasureOnceCheckDrawChildRelativeLayout overlay=
+                    new com.ss.android.ugc.aweme.view.MeasureOnceCheckDrawChildRelativeLayout(f.activity);
+            overlay.setId(0x7f0a3ffa);
+            FrameLayout colours=new FrameLayout(f.activity);
+            colours.setId(0x7f0a3fac);
+            overlay.addView(colours,new android.widget.RelativeLayout.LayoutParams(-1,-1));
+            card.addView(overlay,new FrameLayout.LayoutParams(-1,-1));
+
+            android.widget.ImageView top=new android.widget.ImageView(f.activity);
+            top.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+            android.graphics.Bitmap bitmap=android.graphics.Bitmap.createBitmap(2,2,android.graphics.Bitmap.Config.ARGB_8888);
+            top.setImageDrawable(new android.graphics.drawable.BitmapDrawable(f.activity.getResources(),bitmap));
+            colours.addView(top,new FrameLayout.LayoutParams(270,70,Gravity.TOP|Gravity.CENTER_HORIZONTAL));
+            overlay.layout(0,0,270,600);
+            colours.layout(0,0,270,600);
+            top.layout(0,0,270,70);
+
+            f.select();
+            ViewTreeObserver tree=card.getViewTreeObserver();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(0f,colours.getTransitionAlpha(),0f);
+
+            android.graphics.Rect cardRect=new android.graphics.Rect(),videoRect=new android.graphics.Rect();
+            assertSame(card.getWindowToken(),f.surface.getWindowToken());
+            assertTrue(card.getGlobalVisibleRect(cardRect));
+            assertTrue(f.surface.getGlobalVisibleRect(videoRect));
+            assertEquals("Full card must be visible in the fixture: "+cardRect,card.getHeight(),cardRect.height());
+            assertTrue("Renderer "+videoRect+" must fill card "+cardRect,videoRect.contains(cardRect));
+
+            top.setTranslationY(1.5f);
+            tree.dispatchOnGlobalLayout();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(1f,colours.getTransitionAlpha(),0f);
+            assertEquals("A currently bound, fully covering renderer can retain the translated top",0f,top.getTransitionAlpha(),0f);
+
+            card.offsetTopAndBottom(2);
+            assertTrue(card.getGlobalVisibleRect(cardRect) && cardRect.height()<card.getHeight());
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals("A clipped card restores the translated band",1f,top.getTransitionAlpha(),0f);
+            card.offsetTopAndBottom(-2);
+            tree.dispatchOnGlobalLayout();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(0f,top.getTransitionAlpha(),0f);
+
+            f.holder.B2.mFeedContext.current=null;
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals("Losing the current holder revokes suppression without a layout event",1f,top.getTransitionAlpha(),0f);
+            f.holder.B2.mFeedContext.current=f.holder;
+            tree.dispatchOnGlobalLayout();
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals(0f,top.getTransitionAlpha(),0f);
+
+            f.holder.beforeBind=()->assertEquals("The old lease is restored before the host writes a new binding",1f,top.getTransitionAlpha(),0f);
+            f.bind(f.holder,f.holder.work);
+            assertFalse(tree.dispatchOnPreDraw());
+            assertEquals("A rebind must never reuse the previous top proof",1f,top.getTransitionAlpha(),0f);
+            assertEquals(1.5f,top.getTranslationY(),0f);
+
+            top.setTranslationY(0f);
+            tree.dispatchOnGlobalLayout();
+            tree.dispatchOnPreDraw();
+            assertEquals(0f,colours.getTransitionAlpha(),0f);
+
+            f.holder.work=new Work(); // A replaced work can also be observed without a bind callback.
+            top.setTranslationY(1.5f);
+            tree.dispatchOnGlobalLayout();
+            tree.dispatchOnPreDraw();
+            assertEquals("The new work cannot inherit the previous bitmap proof",1f,top.getTransitionAlpha(),0f);
+        }
+    }
+
     private static final class FramingFixture implements AutoCloseable {
         final Activity activity=Robolectric.buildActivity(Activity.class).setup().visible().get();
         final Holder holder=new Holder();
