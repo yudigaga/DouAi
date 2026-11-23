@@ -15,6 +15,11 @@ import java.util.regex.Pattern;
 public final class AiSkills {
     public enum Entry { CONTACT, WORK }
 
+    @FunctionalInterface
+    public interface TextExecutor {
+        String run(String instruction, String input) throws Exception;
+    }
+
     public record Command(String name, String description, SkillResult.Type outputType) {
         public Command(String name, String description) {
             this(name, description, SkillResult.Type.TEXT);
@@ -166,6 +171,10 @@ public final class AiSkills {
     }
 
     public static SkillResult executeResult(Invocation call, SkillStore store) throws Exception {
+        return executeResult(call, store, null);
+    }
+
+    public static SkillResult executeResult(Invocation call, SkillStore store, TextExecutor textExecutor) throws Exception {
         if (store != null && !store.enabled()) throw new IllegalStateException("技能已停用");
         if (call.mcpBinding() != null) {
             if (store == null || store.mcp() == null) throw new IllegalStateException("MCP 绑定不可用");
@@ -174,7 +183,8 @@ public final class AiSkills {
         }
         if (call.localBuiltIn()) return new SkillResult.Text(execute(call));
         if (store == null) throw new IllegalStateException("技能不可用");
-        return store.executeResult(call.command().name(), call.version(), call.argument(), call.command().outputType());
+        return store.executeResult(call.command().name(), call.version(), call.argument(),
+                call.command().outputType(), textExecutor);
     }
 
     public static String execute(Invocation call) {

@@ -30,6 +30,7 @@ import android.widget.ListView;
 import android.widget.ImageView;
 
 import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
@@ -156,13 +157,26 @@ public final class NativeAiConversationTest {
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
         dialog.enableSkills(AiSkills.Entry.CONTACT);
-        submit("创建一个生图技能");
+        session.skillModelReplies.add("""
+                {"schemaVersion":3,"name":"生图","description":"按提示词生成图片","documentation":"使用已经授权的图片服务。",
+                "execution":{"kind":"service","outputType":"image","maxInput":4000},
+                "trial":{"input":"一只白猫","expectedType":"image"}}
+                """);
+        submit("帮我做一个生图 Skill");
         worker.runNext();
         ShadowLooper.idleMainLooper();
+        assertTrue(renderedText(1).contains("草案"));
+        assertTrue(SkillStore.forContext(activity).pending().isEmpty());
+        assertTrue(SkillStore.forContext(activity).list().isEmpty());
+
+        submit("帮我内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION),session.skillModelSystems);
 
         assertEquals("生图", SkillStore.forContext(activity).pending().get(0).name());
-        assertTrue(renderedText(1).contains("待配置草稿"));
-        View settings = row(1).findViewWithTag("ai.chat.skill.settings.生图");
+        assertTrue(renderedText(3).contains("待配置草稿"));
+        View settings = row(3).findViewWithTag("ai.chat.skill.settings.生图");
         assertNotNull(settings);
         assertTrue(settings.performClick());
         Dialog detailDialog = ShadowDialog.getLatestDialog();
@@ -184,12 +198,47 @@ public final class NativeAiConversationTest {
         submit("/生图 白猫");
         worker.runNext();
         ShadowLooper.idleMainLooper();
-        assertEquals(4, messageCount());
-        ImageView image = row(3).findViewWithTag("ai.chat.image");
+        assertEquals(6, messageCount());
+        ImageView image = row(5).findViewWithTag("ai.chat.image");
         assertNotNull(image);
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
         assertNotNull(image.getDrawable());
+        assertTrue(session.prompts.isEmpty());
+    }
+
+    @Test public void contactCanBuildAndRunAnAuthoredTextSkillAfterReopen() throws Exception {
+        dialog.enableSkills(AiSkills.Entry.CONTACT);
+        session.skillModelReplies.add("""
+                {"schemaVersion":3,"name":"周报润色","description":"整理周报要点","documentation":"输入待整理的周报。",
+                "execution":{"kind":"text_model","outputType":"text","maxInput":2000,"instruction":"保留事实，使用分点格式。"},
+                "trial":{"input":"上线通知","expectedType":"text"}}
+                """);
+        submit("帮我做一个周报 Skill 并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertTrue(renderedText(1).contains("周报润色"));
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION),session.skillModelSystems);
+        assertFalse(SkillStore.forContext(activity).detail("周报润色").pending());
+        assertTrue(session.prompts.isEmpty());
+
+        dialog.dismiss();
+        open(new FakeSession());
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        dialog.enableSkills(AiSkills.Entry.CONTACT);
+        session.skillModelReplies.add("• 上线通知已发出");
+        nativeViews.input.setText("/周");
+        assertNotNull(nativeViews.root.findViewWithTag("ai.chat.skill.周报润色"));
+        submit("/周报润色 上线通知已发出");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals("• 上线通知已发出",renderedText(1));
+        assertEquals(List.of(SkillAuthoring.TEXT_INSTRUCTION),session.skillModelSystems);
+        JSONObject request=new JSONObject(session.skillModelInputs.get(0));
+        assertEquals("保留事实，使用分点格式。",request.getString("instruction"));
+        assertEquals("上线通知已发出",request.getString("argument"));
         assertTrue(session.prompts.isEmpty());
     }
 
@@ -870,6 +919,9 @@ public final class NativeAiConversationTest {
     }
 
     private static final class FakeSession implements AiTestChatDialog.Session {
+        final Queue<String> skillModelReplies = new ArrayDeque<>();
+        final List<String> skillModelSystems = new ArrayList<>();
+        final List<String> skillModelInputs = new ArrayList<>();
         final List<String> prompts = new ArrayList<>();
         final List<List<ChatImage>> images = new ArrayList<>();
         final List<String> documents = new ArrayList<>();
@@ -901,6 +953,12 @@ public final class NativeAiConversationTest {
                 throw new AssertionError("Native streaming test was not released");
             }
             return reply(prompt, attachments, document);
+        }
+        @Override public String skillModel(String system,String input) {
+            skillModelSystems.add(system);
+            skillModelInputs.add(input);
+            if (skillModelReplies.isEmpty()) throw new AssertionError("Unexpected isolated skill model call");
+            return skillModelReplies.remove();
         }
         @Override public List<TestChatMemory.Turn> savedTurns() {
             historyOnMain = Looper.myLooper() == Looper.getMainLooper();

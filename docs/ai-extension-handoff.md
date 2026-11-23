@@ -118,3 +118,28 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 最终专项回归 292 项通过，0 失败，0 跳过。两个入口均覆盖自然语言创建、跳转同一条设置、模拟授权和助手位图显示。
+
+## 聊天模型编写与修订 Skill · 基于 `27b7e8a`
+
+AI 联系人和工作 AI 使用当前对话的模型配置编写声明。草案预览显示名称、输出类型和文本指令。修订请求只携带上一份通过校验的草案。发送「帮我内置」时保存到本机技能库，也可用一条消息明确要求编写并内置。 [交互确认](https://app.slack.com/archives/C0CK9FJ74UC/p1795393932849649)
+
+### 变更范围
+
+- `SkillAuthoring.java` 识别手动发送的明确请求、限制模型输入并严格解析 JSON。模型回复、引用、附件和普通聊天无法写入技能库。关闭或清空聊天会丢弃尚未保存的预览。
+- `AiTestChatDialog.java` 复用两入口的草案状态和设置快捷入口，隔离普通聊天历史、搜索和附件。取消或迟到的输出不会提交。旧的聊天关键词模板已从该链路移除。
+- `SkillStore.java`、`AiSkills.java` 加入 v3 声明、本地试跑和自定义指令文本执行。文本 Skill 通过当前入口已配置的 HTTPS 模型处理文本。图片 Skill 复用已登记并获授权的适配器，缺项进入现有单条设置。模型无法指定地址、费用、密钥、工具或执行方式以外的操作。同名版本经确认才能替换，可回退。v1/v2 定义继续按原约定读取。
+- `SkillAuthoringTest.java`、`ConversationSkillCreationTest.java`、`AiTestChatDialogTest.java` 和 `NativeAiConversationTest.java` 覆盖声明、两个入口、取消、凭据和本地配置。模拟服务的图片仍为固定样图。
+
+### 独立验收清单
+
+1. 选择已配置的 HTTPS 模型，在工作 AI 发送「帮我写一个整理周报的 Skill」。核对聊天返回的草案和实际指令。说「把指令改成三点格式」，核对修订。确认此时技能库没有新条目。
+2. 发送「帮我内置」，重新进入两个入口，使用生成的 `/技能名` 处理文本。也可在 AI 联系人发送「帮我做一个周报 Skill 并内置」验证单条路径。
+3. 用「帮我写一个生图 Skill」生成图片草案，再内置。在没有可用授权时核对待配置和缺项。点开对应设置，选「本地模拟图片」，保存并确认授权，然后在两个入口分别调用并看助手消息的实际图片。用同名草案核对显式确认、旧版保留和回退。
+4. 验证普通提及、附件和模型回显「帮我内置」不会创建或执行。取消编写请求，确认迟到结果不会安装。全屏回缩与顶部色带按 `27b7e8a` 的场景复查。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests 'com.douai.module.ai.*' --tests '*AiSkillSettingsDialogTest' --tests '*AiTestChatDialogTest' --tests '*NativeAiConversationTest' --tests '*IsolatedTextRequestTest' --tests '*ChatCompletionClientTest' --tests '*ConfigTransfer*Test' --tests '*ModuleSettingsActionSeparationTest' --tests '*ModuleSettingsReferenceTest.referenceSubpagesHaveExactItemOrderAndNoExtraInlineInputRows' --tests '*FeedTranslatedTopBandTest' --tests '*FeedRenderScaleHooksTest' --tests '*FeedVideoFramingTest'
+```
+
+最终专项回归 335 项通过，0 失败，0 跳过。模型和图片请求使用替身，真实模型、真机宿主和发布构建待独立验收。

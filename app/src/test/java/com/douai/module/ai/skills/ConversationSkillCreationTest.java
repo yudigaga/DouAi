@@ -2,6 +2,7 @@ package com.douai.module.ai.skills;
 
 import com.douai.module.ai.AiCredentialVault;
 
+import org.json.JSONObject;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -25,9 +26,7 @@ public final class ConversationSkillCreationTest {
 
     @Test public void explicitCreationSurvivesReopenWithExactMissingFieldsAndNoExecutableCommand() throws Exception {
         Fixture fixture = new Fixture();
-        String prompt = "帮我做一个名为「海报」的生图 Skill";
-        assertTrue(SkillStore.isExplicitCreation(prompt));
-        assertEquals("海报", fixture.store.createFromConversation(prompt).pending().name());
+        assertEquals("海报", saveImage(fixture, "海报").pending().name());
 
         SkillStore reopened = new SkillStore(fixture.directory, fixture.services);
         SkillStore.Detail detail = reopened.detail("海报");
@@ -42,25 +41,42 @@ public final class ConversationSkillCreationTest {
         assertEquals(0, fixture.transport.get());
     }
 
-    @Test public void ordinaryQuestionsQuotationsAndInstructionsFromExternalTextDoNotRequestCreation() throws Exception {
-        for (String prompt : new String[]{
-                "如何创建一个生图 Skill？", "解释怎么创建生图 Skill",
-                "我提到了创建一个生图 Skill", "「帮我做一个生图 Skill」",
-                "分析这段文字：帮我做一个生图 Skill", "帮我做一个生图 Skill 的使用说明",
-                "请转述\n帮我做一个生图 Skill", "/创建 生图 Skill"}) {
-            assertFalse(prompt, SkillStore.isExplicitCreation(prompt));
-        }
+    @Test public void authoredTextSkillUsesThePinnedInstructionAndOnlyTheSuppliedExecutor() throws Exception {
         Fixture fixture = new Fixture();
-        assertEquals("文本摘要", fixture.store.createFromConversation("创建一个文本摘要技能").installed().name());
-        var call = AiSkills.match(AiSkills.Entry.CONTACT, "/文本摘要 要点。结论。附录。", fixture.store);
-        assertEquals(new SkillResult.Text("要点。结论。"), AiSkills.executeResult(call, fixture.store));
-        assertFalse(fixture.store.detail("文本摘要").pending());
+        String instruction = "将输入改写成三条项目周报要点。";
+        var authored = SkillStore.validateAuthoredDraft(definition("周报整理", "text_model", "text", instruction));
+        assertEquals(instruction, authored.instruction());
+        assertEquals("周报整理", fixture.store.saveAuthoredDraft(authored).installed().name());
+        SkillStore reopened = new SkillStore(fixture.directory, fixture.services);
+        assertFalse(reopened.detail("周报整理").pending());
+        AtomicInteger calls = new AtomicInteger();
+        for (AiSkills.Entry entry : AiSkills.Entry.values()) {
+            var call = AiSkills.match(entry, "/周报整理 原始任务和进度", reopened);
+            assertThrows(IllegalStateException.class, () -> AiSkills.executeResult(call, reopened));
+            assertEquals(new SkillResult.Text("改写后的周报"), AiSkills.executeResult(call, reopened, (rule, input) -> {
+                assertEquals(instruction, rule);
+                assertEquals("原始任务和进度", input);
+                calls.incrementAndGet();
+                return "改写后的周报";
+            }));
+        }
+        var overlong = AiSkills.match(AiSkills.Entry.WORK, "/周报整理 " + "甲".repeat(2001), reopened);
+        assertThrows(IllegalArgumentException.class,
+                () -> AiSkills.executeResult(overlong, reopened, (rule, input) -> {
+                    throw new AssertionError("Too-long input must never reach the model");
+                }));
+        var invocation = AiSkills.match(AiSkills.Entry.WORK, "/周报整理 原始任务和进度", reopened);
+        IllegalArgumentException unsafe = assertThrows(IllegalArgumentException.class, () ->
+                AiSkills.executeResult(invocation, reopened, (rule, input) -> "Bearer fixture-pasted-result-1234"));
+        assertFalse(unsafe.getMessage().contains("fixture-pasted-result-1234"));
+        assertEquals(2, calls.get());
+        assertEquals(0, fixture.transport.get());
     }
 
     @Test public void onlyTheSelectedSkillGetsItsConfigurationAndBothEntriesRenderAnImageAfterApproval() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.store.createFromConversation("帮我做一个生图 Skill");
-        fixture.store.createFromConversation("创建一个名为「别的」的生图 Skill");
+        saveImage(fixture, "生图");
+        saveImage(fixture, "别的");
         SkillStore.Detail draft = fixture.store.detail("生图");
         var mock = fixture.store.saveConfiguration(draft.name(), draft.draftId(),
                 SkillServices.Adapter.MOCK_IMAGE, "", "", 0, "");
@@ -81,7 +97,7 @@ public final class ConversationSkillCreationTest {
 
     @Test public void partialFieldsPersistCredentialsStayOutsideSkillFilesAndApprovalIsSeparate() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.store.createFromConversation("做一个生图 Skill");
+        saveImage(fixture, "生图");
         var draft = fixture.store.detail("生图");
         var partial = fixture.store.saveConfiguration(draft.name(), draft.draftId(), SkillServices.Adapter.OPENAI_IMAGES,
                 "https://images.example.test/v1/images/generations", "image-fixture", 1, "");
@@ -116,8 +132,8 @@ public final class ConversationSkillCreationTest {
         Fixture fixture = new Fixture();
         var mock = fixture.services.find(SkillServices.MOCK_IMAGE);
         fixture.services.authorize(mock, 0);
-        assertNotNull(fixture.store.createFromConversation("创建一个生图技能").installed());
-        assertNotNull(fixture.store.createFromConversation("创建一个生图技能").pending());
+        assertNotNull(saveImage(fixture, "生图").installed());
+        assertNotNull(saveImage(fixture, "生图").pending());
         var draft = fixture.store.detail("生图");
         assertTrue(draft.canReplace());
         assertEquals(1, fixture.store.list().get(0).version());
@@ -127,17 +143,35 @@ public final class ConversationSkillCreationTest {
         assertEquals(0, fixture.transport.get());
     }
 
-    @Test public void unsupportedDescriptionRemainsHonestAndPending() throws Exception {
+    @Test public void unrecognizedOperationAndChangedPreviewDoNotWriteAnInstalledOrPendingSkill() throws Exception {
         Fixture fixture = new Fixture();
-        var pending = fixture.store.createFromConversation("帮我做一个视频剪辑 Skill").pending();
-        assertNotNull(pending);
-        assertEquals(SkillStore.FieldState.MISSING, field(fixture.store.detail(pending.name()), "operation").state());
+        assertThrows(IllegalArgumentException.class, () ->
+                SkillStore.validateAuthoredDraft(definition("剪辑", "shell", "text", null)));
+        var valid = SkillStore.validateAuthoredDraft(definition("整理", "text_model", "text", "整理文本"));
+        assertThrows(IllegalArgumentException.class, () -> fixture.store.saveAuthoredDraft(
+                new SkillStore.DraftPreview("其他", valid.description(), valid.outputType(), valid.instruction(), valid.definition())));
         assertTrue(fixture.store.list().isEmpty());
+        assertTrue(fixture.store.pending().isEmpty());
+    }
+
+    @Test public void textModelReplacementKeepsItsNewRulePendingUntilAcceptedAndRollsBack() throws Exception {
+        Fixture fixture = new Fixture();
+        var first = SkillStore.validateAuthoredDraft(definition("改写", "text_model", "text", "用简洁的中文改写"));
+        var second = SkillStore.validateAuthoredDraft(definition("改写", "text_model", "text", "用清晰的英文改写"));
+        assertNotNull(fixture.store.saveAuthoredDraft(first).installed());
+        assertNotNull(fixture.store.saveAuthoredDraft(second).pending());
+        var pending = fixture.store.detail("改写");
+        assertTrue(pending.canReplace());
+        assertEquals(first.instruction(), executeInstruction(fixture.store, "改写"));
+        fixture.store.activateReplacement(pending.name(), pending.draftId(), pending.previousVersion());
+        assertEquals(second.instruction(), executeInstruction(fixture.store, "改写"));
+        fixture.store.rollback("改写");
+        assertEquals(first.instruction(), executeInstruction(fixture.store, "改写"));
     }
 
     @Test public void staleAuthorizationCannotApproveAnEditedDraft() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.store.createFromConversation("创建一个生图技能");
+        saveImage(fixture, "生图");
         var draft = fixture.store.detail("生图");
         var first = fixture.store.saveConfiguration("生图", draft.draftId(), SkillServices.Adapter.MOCK_IMAGE, "", "", 0, "");
         var second = fixture.store.saveConfiguration("生图", first.draftId(), SkillServices.Adapter.MOCK_IMAGE, "", "", 0, "");
@@ -150,11 +184,11 @@ public final class ConversationSkillCreationTest {
 
     @Test public void replacingPrivateConfigurationKeepsThePreviousVersionUsableAfterRollback() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.store.createFromConversation("创建一个生图技能");
+        saveImage(fixture, "生图");
         var first = fixture.store.detail("生图");
         var mock = fixture.store.saveConfiguration("生图", first.draftId(), SkillServices.Adapter.MOCK_IMAGE, "", "", 0, "");
         fixture.store.authorizeConfiguration("生图", mock.draftId(), mock.service());
-        fixture.store.createFromConversation("创建一个生图技能");
+        saveImage(fixture, "生图");
         var next = fixture.store.detail("生图");
         assertEquals(mock.service(), next.service());
         var configured = fixture.store.saveConfiguration("生图", next.draftId(), SkillServices.Adapter.OPENAI_IMAGES,
@@ -172,6 +206,24 @@ public final class ConversationSkillCreationTest {
 
     private static SkillStore.Field field(SkillStore.Detail detail, String id) {
         return detail.fields().stream().filter(f -> f.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    private static String executeInstruction(SkillStore store, String name) throws Exception {
+        var invocation = AiSkills.match(AiSkills.Entry.WORK, "/" + name + " 测试", store);
+        return ((SkillResult.Text) AiSkills.executeResult(invocation, store, (instruction, ignored) -> instruction)).text();
+    }
+
+    private static SkillStore.SaveResult saveImage(Fixture fixture, String name) throws Exception {
+        return fixture.store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(definition(name, "service", "image", null)));
+    }
+
+    private static String definition(String name, String kind, String outputType, String instruction) throws Exception {
+        JSONObject execution = new JSONObject().put("kind", kind).put("outputType", outputType)
+                .put("maxInput", "text_model".equals(kind) ? 2000 : 4000);
+        if (instruction != null) execution.put("instruction", instruction);
+        return new JSONObject().put("schemaVersion", 3).put("name", name).put("description", "处理用户输入")
+                .put("documentation", "输入任务文本。").put("execution", execution)
+                .put("trial", new JSONObject().put("input", "试跑文本").put("expectedType", outputType)).toString();
     }
 
     private final class Fixture {

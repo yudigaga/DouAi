@@ -21,6 +21,7 @@ import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
@@ -261,7 +262,8 @@ public final class AiTestChatDialogTest {
 
     @Test public void explicitImageCreationConfiguresItsOwnMockAndRendersFromPersistedSkill() throws Exception {
         dialog.enableSkills(AiSkills.Entry.WORK);
-        submit("帮我做一个名为「海报」的生图 Skill");
+        sessions.get(0).skillReplies.add(imageSkillDraft());
+        submit("帮我做一个名为「海报」的生图 Skill 并内置");
         worker.runNext();
         ShadowLooper.idleMainLooper();
 
@@ -271,6 +273,7 @@ public final class AiTestChatDialogTest {
         assertTrue(pending.pending());
         assertTrue(text("ai.chat.answer").getText().toString().contains("待配置草稿"));
         assertTrue(sessions.get(0).prompts.isEmpty());
+        assertEquals(Collections.singletonList(SkillAuthoring.DESIGN_INSTRUCTION), sessions.get(0).skillInstructions);
         assertTrue(findView("ai.chat.skill.settings.海报").performClick());
         AlertDialog settings = (AlertDialog) ShadowDialog.getLatestDialog();
         View details = settings.getWindow().getDecorView();
@@ -345,24 +348,112 @@ public final class AiTestChatDialogTest {
         assertTrue(SkillStore.forContext(activity).pending().isEmpty());
     }
 
-    @Test public void explicitLocalTextSkillIsReportedEnabledAndAppearsInTheSlashMenu() {
+    @Test public void designAndRevisionStayInMemoryUntilSavedAndRunViaTheIsolatedModel() {
         dialog.enableSkills(AiSkills.Entry.WORK);
-        submit("创建一个文本摘要技能");
+        FakeSession model = sessions.get(0);
+        SkillStore skills = SkillStore.forContext(activity);
+        model.skillReplies.add(textSkillDraft("保留事实，使用分点格式。"));
+        submit("创建一个周报润色技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("草案"));
+        assertTrue(lastAnswer().contains("使用分点格式"));
+        assertFalse(lastAnswer().contains("schemaVersion"));
+        assertTrue(skills.list().isEmpty());
+        assertTrue(skills.pending().isEmpty());
+        assertTrue(model.prompts.isEmpty());
+
+        model.skillReplies.add(textSkillDraft("保留事实，使用三点格式。"));
+        submit("把指令改成三点格式");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("草案"));
+        assertTrue(lastAnswer().contains("使用三点格式"));
+        assertTrue(model.skillInputs.get(1).contains("使用分点格式"));
+        assertTrue(skills.list().isEmpty());
+
+        submit("另一条普通聊天");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList("另一条普通聊天"), model.prompts);
+
+        submit("帮我内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        SkillStore.Installed installed = skills.list().get(0);
+        assertEquals("周报润色", installed.name());
+        assertTrue(installed.enabled());
+        assertTrue(lastAnswer().contains("已启用"));
+        assertEquals(2, model.skillInputs.size());
+        input.setText("/周报");
+        assertNotNull(root.findViewWithTag("ai.chat.skill.周报润色"));
+
+        model.skillReplies.add("一、已更新进度");
+        submit("/周报润色 进度已更新");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals("一、已更新进度", lastAnswer());
+        assertEquals(SkillAuthoring.TEXT_INSTRUCTION, model.skillInstructions.get(2));
+        assertTrue(model.skillInputs.get(2).contains("使用三点格式"));
+        assertTrue(model.skillInputs.get(2).contains("进度已更新"));
+        assertFalse(model.skillInputs.get(2).contains("另一条普通聊天"));
+        assertEquals(Collections.singletonList("另一条普通聊天"), model.prompts);
+    }
+
+    @Test public void invalidRevisionReportsFailureAndLeavesTheValidatedPreviewAvailableToSave() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        FakeSession model = sessions.get(0);
+        model.skillReplies.add(textSkillDraft("保留事实，使用分点格式。"));
+        submit("创建一个周报润色技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        model.skillReplies.add("{\"unexpected\":\"provider-only-content\"}");
+        submit("把指令改成三点格式");
         worker.runNext();
         ShadowLooper.idleMainLooper();
 
-        SkillStore.Installed installed = SkillStore.forContext(activity).list().get(0);
-        assertEquals("文本摘要", installed.name());
-        assertTrue(installed.enabled());
-        assertTrue(text("ai.chat.answer").getText().toString().contains("已启用"));
-        input.setText("/文本");
-        assertNotNull(root.findViewWithTag("ai.chat.skill.文本摘要"));
+        assertTrue(lastAnswer().contains("失败"));
+        assertFalse(lastAnswer().contains("provider-only-content"));
+        assertTrue(SkillStore.forContext(activity).list().isEmpty());
+        submit("帮我内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals("周报润色", SkillStore.forContext(activity).list().get(0).name());
+    }
+
+    @Test public void credentialsInAnAuthoringRequestAreRejectedBeforeTranscriptOrModelAdmission() {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        String typed = "创建一个 sk-abcdefghijklmnopqrstuvwx 技能";
+        submit(typed);
+
+        assertEquals(typed, input.getText().toString());
+        assertEquals(0, messageCount());
+        assertTrue(sessions.get(0).skillInputs.isEmpty());
         assertTrue(sessions.get(0).prompts.isEmpty());
+    }
+
+    @Test public void clearingTheConversationDiscardsTheUnstoredAuthoringPreview() throws Exception {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        sessions.get(0).skillReplies.add(textSkillDraft("保留事实，使用分点格式。"));
+        submit("创建一个周报润色技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("草案"));
+        assertTrue(root.findViewWithTag("ai.chat.clear").performClick());
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit("帮我内置");
+        assertTrue(text("ai.chat.state").getText().toString().contains("没有可保存"));
+        assertEquals(0, messageCount());
+        assertTrue(SkillStore.forContext(activity).list().isEmpty());
+        assertTrue(sessions.get(1).skillInputs.isEmpty());
     }
 
     @Test public void stoppingBeforeLocalCreationCommitsLeavesNoDraft() {
         dialog.enableSkills(AiSkills.Entry.WORK);
-        submit("创建一个生图技能");
+        sessions.get(0).skillReplies.add(imageSkillDraft());
+        submit("帮我做一个名为「海报」的生图 Skill 并内置");
         worker.runNext();
         assertTrue(send.performClick());
         ShadowLooper.idleMainLooper();
@@ -1268,9 +1359,33 @@ public final class AiTestChatDialogTest {
 
     private ListView messages() { return root.findViewWithTag("ai.chat.messages"); }
     private int messageCount() { return messages().getAdapter().getCount(); }
+    private String lastAnswer() {
+        ListView list = messages();
+        View row = list.getAdapter().getView(list.getCount() - 1, null, list);
+        return ((TextView) row.findViewWithTag("ai.chat.answer")).getText().toString();
+    }
+
+    private static String imageSkillDraft() {
+        return """
+                {"schemaVersion":3,"name":"海报","description":"生成海报图","documentation":"使用已授权图片服务。",
+                 "execution":{"kind":"service","outputType":"image","maxInput":4000},
+                 "trial":{"input":"一只猫","expectedType":"image"}}
+                """;
+    }
+
+    private static String textSkillDraft(String instruction) {
+        return """
+                {"schemaVersion":3,"name":"周报润色","description":"修订周报","documentation":"输入待修订文本。",
+                 "execution":{"kind":"text_model","outputType":"text","maxInput":2000,"instruction":"%s"},
+                 "trial":{"input":"进度一","expectedType":"text"}}
+                """.formatted(instruction);
+    }
 
     private static final class FakeSession implements AiTestChatDialog.Session {
         final List<String> prompts = new ArrayList<>();
+        final List<String> skillInstructions = new ArrayList<>();
+        final List<String> skillInputs = new ArrayList<>();
+        final Queue<String> skillReplies = new ArrayDeque<>();
         final List<List<ChatImage>> images = new ArrayList<>();
         final List<String> documents = new ArrayList<>();
         String answer = "模型回复";
@@ -1291,6 +1406,13 @@ public final class AiTestChatDialogTest {
             prompts.add(message);
             if (failure != null) throw failure;
             return answer;
+        }
+
+        @Override public String skillModel(String system, String input) {
+            skillInstructions.add(system);
+            skillInputs.add(input);
+            if (skillReplies.isEmpty()) throw new AssertionError("Unexpected isolated skill model call");
+            return skillReplies.remove();
         }
 
         @Override public String reply(String message, List<ChatImage> attachments, String document) throws Exception {
