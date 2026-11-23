@@ -140,6 +140,7 @@ final class AiTestChatDialog extends Dialog {
     private List<AiSkills.Command> visibleCommands = Collections.emptyList();
     private AiSkills.Entry skillEntry;
     private SkillStore skillStore;
+    private AutoCloseable skillDeletionObserver;
     private SkillStore.DraftPreview skillDraft;
     private SettingsStore subAgentSettings;
     private final List<ChatImage> draftImages = new ArrayList<>();
@@ -643,14 +644,30 @@ final class AiTestChatDialog extends Dialog {
     }
 
     void enableSkills(AiSkills.Entry entry, SettingsStore settings) {
+        if (disposed) return;
+        closeSkillDeletionObserver();
         subAgentSettings = entry == AiSkills.Entry.WORK ? settings : null;
         skillEntry = entry;
         skillStore = entry == null ? null : SkillStore.forContext(getContext());
+        if (skillStore != null) {
+            SkillStore observed = skillStore;
+            skillDeletionObserver = observed.observeDeletions(() -> main.post(() -> {
+                if (!disposed && skillStore == observed) updateSkillMenu();
+            }));
+        }
         boolean enabled = false;
         try { enabled = skillStore != null && skillStore.enabled(); }
         catch (IllegalStateException unavailable) { }
         if (enabled) input.setHint("输入消息，或输入 / 选择技能");
         updateSkillMenu();
+    }
+
+    private void closeSkillDeletionObserver() {
+        AutoCloseable observer = skillDeletionObserver;
+        skillDeletionObserver = null;
+        if (observer == null) return;
+        try { observer.close(); }
+        catch (Exception ignored) { }
     }
 
     void setContactEditAction(Runnable action) {
@@ -1191,6 +1208,7 @@ final class AiTestChatDialog extends Dialog {
     private void dispose() {
         if (disposed) return;
         disposed = true;
+        closeSkillDeletionObserver();
         skillDraft = null;
         if (contactAvatar != null) contactAvatar.setImageDrawable(null);
         if (nativeViews != null && nativeViews.avatar != null) nativeViews.avatar.setImageDrawable(null);

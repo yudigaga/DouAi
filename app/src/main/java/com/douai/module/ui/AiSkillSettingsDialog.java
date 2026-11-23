@@ -161,15 +161,15 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         ChatCompletionClient.IsolatedTextRequest request = offline ? null : new ChatCompletionClient.IsolatedTextRequest();
         prepareDraft(() -> offline ? SkillStore.mockDraft(description) : request.execute(modelSettings, modelId,
                 SkillStore.GENERATION_INSTRUCTION, store.generationPrompt(description),
-                System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048), request, "正在生成并校验…", false);
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048), request, "正在生成并校验…", null);
     }
 
     private void retryPending(SkillStore.Pending pending) {
         if (!active() || busy) return;
-        prepareDraft(() -> store.pendingDefinition(pending.name()), null, "正在检查技能服务…", true);
+        prepareDraft(() -> store.pendingDefinition(pending.name()), null, "正在检查技能服务…", pending.draftId());
     }
 
-    private void prepareDraft(Callable<String> definition, ChatCompletionClient.IsolatedTextRequest request, String message, boolean reconnect) {
+    private void prepareDraft(Callable<String> definition, ChatCompletionClient.IsolatedTextRequest request, String message, String expectedDraftId) {
         generation = request;
         setGenerating(true);
         status.setText(message);
@@ -177,28 +177,29 @@ final class AiSkillSettingsDialog implements AutoCloseable {
             try {
                 String draft = definition.call();
                 SkillStore.Preview preview = store.previewGenerated(draft);
-                main.post(() -> finishGeneration(request, draft, preview, reconnect));
+                main.post(() -> finishGeneration(request, draft, preview, expectedDraftId));
             } catch (Exception failure) {
-                main.post(() -> finishGeneration(request, null, null, reconnect));
+                main.post(() -> finishGeneration(request, null, null, expectedDraftId));
             }
         });
     }
 
-    private void finishGeneration(ChatCompletionClient.IsolatedTextRequest request, String draft, SkillStore.Preview preview, boolean reconnect) {
+    private void finishGeneration(ChatCompletionClient.IsolatedTextRequest request, String draft, SkillStore.Preview preview, String expectedDraftId) {
         if (!active() || generation != request) return;
         generation = null;
         generationTask = null;
         setGenerating(false);
         if (preview == null) {
-            status.setText("生成或校验失败，已安装的技能版本保留");
+            if (expectedDraftId == null) status.setText("生成或校验失败，已安装的技能版本保留");
+            else refreshAfterChange("重试连接未完成，请核对当前草稿");
         } else if (preview.pendingReason().isEmpty() && preview.needsConfirmation()) {
-            reviewDraft(draft, preview, reconnect);
+            reviewDraft(draft, preview, expectedDraftId);
         } else {
-            save(draft, null, reconnect);
+            save(draft, null, expectedDraftId);
         }
     }
 
-    private void reviewDraft(String draft, SkillStore.Preview preview, boolean reconnect) {
+    private void reviewDraft(String draft, SkillStore.Preview preview, String expectedDraftId) {
         boolean updating = preview.previousVersion() > 0;
         String details = "技能 /" + preview.name();
         if (updating) details += "\n当前版本 v" + preview.previousVersion() + "，启用新版后可回退。";
@@ -211,17 +212,19 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         status.setText("");
         presenter.accept(builder(updating ? "确认更新技能" : "确认技能的服务权限")
                 .setMessage(details).setNegativeButton("取消", null)
-                .setPositiveButton(updating ? "启用新版" : "确认并启用", (child, which) -> save(draft, preview, reconnect))
+                .setPositiveButton(updating ? "启用新版" : "确认并启用", (child, which) -> save(draft, preview, expectedDraftId))
                 .create(), null);
     }
 
-    private void save(String draft, SkillStore.Preview confirmation, boolean reconnect) {
+    private void save(String draft, SkillStore.Preview confirmation, String expectedDraftId) {
         if (!active()) return;
         SkillStore.SaveResult result;
         try {
-            result = reconnect ? store.connectPending(draft, confirmation) : store.saveGenerated(draft, confirmation);
+            result = expectedDraftId == null ? store.saveGenerated(draft, confirmation)
+                    : store.connectPending(draft, confirmation, expectedDraftId);
         } catch (Exception failure) {
-            status.setText("技能试跑或保存失败，已安装的技能版本保留");
+            if (expectedDraftId == null) status.setText("技能试跑或保存失败，已安装的技能版本保留");
+            else refreshAfterChange("重试连接未完成，请核对当前草稿");
             return;
         }
         SkillStore.Pending pending = result.pending();

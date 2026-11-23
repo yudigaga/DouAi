@@ -51,15 +51,15 @@ final class AiSkillDetailDialog implements AutoCloseable {
         ScrollView scroll = new ScrollView(context);
         scroll.addView(body);
         dialog = builder("技能配置").setView(scroll).setNegativeButton("关闭", null).create();
-        reload("");
+        reload("", true);
     }
 
     AlertDialog dialog() { return dialog; }
 
-    private void reload(String feedback) {
+    private void reload(String feedback, boolean retryReadyDraft) {
         try {
             SkillStore.Detail detail = store.detail(name);
-            if (detail.pending() && !detail.canReplace() && detail.service() != null
+            if (retryReadyDraft && detail != null && detail.pending() && !detail.canReplace() && detail.service() != null
                     && detail.fields().stream().allMatch(field -> field.state() == SkillStore.FieldState.FILLED)
                     && !detail.fields().isEmpty()) {
                 detail = store.retryConfiguration(name, detail.draftId());
@@ -67,7 +67,9 @@ final class AiSkillDetailDialog implements AutoCloseable {
             }
             render(detail, feedback);
         }
-        catch (Exception failure) { render(null, "暂时无法读取此技能的配置"); }
+        catch (Exception failure) {
+            render(null, retryReadyDraft ? "暂时无法读取此技能的配置" : "删除未完成，暂时无法读取此技能");
+        }
     }
 
     private void render(SkillStore.Detail detail, String feedback) {
@@ -78,6 +80,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         title.setAccessibilityHeading(true);
         if (detail == null) {
             status = text(body, feedback.isEmpty() ? "此技能已不存在" : feedback, "skills.detail.status");
+            status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
             return;
         }
         String summary = detail.outputType() == SkillResult.Type.IMAGE ? "图片输出" : "文本输出";
@@ -97,6 +100,27 @@ final class AiSkillDetailDialog implements AutoCloseable {
             text(body, detail.service().label(), "skills.detail.service");
         }
         if (detail.previousVersion() > 0) installedActions(detail);
+        SkillStore.DeleteTarget deleteTarget = detail.deleteTarget();
+        if (deleteTarget != null) {
+            button(body, "删除", "skills.detail.delete", () -> reviewDelete(deleteTarget));
+        }
+    }
+
+    private void reviewDelete(SkillStore.DeleteTarget expected) {
+        String scope = expected.versionCount() == 0 ? "待连接草稿"
+                : expected.versionCount() + " 个已安装版本" + (expected.hasDraft() ? "及同名待连接草稿" : "");
+        review("删除技能", "将删除 /" + expected.name() + " 的" + scope + "。删除后无法恢复。",
+                "确认删除", () -> delete(expected));
+    }
+
+    private void delete(SkillStore.DeleteTarget expected) {
+        try { store.delete(expected); }
+        catch (Exception failure) {
+            reload("删除未完成，请核对当前版本和草稿后再试", false);
+            return;
+        }
+        render(null, "已删除 /" + expected.name());
+        if (onChanged != null) onChanged.run();
     }
 
     private void pendingActions(SkillStore.Detail detail) {

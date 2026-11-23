@@ -4,6 +4,7 @@ import android.content.Context;
 import com.douai.module.ai.mcp.McpRegistry;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 
@@ -15,11 +16,22 @@ import java.io.RandomAccessFile;
 import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -52,6 +64,8 @@ public final class SkillStore {
     private static final String NEEDS_REPLACEMENT = "离线校验通过，等待确认启用同名新版";
     private static final String TRIAL_FAILED = "离线校验失败，草稿待配置";
     private static final int LIMIT = 96 * 1024;
+    private static final String RETIRED_VERSIONS = "retiredVersions";
+    private static final Map<Path, List<DeletionObserver>> DELETION_OBSERVERS = new HashMap<>();
     private static final int DRAFT_LIMIT = 16000;
     private static final int AUTHORED_SCHEMA = 3;
     private static final int TEXT_MODEL_MAX_INPUT = 2000;
@@ -63,20 +77,22 @@ public final class SkillStore {
     public record Preview(String name, String serviceLabel, String endpoint, int costUnits,
                           boolean needsConfirmation, String serviceId, SkillResult.Type outputType,
                           String pendingReason, int previousVersion, int latestVersion) {}
-    public record Pending(String name, SkillResult.Type outputType, String reason) {}
+    public record Pending(String name, SkillResult.Type outputType, String reason, String draftId) {}
     public record SaveResult(Installed installed, Pending pending) {}
     public record DraftPreview(String name, String description, SkillResult.Type outputType,
                                String instruction, String definition) {}
     public enum FieldState { FILLED, MISSING, NEEDS_AUTHORIZATION }
     public record Field(String id, String label, boolean required, FieldState state) {}
+    public record DeleteTarget(String name, int versionCount, boolean hasDraft, String proof) {}
     public record Detail(String name, SkillResult.Type outputType, String draftId, String reason,
                          List<Field> fields, SkillServices.Service service, boolean canAuthorize,
-                         boolean canReplace, int previousVersion, boolean installedEnabled, boolean canRollback) {
+                         boolean canReplace, int previousVersion, boolean installedEnabled, boolean canRollback,
+                         DeleteTarget deleteTarget) {
         public boolean pending() { return !draftId.isEmpty(); }
     }
     private enum SaveMode { GENERATE, RECONNECT, CONVERSATION }
     private record Configuration(List<Field> fields, boolean canAuthorize) {}
-    record Available(AiSkills.Command command, int version) {}
+    record Available(AiSkills.Command command, int version, String revisionId) {}
     private record Draft(String name, String description, String documentation, String kind,
                          int maxInput, SkillResult.Type outputType, String serviceId, String trialInput,
                          String expected, String instruction, int schemaVersion) {
@@ -88,9 +104,34 @@ public final class SkillStore {
                               SkillServices.Service service, String instruction) {}
     private interface StateAction<T> { T run(JSONObject state) throws Exception; }
     private final File directory;
+    private final Path directoryKey;
     private final File catalog;
     private final SkillServices services;
     private final McpRegistry mcp;
+    private boolean cleanupChecked;
+
+    private static final class DeletionObserver implements AutoCloseable {
+        private final Path directory;
+        private final Runnable callback;
+        private volatile boolean closed;
+
+        DeletionObserver(Path directory, Runnable callback) {
+            this.directory = directory;
+            this.callback = callback;
+        }
+
+        @Override public void close() {
+            synchronized (DELETION_OBSERVERS) {
+                if (closed) return;
+                closed = true;
+                List<DeletionObserver> observers = DELETION_OBSERVERS.get(directory);
+                if (observers != null) {
+                    observers.remove(this);
+                    if (observers.isEmpty()) DELETION_OBSERVERS.remove(directory);
+                }
+            }
+        }
+    }
 
     public static SkillStore forContext(Context context) {
         Context app = context.getApplicationContext();
@@ -105,6 +146,7 @@ public final class SkillStore {
 
     private SkillStore(File directory, SkillServices services, McpRegistry mcp) {
         this.directory = directory;
+        this.directoryKey = canonical(directory);
         this.catalog = new File(directory, "catalog.json");
         this.services = services;
         this.mcp = mcp;
@@ -143,7 +185,7 @@ public final class SkillStore {
                 if (!skill.getBoolean("enabled")) continue;
                 JSONObject revision = activeRevision(skill);
                 entries.add(new Available(new AiSkills.Command(name, revision.getString("description"), resultType(revision)),
-                        revision.getInt("version")));
+                        revision.getInt("version"), revision.getString("directory")));
             }
             return entries;
         });
@@ -162,6 +204,68 @@ public final class SkillStore {
             writeState(state);
             return installed(name, skill);
         });
+    }
+
+    public AutoCloseable observeDeletions(Runnable listener) {
+        DeletionObserver observer = new DeletionObserver(directoryKey, Objects.requireNonNull(listener));
+        synchronized (DELETION_OBSERVERS) {
+            DELETION_OBSERVERS.computeIfAbsent(directoryKey, ignored -> new ArrayList<>()).add(observer);
+        }
+        return observer;
+    }
+
+    private void notifyDeletions() {
+        List<DeletionObserver> observers;
+        synchronized (DELETION_OBSERVERS) {
+            List<DeletionObserver> registered = DELETION_OBSERVERS.get(directoryKey);
+            if (registered == null) return;
+            observers = new ArrayList<>(registered);
+        }
+        for (DeletionObserver observer : observers) {
+            if (observer.closed) continue;
+            try { observer.callback.run(); }
+            catch (RuntimeException | LinkageError ignored) { }
+        }
+    }
+
+    public void delete(DeleteTarget expected) throws Exception {
+        if (expected == null || expected.name() == null || !NAME.matcher(expected.name()).matches()
+                || AiSkills.isBuiltIn(expected.name()) || expected.name().startsWith("mcp-")) {
+            throw new IllegalArgumentException("只能删除自定义技能");
+        }
+        locked(state -> {
+            JSONObject skills = state.getJSONObject("skills");
+            JSONObject drafts = state.getJSONObject("drafts");
+            JSONObject installed = skills.optJSONObject(expected.name());
+            JSONObject draft = drafts.optJSONObject(expected.name());
+            if (!expected.equals(deleteTarget(expected.name(), installed, draft))) {
+                throw new IllegalStateException("技能或待配置草稿已变化，请重新确认删除");
+            }
+
+            if (installed != null) {
+                Set<String> retired = retiredVersions(state);
+                collectRevisionIds(installed, retired);
+                state.put(RETIRED_VERSIONS, new JSONArray(retired));
+            }
+            skills.remove(expected.name());
+            drafts.remove(expected.name());
+            writeState(state);
+            cleanupRetiredVersions(state);
+            return null;
+        });
+        notifyDeletions();
+    }
+
+    private static DeleteTarget deleteTarget(String name, JSONObject installed, JSONObject draft) throws Exception {
+        if (installed == null && draft == null) return null;
+        int versions = installed == null ? 0 : installed.getJSONArray("versions").length();
+        JSONArray records = new JSONArray().put(name)
+                .put(installed == null ? JSONObject.NULL : installed)
+                .put(draft == null ? JSONObject.NULL : draft);
+        byte[] digest = MessageDigest.getInstance("SHA-256")
+                .digest(records.toString().getBytes(StandardCharsets.UTF_8));
+        return new DeleteTarget(name, versions, draft != null,
+                Base64.getUrlEncoder().withoutPadding().encodeToString(digest));
     }
 
     public String generationPrompt(String requirements) throws Exception {
@@ -226,7 +330,7 @@ public final class SkillStore {
             for (Iterator<String> names = drafts.keys(); names.hasNext();) {
                 String name = names.next();
                 JSONObject draft = drafts.getJSONObject(name);
-                entries.add(new Pending(name, resultType(draft), draft.getString("reason")));
+                entries.add(new Pending(name, resultType(draft), draft.getString("reason"), draftIdentity(name, draft)));
             }
             return entries;
         });
@@ -327,11 +431,12 @@ public final class SkillStore {
         int version = current == null ? 0 : current.version();
         boolean enabled = current != null && current.enabled();
         boolean rollback = current != null && current.canRollback();
+        DeleteTarget deletion = deleteTarget(name, installed, entry);
         if (entry == null) {
             if (current == null) throw new IllegalStateException("技能不存在");
             Executable execution = readExecution(revisionDirectory(activeRevision(installed)));
             return new Detail(name, current.outputType(), "", enabled ? "已启用" : "已停用", Collections.emptyList(),
-                    execution.service(), false, false, version, enabled, rollback);
+                    execution.service(), false, false, version, enabled, rollback, deletion);
         }
         Draft draft = parse(entry.getString("definition"));
         SkillServices.Service explicit = configured(entry, name);
@@ -341,7 +446,7 @@ public final class SkillStore {
         boolean replace = version > 0 && NEEDS_REPLACEMENT.equals(reason)
                 && (!"service".equals(draft.kind()) || target != null && authorized(target));
         return new Detail(name, draft.outputType(), draftIdentity(name, entry), reason, status.fields(), target,
-                explicit != null && status.canAuthorize(), replace, version, enabled, rollback);
+                explicit != null && status.canAuthorize(), replace, version, enabled, rollback, deletion);
     }
 
     private Configuration configuration(Draft draft, SkillServices.Service service) throws Exception {
@@ -430,18 +535,29 @@ public final class SkillStore {
         return saveGenerated(json, confirmation, SaveMode.RECONNECT);
     }
 
+    public SaveResult connectPending(String json, Preview confirmation, String expectedDraftId) throws Exception {
+        if (expectedDraftId == null || expectedDraftId.isEmpty()) throw new IllegalArgumentException("草稿标识无效");
+        return saveGenerated(parse(json), json, confirmation, SaveMode.RECONNECT, expectedDraftId);
+    }
+
     private SaveResult saveGenerated(String json, Preview confirmation, SaveMode mode) throws Exception {
         return saveGenerated(parse(json), json, confirmation, mode);
     }
 
     private SaveResult saveGenerated(Draft draft, String json, Preview confirmation, SaveMode mode) throws Exception {
+        return saveGenerated(draft, json, confirmation, mode, null);
+    }
+
+    private SaveResult saveGenerated(Draft draft, String json, Preview confirmation, SaveMode mode,
+                                     String expectedDraftId) throws Exception {
         return locked(state -> {
             if (mode == SaveMode.CONVERSATION && !state.getBoolean("enabled")) {
                 throw new IllegalStateException("Skills 已停用");
             }
             if (mode == SaveMode.RECONNECT) {
                 JSONObject currentDraft = state.getJSONObject("drafts").optJSONObject(draft.name());
-                if (currentDraft == null || !json.equals(currentDraft.getString("definition"))) {
+                if (currentDraft == null || !json.equals(currentDraft.getString("definition"))
+                        || (expectedDraftId != null && !expectedDraftId.equals(draftIdentity(draft.name(), currentDraft)))) {
                     throw new IllegalStateException("待连接草稿已变化，请重新打开");
                 }
             }
@@ -480,20 +596,21 @@ public final class SkillStore {
         }
         entry.put("outputType", draft.outputType().wireName()).put("reason", reason);
         writeState(state);
-        return new SaveResult(null, new Pending(draft.name(), draft.outputType(), reason));
+        return new SaveResult(null, new Pending(draft.name(), draft.outputType(), reason,
+                draftIdentity(draft.name(), entry)));
     }
 
     private SkillServices.Service configuredDraft(JSONObject state, Draft draft, String json) throws Exception {
         JSONObject old = state.getJSONObject("drafts").optJSONObject(draft.name());
         return old != null && json.equals(old.optString("definition")) ? configured(old, draft.name()) : null;
     }
-    SkillResult executeResult(String name, int version, String argument, SkillResult.Type expectedType,
+    SkillResult executeResult(String name, int version, String revisionId, String argument, SkillResult.Type expectedType,
                               AiSkills.TextExecutor textExecutor) throws Exception {
         Executable definition = locked(state -> {
             JSONObject skill = skill(state, name);
             JSONObject revision = activeRevision(skill);
             if (!state.getBoolean("enabled") || !skill.getBoolean("enabled")
-                    || revision.getInt("version") != version) {
+                    || revision.getInt("version") != version || !revision.getString("directory").equals(revisionId)) {
                 throw new IllegalStateException("技能版本已变更或停用");
             }
             return readExecution(revisionDirectory(revision));
@@ -768,10 +885,90 @@ public final class SkillStore {
                 skill.getInt("active") > 0, resultType(revision), revision.optString("serviceLabel", ""));
     }
 
-    private File revisionDirectory(JSONObject version) throws Exception {
+    private static String revisionId(JSONObject version) throws IOException, JSONException {
         String id = version.getString("directory");
         if (!REVISION.matcher(id).matches()) throw new IOException("技能版本标识无效");
-        return new File(new File(directory, "versions"), id);
+        return id;
+    }
+
+    private File revisionDirectory(JSONObject version) throws Exception {
+        return new File(new File(directory, "versions"), revisionId(version));
+    }
+
+    private static void collectRevisionIds(JSONObject installed, Set<String> ids) throws IOException, JSONException {
+        JSONArray revisions = installed.getJSONArray("versions");
+        for (int i = 0; i < revisions.length(); i++) ids.add(revisionId(revisions.getJSONObject(i)));
+    }
+
+    private static Set<String> retiredVersions(JSONObject state) {
+        Set<String> ids = new LinkedHashSet<>();
+        JSONArray versions = state.optJSONArray(RETIRED_VERSIONS);
+        if (versions != null) {
+            for (int i = 0; i < versions.length(); i++) {
+                Object id = versions.opt(i);
+                if (id instanceof String value && REVISION.matcher(value).matches()) ids.add(value);
+            }
+        }
+        return ids;
+    }
+
+    private void cleanupRetiredVersions(JSONObject state) {
+        JSONArray journal = state.optJSONArray(RETIRED_VERSIONS);
+        if (journal == null) return;
+        try {
+            Set<String> live = new LinkedHashSet<>();
+            JSONObject skills = state.getJSONObject("skills");
+            for (Iterator<String> names = skills.keys(); names.hasNext();) {
+                collectRevisionIds(skills.getJSONObject(names.next()), live);
+            }
+            JSONArray pending = new JSONArray();
+            for (String id : retiredVersions(state)) {
+                if (!live.contains(id) && !removeRevisionDocuments(id)) pending.put(id);
+            }
+            if (pending.length() == journal.length()) return;
+            if (pending.length() == 0) state.remove(RETIRED_VERSIONS);
+            else state.put(RETIRED_VERSIONS, pending);
+            writeState(state);
+        } catch (IOException | JSONException | RuntimeException ignored) {
+            // The committed catalog still has the cleanup journal. A later open can retry it.
+        }
+    }
+
+    private boolean removeRevisionDocuments(String id) {
+        try {
+            Path versions = directoryKey.resolve("versions");
+            Path slot = versions.resolve(id);
+            if (!Files.readAttributes(versions, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isDirectory()
+                    || !versions.equals(versions.toRealPath())) return false;
+            if (!Files.readAttributes(slot, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isDirectory()
+                    || !slot.equals(slot.toRealPath())) return false;
+            boolean documentation = removeRevisionDocument(slot.resolve("SKILL.md"));
+            boolean execution = removeRevisionDocument(slot.resolve("execution.json"));
+            if (!documentation || !execution) return false;
+            Files.deleteIfExists(slot);
+            return true;
+        } catch (NoSuchFileException removed) {
+            return true;
+        } catch (IOException | RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    private static boolean removeRevisionDocument(Path path) throws IOException {
+        try {
+            if (!Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isRegularFile()) {
+                return false;
+            }
+            Files.deleteIfExists(path);
+            return true;
+        } catch (NoSuchFileException removed) {
+            return true;
+        }
+    }
+
+    private static Path canonical(File directory) {
+        try { return directory.getCanonicalFile().toPath(); }
+        catch (IOException unavailable) { return directory.toPath().toAbsolutePath().normalize(); }
     }
 
     private static Executable readExecution(File revision) throws Exception {
@@ -826,6 +1023,10 @@ public final class SkillStore {
                     if (state.getInt("schemaVersion") != 1) throw new IOException("技能目录版本不兼容");
                 }
                 if (!state.has("drafts")) state.put("drafts", new JSONObject());
+                if (!cleanupChecked) {
+                    cleanupChecked = true;
+                    cleanupRetiredVersions(state);
+                }
                 return action.run(state);
             }
         }

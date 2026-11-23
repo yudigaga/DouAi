@@ -14,6 +14,7 @@ import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.HostSettingsStore;
 
+import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -21,6 +22,7 @@ import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.LooperMode;
 import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
 
@@ -154,6 +156,118 @@ public final class AiSkillSettingsDialogTest {
         enterAndGenerate("提取摘要", "skills.generate.mock");
         confirm((AlertDialog) ShadowDialog.getLatestDialog());
         assertEquals(2, store.list().get(0).version());
+    }
+
+    @Test public void cancellingThenConfirmingDeleteCoversOnlyTheNamedVersionsAndDraft() throws Exception {
+        enterAndGenerate("提取摘要", "skills.generate.mock");
+        String name = store.list().get(0).name();
+        enterAndGenerate("提取摘要", "skills.generate.mock");
+        confirm((AlertDialog) ShadowDialog.getLatestDialog());
+        String image = SkillStore.mockDraft("生图");
+        assertNotNull(store.saveGenerated(new JSONObject(image).put("name", name).toString(), null).pending());
+        assertNotNull(store.saveGenerated(new JSONObject(image).put("name", "另一技能").toString(), null).pending());
+
+        AlertDialog detail = skillDetail("skills.installed." + name);
+        AlertDialog review = requestDeletion(detail);
+        String description = message(review);
+        assertTrue(description.contains("/" + name));
+        assertTrue(description.contains("2 个已安装版本"));
+        assertTrue(description.contains("同名待连接草稿"));
+        assertTrue(review.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertEquals(2, store.list().get(0).version());
+        assertEquals(2, store.pending().size());
+
+        confirm(requestDeletion(detail));
+        assertTrue(store.list().isEmpty());
+        assertEquals(1, store.pending().size());
+        assertEquals("另一技能", store.pending().get(0).name());
+        assertNull(manager.dialog().getWindow().getDecorView().findViewWithTag("skills.installed." + name));
+        assertTrue(detailStatus(detail).contains("已删除 /" + name));
+        assertNull(detail.getWindow().getDecorView().findViewWithTag("skills.detail.delete"));
+        detail.dismiss();
+    }
+
+    @Test public void thePendingDraftCanBeDeletedWithoutAnInstalledVersion() {
+        enterAndGenerate("生图", "skills.generate.mock");
+        String name = store.pending().get(0).name();
+        String tag = "skills.pending." + name + ".configure";
+        AlertDialog detail = skillDetail(tag);
+        AlertDialog review = requestDeletion(detail);
+        assertTrue(message(review).contains("/" + name));
+        assertTrue(message(review).contains("待连接草稿"));
+        assertFalse(message(review).contains("已安装版本"));
+        confirm(review);
+
+        assertTrue(store.pending().isEmpty());
+        assertNull(manager.dialog().getWindow().getDecorView().findViewWithTag(tag));
+        assertTrue(detailStatus(detail).contains("已删除 /" + name));
+        detail.dismiss();
+    }
+
+    @Test public void staleDeleteConfirmationReloadsTheNewCurrentVersionWithoutDeletingIt() throws Exception {
+        enterAndGenerate("提取摘要", "skills.generate.mock");
+        String name = store.list().get(0).name();
+        AlertDialog detail = skillDetail("skills.installed." + name);
+        AlertDialog review = requestDeletion(detail);
+        assertTrue(message(review).contains("1 个已安装版本"));
+
+        String next = SkillStore.mockDraft("提取摘要");
+        assertEquals(2, store.saveGenerated(next, store.previewGenerated(next)).installed().version());
+        confirm(review);
+
+        assertEquals(2, store.list().get(0).version());
+        assertTrue(detailStatus(detail).contains("删除未完成"));
+        assertTrue(message(requestDeletion(detail)).contains("2 个已安装版本"));
+        detail.dismiss();
+    }
+
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    public void queuedRetryCannotActivateAnIdenticalDraftRecreatedAfterDeletion() throws Exception {
+        enterAndGenerate("生图", "skills.generate.mock");
+        SkillStore.Pending original = store.pending().get(0);
+        String name = original.name();
+        String definition = store.pendingDefinition(name);
+        SkillServices.Service mock = services.find(SkillServices.MOCK_IMAGE);
+        services.authorize(mock, 0);
+        assertTrue(view("skills.pending." + name + ".retry").performClick());
+        assertTrue(store.list().isEmpty());
+
+        store.delete(store.detail(name).deleteTarget());
+        services.revoke(mock);
+        SkillStore.Pending recreated = store.saveGenerated(definition, null).pending();
+        assertNotNull(recreated);
+        assertNotEquals(original.draftId(), recreated.draftId());
+        services.authorize(mock, 0);
+        ShadowLooper.idleMainLooper();
+
+        assertTrue(store.list().isEmpty());
+        assertEquals(recreated.draftId(), store.pending().get(0).draftId());
+        assertTrue(((TextView) view("skills.status")).getText().toString().contains("重试连接未完成"));
+    }
+
+    private AlertDialog skillDetail(String rowTag) {
+        assertTrue(view(rowTag).performClick());
+        return (AlertDialog) ShadowDialog.getLatestDialog();
+    }
+
+    private static AlertDialog requestDeletion(AlertDialog detail) {
+        View remove = detail.getWindow().getDecorView().findViewWithTag("skills.detail.delete");
+        assertNotNull(remove);
+        assertTrue(remove.performClick());
+        return (AlertDialog) ShadowDialog.getLatestDialog();
+    }
+
+    private static String message(AlertDialog dialog) {
+        TextView message = dialog.findViewById(android.R.id.message);
+        assertNotNull(message);
+        return message.getText().toString();
+    }
+
+    private static String detailStatus(AlertDialog detail) {
+        TextView status = detail.getWindow().getDecorView().findViewWithTag("skills.detail.status");
+        assertNotNull(status);
+        return status.getText().toString();
     }
 
     private void enterAndGenerate(String requirements, String tag) {

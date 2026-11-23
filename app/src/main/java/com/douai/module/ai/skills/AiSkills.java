@@ -31,9 +31,11 @@ public final class AiSkills {
     }
 
     public record Invocation(Command command, String argument, int version,
-                             McpRegistry.Binding mcpBinding, boolean delegated) {
+                             McpRegistry.Binding mcpBinding, boolean delegated, String revisionId) {
+        public Invocation(Command command, String argument, int version, McpRegistry.Binding mcpBinding, boolean delegated) {
+            this(command, argument, version, mcpBinding, delegated, "");
+        }
         Invocation(Command command, String argument) { this(command, argument, 0, null, false); }
-        Invocation(Command command, String argument, int version) { this(command, argument, version, null, false); }
         public boolean localBuiltIn() { return version == 0 && mcpBinding == null && !delegated; }
     }
 
@@ -130,7 +132,7 @@ public final class AiSkills {
         if (store != null) {
             for (SkillStore.Available skill : store.available()) {
                 if (skill.command().name().equals(matcher.group(1))) {
-                    return new Invocation(skill.command(), argument, skill.version());
+                    return new Invocation(skill.command(), argument, skill.version(), null, false, skill.revisionId());
                 }
             }
             String unavailableReason = store.unavailableReason(matcher.group(1));
@@ -183,7 +185,7 @@ public final class AiSkills {
         }
         if (call.localBuiltIn()) return new SkillResult.Text(execute(call));
         if (store == null) throw new IllegalStateException("技能不可用");
-        return store.executeResult(call.command().name(), call.version(), call.argument(),
+        return store.executeResult(call.command().name(), call.version(), call.revisionId(), call.argument(),
                 call.command().outputType(), textExecutor);
     }
 

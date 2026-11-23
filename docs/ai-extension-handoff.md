@@ -143,3 +143,25 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 最终专项回归 335 项通过，0 失败，0 跳过。模型和图片请求使用替身，真实模型、真机宿主和发布构建待独立验收。
+
+## 自定义 Skill 删除 · 基于 `03e16d1`
+
+在「扩展功能 → AI Skills」点开单条 Skill，再选择「删除」。确认框显示准确命令、版本数及是否一并删除同名待配置草稿。纯草稿可单独删除。取消会保留当前记录。
+
+- `SkillStore.java` 在锁内核对确认时所见的完整记录，并原子移除该名称的已安装记录、版本索引和待配置草稿。提交后清理已移除版本的本地文档，遇到文件系统阻碍时保留清理记录供重开后重试。
+- `AiSkills.java` 绑定排队调用到原版本目录。就算删除后重新创建同名 v1，旧调用也无法进入新版本。
+- `AiSkillDetailDialog.java` 提供删除确认，成功刷新设置。过期确认只重新读取当前记录。`AiSkillSettingsDialog.java` 的连接重试也核对原草稿身份。
+- `AiTestChatDialog.java` 让同一技能库的已打开菜单响应删除。内置命令和其他 Skill 继续由各自记录管理。既有服务登记、授权和本机凭据仍可通过原有设置使用。
+
+### 独立验收清单
+
+1. 创建一个带旧版本的自定义 Skill，再保存同名待配置草稿。点「删除」核对名称、版本数和同名草稿，先取消，确认两个条目都还在。
+2. 再次确认删除，检查设置列表、AI 联系人和工作 AI 的斜杠菜单。重开后仍不应出现已删命令。复测纯草稿删除及另一个使用相同授权服务的 Skill。
+3. 自动化回归包含陈旧确认、删除后重建同名同版本、排队连接重试和版本文件清理重试。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests '*SkillDeletionTest' --tests '*AiSkillSettingsDialogTest' --tests '*AiTestChatDialogTest'
+```
+
+本轮专项及相邻回归 347 项通过，0 失败，0 跳过。真机与签名包待独立验收。

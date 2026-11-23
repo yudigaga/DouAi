@@ -144,6 +144,57 @@ public final class AiTestChatDialogTest {
         assertTrue(sessions.get(0).prompts.isEmpty());
     }
 
+    @Test public void committedDeletionRefreshesBothOpenMenusAndTheOldCommandCannotUseItsExecutor() throws Exception {
+        SkillStore store = SkillStore.forContext(activity);
+        store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(textSkillDraft("保留事实，使用分点格式。")));
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        FakeSession contactSession = new FakeSession();
+        ManualExecutor contactWorker = new ManualExecutor();
+        ManualExecutor contactHistory = new ManualExecutor();
+        AiModelConfig config = AiModelConfig.fromJson(new JSONObject()
+                .put("id", "delete-skill-contact").put("name", "联系人")
+                .put("apiEndpoint", "https://example.test/v1").put("modelName", "test-model"));
+        AiTestChatDialog contact = new AiTestChatDialog(activity, config, () -> contactSession,
+                contactWorker, contactHistory, false, ChatImageLoader::thumbnail, true);
+        try {
+            contact.enableSkills(AiSkills.Entry.CONTACT);
+            contact.show();
+            contactHistory.runAllOnThread();
+            ShadowLooper.idleMainLooper();
+            View contactRoot = contact.getWindow().getDecorView().findViewWithTag("ai.chat");
+            EditText contactInput = contactRoot.findViewWithTag("ai.chat.input");
+            input.setText("/");
+            contactInput.setText("/");
+            String rowTag = "ai.chat.skill.周报润色";
+            assertEquals(View.VISIBLE, root.findViewWithTag("ai.chat.skills").getVisibility());
+            assertEquals(View.VISIBLE, contactRoot.findViewWithTag("ai.chat.skills").getVisibility());
+            assertNotNull(root.findViewWithTag(rowTag));
+            assertNotNull(contactRoot.findViewWithTag(rowTag));
+
+            store.delete(store.detail("周报润色").deleteTarget());
+            ShadowLooper.idleMainLooper();
+
+            assertNull(root.findViewWithTag(rowTag));
+            assertNull(contactRoot.findViewWithTag(rowTag));
+            assertEquals("/", input.getText().toString());
+            assertEquals("/", contactInput.getText().toString());
+            assertNotNull(root.findViewWithTag("ai.chat.skill.摘要"));
+            assertNotNull(contactRoot.findViewWithTag("ai.chat.skill.摘要"));
+
+            submit("/周报润色 进度已更新");
+            contactInput.setText("/周报润色 进度已更新");
+            assertTrue(contactRoot.findViewWithTag("ai.chat.send").performClick());
+            worker.runNext();
+            contactWorker.runNext();
+            ShadowLooper.idleMainLooper();
+            assertTrue(sessions.get(0).skillInputs.isEmpty());
+            assertTrue(contactSession.skillInputs.isEmpty());
+        } finally {
+            contact.dismiss();
+            contactHistory.shutdownNow();
+        }
+    }
+
     @Test public void skillsDisabledPreservesSlashTextInTheOrdinaryChatSession() {
         submit("/摘要 普通消息");
         worker.runNext();
