@@ -9,6 +9,7 @@ import android.graphics.Shader;
 
 import com.douai.module.ai.AiCredentialVault;
 import com.douai.module.ai.AiExtensionHttp;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.feature.ChatImage;
 import com.douai.module.feature.ChatImageLoader;
 
@@ -238,18 +239,27 @@ public final class SkillServices {
 
     List<String> discoverImageModels(String name, Service saved, String generationEndpoint, String modelsEndpoint,
                                     String typedBearer) throws IOException {
+        DouAiLog.Operation trace = DouAiLog.current();
+        if (trace != null) trace.stage("catalogue_target", value(modelsEndpoint).trim().isEmpty()
+                ? "address_mode=derived" : "address_mode=explicit");
         String endpoint = value(generationEndpoint).trim();
         String resolved = SkillImageModelCatalog.resolveEndpoint(endpoint, modelsEndpoint);
+        if (trace != null) trace.stage("credential_input", "");
         String token = normalizeScopedBearer(typedBearer);
+        String source = "typed";
         if (token.isEmpty()) {
-            if (saved == null || saved.adapter() != Adapter.OPENAI_IMAGES || !name.equals(saved.skillName())
-                    || !endpoint.equals(saved.endpoint())) {
+            source = "saved_scoped";
+            boolean exact = saved != null && saved.adapter() == Adapter.OPENAI_IMAGES && name.equals(saved.skillName())
+                    && endpoint.equals(saved.endpoint());
+            if (trace != null) trace.stage("credential_scope", exact ? "binding=exact" : "binding=missing_or_mismatch");
+            if (!exact) {
                 throw problem(Code.CREDENTIAL_REQUIRED, "请输入此图片服务的 API 密钥");
             }
             synchronized (REGISTRY_LOCK) {
                 token = decrypt(requireMatching(read(), saved));
             }
         }
+        if (trace != null) trace.stage("credential_ready", token.isEmpty() ? "source=missing" : "source=" + source);
         if (token.isEmpty()) throw problem(Code.CREDENTIAL_REQUIRED, "请输入此图片服务的 API 密钥");
         if (AiCredentialVault.imageEndpointContainsCredential(endpoint, token)
                 || AiCredentialVault.imageEndpointContainsCredential(resolved, token)) {
@@ -663,6 +673,12 @@ public final class SkillServices {
         String token = input.substring(prefixed ? prefix.end() : first, last);
         if (!token.isEmpty() && !AiCredentialVault.validImageBearer(token)) throw invalidImageKey();
         return token;
+    }
+
+    static boolean hasScopedBearerInput(String value) {
+        if (value == null) return false;
+        for (int i = 0; i < value.length(); i++) if (!clipboardSpace(value.charAt(i))) return true;
+        return false;
     }
 
     private static Failure invalidImageKey() {

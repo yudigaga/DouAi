@@ -64,6 +64,52 @@ public final class SkillImageDiscoveryTest {
         assertTrue(reopened.list().isEmpty());
     }
 
+    @Test public void visibleLateScopedBindingCanSupplyItsKeyWithoutChangingTheDraft() throws Exception {
+        Fixture fixture = new Fixture();
+        var pending = fixture.pending();
+        var foreign = fixture.services.configureForSkill("", "别的技能", SkillServices.Adapter.OPENAI_IMAGES,
+                IMAGE, MODELS, "image-fixture", 0, "fixture-foreign-image-key");
+        fixture.services.authorize(foreign, 0);
+        assertThrows(SkillServices.Failure.class, () ->
+                fixture.store.discoverImageModels(NAME, pending.draftId(), IMAGE, MODELS, ""));
+        assertTrue(fixture.targets.isEmpty());
+
+        var owned = fixture.services.configureForSkill("", NAME, SkillServices.Adapter.OPENAI_IMAGES,
+                IMAGE, MODELS, "image-fixture", 0, KEY);
+        fixture.services.authorize(owned, 0);
+        SkillStore reopened = new SkillStore(fixture.directory, fixture.services);
+        assertEquals(owned, reopened.detail(NAME).service());
+        assertThrows(SkillServices.Failure.class, () ->
+                reopened.discoverImageModels(NAME, pending.draftId(), IMAGE + "-other", MODELS, ""));
+
+        assertEquals(List.of("image-fixture"),
+                reopened.discoverImageModels(NAME, pending.draftId(), IMAGE, MODELS, ""));
+        assertEquals(List.of(MODELS), fixture.targets);
+        assertEquals(List.of("Bearer " + KEY), fixture.authorizations);
+        assertEquals(pending.draftId(), reopened.detail(NAME).draftId());
+        assertTrue(reopened.list().isEmpty());
+    }
+
+    @Test public void retainedLegacyBaseLooksUpSiblingCatalogueWithoutChangingItsGenerationGrant() throws Exception {
+        Fixture fixture = new Fixture();
+        String base = "https://images.example.test/proxy/v1";
+        var legacy = fixture.services.configureForSkill("", NAME, SkillServices.Adapter.OPENAI_IMAGES,
+                base, "image-fixture", 0, KEY);
+        fixture.services.authorize(legacy, 0);
+        fixture.store.installGenerated(SkillStore.mockDraft("创建名为「" + NAME + "」的生图 Skill"));
+        SkillStore.EditTarget editor = fixture.store.editTarget(fixture.store.detail(NAME).deleteTarget());
+        var draft = fixture.store.saveEdit(editor, "新的说明", "请输入绘图要求。", "");
+        SkillStore reopened = new SkillStore(fixture.directory, fixture.services);
+
+        assertEquals(List.of("image-fixture"), reopened.discoverImageModels(NAME, draft.draftId(), base, "", ""));
+        assertEquals(List.of(base + "/models"), fixture.targets);
+        assertEquals(List.of("Bearer " + KEY), fixture.authorizations);
+        assertEquals(legacy, fixture.services.scoped(legacy.id(), NAME));
+        assertTrue(fixture.services.isAuthorized(legacy));
+        assertEquals(1, reopened.list().get(0).version());
+        assertEquals(draft.draftId(), reopened.detail(NAME).draftId());
+    }
+
     @Test public void privateListOverrideMetadataDoesNotChangeExistingGenerationGrant() throws Exception {
         Fixture fixture = new Fixture();
         SkillServices.Service original = fixture.services.configureForSkill("", NAME, SkillServices.Adapter.OPENAI_IMAGES,

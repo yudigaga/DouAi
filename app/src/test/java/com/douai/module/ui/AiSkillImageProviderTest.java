@@ -20,6 +20,8 @@ import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.HostSettingsStore;
+import com.douai.module.diagnostics.DebugLog;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.feature.ChatCompletionClient;
 import com.douai.module.ui.miuix.MiuixFormControls;
 
@@ -42,6 +44,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -131,7 +135,7 @@ public final class AiSkillImageProviderTest {
             imageWorker.runNext();
             ShadowLooper.idleMainLooper();
 
-            assertEquals("生图配置页反馈：" + fixture.status(), MODELS_ENDPOINT, imageLookup.get());
+            assertEquals("生图配置页反馈：" + fixture.modelStatus(), MODELS_ENDPOINT, imageLookup.get());
             assertEquals(ENDPOINT, imageGeneration.get());
             AlertDialog imageChoices = (AlertDialog) ShadowDialog.getLatestDialog();
             assertEquals(MODEL, imageChoices.getListView().getItemAtPosition(0));
@@ -346,17 +350,110 @@ public final class AiSkillImageProviderTest {
             Dialog last = ShadowDialog.getLatestDialog();
             click(fixture.dialog, "skills.detail.fetch_models");
             executor.runNext();
-            EditText model = (EditText) view(fixture.dialog, "skills.detail.model");
-            model.setText("手动模型");
+            EditText endpoint = (EditText) view(fixture.dialog, "skills.detail.endpoint");
+            endpoint.setText(BASE_ENDPOINT + "/provider2");
             ShadowLooper.idleMainLooper();
             assertSame(last, ShadowDialog.getLatestDialog());
-            assertEquals("手动模型", model.getText().toString());
+            assertEquals(BASE_ENDPOINT + "/provider2", endpoint.getText().toString());
             click(fixture.dialog, "skills.detail.fetch_models");
             executor.runNext();
             fixture.page.close();
             fixture.dialog.dismiss();
             ShadowLooper.idleMainLooper();
             assertSame(last, ShadowDialog.getLatestDialog());
+        }
+    }
+
+    @Test public void changingCostAndManualModelDoesNotDiscardTheQueuedCatalogReply() throws Exception {
+        ModelExecutor executor = new ModelExecutor();
+        try (Fixture fixture = new Fixture(null, (name, draftId, endpoint, modelsEndpoint, bearer) ->
+                List.of(MODEL), executor)) {
+            fixture.fill(ENDPOINT, "", "", KEY);
+            View fetch = view(fixture.dialog, "skills.detail.fetch_models");
+            assertTrue(fetch.performClick());
+            assertFalse(fetch.isEnabled());
+            assertEquals("正在查询模型列表…", fixture.modelStatus());
+            executor.runNext();
+            EditText model = (EditText) view(fixture.dialog, "skills.detail.model");
+            model.setText("手动模型");
+            ((EditText) view(fixture.dialog, "skills.detail.cost")).setText("3");
+            ShadowLooper.idleMainLooper();
+
+            assertTrue(fetch.isEnabled());
+            assertEquals("已获取 1 个模型", fixture.modelStatus());
+            AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertTrue(choices.isShowing());
+            assertNotNull(choices.getListView());
+            assertEquals(MODEL, choices.getListView().getItemAtPosition(0));
+            assertEquals("手动模型", model.getText().toString());
+        }
+    }
+
+    @Test public void aRejectedDiscoverySubmissionReenablesTheButtonForTheNextLookup() throws Exception {
+        ModelExecutor executor = new ModelExecutor();
+        try (Fixture fixture = new Fixture(null, (name, draftId, endpoint, modelsEndpoint, bearer) ->
+                List.of(MODEL), executor)) {
+            fixture.fill(ENDPOINT, "", "", KEY);
+            View fetch = view(fixture.dialog, "skills.detail.fetch_models");
+            executor.rejectNext = true;
+            assertTrue(fetch.performClick());
+            assertTrue(fetch.isEnabled());
+            assertEquals("暂时无法启动模型查询，请重试", fixture.modelStatus());
+
+            assertTrue(fetch.performClick());
+            assertFalse(fetch.isEnabled());
+            executor.runNext();
+            ShadowLooper.idleMainLooper();
+            assertTrue(fetch.isEnabled());
+            AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertTrue(choices.isShowing());
+            assertEquals(MODEL, choices.getListView().getItemAtPosition(0));
+        }
+    }
+
+    @Test public void catalogueTraceClassifiesVisibleResultsWithoutRecordingFormValues() throws Exception {
+        ModelExecutor executor = new ModelExecutor();
+        AtomicInteger responses = new AtomicInteger();
+        List<String> evidence = new CopyOnWriteArrayList<>();
+        boolean previousDebug = DebugLog.isEnabled();
+        try (Fixture fixture = new Fixture(null, (name, draftId, endpoint, modelsEndpoint, bearer) -> {
+            assertNotNull(DouAiLog.current());
+            if (responses.getAndIncrement() == 0) return List.of(MODEL);
+            SkillImageModelCatalog.resolveEndpoint(endpoint, "https://other.example.test/v1/models");
+            throw new AssertionError("Expected a fixed cross-origin catalogue failure");
+        }, executor)) {
+            fixture.fill(ENDPOINT, MODELS_ENDPOINT, "", KEY);
+            assertTrue(DouAiLog.awaitIdle(5000));
+            DebugLog.setEnabled(true);
+            DouAiLog.setFrameworkSink((priority, line) -> evidence.add(line));
+            click(fixture.dialog, "skills.detail.fetch_models");
+            executor.runNext();
+            ShadowLooper.idleMainLooper();
+            AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertTrue(choices.isShowing());
+            assertEquals(MODEL, choices.getListView().getItemAtPosition(0));
+            choices.dismiss();
+            ShadowLooper.idleMainLooper();
+            click(fixture.dialog, "skills.detail.fetch_models");
+            executor.runNext();
+            ShadowLooper.idleMainLooper();
+            assertTrue(fixture.modelStatus(), fixture.modelStatus().contains("相同的 HTTPS"));
+            ((EditText) view(fixture.dialog, "skills.detail.models_endpoint")).setText("");
+            assertEquals("", fixture.modelStatus());
+
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String logs = String.join("\n", evidence);
+            assertTrue(logs.contains("image_model_catalogue"));
+            assertTrue(logs.contains("options_presented"));
+            assertTrue(logs.contains("catalogue_different_origin"));
+            assertFalse(logs.contains(ENDPOINT));
+            assertFalse(logs.contains(MODELS_ENDPOINT));
+            assertFalse(logs.contains(KEY));
+            assertFalse(logs.contains(MODEL));
+        } finally {
+            DouAiLog.awaitIdle(5000);
+            DouAiLog.setFrameworkSink(null);
+            DebugLog.setEnabled(previousDebug);
         }
     }
 
@@ -426,6 +523,7 @@ public final class AiSkillImageProviderTest {
         }
 
         String status() { return ((TextView) view(dialog, "skills.detail.status")).getText().toString(); }
+        String modelStatus() { return ((TextView) view(dialog, "skills.detail.model_status")).getText().toString(); }
 
         @Override public void close() {
             page.close();
@@ -438,8 +536,15 @@ public final class AiSkillImageProviderTest {
     private static final class ModelExecutor extends AbstractExecutorService {
         private final Queue<Runnable> tasks = new ArrayDeque<>();
         private boolean shutdown;
+        private boolean rejectNext;
 
-        @Override public void execute(Runnable task) { tasks.add(task); }
+        @Override public void execute(Runnable task) {
+            if (rejectNext) {
+                rejectNext = false;
+                throw new RejectedExecutionException("test model worker is busy");
+            }
+            tasks.add(task);
+        }
         void runNext() { tasks.remove().run(); }
         @Override public void shutdown() { shutdown = true; }
         @Override public List<Runnable> shutdownNow() {

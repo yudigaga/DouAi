@@ -6,6 +6,7 @@ import android.util.MalformedJsonException;
 
 import com.douai.module.ai.AiCredentialVault;
 import com.douai.module.ai.AiExtensionHttp;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -19,16 +20,17 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /** One user-requested catalogue GET for an OpenAI-compatible image service. */
 public final class SkillImageModelCatalog {
     private static final int MAX_RESPONSE_BYTES = 256 * 1024;
     private static final int MAX_ROWS = 4096;
     private static final int DEADLINE_SECONDS = 12;
+    private static final Pattern LEGACY_VERSION_BASE = Pattern.compile(".*/v[0-9]+");
 
     public enum Code {
         INVALID_ENDPOINT, DIFFERENT_ORIGIN, CATALOG_REQUIRED, CREDENTIAL_REQUIRED, REDIRECT, AUTHENTICATION,
@@ -96,8 +98,13 @@ public final class SkillImageModelCatalog {
         if (!explicit.isEmpty()) return explicit;
         URI generation = generationEndpoint(generationEndpoint);
         String path = SkillImageProviderAddress.withoutTrailingSlash(generation.getRawPath());
-        if (!path.endsWith(SkillImageProviderAddress.GENERATION_SUFFIX)) throw failure(Code.CATALOG_REQUIRED);
-        String prefix = path.substring(0, path.length() - SkillImageProviderAddress.GENERATION_SUFFIX.length());
+        String prefix = path;
+        if (path.endsWith(SkillImageProviderAddress.GENERATION_SUFFIX)) {
+            prefix = path.substring(0, path.length() - SkillImageProviderAddress.GENERATION_SUFFIX.length());
+        } else if (!path.isEmpty() && !LEGACY_VERSION_BASE.matcher(path).matches()) {
+            throw failure(Code.CATALOG_REQUIRED);
+        }
+        // Older settings could store the API base as the exact generation binding. Only the lookup target is derived.
         return endpoint("https://" + generation.getRawAuthority() + prefix + "/models").toString();
     }
 
@@ -110,11 +117,20 @@ public final class SkillImageModelCatalog {
         headers.put("Accept", "application/json");
         headers.put("Authorization", "Bearer " + bearer);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(DEADLINE_SECONDS);
+        DouAiLog.Operation trace = DouAiLog.current();
         Reply reply;
         try {
+            stage(trace, "catalog_http_dispatch", "method=GET");
             reply = transport.request(catalog.toString(), "GET", Collections.unmodifiableMap(headers), null,
-                    deadline, MAX_RESPONSE_BYTES, (status, responseHeaders, body) -> readReply(status, responseHeaders, body, bearer));
+                    deadline, MAX_RESPONSE_BYTES, (status, ignored, body) -> {
+                        stage(trace, "catalog_http_response", "status=" + status);
+                        Reply parsed = readReply(status, body, bearer);
+                        if (status == 200) stage(trace, "catalog_parse_outcome",
+                                "outcome=" + (parsed.error() == null ? "ok" : parsed.error().name()));
+                        return parsed;
+                    });
         } catch (AiExtensionHttp.Failure failure) {
+            stage(trace, "catalog_transport_failure", "kind=" + failure.kind.name());
             switch (failure.kind) {
                 case DEADLINE: throw failure(Code.DEADLINE);
                 case CANCELLED: throw failure(Code.CANCELLED);
@@ -122,23 +138,18 @@ public final class SkillImageModelCatalog {
                 default: throw failure(Code.TRANSPORT);
             }
         } catch (IOException unavailable) {
+            stage(trace, "catalog_transport_failure", "kind=" + AiExtensionHttp.Kind.TRANSPORT.name());
             throw failure(Code.TRANSPORT);
         }
         if (reply.error() != null) throw failure(reply.error());
         return reply.models();
     }
 
-    private static Reply readReply(int status, AiExtensionHttp.Headers headers, InputStream body, String bearer)
-            throws IOException {
+    private static Reply readReply(int status, InputStream body, String bearer) throws IOException {
         if (status >= 300 && status < 400) return error(Code.REDIRECT);
         if (status == 401 || status == 403) return error(Code.AUTHENTICATION);
         if (status == 204) return error(Code.EMPTY);
         if (status != 200) return error(Code.UNSUPPORTED);
-        String type = headers.get("Content-Type");
-        if (type != null && !type.isEmpty()) {
-            String mime = type.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
-            if (!"application/json".equals(mime) && !mime.endsWith("+json")) return error(Code.INVALID_RESPONSE);
-        }
         try {
             Catalog catalog = readCatalog(body, bearer);
             if (catalog == null) return error(Code.INVALID_RESPONSE);
@@ -201,21 +212,33 @@ public final class SkillImageModelCatalog {
             json.skipValue();
             return null;
         }
-        String id = null;
-        boolean seen = false;
+        String id = null, name = null;
+        boolean seenId = false, nullId = false;
+        int names = 0;
         json.beginObject();
         while (json.hasNext()) {
-            if (!"id".equals(json.nextName())) {
-                json.skipValue();
-                continue;
+            switch (json.nextName()) {
+                case "id":
+                    if (seenId) throw failure(Code.INVALID_RESPONSE);
+                    seenId = true;
+                    JsonToken token = json.peek();
+                    nullId = token == JsonToken.NULL;
+                    if (token == JsonToken.STRING) id = json.nextString();
+                    else json.skipValue();
+                    break;
+                case "name":
+                    if (++names == 1 && json.peek() == JsonToken.STRING) name = json.nextString();
+                    else json.skipValue();
+                    break;
+                default:
+                    json.skipValue();
+                    break;
             }
-            if (seen) throw failure(Code.INVALID_RESPONSE);
-            seen = true;
-            if (json.peek() == JsonToken.STRING) id = json.nextString();
-            else json.skipValue();
         }
         json.endObject();
-        return id;
+        if (seenId && !nullId) return id;
+        if (names > 1) throw failure(Code.INVALID_RESPONSE);
+        return name;
     }
 
     private static boolean usableId(String id) {
@@ -244,4 +267,8 @@ public final class SkillImageModelCatalog {
     private static Reply error(Code code) { return new Reply(null, code); }
 
     private static Failure failure(Code code) { return new Failure(code); }
+
+    private static void stage(DouAiLog.Operation trace, String name, String evidence) {
+        if (trace != null) trace.stage(name, evidence);
+    }
 }

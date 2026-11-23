@@ -244,3 +244,27 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 本轮专项及相邻回归 409 项通过，0 失败，0 跳过。使用合成密钥与模拟目录，真机和签名构建待独立验收。
+
+## 生图模型目录兼容与诊断 · 基于 `f07f5dc`
+
+主 AI 与生图服务各有独立的配置和凭据。用合成密钥和目录替身对照两条代码路径，基线复现了六处差异。生图入口拒绝 MIME 标为非 JSON 的合法目录，也拒绝只提供 `name` 的可用模型项。旧版保存为完整地址的 `/v1` 无法推导目录。详情显示同一 Skill 后登记的专属配置时，目录可能找不到对应密钥。修改模型名或费用会丢弃排队中的目录回调，提交任务被拒后也无法立即重试。 [基线回归日志](../build/ai-extension-image-catalogue-baseline.log)
+
+真机日志里的 5 项、约 698 ms 来自主 AI 的 `fetch_model_catalog`。现有导出缺少生图查询的阶段证据，真机失败原因仍未知。 [用户反馈](https://app.slack.com/archives/C0CK9FJ74UC/p1795431970830819) · [复测反馈](https://app.slack.com/archives/C0CK9FJ74UC/p1795432269447829)
+
+- `SkillImageModelCatalog.java` 按有界 JSON 正文校验目录，保留精确的字符串模型标识。`id` 缺失或为 `null` 时接受 `name`，识别旧版直接保存的根地址和 `/vN`，查询同源 `/models`。
+- `SkillStore.java`、`SkillServices.java` 用详情页显示的草稿绑定定位本机密钥，再核对 Skill 归属、适配器和精确生图地址。显式查询只单次 GET。
+- `AiSkillDetailDialog.java` 在拉取按钮旁显示状态，区分查询输入和待填写的模型与费用。任务提交失败可立即重试。查询全程使用单独的诊断 trace。
+
+### 独立验收清单
+
+1. 打开已有图片 Skill，沿「编辑 → 保存草稿 → 配置图片服务」选择 OpenAI Images 兼容服务。按 AI 供应商界面的填写方式输入 HTTPS 基础地址与此 Skill 自己的密钥，模型可先留空。保存并重开，核对已保存标记和空白的密钥输入栏。留空直接点「拉取模型列表」，选择后核对模型字段，另行保存。
+2. 用模拟目录分别返回 `text/plain` 标记的有效 JSON、只有 `name` 的模型项、认证失败、空目录、无效 JSON、重定向与超时。确认有效模型可选，失败有明确提示，手填始终可用。旧记录若把 `/v1` 保存为完整地址，本次显式查询可读取同源 `/v1/models`，原生图地址和绑定继续按记录使用。自定义生图路径仍可补填同源目录地址。
+3. 查询排队时修改模型名或费用，应仍看到目录结果。修改查询地址、覆盖目录或本次密钥后，旧结果不会写回。关闭并重开时重复同样检查。
+4. 打开「全局调试日志」后复现，按 `image_model_catalogue` 定位生图查询，同一 trace 可核对地址推导方式、凭据来源、HTTP 状态、解析及界面结果。记录使用固定标签或状态码，无服务地址、密钥、模型值、响应体或底层异常文本。鉴权、同源验证、禁重定向和原有生图授权仍按生图适配器执行。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests '*SkillImageModelCatalogParityTest' --tests '*SkillImageModelCatalogTest' --tests '*SkillImageDiscoveryTest' --tests '*AiSkillImageProviderTest' --tests '*AiModelEditorTest' --tests '*MiuixEditorsInteractionTest'
+```
+
+专项及相邻回归共 437 项通过，0 失败，0 跳过，包括两个聊天入口、主 AI 表单、设置菜单、顶部色带及全屏回缩。使用合成密钥和模拟服务。真机待独立复测，本轮未构建安装包。 [运行日志](../build/ai-extension-image-catalogue-final.log)

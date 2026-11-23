@@ -30,13 +30,16 @@ import com.douai.module.ai.skills.SkillImageProviderAddress;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 
 /** Configuration for one exact skill, shared by manual chats and the Skills list. */
 final class AiSkillDetailDialog implements AutoCloseable {
@@ -61,7 +64,9 @@ final class AiSkillDetailDialog implements AutoCloseable {
     private TextView status;
     private EditText keyInput;
     private Button modelLookupButton;
+    private TextView modelLookupStatus;
     private Future<?> modelLookup;
+    private DouAiLog.Operation modelLookupTrace;
     private long modelLookupGeneration;
     private boolean closed;
 
@@ -111,8 +116,9 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private void render(SkillStore.Detail detail, String feedback, boolean showImageConfiguration) {
-        cancelModelLookup();
+        cancelModelLookup("form_rebound");
         modelLookupButton = null;
+        modelLookupStatus = null;
         clearKey();
         body.removeAllViews();
         TextView title = text(body, "/" + name, "skills.detail.name");
@@ -148,7 +154,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private void showEdit(SkillStore.DeleteTarget expected) {
-        cancelModelLookup();
+        cancelModelLookup("editor_opened");
         SkillStore.EditTarget edit;
         try { edit = store.editTarget(expected); }
         catch (Exception failure) {
@@ -307,24 +313,23 @@ final class AiSkillDetailDialog implements AutoCloseable {
             @Override public void onItemSelected(AdapterView<?> parent, View row, int position, long id) {
                 if (keyInput != key) return;
                 int visibility = position == 1 ? View.GONE : View.VISIBLE;
-                if (fields.getVisibility() != visibility) cancelModelLookup();
+                if (fields.getVisibility() != visibility) cancelModelLookup("adapter_changed");
                 fields.setVisibility(visibility);
                 if (position == 1) key.getText().clear();
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
-        modelLookupButton = button(fields, "拉取模型列表", "skills.detail.fetch_models", () -> {
-            if (adapter.getSelectedItemPosition() != 0 || keyInput != key) return;
-            String generation = generationAddress(endpoint, complete);
-            if (generation != null) lookupModels(detail, generation, fieldValue(modelsEndpoint), key, model);
-        });
-        watchModelInputs(key, endpoint, modelsEndpoint, model, cost, key);
+        modelLookupButton = button(fields, "拉取模型列表", "skills.detail.fetch_models", () ->
+                lookupModels(detail, adapter, endpoint, complete, modelsEndpoint, key, model));
+        modelLookupStatus = text(fields, "", "skills.detail.model_status");
+        modelLookupStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        watchModelInputs(key, endpoint, modelsEndpoint, key);
         complete.setOnCheckedChangeListener((view, checked) -> {
-            if (keyInput == key) cancelModelLookup();
+            if (keyInput == key) cancelModelLookup("address_mode_changed");
         });
 
         button(body, "保存配置", "skills.detail.save", () -> {
-            cancelModelLookup();
+            cancelModelLookup("configuration_save_started");
             boolean mock = adapter.getSelectedItemPosition() == 1;
             SkillServices.Adapter selected = mock ? SkillServices.Adapter.MOCK_IMAGE : SkillServices.Adapter.OPENAI_IMAGES;
             int units;
@@ -356,9 +361,13 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private String generationAddress(EditText address, CompoundButton complete) {
+        return generationAddress(address, complete, status);
+    }
+
+    private String generationAddress(EditText address, CompoundButton complete, TextView feedback) {
         try { return SkillImageProviderAddress.resolve(fieldValue(address), complete.isChecked()); }
         catch (IllegalArgumentException invalid) {
-            status.setText(invalid.getMessage());
+            feedback.setText(invalid.getMessage());
             return null;
         }
     }
@@ -398,51 +407,115 @@ final class AiSkillDetailDialog implements AutoCloseable {
         TextWatcher watcher = new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence text, int start, int before, int count) {
-                if (keyInput == key) cancelModelLookup();
+                if (keyInput == key) cancelModelLookup("request_inputs_changed");
             }
             @Override public void afterTextChanged(Editable text) { }
         };
         for (EditText field : fields) field.addTextChangedListener(watcher);
     }
 
-    private void lookupModels(SkillStore.Detail detail, String endpoint, String modelsEndpoint, EditText key, EditText model) {
-        if (modelLookup != null) return;
+    private void lookupModels(SkillStore.Detail detail, Spinner adapter, EditText endpoint, CompoundButton complete,
+                              EditText modelsEndpoint, EditText key, EditText model) {
+        DouAiLog.Operation trace = DouAiLog.begin("model_settings", "image_model_catalogue");
+        if (adapter.getSelectedItemPosition() != 0 || keyInput != key) {
+            trace.finish(DouAiLog.Outcome.SKIPPED, "inactive_image_form", "request_queued=false");
+            return;
+        }
+        if (modelLookup != null) {
+            trace.finish(DouAiLog.Outcome.SKIPPED, "lookup_already_pending", "request_queued=false");
+            return;
+        }
+        String generation = generationAddress(endpoint, complete, modelLookupStatus);
+        if (generation == null || generation.isEmpty()) {
+            if (generation != null) modelLookupStatus.setText("请填写 HTTPS API 基础地址");
+            trace.finish(DouAiLog.Outcome.FAILED, "invalid_generation_address", "request_queued=false");
+            return;
+        }
+        String catalogue = fieldValue(modelsEndpoint);
         String bearer = key.getText().toString();
         long ticket = ++modelLookupGeneration;
-        status.setText(FETCHING_MODELS);
+        modelLookupStatus.setText(FETCHING_MODELS);
         modelLookupButton.setEnabled(false);
-        modelLookup = discoveryWorker.submit(() -> {
-            try {
-                List<String> models = discovery.fetch(name, detail.draftId(), endpoint, modelsEndpoint, bearer);
-                main.post(() -> finishModelLookup(ticket, detail.draftId(), key, model, models, null));
-            } catch (Exception failure) {
-                String reason = failure instanceof SkillImageModelCatalog.Failure || failure instanceof SkillServices.Failure
-                        ? failure.getMessage() : "暂时无法读取模型列表，可以手动填写模型名称";
-                main.post(() -> finishModelLookup(ticket, detail.draftId(), key, model, List.of(), reason));
-            }
-        });
+        modelLookupTrace = trace;
+        trace.stage("admission", "request_method=get;discovery_only=true");
+        trace.stage("queue", "submission_attempted=true");
+        try {
+            modelLookup = discoveryWorker.submit(trace.wrap(() -> {
+                trace.stage("worker_started", "discovery_only=true");
+                try {
+                    List<String> models = discovery.fetch(name, detail.draftId(), generation, catalogue, bearer);
+                    main.post(trace.wrap(() -> finishModelLookup(trace, ticket, detail.draftId(), key, model, models, null)));
+                } catch (Exception failure) {
+                    LookupFailure rejected = lookupFailure(failure);
+                    main.post(trace.wrap(() -> finishModelLookup(trace, ticket, detail.draftId(), key, model, List.of(), rejected)));
+                }
+            }));
+        } catch (RejectedExecutionException unavailable) {
+            modelLookupTrace = null;
+            modelLookupButton.setEnabled(true);
+            modelLookupStatus.setText("暂时无法启动模型查询，请重试");
+            trace.finish(DouAiLog.Outcome.FAILED, "worker_rejected", "request_queued=false");
+        }
     }
 
-    private void finishModelLookup(long ticket, String draftId, EditText key, EditText model, List<String> models,
-                                   String failure) {
-        if (!currentModelLookup(ticket, key)) return;
+    private record LookupFailure(String message, DouAiLog.Outcome outcome, String reason) { }
+
+    private static LookupFailure lookupFailure(Exception failure) {
+        if (failure instanceof SkillImageModelCatalog.Failure catalogue) {
+            DouAiLog.Outcome outcome = switch (catalogue.code()) {
+                case CANCELLED -> DouAiLog.Outcome.CANCELLED;
+                case DEADLINE -> DouAiLog.Outcome.TIMED_OUT;
+                default -> DouAiLog.Outcome.FAILED;
+            };
+            return new LookupFailure(catalogue.getMessage(), outcome,
+                    "catalogue_" + catalogue.code().name().toLowerCase(Locale.ROOT));
+        }
+        if (failure instanceof SkillServices.Failure service) {
+            return new LookupFailure(service.getMessage(), DouAiLog.Outcome.FAILED,
+                    "service_" + service.code().name().toLowerCase(Locale.ROOT));
+        }
+        return new LookupFailure("暂时无法读取模型列表，可以手动填写模型名称",
+                DouAiLog.Outcome.FAILED, "lookup_unavailable");
+    }
+
+    private void finishModelLookup(DouAiLog.Operation trace, long ticket, String draftId, EditText key, EditText model,
+                                   List<String> models, LookupFailure failure) {
+        if (modelLookupTrace != trace) return;
+        modelLookupTrace = null;
         modelLookup = null;
+        if (!currentModelLookup(ticket, key)) {
+            trace.finish(DouAiLog.Outcome.CANCELLED, active() ? "stale_form" : "dialog_closed", "options_presented=false");
+            return;
+        }
         modelLookupButton.setEnabled(true);
         if (!currentDraft(draftId)) {
-            status.setText("草稿状态已变化，请重新打开技能配置");
+            modelLookupStatus.setText("草稿状态已变化，请重新打开技能配置");
+            trace.finish(DouAiLog.Outcome.CANCELLED, "stale_draft", "options_presented=false");
             return;
         }
-        if (failure != null || models.isEmpty()) {
-            status.setText(failure == null ? "模型列表为空，可以手动填写模型名称" : failure);
+        if (failure != null) {
+            modelLookupStatus.setText(failure.message());
+            trace.finish(failure.outcome(), failure.reason(), "options_presented=false");
             return;
         }
-        status.setText("");
-        AlertDialog choices = builder("选择模型").setItems(models.toArray(new String[0]), (ignored, which) -> {
-                    if (!currentModelLookup(ticket, key) || !currentDraft(draftId)) return;
-                    model.setText(models.get(which));
-                    status.setText("已选择模型，请保存配置");
-                }).setNegativeButton("取消", null).create();
-        showChild(choices);
+        if (models.isEmpty()) {
+            modelLookupStatus.setText("模型列表为空，可以手动填写模型名称");
+            trace.finish(DouAiLog.Outcome.FAILED, "catalogue_empty", "options_presented=false");
+            return;
+        }
+        try {
+            AlertDialog choices = builder("选择模型").setItems(models.toArray(new String[0]), (ignored, which) -> {
+                        if (!currentModelLookup(ticket, key) || !currentDraft(draftId)) return;
+                        model.setText(models.get(which));
+                        modelLookupStatus.setText("已选择模型，请保存配置");
+                    }).setNegativeButton("取消", null).create();
+            showChild(choices);
+            modelLookupStatus.setText("已获取 " + models.size() + " 个模型");
+            trace.finish(DouAiLog.Outcome.SUCCESS, "options_presented", "model_count=" + models.size());
+        } catch (RuntimeException | LinkageError unavailable) {
+            modelLookupStatus.setText("无法打开模型选择，可以手动填写模型名称");
+            trace.finish(DouAiLog.Outcome.FAILED, "chooser_unavailable", "options_presented=false");
+        }
     }
 
     private boolean currentModelLookup(long ticket, EditText key) {
@@ -454,13 +527,25 @@ final class AiSkillDetailDialog implements AutoCloseable {
         catch (RuntimeException unavailable) { return false; }
     }
 
-    private void cancelModelLookup() {
+    private void cancelModelLookup(String reason) {
         modelLookupGeneration++;
-        if (modelLookup == null) return;
-        modelLookup.cancel(true);
-        modelLookup = null;
-        if (modelLookupButton != null) modelLookupButton.setEnabled(true);
-        if (status != null && FETCHING_MODELS.contentEquals(status.getText())) status.setText("");
+        boolean pending = modelLookup != null;
+        if (pending) {
+            modelLookup.cancel(true);
+            modelLookup = null;
+            if (modelLookupTrace != null) {
+                modelLookupTrace.finish(DouAiLog.Outcome.CANCELLED, reason, "options_presented=false");
+                modelLookupTrace = null;
+            }
+            if (modelLookupButton != null) modelLookupButton.setEnabled(true);
+        }
+        if (modelLookupStatus != null) {
+            String feedback = pending ? switch (reason) {
+                case "request_inputs_changed", "adapter_changed", "address_mode_changed" -> "查询条件已变化，请重新获取模型列表";
+                default -> "";
+            } : "";
+            modelLookupStatus.setText(feedback);
+        }
     }
 
     private static String fieldValue(EditText field) { return field.getText().toString().trim(); }
@@ -492,7 +577,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
 
     private void review(String title, String message, String label, Runnable action) {
         if (!active()) return;
-        cancelModelLookup();
+        cancelModelLookup("review_opened");
         AlertDialog child = builder(title).setMessage(message).setNegativeButton("取消", null)
                 .setPositiveButton(label, (ignored, which) -> { if (active()) action.run(); }).create();
         showChild(child);
@@ -586,7 +671,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
-        cancelModelLookup();
+        cancelModelLookup("dialog_closed");
         discoveryWorker.shutdownNow();
         clearKey();
         if (confirmation != null) confirmation.dismiss();

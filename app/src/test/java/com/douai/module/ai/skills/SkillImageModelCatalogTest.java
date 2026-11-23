@@ -1,6 +1,8 @@
 package com.douai.module.ai.skills;
 
 import com.douai.module.ai.AiExtensionHttp;
+import com.douai.module.diagnostics.DebugLog;
+import com.douai.module.diagnostics.DouAiLog;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -8,8 +10,14 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.*;
@@ -25,6 +33,9 @@ public final class SkillImageModelCatalogTest {
         assertEquals("", SkillImageModelCatalog.validateOverride("", ""));
         assertEquals(MODELS, SkillImageModelCatalog.resolveEndpoint(IMAGE, ""));
         assertEquals(MODELS, SkillImageModelCatalog.resolveEndpoint(IMAGE + "/", ""));
+        assertEquals(MODELS, SkillImageModelCatalog.resolveEndpoint("https://images.example.test/gateway/v1/", ""));
+        assertEquals("https://images.example.test:9443/models",
+                SkillImageModelCatalog.resolveEndpoint("https://images.example.test:9443/", ""));
         String custom = "https://IMAGES.example.test:443/available";
         assertEquals(custom, SkillImageModelCatalog.validateOverride(IMAGE, " " + custom + " "));
         assertEquals(custom, SkillImageModelCatalog.resolveEndpoint("https://images.example.test/custom/generate", custom));
@@ -46,7 +57,7 @@ public final class SkillImageModelCatalogTest {
         }
     }
 
-    @Test public void discoveryUsesOneGetAndReturnsOnlyExactStringIds() throws Exception {
+    @Test public void discoveryUsesOneGetAndReturnsExactStringIdsOrExplicitNameFallbacks() throws Exception {
         AtomicInteger requests = new AtomicInteger();
         SkillImageModelCatalog catalog = new SkillImageModelCatalog((endpoint, method, headers, body, deadline, limit, reader) -> {
             requests.incrementAndGet();
@@ -58,11 +69,13 @@ public final class SkillImageModelCatalogTest {
             assertTrue(deadline > System.nanoTime());
             assertTrue(limit <= 256 * 1024);
             return reader.read(200, name -> "application/json; charset=utf-8", json("""
-                    {"data":[{"id":"Photo-A"},{"id":"photo-a"},{"id":"models/Custom"},
-                             {"id":"Photo-A"},{"id":9},{"name":"name-only"},{"id":" padded "}]}
+                    {"data":[{"id":"Photo-A","name":"ignored-name"},{"id":"photo-a"},{"id":"models/Custom"},
+                             {"id":"Photo-A"},{"id":9,"name":"ignored-numeric-id"},
+                             {"name":"name-only"},{"id":null,"name":"null-id-name"},
+                             {"id":"","name":"ignored-empty-id"},{"id":" padded "}]}
                     """));
         });
-        assertEquals(List.of("Photo-A", "photo-a", "models/Custom"), catalog.fetch(MODELS, BEARER));
+        assertEquals(List.of("Photo-A", "photo-a", "models/Custom", "name-only", "null-id-name"), catalog.fetch(MODELS, BEARER));
         assertEquals(1, requests.get());
         assertEquals(List.of("fallback"), catalog(200, "{\"models\":[{\"id\":\"fallback\"}]}").fetch(MODELS, BEARER));
     }
@@ -97,6 +110,23 @@ public final class SkillImageModelCatalogTest {
         assertEquals(0, requests.get());
     }
 
+    @Test public void decodedCredentialInANameFallbackStillRejectsTheCatalogue() {
+        SkillImageModelCatalog.Failure failure = assertThrows(SkillImageModelCatalog.Failure.class,
+                () -> catalog(200, "text/plain", "{\"models\":[{\"id\":null,\"name\":\"\\u0066ixture-image-secret\"}]}")
+                        .fetch(MODELS, BEARER));
+        assertEquals(SkillImageModelCatalog.Code.UNSAFE_RESPONSE, failure.code());
+        assertFalse(failure.toString().contains(BEARER));
+        assertNull(failure.getCause());
+    }
+
+    @Test public void malformedPlainTextStillFailsWithoutExposingTheBody() {
+        SkillImageModelCatalog.Failure failure = assertThrows(SkillImageModelCatalog.Failure.class,
+                () -> catalog(200, "text/plain; charset=utf-8", "Invalid document " + BEARER).fetch(MODELS, BEARER));
+        assertEquals(SkillImageModelCatalog.Code.INVALID_RESPONSE, failure.code());
+        assertFalse(failure.toString().contains(BEARER));
+        assertNull(failure.getCause());
+    }
+
     @Test public void shortImageKeysUseTheSameHeaderPolicyWithoutFalseCatalogueEchoes() throws Exception {
         assertEquals(List.of("example-image"), catalog(200, "{\"data\":[{\"id\":\"example-image\"}]}")
                 .fetch(MODELS, "x"));
@@ -129,6 +159,47 @@ public final class SkillImageModelCatalogTest {
         assertEquals(1, requests.get());
     }
 
+    @Test public void transportStagesKeepTheCallersTraceEvenOnAnotherThreadWithoutLoggingPayloads() {
+        String fixtureId = "catalogue-private-model";
+        List<String> events = new CopyOnWriteArrayList<>();
+        boolean detailed = DebugLog.isEnabled();
+        assertTrue(DouAiLog.awaitIdle(3000));
+        DebugLog.setEnabled(true);
+        DouAiLog.setFrameworkSink((priority, json) -> events.add(json));
+        try {
+            SkillImageModelCatalog catalog = new SkillImageModelCatalog((url, method, headers, request, deadline, limit, reader) -> {
+                FutureTask<SkillImageModelCatalog.Reply> result = new FutureTask<>(() -> {
+                    assertNull(DouAiLog.current());
+                    return reader.read(200, ignored -> "text/plain", json("{\"data\":[{\"id\":\"" + fixtureId + "\"}]}"));
+                });
+                Thread worker = new Thread(result, "catalogue-test-worker");
+                worker.setDaemon(true);
+                worker.start();
+                try { return result.get(3, TimeUnit.SECONDS); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(); }
+                catch (ExecutionException | TimeoutException failure) { throw new AssertionError(failure); }
+            });
+            DouAiLog.Operation trace = DouAiLog.begin("image_catalog_fixture", "user_click");
+            trace.wrap(() -> {
+                try { assertEquals(List.of(fixtureId), catalog.fetch(MODELS, BEARER)); }
+                catch (SkillImageModelCatalog.Failure failure) { throw new AssertionError(failure); }
+            }).run();
+            trace.finish(DouAiLog.Outcome.SUCCESS, "completed", "");
+            assertTrue(DouAiLog.awaitIdle(5000));
+
+            String correlation = "\"trace_id\":\"" + trace.traceId() + "\"";
+            assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_http_dispatch")));
+            assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_http_response")
+                    && line.contains("status=200")));
+            assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_parse_outcome")
+                    && line.contains("outcome=ok")));
+            assertTrue(events.stream().noneMatch(line -> line.contains(MODELS) || line.contains(BEARER) || line.contains(fixtureId)));
+        } finally {
+            DouAiLog.setFrameworkSink(null);
+            DebugLog.setEnabled(detailed);
+        }
+    }
+
     private static void check(int status, String body, SkillImageModelCatalog.Code code) {
         SkillImageModelCatalog.Failure failure = assertThrows(SkillImageModelCatalog.Failure.class,
                 () -> catalog(status, body).fetch(MODELS, BEARER));
@@ -138,8 +209,12 @@ public final class SkillImageModelCatalogTest {
     }
 
     private static SkillImageModelCatalog catalog(int status, String body) {
+        return catalog(status, "application/json", body);
+    }
+
+    private static SkillImageModelCatalog catalog(int status, String mimeType, String body) {
         return new SkillImageModelCatalog((endpoint, method, headers, request, deadline, limit, reader) ->
-                reader.read(status, name -> "application/json", json(body)));
+                reader.read(status, name -> mimeType, json(body)));
     }
 
     private static ByteArrayInputStream json(String text) {

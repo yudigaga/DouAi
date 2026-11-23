@@ -2,6 +2,7 @@ package com.douai.module.ai.skills;
 
 import android.content.Context;
 import com.douai.module.ai.mcp.McpRegistry;
+import com.douai.module.diagnostics.DouAiLog;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -502,16 +503,19 @@ public final class SkillStore {
 
     public List<String> discoverImageModels(String name, String draftId, String generationEndpoint,
                                             String modelsEndpoint, String typedBearer) throws Exception {
+        DouAiLog.Operation trace = DouAiLog.current();
+        if (trace != null) trace.stage("draft_snapshot", "required_scope=pending_image");
+        boolean typed = SkillServices.hasScopedBearerInput(typedBearer);
         SkillServices.Service saved = locked(state -> {
             JSONObject entry = requirePending(state, name, draftId);
             Draft draft = parse(entry.getString("definition"));
             if (draft.outputType() != SkillResult.Type.IMAGE) throw new IllegalStateException("此草稿没有图片配置项");
+            if (typed) return null;
             if (entry.has("serviceId")) return configured(entry, name);
-            JSONObject retained = entry.optJSONObject(RETAINED_SERVICE);
-            if (retained != null) return readService(retained, draft.outputType());
-            JSONObject installed = state.getJSONObject("skills").optJSONObject(name);
-            return installed == null ? null : readExecution(revisionDirectory(activeRevision(installed))).service();
+            return pendingService(state, draft, entry);
         });
+        if (trace != null) trace.stage("scope_snapshot", typed ? "selection=typed_only"
+                : saved == null ? "selection=none" : "selection=saved");
         return services.discoverImageModels(name, saved, generationEndpoint, modelsEndpoint, typedBearer);
     }
 
