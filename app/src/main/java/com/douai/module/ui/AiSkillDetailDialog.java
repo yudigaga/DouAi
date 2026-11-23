@@ -3,8 +3,12 @@ package com.douai.module.ui;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.graphics.Typeface;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.Editable;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -18,32 +22,58 @@ import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
+import com.douai.module.ai.skills.SkillImageModelCatalog;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
 
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
 /** Configuration for one exact skill, shared by manual chats and the Skills list. */
 final class AiSkillDetailDialog implements AutoCloseable {
+    @FunctionalInterface
+    interface ModelDiscovery {
+        List<String> fetch(String name, String draftId, String endpoint, String modelsEndpoint, String bearer) throws Exception;
+    }
+
+    private static final int MAX_KEY_ENTRY = 2112; // Allows a pasted Bearer prefix around a full-length token.
+    private static final String FETCHING_MODELS = "正在查询模型列表…";
     private final Context context;
     private final boolean miuix;
     private final String name;
     private final Runnable onChanged;
     private final SkillStore store;
+    private final ModelDiscovery discovery;
+    private final ExecutorService discoveryWorker;
+    private final Handler main = new Handler(Looper.getMainLooper());
     private final LinearLayout body;
     private final AlertDialog dialog;
     private AlertDialog confirmation;
     private TextView status;
     private EditText keyInput;
+    private Button modelLookupButton;
+    private Future<?> modelLookup;
+    private long modelLookupGeneration;
     private boolean closed;
 
     AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged) {
+        this(context, miuix, exactSkillName, onChanged, null, Executors.newSingleThreadExecutor());
+    }
+
+    AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
+                        ModelDiscovery discovery, ExecutorService discoveryWorker) {
         this.context = context;
         this.miuix = miuix;
         name = exactSkillName;
         this.onChanged = onChanged;
         store = SkillStore.forContext(context);
+        this.discovery = discovery == null ? store::discoverImageModels : discovery;
+        this.discoveryWorker = discoveryWorker;
         body = column();
         body.setTag("skills.detail." + name);
         int padding = dp(16);
@@ -77,6 +107,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private void render(SkillStore.Detail detail, String feedback, boolean showImageConfiguration) {
+        cancelModelLookup();
+        modelLookupButton = null;
         clearKey();
         body.removeAllViews();
         TextView title = text(body, "/" + name, "skills.detail.name");
@@ -112,6 +144,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private void showEdit(SkillStore.DeleteTarget expected) {
+        cancelModelLookup();
         SkillStore.EditTarget edit;
         try { edit = store.editTarget(expected); }
         catch (Exception failure) {
@@ -239,10 +272,12 @@ final class AiSkillDetailDialog implements AutoCloseable {
         body.addView(fields, matchWrap());
         EditText endpoint = input(fields, "HTTPS 生图接口", "skills.detail.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
+        EditText modelsEndpoint = input(fields, "模型列表 HTTPS 地址（可选）", "skills.detail.models_endpoint",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
         EditText model = input(fields, "模型名称", "skills.detail.model", InputType.TYPE_CLASS_TEXT, 256, false);
         EditText cost = input(fields, "每次调用费用单位", "skills.detail.cost", InputType.TYPE_CLASS_NUMBER, 7, false);
         EditText key = input(fields, "API 密钥", "skills.detail.key",
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 2048, true);
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, MAX_KEY_ENTRY, true);
         key.setSaveEnabled(false);
         key.setSaveFromParentEnabled(false);
         key.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
@@ -250,37 +285,46 @@ final class AiSkillDetailDialog implements AutoCloseable {
         keyInput = key;
         if (savedOpenAi) {
             endpoint.setText(saved.endpoint());
+            modelsEndpoint.setText(saved.modelsEndpoint());
             model.setText(saved.modelName());
         }
         cost.setText(Integer.toString(savedOpenAi ? saved.costUnits() : 0));
         fields.setVisibility(savedMock ? View.GONE : View.VISIBLE);
         adapter.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View row, int position, long id) {
-                fields.setVisibility(position == 1 ? View.GONE : View.VISIBLE);
+                if (keyInput != key) return;
+                int visibility = position == 1 ? View.GONE : View.VISIBLE;
+                if (fields.getVisibility() != visibility) cancelModelLookup();
+                fields.setVisibility(visibility);
                 if (position == 1) key.getText().clear();
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
+        modelLookupButton = button(fields, "拉取模型列表", "skills.detail.fetch_models", () -> {
+            if (adapter.getSelectedItemPosition() != 0 || keyInput != key) return;
+            lookupModels(detail, fieldValue(endpoint), fieldValue(modelsEndpoint), key, model);
+        });
+        watchModelInputs(key, endpoint, modelsEndpoint, model, cost, key);
 
         button(body, "保存配置", "skills.detail.save", () -> {
+            cancelModelLookup();
             boolean mock = adapter.getSelectedItemPosition() == 1;
             SkillServices.Adapter selected = mock ? SkillServices.Adapter.MOCK_IMAGE : SkillServices.Adapter.OPENAI_IMAGES;
             int units;
-            try { units = mock ? 0 : Integer.parseInt(cost.getText().toString().trim()); }
+            try { units = mock ? 0 : Integer.parseInt(fieldValue(cost)); }
             catch (NumberFormatException invalid) { status.setText("请输入有效的每次调用费用单位"); return; }
             String bearer = mock ? "" : key.getText().toString();
-            key.getText().clear();
-            apply(() -> store.saveConfiguration(name, detail.draftId(), selected,
-                            mock ? "" : endpoint.getText().toString().trim(), mock ? "" : model.getText().toString().trim(), units, bearer),
-                    "配置已保存", "保存失败，请核对 HTTPS 地址、模型名称、密钥和费用单位");
+            saveConfiguration(detail, selected, mock ? "" : fieldValue(endpoint),
+                    mock ? "" : fieldValue(modelsEndpoint), mock ? "" : fieldValue(model), units, bearer);
         });
         if (detail.canAuthorize() && saved != null) {
             button(body, "授权已保存的服务", "skills.detail.authorize", () -> {
                 boolean mockSelected = adapter.getSelectedItemPosition() == 1;
                 boolean changed = (savedMock != mockSelected) || (savedOpenAi && (
-                        !saved.endpoint().equals(endpoint.getText().toString().trim())
-                                || !saved.modelName().equals(model.getText().toString().trim())
-                                || !Integer.toString(saved.costUnits()).equals(cost.getText().toString().trim())
+                        !saved.endpoint().equals(fieldValue(endpoint))
+                                || !saved.modelsEndpoint().equals(fieldValue(modelsEndpoint))
+                                || !saved.modelName().equals(fieldValue(model))
+                                || !Integer.toString(saved.costUnits()).equals(fieldValue(cost))
                                 || key.length() != 0));
                 if (changed) { status.setText("请先保存当前配置"); return; }
                 review("授权此技能的服务", target(saved), "确认授权", () -> apply(
@@ -289,6 +333,108 @@ final class AiSkillDetailDialog implements AutoCloseable {
             });
         }
     }
+
+    private void saveConfiguration(SkillStore.Detail detail, SkillServices.Adapter adapter, String endpoint,
+                                   String modelsEndpoint, String modelName, int costUnits, String bearer) {
+        SkillStore.Detail updated;
+        try {
+            updated = store.saveConfiguration(name, detail.draftId(), adapter, endpoint, modelsEndpoint,
+                    modelName, costUnits, bearer);
+        } catch (SkillServices.Failure rejected) {
+            status.setText(rejected.getMessage());
+            return;
+        } catch (IllegalStateException stale) {
+            status.setText("草稿状态已变化，请重新打开技能配置");
+            return;
+        } catch (Exception unavailable) {
+            status.setText("暂时无法保存图片服务配置");
+            return;
+        }
+        render(updated, savedConfigurationStatus(updated));
+        if (onChanged != null) onChanged.run();
+    }
+
+    private static String savedConfigurationStatus(SkillStore.Detail detail) {
+        for (SkillStore.Field field : detail.fields()) {
+            if (field.required() && field.state() == SkillStore.FieldState.MISSING) {
+                if ("model".equals(field.id())) return "配置已保存，请选择或填写模型名称";
+                if ("endpoint".equals(field.id())) return "配置已保存，请填写 HTTPS 生图接口";
+                if ("credential".equals(field.id())) return "配置已保存，请填写 API 密钥";
+            }
+        }
+        return detail.canAuthorize() ? "配置已保存，请授权已保存的服务" : "配置已保存";
+    }
+
+    private void watchModelInputs(EditText key, EditText... fields) {
+        TextWatcher watcher = new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) {
+                if (keyInput == key) cancelModelLookup();
+            }
+            @Override public void afterTextChanged(Editable text) { }
+        };
+        for (EditText field : fields) field.addTextChangedListener(watcher);
+    }
+
+    private void lookupModels(SkillStore.Detail detail, String endpoint, String modelsEndpoint, EditText key, EditText model) {
+        if (modelLookup != null) return;
+        String bearer = key.getText().toString();
+        long ticket = ++modelLookupGeneration;
+        status.setText(FETCHING_MODELS);
+        modelLookupButton.setEnabled(false);
+        modelLookup = discoveryWorker.submit(() -> {
+            try {
+                List<String> models = discovery.fetch(name, detail.draftId(), endpoint, modelsEndpoint, bearer);
+                main.post(() -> finishModelLookup(ticket, detail.draftId(), key, model, models, null));
+            } catch (Exception failure) {
+                String reason = failure instanceof SkillImageModelCatalog.Failure || failure instanceof SkillServices.Failure
+                        ? failure.getMessage() : "暂时无法读取模型列表，可以手动填写模型名称";
+                main.post(() -> finishModelLookup(ticket, detail.draftId(), key, model, List.of(), reason));
+            }
+        });
+    }
+
+    private void finishModelLookup(long ticket, String draftId, EditText key, EditText model, List<String> models,
+                                   String failure) {
+        if (!currentModelLookup(ticket, key)) return;
+        modelLookup = null;
+        modelLookupButton.setEnabled(true);
+        if (!currentDraft(draftId)) {
+            status.setText("草稿状态已变化，请重新打开技能配置");
+            return;
+        }
+        if (failure != null || models.isEmpty()) {
+            status.setText(failure == null ? "模型列表为空，可以手动填写模型名称" : failure);
+            return;
+        }
+        status.setText("");
+        AlertDialog choices = builder("选择模型").setItems(models.toArray(new String[0]), (ignored, which) -> {
+                    if (!currentModelLookup(ticket, key) || !currentDraft(draftId)) return;
+                    model.setText(models.get(which));
+                    status.setText("已选择模型，请保存配置");
+                }).setNegativeButton("取消", null).create();
+        showChild(choices);
+    }
+
+    private boolean currentModelLookup(long ticket, EditText key) {
+        return active() && ticket == modelLookupGeneration && keyInput == key;
+    }
+
+    private boolean currentDraft(String draftId) {
+        try { return draftId.equals(store.detail(name).draftId()); }
+        catch (RuntimeException unavailable) { return false; }
+    }
+
+    private void cancelModelLookup() {
+        modelLookupGeneration++;
+        if (modelLookup == null) return;
+        modelLookup.cancel(true);
+        modelLookup = null;
+        if (modelLookupButton != null) modelLookupButton.setEnabled(true);
+        if (status != null && FETCHING_MODELS.contentEquals(status.getText())) status.setText("");
+    }
+
+    private static String fieldValue(EditText field) { return field.getText().toString().trim(); }
 
     private void installedActions(SkillStore.Detail detail) {
         button(body, detail.installedEnabled() ? "停用已安装版本" : "启用已安装版本", "skills.detail.toggle", () -> apply(() -> {
@@ -317,6 +463,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
 
     private void review(String title, String message, String label, Runnable action) {
         if (!active()) return;
+        cancelModelLookup();
         AlertDialog child = builder(title).setMessage(message).setNegativeButton("取消", null)
                 .setPositiveButton(label, (ignored, which) -> { if (active()) action.run(); }).create();
         showChild(child);
@@ -347,8 +494,9 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private void clearKey() {
-        if (keyInput != null) keyInput.getText().clear();
+        EditText previous = keyInput;
         keyInput = null;
+        if (previous != null) previous.getText().clear();
     }
 
     private AlertDialog.Builder builder(String title) { return new MiuixDialogBuilder(context, miuix).setTitle(title); }
@@ -398,6 +546,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        cancelModelLookup();
+        discoveryWorker.shutdownNow();
         clearKey();
         if (confirmation != null) confirmation.dismiss();
         confirmation = null;

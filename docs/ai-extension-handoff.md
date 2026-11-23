@@ -187,3 +187,31 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 本轮专项及相邻回归 362 项通过，0 失败，0 跳过。模型和图片服务使用模拟响应，真机待独立复测。
+
+## 图片服务模型目录与密钥保存 · 基于 `6e40cb5`
+
+### 基线复现与证据
+
+在生产源码仍为 `6e40cb5` 时，用 Robolectric 走实际表单回调。已启用的专属模拟图片 v1 → 编辑 → 保存草稿 → 配置图片服务 → OpenAI Images 兼容服务。四项基线用例中，格式有效的合成密钥在可写测试密钥库里确实写入专属服务，授权仍关闭，模拟 v1 仍有原授权。缺少或无效的 HTTPS 地址在写入前拒绝。粘贴「Bearer 前缀加首尾空白」被拒绝，缺少 AndroidKeyStore 的测试环境也只显示相同的通用错误。基线在调用保存前就清空密钥字段。 [基线复现日志](../build/ai-extension-model-directory-baseline.log)
+
+需区分上述可复现缺陷与用户设备的未知故障。按提供的脱敏摘要，14:45:29 LSPosed 导出缺少压缩包结束索引，`full.log` 仅部分可读，可读模块段和 verbose 没有保存失败、Keystore 或 SkillServices 的具体异常。本机 ADB 未发现可用设备，因此没有复现该手机的具体错误，也无法据此判断其凭据层失败。
+
+### 变更范围
+
+- `AiSkillDetailDialog.java` 增加可选模型列表地址、主动拉取和模型选择。选择只写入表单，可手填。保存错误区分字段、凭据、草稿状态和其他本地写入失败，失败时保留遮罩输入。保存成功后密钥只显示已填写状态。
+- `SkillServices.java`、`SkillStore.java` 让图片配置接受密钥首尾空白及单个 `Bearer` 前缀。缺模型时也可保存可用的地址和凭据。单独保存模型目录地址。登记、授权、启用新版分别操作。
+- `SkillImageModelCatalog.java` 沿用已有有界 HTTPS 传输和 OpenAI 目录格式，以同源 URL 发起一次 GET。请求使用本次填写的凭据，或复用所属草稿同一生图地址的本机凭据。禁用重定向、禁止凭据进入 URL，并拒绝返回值中的密钥回显。
+- `AiSkillImageProviderTest.java`、`SkillImageDiscoveryTest.java` 和 `SkillImageModelCatalogTest.java` 检查表单、存储、请求、取消及保留旧授权。使用合成密钥、AES 测试密钥库和响应替身。
+
+### 独立验收路径
+
+1. 从已启用的模拟图片 v1 进入编辑、保存草稿、配置图片服务，切到 OpenAI Images 兼容服务。填写如 `https://provider.example/v1/images/generations` 的真实生图地址和密钥，模型先留空，保存后应能看到密钥已填写和待选模型。退出重开，密钥栏应为空，已填标志仍在。
+2. 点击「拉取模型列表」。标准生图路径默认从同源 `/v1/models` 查询。网关使用自定义生图路径时可填同源模型列表地址。选择一项后应只填写模型字段。目录空、不可用或需认证时，可手填模型名。
+3. 保存所选模型，核对原 v1 仍启用。授权后再确认启用新版。可按需求回退到 v1。目录验证用模拟 GET 响应，生图操作用本机模拟图复测。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests '*AiSkillImageProviderTest' --tests '*SkillImageDiscoveryTest' --tests '*SkillImageModelCatalogTest'
+```
+
+本轮专项及相邻回归 379 项通过，0 失败，0 跳过。未发出真实服务请求，设备复测待独立执行。

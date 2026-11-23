@@ -462,13 +462,21 @@ public final class SkillStore {
 
     public Detail saveConfiguration(String name, String draftId, SkillServices.Adapter adapter, String endpoint,
                                     String modelName, int costUnits, String bearerToken) throws Exception {
+        return saveConfiguration(name, draftId, adapter, endpoint, null, modelName, costUnits, bearerToken);
+    }
+
+    public Detail saveConfiguration(String name, String draftId, SkillServices.Adapter adapter, String endpoint,
+                                    String modelsEndpoint, String modelName, int costUnits, String bearerToken)
+            throws Exception {
         return locked(state -> {
             JSONObject entry = requirePending(state, name, draftId);
             Draft draft = parse(entry.getString("definition"));
             if (draft.outputType() != SkillResult.Type.IMAGE) throw new IllegalStateException("此草稿没有图片配置项");
-            if (bearerToken == null || bearerToken.isEmpty()) {
-                SkillServices.Service binding = pendingService(state, draft, entry);
-                if (sameConfiguration(binding, adapter, endpoint, modelName, costUnits) && authorized(binding)) {
+            String token = SkillServices.normalizeScopedBearer(bearerToken);
+            if (token.isEmpty()) {
+                SkillServices.Service binding = discoveryMetadata(pendingService(state, draft, entry));
+                if (sameConfiguration(binding, adapter, endpoint, modelsEndpoint, modelName, costUnits)
+                        && authorized(binding)) {
                     if (!entry.has("serviceId") && !entry.has(RETAINED_SERVICE)) {
                         entry.put(RETAINED_SERVICE, serviceRecord(binding))
                                 .put("draftId", UUID.randomUUID().toString());
@@ -477,7 +485,7 @@ public final class SkillStore {
                 }
             }
             SkillServices.Service saved = services.configureForSkill(editableServiceId(state, entry, name), name, adapter,
-                    endpoint, modelName, costUnits, bearerToken);
+                    endpoint, modelsEndpoint, modelName, costUnits, token);
             entry.put("serviceId", saved.id()).put("draftId", UUID.randomUUID().toString());
             entry.remove(RETAINED_SERVICE);
             return advancePending(state, entry, draft, null);
@@ -485,10 +493,26 @@ public final class SkillStore {
     }
 
     private static boolean sameConfiguration(SkillServices.Service binding, SkillServices.Adapter adapter,
-                                             String endpoint, String modelName, int costUnits) {
+                                             String endpoint, String modelsEndpoint, String modelName, int costUnits) {
         return binding != null && binding.adapter() == adapter && binding.costUnits() == costUnits
                 && binding.endpoint().equals(endpoint == null ? "" : endpoint.trim())
+                && (modelsEndpoint == null || binding.modelsEndpoint().equals(modelsEndpoint.trim()))
                 && binding.modelName().equals(modelName == null ? "" : modelName.trim());
+    }
+
+    public List<String> discoverImageModels(String name, String draftId, String generationEndpoint,
+                                            String modelsEndpoint, String typedBearer) throws Exception {
+        SkillServices.Service saved = locked(state -> {
+            JSONObject entry = requirePending(state, name, draftId);
+            Draft draft = parse(entry.getString("definition"));
+            if (draft.outputType() != SkillResult.Type.IMAGE) throw new IllegalStateException("此草稿没有图片配置项");
+            if (entry.has("serviceId")) return configured(entry, name);
+            JSONObject retained = entry.optJSONObject(RETAINED_SERVICE);
+            if (retained != null) return readService(retained, draft.outputType());
+            JSONObject installed = state.getJSONObject("skills").optJSONObject(name);
+            return installed == null ? null : readExecution(revisionDirectory(activeRevision(installed))).service();
+        });
+        return services.discoverImageModels(name, saved, generationEndpoint, modelsEndpoint, typedBearer);
     }
 
     public Detail authorizeConfiguration(String name, String draftId, SkillServices.Service expected) throws Exception {
@@ -573,11 +597,11 @@ public final class SkillStore {
             if (current == null) throw new IllegalStateException("技能不存在");
             Executable execution = readExecution(revisionDirectory(activeRevision(installed)));
             return new Detail(name, current.outputType(), "", enabled ? "已启用" : "已停用", Collections.emptyList(),
-                    execution.service(), false, false, version, enabled, rollback, deletion);
+                    discoveryMetadata(execution.service()), false, false, version, enabled, rollback, deletion);
         }
         Draft draft = parse(entry.getString("definition"));
         SkillServices.Service explicit = configured(entry, name);
-        SkillServices.Service target = explicit == null ? pendingService(state, draft, entry) : explicit;
+        SkillServices.Service target = explicit == null ? discoveryMetadata(pendingService(state, draft, entry)) : explicit;
         Configuration status = configuration(draft, target);
         String reason = entry.getString("reason");
         boolean replace = version > 0 && NEEDS_REPLACEMENT.equals(reason)
@@ -619,6 +643,19 @@ public final class SkillStore {
     private SkillServices.Service configured(JSONObject entry, String name) throws SkillServices.Failure {
         if (entry == null || !entry.has("serviceId")) return null;
         return services.scoped(entry.optString("serviceId", ""), name);
+    }
+
+    private SkillServices.Service discoveryMetadata(SkillServices.Service binding) {
+        if (binding == null || binding.adapter() != SkillServices.Adapter.OPENAI_IMAGES || binding.skillName().isEmpty()) {
+            return binding;
+        }
+        try {
+            SkillServices.Service current = services.scoped(binding.id(), binding.skillName());
+            if (current != null && SkillServices.sameBinding(binding, current)) return current;
+        } catch (SkillServices.Failure unavailable) {
+            // A saved image revision remains inspectable when optional discovery metadata is unavailable.
+        }
+        return binding;
     }
 
     private String editableServiceId(JSONObject state, JSONObject entry, String name) throws Exception {

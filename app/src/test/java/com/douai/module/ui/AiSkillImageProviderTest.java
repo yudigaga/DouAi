@@ -1,0 +1,299 @@
+package com.douai.module.ui;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.Dialog;
+import android.text.method.PasswordTransformationMethod;
+import android.view.View;
+import android.widget.EditText;
+import android.widget.Spinner;
+import android.widget.TextView;
+
+import com.douai.module.ai.AiCredentialVault;
+import com.douai.module.ai.skills.SkillServices;
+import com.douai.module.ai.skills.SkillStore;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.Robolectric;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
+import org.robolectric.shadows.ShadowDialog;
+import org.robolectric.shadows.ShadowLooper;
+
+import java.lang.reflect.Field;
+import java.security.Security;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import javax.crypto.spec.SecretKeySpec;
+
+import static org.junit.Assert.*;
+import static org.junit.Assume.assumeTrue;
+
+@RunWith(RobolectricTestRunner.class)
+@Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
+public final class AiSkillImageProviderTest {
+    private static final String NAME = "生图";
+    private static final String ENDPOINT = "https://images.example.test/v1/images/generations";
+    private static final String MODELS_ENDPOINT = "https://images.example.test/v1/models";
+    private static final String MODEL = "test-image-model";
+    private static final String KEY = "fixture-image-token";
+
+    @Test public void editedMockDraftSavesTheExactHttpsProviderAndCredentialWithAWritableVault() throws Exception {
+        AtomicInteger keyReads = new AtomicInteger();
+        AiCredentialVault vault = new AiCredentialVault(() -> {
+            keyReads.incrementAndGet();
+            return new SecretKeySpec(new byte[32], "AES");
+        });
+        try (Fixture fixture = new Fixture(vault)) {
+            fixture.save(ENDPOINT, "");
+            SkillStore.Detail savedWithoutKey = fixture.store.detail(NAME);
+            assertEquals(fixture.status(), SkillServices.Adapter.OPENAI_IMAGES, savedWithoutKey.service().adapter());
+            assertEquals(ENDPOINT, savedWithoutKey.service().endpoint());
+            assertFalse(savedWithoutKey.canAuthorize());
+            assertEquals(0, keyReads.get());
+
+            fixture.save(ENDPOINT, KEY);
+            SkillStore.Detail saved = fixture.store.detail(NAME);
+            SkillServices.Service provider = fixture.services.scoped(saved.service().id(), NAME);
+            assertEquals("配置已保存，请授权已保存的服务", fixture.status());
+            assertEquals(saved.service(), provider);
+            assertEquals(savedWithoutKey.service().id(), provider.id());
+            assertEquals(ENDPOINT, provider.endpoint());
+            assertEquals(MODEL, provider.modelName());
+            assertTrue(fixture.services.hasCredential(provider));
+            assertTrue(saved.canAuthorize());
+            assertFalse(fixture.services.isAuthorized(provider));
+            assertEquals(1, saved.previousVersion());
+            assertTrue(fixture.services.isAuthorized(fixture.activeMock));
+            assertEquals(0, ((EditText) view(fixture.dialog, "skills.detail.key")).length());
+        }
+    }
+
+    @Test public void pastedBearerCanBeSavedWithoutASelectedModel() throws Exception {
+        try (Fixture fixture = new Fixture(new AiCredentialVault(() -> new SecretKeySpec(new byte[32], "AES")))) {
+            fixture.save(ENDPOINT, "", "  Bearer " + KEY + "  ");
+            SkillStore.Detail saved = fixture.store.detail(NAME);
+            assertEquals(fixture.status(), SkillServices.Adapter.OPENAI_IMAGES, saved.service().adapter());
+            assertTrue(fixture.services.hasCredential(saved.service()));
+            assertEquals("", saved.service().modelName());
+            assertEquals("配置已保存，请选择或填写模型名称", fixture.status());
+            assertFalse(saved.canAuthorize());
+            assertEquals(1, saved.previousVersion());
+        }
+    }
+
+    @Test public void missingAndNonHttpsAddressesLeaveTheExistingProviderAndDraftUntouched() throws Exception {
+        AtomicInteger keyReads = new AtomicInteger();
+        AiCredentialVault vault = new AiCredentialVault(() -> {
+            keyReads.incrementAndGet();
+            return new SecretKeySpec(new byte[32], "AES");
+        });
+        try (Fixture fixture = new Fixture(vault)) {
+            SkillStore.Detail before = fixture.store.detail(NAME);
+            int registryCount = fixture.services.listForSkill(NAME).size();
+            for (String invalid : new String[]{"", "http://images.example.test/v1/images/generations"}) {
+                fixture.save(invalid, KEY);
+                assertTrue(fixture.status(), fixture.status().contains("HTTPS"));
+                assertEquals(KEY.length(), ((EditText) view(fixture.dialog, "skills.detail.key")).length());
+                SkillStore.Detail after = fixture.store.detail(NAME);
+                assertEquals(before.draftId(), after.draftId());
+                assertEquals(before.service(), after.service());
+                assertEquals(registryCount, fixture.services.listForSkill(NAME).size());
+            }
+            assertEquals(0, keyReads.get());
+        }
+    }
+
+    @Test public void missingRobolectricKeystoreIsReportedSeparatelyFromEndpointValidation() throws Exception {
+        assumeTrue("This test inspects a runtime without AndroidKeyStore", Security.getProvider("AndroidKeyStore") == null);
+        try (Fixture fixture = new Fixture(null)) {
+            SkillStore.Detail before = fixture.store.detail(NAME);
+            fixture.save(ENDPOINT, KEY);
+
+            assertEquals(before.draftId(), fixture.store.detail(NAME).draftId());
+            assertEquals(before.service(), fixture.store.detail(NAME).service());
+            assertTrue(fixture.status(), fixture.status().contains("本机") && fixture.status().contains("凭据"));
+            assertFalse(fixture.status().contains(KEY));
+            EditText key = (EditText) view(fixture.dialog, "skills.detail.key");
+            assertEquals(KEY.length(), key.length());
+            assertTrue(key.getTransformationMethod() instanceof PasswordTransformationMethod);
+        }
+    }
+
+    @Test public void explicitModelLookupOnlyFillsTheChoiceAndRequiresAnIndependentSave() throws Exception {
+        ModelExecutor executor = new ModelExecutor();
+        AtomicInteger calls = new AtomicInteger();
+        AiCredentialVault vault = new AiCredentialVault(() -> new SecretKeySpec(new byte[32], "AES"));
+        try (Fixture fixture = new Fixture(vault, (name, draftId, endpoint, modelsEndpoint, bearer) -> {
+            assertEquals(NAME, name);
+            assertEquals(ENDPOINT, endpoint);
+            assertEquals(MODELS_ENDPOINT, modelsEndpoint);
+            assertEquals(KEY, bearer);
+            calls.incrementAndGet();
+            return List.of(MODEL);
+        }, executor)) {
+            SkillStore.Detail before = fixture.store.detail(NAME);
+            int registryCount = fixture.services.listForSkill(NAME).size();
+            fixture.fill(ENDPOINT, MODELS_ENDPOINT, "", KEY);
+            assertEquals(0, calls.get());
+            click(fixture.dialog, "skills.detail.fetch_models");
+            assertEquals(0, calls.get());
+            executor.runNext();
+            ShadowLooper.idleMainLooper();
+            assertEquals(1, calls.get());
+            AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals(1, choices.getListView().getCount());
+            assertTrue(choices.getListView().performItemClick(null, 0, 0));
+            ShadowLooper.idleMainLooper();
+
+            assertEquals(MODEL, ((EditText) view(fixture.dialog, "skills.detail.model")).getText().toString());
+            assertEquals(before.draftId(), fixture.store.detail(NAME).draftId());
+            assertEquals(registryCount, fixture.services.listForSkill(NAME).size());
+            assertEquals(KEY.length(), ((EditText) view(fixture.dialog, "skills.detail.key")).length());
+            click(fixture.dialog, "skills.detail.save");
+            SkillStore.Detail saved = fixture.store.detail(NAME);
+            assertEquals(MODEL, saved.service().modelName());
+            assertEquals(MODELS_ENDPOINT, saved.service().modelsEndpoint());
+            assertFalse(fixture.services.isAuthorized(saved.service()));
+            assertTrue(fixture.services.isAuthorized(fixture.activeMock));
+            assertEquals(0, ((EditText) view(fixture.dialog, "skills.detail.key")).length());
+        }
+    }
+
+    @Test public void queuedModelsAreIgnoredAfterEditingTheFormOrClosingIt() throws Exception {
+        ModelExecutor executor = new ModelExecutor();
+        try (Fixture fixture = new Fixture(null, (name, draftId, endpoint, modelsEndpoint, bearer) ->
+                List.of(MODEL), executor)) {
+            fixture.fill(ENDPOINT, "", "", KEY);
+            Dialog last = ShadowDialog.getLatestDialog();
+            click(fixture.dialog, "skills.detail.fetch_models");
+            executor.runNext();
+            EditText model = (EditText) view(fixture.dialog, "skills.detail.model");
+            model.setText("手动模型");
+            ShadowLooper.idleMainLooper();
+            assertSame(last, ShadowDialog.getLatestDialog());
+            assertEquals("手动模型", model.getText().toString());
+            click(fixture.dialog, "skills.detail.fetch_models");
+            executor.runNext();
+            fixture.page.close();
+            fixture.dialog.dismiss();
+            ShadowLooper.idleMainLooper();
+            assertSame(last, ShadowDialog.getLatestDialog());
+        }
+    }
+
+    private static final class Fixture implements AutoCloseable {
+        final Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        final SkillStore store;
+        final SkillServices.Service activeMock;
+        final AiSkillDetailDialog page;
+        final AlertDialog dialog;
+        final SkillServices services;
+
+        Fixture(AiCredentialVault vault) throws Exception {
+            this(vault, null, null);
+        }
+
+        Fixture(AiCredentialVault vault, AiSkillDetailDialog.ModelDiscovery discovery, ModelExecutor executor) throws Exception {
+            SkillStore setup = SkillStore.forContext(activity);
+            setup.saveAuthoredDraft(SkillStore.validateAuthoredDraft("""
+                    {"schemaVersion":3,"name":"生图","description":"生成图片","documentation":"输入画面描述。",
+                     "execution":{"kind":"service","outputType":"image","maxInput":4000},
+                     "trial":{"input":"一只猫","expectedType":"image"}}
+                    """));
+            SkillStore.Detail pending = setup.detail(NAME);
+            SkillStore.Detail saved = setup.saveConfiguration(NAME, pending.draftId(), SkillServices.Adapter.MOCK_IMAGE,
+                    "", "", 0, "");
+            SkillStore.Detail installed = setup.authorizeConfiguration(NAME, saved.draftId(), saved.service());
+            assertEquals(1, installed.previousVersion());
+            assertFalse(installed.pending());
+            activeMock = installed.service();
+            assertEquals(NAME, activeMock.skillName());
+
+            page = discovery == null ? new AiSkillDetailDialog(activity, false, NAME, null)
+                    : new AiSkillDetailDialog(activity, false, NAME, null, discovery, executor);
+            store = (SkillStore) field(AiSkillDetailDialog.class, "store").get(page);
+            services = (SkillServices) field(SkillStore.class, "services").get(store);
+            if (vault != null) field(SkillServices.class, "credentials").set(services, vault);
+            dialog = page.dialog();
+            dialog.setOwnerActivity(activity);
+            dialog.show();
+            click(dialog, "skills.detail.edit");
+            AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+            ((EditText) view(editor, "skills.edit.documentation")).setText("输入画面主题和构图要求。");
+            assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            ShadowLooper.idleMainLooper();
+            assertTrue(store.detail(NAME).canReplace());
+            click(dialog, "skills.detail.configure");
+            ((Spinner) view(dialog, "skills.detail.adapter")).setSelection(0);
+            ShadowLooper.idleMainLooper();
+        }
+
+        void save(String endpoint, String key) {
+            save(endpoint, MODEL, key);
+        }
+
+        void save(String endpoint, String model, String key) {
+            fill(endpoint, "", model, key);
+            click(dialog, "skills.detail.save");
+            ShadowLooper.idleMainLooper();
+        }
+
+        void fill(String endpoint, String modelsEndpoint, String model, String key) {
+            ((EditText) view(dialog, "skills.detail.endpoint")).setText(endpoint);
+            ((EditText) view(dialog, "skills.detail.models_endpoint")).setText(modelsEndpoint);
+            ((EditText) view(dialog, "skills.detail.model")).setText(model);
+            ((EditText) view(dialog, "skills.detail.cost")).setText("2");
+            ((EditText) view(dialog, "skills.detail.key")).setText(key);
+        }
+
+        String status() { return ((TextView) view(dialog, "skills.detail.status")).getText().toString(); }
+
+        @Override public void close() {
+            page.close();
+            dialog.dismiss();
+            activity.finish();
+            ShadowLooper.idleMainLooper();
+        }
+    }
+
+    private static final class ModelExecutor extends AbstractExecutorService {
+        private final Queue<Runnable> tasks = new ArrayDeque<>();
+        private boolean shutdown;
+
+        @Override public void execute(Runnable task) { tasks.add(task); }
+        void runNext() { tasks.remove().run(); }
+        @Override public void shutdown() { shutdown = true; }
+        @Override public List<Runnable> shutdownNow() {
+            List<Runnable> pending = new ArrayList<>(tasks);
+            tasks.clear();
+            shutdown();
+            return pending;
+        }
+        @Override public boolean isShutdown() { return shutdown; }
+        @Override public boolean isTerminated() { return shutdown && tasks.isEmpty(); }
+        @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return isTerminated(); }
+    }
+
+    private static void click(AlertDialog dialog, String tag) {
+        assertTrue(tag, view(dialog, tag).performClick());
+    }
+
+    private static View view(AlertDialog dialog, String tag) {
+        View view = dialog.getWindow().getDecorView().findViewWithTag(tag);
+        assertNotNull(tag, view);
+        return view;
+    }
+
+    private static Field field(Class<?> type, String name) throws Exception {
+        Field field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return field;
+    }
+}
