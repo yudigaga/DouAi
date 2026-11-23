@@ -766,13 +766,14 @@ final class AiTestChatDialog extends Dialog {
                 return;
             }
         }
+        boolean imageRequired = authoring != null && SkillStore.requiresImage(authoring.request());
         final String authoringInput;
         try {
             if (authoring != null || skill != null) SkillAuthoring.rejectCredential(prompt);
             String prior = authoring != null && authoring.mode() == SkillAuthoring.Mode.REVISE && previousDraft != null
                     ? previousDraft.definition() : null;
             authoringInput = authoring == null || authoring.mode() == SkillAuthoring.Mode.SAVE
-                    ? null : SkillAuthoring.draftInput(authoring.request(), prior);
+                    ? null : SkillAuthoring.draftInput(authoring.request(), prior, imageRequired);
         } catch (IllegalArgumentException invalid) {
             state.setText("技能需求包含不支持的内容或超过长度");
             updateSend();
@@ -840,7 +841,11 @@ final class AiTestChatDialog extends Dialog {
                     } else {
                         String raw = askSkillModel(turn, active, SkillAuthoring.DESIGN_INSTRUCTION, authoringInput);
                         turn.checkStopped();
-                        authored = SkillStore.validateAuthoredDraft(raw);
+                        SkillStore.DraftPreview validated = SkillStore.validateAuthoredDraft(raw);
+                        if (imageRequired && validated.outputType() != SkillResult.Type.IMAGE) {
+                            throw new ImageOutputMismatch();
+                        }
+                        authored = validated;
                     }
                     turn.checkStopped();
                 } else if (turn.skill != null) {
@@ -1032,6 +1037,11 @@ final class AiTestChatDialog extends Dialog {
                 failure = cannotComplete;
             }
         }
+        if (!turn.stopRequested && failure instanceof ImageOutputMismatch
+                && skillDraft != null && skillDraft.outputType() != SkillResult.Type.IMAGE) {
+            // An explicit image request must not leave an older text draft selected for saving.
+            skillDraft = null;
+        }
         busy = false;
         request = null;
         pending = null;
@@ -1119,7 +1129,10 @@ final class AiTestChatDialog extends Dialog {
         return status.toString();
     }
 
+    private static final class ImageOutputMismatch extends IllegalArgumentException { }
+
     private static String authoringFailure(SkillAuthoring.Action action, Exception failure) {
+        if (failure instanceof ImageOutputMismatch) return "生图技能需要图片输出，模型返回了文本，本次草案未保存。";
         if (failure instanceof java.net.SocketTimeoutException) return "技能请求超时，请稍后再试";
         if (action.mode() == SkillAuthoring.Mode.SAVE) return "保存技能失败，原草案仍保留";
         return "技能草案处理失败，请检查技能需求与模型设置";

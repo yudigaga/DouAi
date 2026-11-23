@@ -162,21 +162,15 @@ public final class NativeAiConversationTest {
                 "execution":{"kind":"service","outputType":"image","maxInput":4000},
                 "trial":{"input":"一只白猫","expectedType":"image"}}
                 """);
-        submit("帮我做一个生图 Skill");
-        worker.runNext();
-        ShadowLooper.idleMainLooper();
-        assertTrue(renderedText(1).contains("草案"));
-        assertTrue(SkillStore.forContext(activity).pending().isEmpty());
-        assertTrue(SkillStore.forContext(activity).list().isEmpty());
-
-        submit("帮我内置");
+        submit("帮我写一个生图 skills 并内置");
         worker.runNext();
         ShadowLooper.idleMainLooper();
         assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION),session.skillModelSystems);
+        assertEquals("image",new JSONObject(session.skillModelInputs.get(0)).getString("requiredOutputType"));
 
         assertEquals("生图", SkillStore.forContext(activity).pending().get(0).name());
-        assertTrue(renderedText(3).contains("待配置草稿"));
-        View settings = row(3).findViewWithTag("ai.chat.skill.settings.生图");
+        assertTrue(renderedText(1).contains("待配置草稿"));
+        View settings = row(1).findViewWithTag("ai.chat.skill.settings.生图");
         assertNotNull(settings);
         assertTrue(settings.performClick());
         Dialog detailDialog = ShadowDialog.getLatestDialog();
@@ -198,13 +192,61 @@ public final class NativeAiConversationTest {
         submit("/生图 白猫");
         worker.runNext();
         ShadowLooper.idleMainLooper();
-        assertEquals(6, messageCount());
-        ImageView image = row(5).findViewWithTag("ai.chat.image");
+        assertEquals(4, messageCount());
+        ImageView image = row(3).findViewWithTag("ai.chat.image");
         assertNotNull(image);
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
         assertNotNull(image.getDrawable());
         assertTrue(session.prompts.isEmpty());
+    }
+
+    @Test public void explicitPluralImageRequestNeverInstallsATextDraftInContact() throws Exception {
+        dialog.enableSkills(AiSkills.Entry.CONTACT);
+        String textDraft = """
+                {"schemaVersion":3,"name":"模拟技能","description":"返回文本","documentation":"输入待摘要文本。",
+                "execution":{"kind":"summary","outputType":"text","maxInput":2000},
+                "trial":{"input":"示例","expectedType":"text"}}
+                """;
+        session.skillModelReplies.add(textDraft);
+        submit("帮我写一个文本摘要 Skill");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertTrue(renderedText(1).contains("尚未保存"));
+
+        session.skillModelReplies.add(textDraft);
+        submit("帮我写一个生图 skills 并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertTrue(renderedText(3).contains("图片"));
+        assertTrue(SkillStore.forContext(activity).list().isEmpty());
+        assertTrue(SkillStore.forContext(activity).pending().isEmpty());
+        assertEquals("image",new JSONObject(session.skillModelInputs.get(1)).getString("requiredOutputType"));
+        assertEquals(2,session.skillModelInputs.size());
+        assertNull(row(3).findViewWithTag("ai.chat.skill.settings.模拟技能"));
+
+        submit("帮我内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(4,messageCount());
+        assertTrue(SkillStore.forContext(activity).list().isEmpty());
+        assertTrue(session.prompts.isEmpty());
+    }
+
+    @Test public void aQuotedPluralImageRequestAndItsModelEchoRemainOrdinaryContactChat() {
+        dialog.enableSkills(AiSkills.Entry.CONTACT);
+        String request="帮我写一个生图 skills 并内置";
+        session.answer=request;
+        submit("「"+request+"」");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(List.of("「"+request+"」"),session.prompts);
+        assertEquals(request,renderedText(1));
+        assertTrue(session.skillModelInputs.isEmpty());
+        assertTrue(SkillStore.forContext(activity).list().isEmpty());
+        assertTrue(SkillStore.forContext(activity).pending().isEmpty());
     }
 
     @Test public void contactCanBuildAndRunAnAuthoredTextSkillAfterReopen() throws Exception {

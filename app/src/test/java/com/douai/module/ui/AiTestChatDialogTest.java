@@ -325,6 +325,7 @@ public final class AiTestChatDialogTest {
         assertTrue(text("ai.chat.answer").getText().toString().contains("待配置草稿"));
         assertTrue(sessions.get(0).prompts.isEmpty());
         assertEquals(Collections.singletonList(SkillAuthoring.DESIGN_INSTRUCTION), sessions.get(0).skillInstructions);
+        assertEquals("image", new JSONObject(sessions.get(0).skillInputs.get(0)).getString("requiredOutputType"));
         assertTrue(findView("ai.chat.skill.settings.海报").performClick());
         AlertDialog settings = (AlertDialog) ShadowDialog.getLatestDialog();
         View details = settings.getWindow().getDecorView();
@@ -376,15 +377,36 @@ public final class AiTestChatDialogTest {
 
     @Test public void askingHowToCreateASkillAndReceivingImperativeTextDoesNotCreateIt() {
         dialog.enableSkills(AiSkills.Entry.WORK);
-        sessions.get(0).answer = "创建一个生图技能";
-        submit("如何创建一个生图技能？");
+        sessions.get(0).answer = "帮我写一个生图 skills 并内置";
+        submit("如何写一个生图 skills 并内置？");
         worker.runNext();
         ShadowLooper.idleMainLooper();
 
-        assertEquals(Collections.singletonList("如何创建一个生图技能？"), sessions.get(0).prompts);
-        assertEquals("创建一个生图技能", text("ai.chat.answer").getText().toString());
+        assertEquals(Collections.singletonList("如何写一个生图 skills 并内置？"), sessions.get(0).prompts);
+        assertEquals("帮我写一个生图 skills 并内置", text("ai.chat.answer").getText().toString());
         assertTrue(SkillStore.forContext(activity).pending().isEmpty());
         assertNull(findView("ai.chat.skill.settings.生图"));
+    }
+
+    @Test public void pluralImageCreationRejectsATextDraftWithoutSavingOrRetrying() throws Exception {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        FakeSession model = sessions.get(0);
+        model.skillReplies.add(new JSONObject(textSkillDraft("保留事实，使用分点格式。"))
+                .put("name", "模拟技能").toString());
+        submit("帮我写一个生图 skills 并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertTrue(lastAnswer().contains("图片"));
+        assertTrue(lastAnswer().contains("文本"));
+        assertTrue(lastAnswer().contains("未保存"));
+        assertEquals(1, model.skillInputs.size());
+        assertEquals("image", new JSONObject(model.skillInputs.get(0)).getString("requiredOutputType"));
+        assertTrue(model.prompts.isEmpty());
+        SkillStore skills = SkillStore.forContext(activity);
+        assertTrue(skills.list().isEmpty());
+        assertTrue(skills.pending().isEmpty());
+        assertNull(findView("ai.chat.skill.settings.模拟技能"));
     }
 
     @Test public void aCreationRequestOnlyInAnAttachmentStaysInTheUsualChatFlow() {

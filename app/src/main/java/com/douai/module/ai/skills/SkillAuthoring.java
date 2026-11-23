@@ -21,7 +21,7 @@ public final class SkillAuthoring {
 
     public static final String DESIGN_INSTRUCTION = """
             你为 DouAi 设计或修订一个供用户手动调用的 Skill。只依据输入 JSON 的 requirement
-            和可选的 previousDefinition。只返回一个 JSON 对象，不要代码围栏和额外解释。
+            和可选的 previousDefinition、requiredOutputType。只返回一个 JSON 对象，不要代码围栏和额外解释。
             顶层仅包含 schemaVersion（整数 3）、name（1 至 24 字，无空格和斜杠）、description、
             documentation（供用户阅读的说明）、execution、trial。
 
@@ -30,6 +30,7 @@ public final class SkillAuthoring {
             {"kind":"text_model","outputType":"text","maxInput":2000,"instruction":"明确的文本处理要求"}，
             instruction 不超过 1600 字。
             生图技能使用 {"kind":"service","outputType":"image","maxInput":4000}。
+            requiredOutputType 为 image 时，必须使用生图执行结构，trial.expectedType 也必须为 image。
             提取首段摘要可使用 {"kind":"summary","outputType":"text","maxInput":2000}。
             trial 仅包含 input（简短的无隐私模拟输入）和 expectedType（与 outputType 相同）。
 
@@ -53,17 +54,19 @@ public final class SkillAuthoring {
             + "(?:(?:你|帮我|给我|为我)\\s*){0,2}";
     private static final String END = "\\s*(?:可以吗|好吗|吧|吗)?\\s*[。！？?!]?\\s*$";
     private static final String SUBJECT = "[^\\r\\n。！？?!：:；;，,\\x60]";
+    private static final String SKILL_WORD = "(?:skills?|技能)";
+    private static final String SAVE_TARGET = "(?:这个\\s*" + SKILL_WORD + "|它)";
     private static final Pattern DESIGN = Pattern.compile("(?i)^" + PREFIX
             + "(?:写|编写|创建|新建|做|制作|生成|设计)\\s*(并(?:且)?\\s*内置)?\\s*(?:一个新的|一个|一条|一项|个)?\\s*"
-            + "(" + SUBJECT + "{0,160}?)\\s*(?:skill|技能)"
+            + "(" + SUBJECT + "{0,160}?)\\s*" + SKILL_WORD
             + "(?:(?:[，,]\\s*(?:用于|用来|要能|能|可以|需求是|功能是)|[：:])\\s*"
             + "(" + SUBJECT + "{1,180}?))?" + END);
     private static final Pattern SAVE = Pattern.compile("(?i)^" + PREFIX
-            + "(?:内置(?:这个技能|这个skill|它)?|把(?:这个技能|这个skill|它)\\s*内置)" + END);
+            + "(?:内置(?:\\s*" + SAVE_TARGET + ")?|把\\s*" + SAVE_TARGET + "\\s*内置)" + END);
     private static final Pattern SAVE_TAIL = Pattern.compile("(?i)\\s*(?:[，,]\\s*)?"
             + "(?:并(?:且)?\\s*(?:帮我\\s*)?内置|然后\\s*内置|再\\s*内置)"
-            + "(?:这个技能|这个skill|它)?\\s*(?:吧)?\\s*[。！？?!]?\\s*$");
-    private static final String DRAFT_TARGET = "(?:这个|这份|刚才的|当前的)?(?:skill|技能|草案|草稿|方案)";
+            + "(?:\\s*" + SAVE_TARGET + ")?\\s*(?:吧)?\\s*[。！？?!]?\\s*$");
+    private static final String DRAFT_TARGET = "(?:(?:这个|这份|刚才的|当前的)\\s*)?(?:" + SKILL_WORD + "|草案|草稿|方案)";
     private static final String DRAFT_FIELD = "(?:名称|名字|说明|用途|参数|指令|提示词|语气|输出(?:格式)?)";
     private static final String CHANGE = "(?:改成|改为|调整为|修改为|换成|改名为|重命名为|增加|加上|补充|去掉|删掉|移除"
             + "|改一下|修改一下|优化一下|调整一下)";
@@ -112,8 +115,13 @@ public final class SkillAuthoring {
     }
 
     public static String draftInput(String requirement, String priorValidatedDefinition) {
+        return draftInput(requirement, priorValidatedDefinition, false);
+    }
+
+    public static String draftInput(String requirement, String priorValidatedDefinition, boolean imageRequired) {
         JSONObject input = new JSONObject();
         put(input, "requirement", boundedText(requirement, 2000));
+        if (imageRequired) put(input, "requiredOutputType", "image");
         if (priorValidatedDefinition != null && !priorValidatedDefinition.trim().isEmpty()) {
             put(input, "previousDefinition", readObject(priorValidatedDefinition, MAX_DEFINITION));
         }

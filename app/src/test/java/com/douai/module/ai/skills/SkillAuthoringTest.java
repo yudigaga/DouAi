@@ -24,6 +24,17 @@ public final class SkillAuthoringTest {
         assertEquals(SkillAuthoring.Mode.SAVE, SkillAuthoring.match("请帮我内置。", true).mode());
     }
 
+    @Test public void phonePhrasingAcceptsPluralSingularAndChineseSkillNames() {
+        SkillAuthoring.Action createImageAndSave = new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, "生图", true);
+        for (String phrase : new String[]{"帮我写一个生图 skills 并内置", "帮我写一个生图 Skill 并内置",
+                "帮我写一个生图 SKILLS 并内置", "帮我写一个生图技能并内置",
+                "帮我写一个生图 skills，然后内置这个 SKILLS"}) {
+            assertEquals(phrase, createImageAndSave, SkillAuthoring.match(phrase, false));
+        }
+        assertEquals(SkillAuthoring.Mode.SAVE, SkillAuthoring.match("帮我内置这个 skills", true).mode());
+        assertEquals(SkillAuthoring.Mode.REVISE, SkillAuthoring.match("修改这个 skills：使用三个要点", true).mode());
+    }
+
     @Test public void revisionRequiresAnExistingDraftAndARequestToChangeIt() {
         assertNull(SkillAuthoring.match("把它改成正式语气", false));
         assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.REVISE, "把它改成正式语气", false),
@@ -39,6 +50,7 @@ public final class SkillAuthoringTest {
 
     @Test public void quotedAndOrdinaryDiscussionRemainChatEvenWithADraft() {
         for (String sentence : new String[]{"如何写一个周报 Skill？", "帮我写一个生图 Skill 的使用说明",
+                "如何写一个生图 skills 并内置？", "帮我写一个生图 skills 的介绍", "「帮我写一个生图 skills 并内置」",
                 "「帮我做一个生图 Skill」", "分析这段文字：帮我做一个 Skill", "这是引用\n帮我内置",
                 "请解释怎么内置", "他说帮我内置", "/skill 做一个生图 Skill", "帮我做一个如何写 Skill 的 Skill",
                 "补充讲讲这件事", "再补充昨晚比分", "改一下这个问题"}) {
@@ -50,6 +62,11 @@ public final class SkillAuthoringTest {
         JSONObject create = new JSONObject(SkillAuthoring.draftInput("生成会议纪要", null));
         assertEquals(1, create.length());
         assertEquals("生成会议纪要", create.getString("requirement"));
+        assertFalse(create.has("requiredOutputType"));
+        JSONObject image = new JSONObject(SkillAuthoring.draftInput("生图", null, true));
+        assertEquals(2, image.length());
+        assertEquals("生图", image.getString("requirement"));
+        assertEquals("image", image.getString("requiredOutputType"));
         JSONObject revision = new JSONObject(SkillAuthoring.draftInput("把语气改正式", "{\"name\":\"会议纪要\"}"));
         assertEquals(2, revision.length());
         assertEquals("会议纪要", revision.getJSONObject("previousDefinition").getString("name"));

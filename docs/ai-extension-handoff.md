@@ -165,3 +165,25 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 本轮专项及相邻回归 347 项通过，0 失败，0 跳过。真机与签名包待独立验收。
+
+## 编辑单条 Skill 与生图复数请求 · 基于 `68a6ad9`
+
+在「扩展功能 → AI Skills」打开单条详情，点「编辑」。可修改简介、使用说明及适用的执行指令。命令名固定。保存会核对原记录身份，再写入待确认草稿。已有版本在确认「启用新版」前继续可用，随后可回退。取消编辑会保留原记录。
+
+- `AiSkillDetailDialog.java`、`SkillStore.java` 增加编辑、草稿、旧版本复核和启用。继续读取 v1/v2/v3。图片草稿在待确认时也可进入「配置图片服务」。相同的已授权绑定可复用。调整服务目标、模型或密钥走单独的本地配置与授权，旧版和共享配置仍可供其他调用使用。
+- `SkillAuthoring.java`、`AiTestChatDialog.java` 支持明确的单数、复数及中文写技能请求。比如「帮我写一个生图 skills 并内置」会要求图片输出；若模型返回文本，显示类型不符并拦截保存。图片缺少服务时留下真实待配置草稿和对应设置入口。
+- `SkillEditingTest.java`、`AiSkillSettingsDialogTest.java`、`SkillAuthoringTest.java`、`AiTestChatDialogTest.java`、`NativeAiConversationTest.java` 覆盖编辑、回退、配置隔离、同名冲突、反馈原句和两入口。文件级删除仍走原有确认和原子目录流程。
+
+### 独立验收清单
+
+1. 打开文本 Skill 详情，改简介、说明和支持的指令。先取消，核对版本及当前命令。再保存，确认斜杠执行仍使用旧指令。点「启用新版」，执行新版本，再回退复测。
+2. 编辑已安装图片 Skill 并保存草稿，从同一详情打开「配置图片服务」。用本地模拟服务验证保存、授权和启用新版。也可核对地址、模型、费用字段及空白密钥显示。其他 Skill 所用的共享服务继续通过原登记访问。
+3. 在两个入口各用「帮我写一个生图 skills 并内置」验收。图片缺少授权时，应显示待配置，并可打开对应详情，配置本地模拟后调用查看位图。模型只返回文本时，应报告类型不符，且技能库没有因此新增 `/模拟技能`。普通问句和带引号的原句留在普通聊天。
+4. 用同名条目制造待确认草稿，检查第一个编辑窗口的旧快照无法覆盖后续保存，再回归删除、回退、顶部色带和全屏回缩。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests '*SkillEditingTest' --tests '*AiSkillSettingsDialogTest' --tests '*SkillAuthoringTest' --tests '*AiTestChatDialogTest' --tests '*NativeAiConversationTest'
+```
+
+本轮专项及相邻回归 362 项通过，0 失败，0 跳过。模型和图片服务使用模拟响应，真机待独立复测。

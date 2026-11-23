@@ -68,11 +68,15 @@ final class AiSkillDetailDialog implements AutoCloseable {
             render(detail, feedback);
         }
         catch (Exception failure) {
-            render(null, retryReadyDraft ? "暂时无法读取此技能的配置" : "删除未完成，暂时无法读取此技能");
+            render(null, feedback.isEmpty() ? "暂时无法读取此技能的配置" : feedback);
         }
     }
 
     private void render(SkillStore.Detail detail, String feedback) {
+        render(detail, feedback, false);
+    }
+
+    private void render(SkillStore.Detail detail, String feedback, boolean showImageConfiguration) {
         clearKey();
         body.removeAllViews();
         TextView title = text(body, "/" + name, "skills.detail.name");
@@ -84,7 +88,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
             return;
         }
         String summary = detail.outputType() == SkillResult.Type.IMAGE ? "图片输出" : "文本输出";
-        if (detail.pending()) summary += " · 待连接";
+        if (detail.pending()) summary += detail.canReplace() ? " · 待启用新版" : " · 待连接";
         if (detail.previousVersion() > 0) summary += " · v" + detail.previousVersion()
                 + (detail.installedEnabled() ? " 已启用" : " 已停用");
         text(body, summary, "skills.detail.summary");
@@ -95,15 +99,85 @@ final class AiSkillDetailDialog implements AutoCloseable {
             for (SkillStore.Field field : detail.fields()) {
                 text(body, field.label() + " · " + fieldState(field), "skills.detail.field." + field.id());
             }
-            pendingActions(detail);
+            pendingActions(detail, showImageConfiguration);
         } else if (detail.service() != null) {
             text(body, detail.service().label(), "skills.detail.service");
         }
         if (detail.previousVersion() > 0) installedActions(detail);
         SkillStore.DeleteTarget deleteTarget = detail.deleteTarget();
         if (deleteTarget != null) {
+            button(body, "编辑", "skills.detail.edit", () -> showEdit(deleteTarget));
             button(body, "删除", "skills.detail.delete", () -> reviewDelete(deleteTarget));
         }
+    }
+
+    private void showEdit(SkillStore.DeleteTarget expected) {
+        SkillStore.EditTarget edit;
+        try { edit = store.editTarget(expected); }
+        catch (Exception failure) {
+            reload("无法打开编辑，请核对当前技能后再试", false);
+            return;
+        }
+        if (edit == null) {
+            status.setText("此技能暂不可编辑");
+            return;
+        }
+
+        LinearLayout form = column();
+        int padding = dp(16);
+        form.setPadding(padding, 0, padding, padding);
+        TextView command = text(form, "/" + expected.name(), "skills.edit.name");
+        command.setTypeface(null, Typeface.BOLD);
+        command.setAccessibilityHeading(true);
+        int multiline = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+        EditText description = input(form, "技能简介", "skills.edit.description", InputType.TYPE_CLASS_TEXT, 100, false);
+        description.setText(edit.description());
+        EditText usage = input(form, "使用说明", "skills.edit.documentation", multiline, 6000, false);
+        usage.setText(edit.documentation());
+        EditText instruction = edit.instructionEditable()
+                ? input(form, "执行指令", "skills.edit.instruction", multiline, 1600, false) : null;
+        if (instruction != null) instruction.setText(edit.instruction());
+        TextView error = text(form, "", "skills.edit.error");
+        error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        ScrollView scroll = new ScrollView(context);
+        scroll.addView(form);
+        AlertDialog editor = builder("编辑技能").setView(scroll).setNegativeButton("取消", null)
+                .setPositiveButton("保存草稿", null).create();
+        showChild(editor);
+        if (!editor.isShowing()) return;
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+            if (!active() || !editor.isShowing() || confirmation != editor) return;
+            String nextDescription = description.getText().toString();
+            String nextUsage = usage.getText().toString();
+            String nextInstruction = instruction == null ? edit.instruction() : instruction.getText().toString();
+            if (nextDescription.trim().isEmpty() || nextUsage.trim().isEmpty()
+                    || (instruction != null && nextInstruction.trim().isEmpty())) {
+                error.setText("请填写所有编辑字段");
+                return;
+            }
+            saveEdit(editor, error, edit, nextDescription, nextUsage, nextInstruction);
+        });
+    }
+
+    private void saveEdit(AlertDialog editor, TextView error, SkillStore.EditTarget expected,
+                          String description, String usage, String instruction) {
+        SkillStore.Detail updated;
+        try { updated = store.saveEdit(expected, description, usage, instruction); }
+        catch (Exception failure) {
+            SkillStore.Detail current;
+            try { current = store.detail(name); }
+            catch (Exception unavailable) { current = null; }
+            if (current != null && expected.identity().equals(current.deleteTarget())) {
+                error.setText("编辑未保存，请检查填写内容后再试");
+                return;
+            }
+            editor.dismiss();
+            render(current, "编辑未保存，请核对当前技能后重试");
+            return;
+        }
+        editor.dismiss();
+        render(updated, "编辑已保存为草稿");
+        if (onChanged != null) onChanged.run();
     }
 
     private void reviewDelete(SkillStore.DeleteTarget expected) {
@@ -123,8 +197,14 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (onChanged != null) onChanged.run();
     }
 
-    private void pendingActions(SkillStore.Detail detail) {
-        if (detail.outputType() == SkillResult.Type.IMAGE && !detail.canReplace()) connectionForm(detail);
+    private void pendingActions(SkillStore.Detail detail, boolean showImageConfiguration) {
+        if (detail.outputType() == SkillResult.Type.IMAGE) {
+            if (detail.canReplace() && !showImageConfiguration) {
+                button(body, "配置图片服务", "skills.detail.configure", () -> render(detail, "", true));
+            } else {
+                connectionForm(detail);
+            }
+        }
         if (detail.canReplace()) {
             button(body, "启用新版", "skills.detail.replace", () -> review("确认更新技能",
                     "/" + name + " 当前版本 v" + detail.previousVersion() + "。启用新版后可回退。"
@@ -237,9 +317,13 @@ final class AiSkillDetailDialog implements AutoCloseable {
 
     private void review(String title, String message, String label, Runnable action) {
         if (!active()) return;
-        if (confirmation != null) confirmation.dismiss();
         AlertDialog child = builder(title).setMessage(message).setNegativeButton("取消", null)
                 .setPositiveButton(label, (ignored, which) -> { if (active()) action.run(); }).create();
+        showChild(child);
+    }
+
+    private void showChild(AlertDialog child) {
+        if (confirmation != null) confirmation.dismiss();
         confirmation = child;
         if (dialog.getOwnerActivity() != null) child.setOwnerActivity(dialog.getOwnerActivity());
         child.setOnDismissListener(ignored -> { if (confirmation == child) confirmation = null; });
@@ -299,7 +383,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         view.setHint(label);
         view.setTag(tag);
         view.setInputType(type);
-        view.setMaxLines(1);
+        view.setMaxLines((type & InputType.TYPE_TEXT_FLAG_MULTI_LINE) != 0 ? 6 : 1);
         view.setFilters(new InputFilter[]{new InputFilter.LengthFilter(limit)});
         parent.addView(MiuixFormControls.viewFor(view), matchWrap());
         return view;

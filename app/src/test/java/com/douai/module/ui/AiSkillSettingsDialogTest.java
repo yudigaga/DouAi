@@ -9,6 +9,7 @@ import android.widget.EditText;
 import android.widget.Spinner;
 import android.widget.TextView;
 
+import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -244,6 +245,124 @@ public final class AiSkillSettingsDialogTest {
         assertTrue(store.list().isEmpty());
         assertEquals(recreated.draftId(), store.pending().get(0).draftId());
         assertTrue(((TextView) view("skills.status")).getText().toString().contains("重试连接未完成"));
+    }
+
+    @Test public void cancellingSkillEditKeepsTheInstalledIdentityAndDoesNotCreateADraft() throws Exception {
+        String name = "整理稿件";
+        installTextSkill(name, "保持段落结构");
+        SkillStore.DeleteTarget before = store.detail(name).deleteTarget();
+        AlertDialog detail = directSkillDetail(name);
+        AlertDialog editor = requestEdit(detail);
+        TextView command = dialogView(editor, "skills.edit.name");
+        assertEquals("/" + name, command.getText().toString());
+        assertFalse(command instanceof EditText);
+        editField(editor, "instruction").setText("将结果缩短为两段");
+        assertTrue(editor.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(before, store.detail(name).deleteTarget());
+        assertTrue(store.pending().isEmpty());
+        assertEquals("保持段落结构", activeInstruction(name));
+        detail.dismiss();
+    }
+
+    @Test public void savingSkillEditStagesTheNewRuleUntilConfirmationAndSupportsRollback() throws Exception {
+        String name = "整理稿件";
+        installTextSkill(name, "保持段落结构");
+        AlertDialog detail = directSkillDetail(name);
+        AlertDialog editor = requestEdit(detail);
+        editField(editor, "description").setText("改写成提纲");
+        editField(editor, "documentation").setText("输入原稿。\n每段返回一个条目。");
+        editField(editor, "instruction").setText("每段写一个条目");
+        confirm(editor);
+
+        assertTrue(store.detail(name).canReplace());
+        assertEquals("保持段落结构", activeInstruction(name));
+        JSONObject draft = new JSONObject(store.pendingDefinition(name));
+        assertEquals("改写成提纲", draft.getString("description"));
+        assertEquals("输入原稿。\n每段返回一个条目。", draft.getString("documentation"));
+        assertTrue(dialogView(detail, "skills.detail.replace").performClick());
+        confirm((AlertDialog) ShadowDialog.getLatestDialog());
+        assertEquals("每段写一个条目", activeInstruction(name));
+        assertTrue(store.pending().isEmpty());
+
+        assertTrue(dialogView(detail, "skills.detail.rollback").performClick());
+        assertEquals("保持段落结构", activeInstruction(name));
+        detail.dismiss();
+    }
+
+    @Test public void anEditedReadyImageSkillCanReopenItsMaskedServiceForm() throws Exception {
+        SkillServices.Service mock = services.find(SkillServices.MOCK_IMAGE);
+        services.authorize(mock, 0);
+        String source = SkillStore.mockDraft("生图");
+        String name = store.saveGenerated(source, store.previewGenerated(source)).installed().name();
+        AlertDialog detail = directSkillDetail(name);
+        AlertDialog editor = requestEdit(detail);
+        assertNull(dialogView(editor, "skills.edit.instruction"));
+        editField(editor, "documentation").setText("输入想要的画面描述。");
+        confirm(editor);
+
+        assertTrue(store.detail(name).canReplace());
+        assertTrue(dialogView(detail, "skills.detail.configure").performClick());
+        assertNotNull(dialogView(detail, "skills.detail.adapter"));
+        EditText key = dialogView(detail, "skills.detail.key");
+        assertTrue(key.getTransformationMethod() instanceof PasswordTransformationMethod);
+        assertEquals(0, key.length());
+        assertNotNull(dialogView(detail, "skills.detail.replace"));
+        detail.dismiss();
+    }
+
+    @Test public void aStaleSkillEditorCannotOverwriteAConcurrentSavedDraft() throws Exception {
+        String name = "整理稿件";
+        installTextSkill(name, "保持段落结构");
+        AlertDialog detail = directSkillDetail(name);
+        AlertDialog editor = requestEdit(detail);
+        SkillStore.EditTarget concurrent = store.editTarget(store.detail(name).deleteTarget());
+        SkillStore.Detail newer = store.saveEdit(concurrent, "并发保存的草稿", "更新后的说明。", "根据标题整理");
+        editField(editor, "description").setText("过期编辑内容");
+        confirm(editor);
+
+        assertEquals(newer.draftId(), store.detail(name).draftId());
+        assertEquals("并发保存的草稿", new JSONObject(store.pendingDefinition(name)).getString("description"));
+        assertTrue(detailStatus(detail).contains("编辑未保存"));
+        assertEquals("保持段落结构", activeInstruction(name));
+        detail.dismiss();
+    }
+
+    private void installTextSkill(String name, String instruction) throws Exception {
+        String definition = new JSONObject().put("schemaVersion", 3).put("name", name).put("description", "整理文本")
+                .put("documentation", "输入待整理的内容。")
+                .put("execution", new JSONObject().put("kind", "text_model").put("outputType", "text")
+                        .put("maxInput", 2000).put("instruction", instruction))
+                .put("trial", new JSONObject().put("input", "示例内容").put("expectedType", "text")).toString();
+        assertNotNull(store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(definition)).installed());
+    }
+
+    private String activeInstruction(String name) throws Exception {
+        AiSkills.Invocation call = AiSkills.match(AiSkills.Entry.WORK, "/" + name + " 一段内容", store);
+        assertNotNull(call);
+        return ((SkillResult.Text) AiSkills.executeResult(call, store, (instruction, argument) -> instruction)).text();
+    }
+
+    private AlertDialog directSkillDetail(String name) {
+        AiSkillDetailDialog page = new AiSkillDetailDialog(activity, false, name, null);
+        present(page.dialog(), page::close);
+        return page.dialog();
+    }
+
+    private static AlertDialog requestEdit(AlertDialog detail) {
+        assertTrue(dialogView(detail, "skills.detail.edit").performClick());
+        return (AlertDialog) ShadowDialog.getLatestDialog();
+    }
+
+    private static EditText editField(AlertDialog editor, String field) {
+        EditText input = dialogView(editor, "skills.edit." + field);
+        assertNotNull(input);
+        return input;
+    }
+
+    private static <T extends View> T dialogView(AlertDialog dialog, String tag) {
+        return dialog.getWindow().getDecorView().findViewWithTag(tag);
     }
 
     private AlertDialog skillDetail(String rowTag) {
