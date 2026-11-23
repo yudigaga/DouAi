@@ -26,7 +26,6 @@ import java.util.concurrent.TimeUnit;
 
 /** One user-requested catalogue GET for an OpenAI-compatible image service. */
 public final class SkillImageModelCatalog {
-    private static final String GENERATION_SUFFIX = "/images/generations";
     private static final int MAX_RESPONSE_BYTES = 256 * 1024;
     private static final int MAX_ROWS = 4096;
     private static final int DEADLINE_SECONDS = 12;
@@ -82,30 +81,31 @@ public final class SkillImageModelCatalog {
     public static String validateOverride(String generationEndpoint, String override) throws Failure {
         String explicit = trimmed(override);
         if (explicit.isEmpty()) return "";
-        URI generation = endpoint(generationEndpoint);
+        URI generation = generationEndpoint(generationEndpoint);
         URI catalog = endpoint(explicit);
         if (!generation.getHost().equalsIgnoreCase(catalog.getHost()) || port(generation) != port(catalog)) {
             throw failure(Code.DIFFERENT_ORIGIN);
         }
-        if (generation.getPath().equals(catalog.getPath())) throw failure(Code.INVALID_ENDPOINT);
+        if (SkillImageProviderAddress.withoutTrailingSlash(generation.getPath()).equals(
+                SkillImageProviderAddress.withoutTrailingSlash(catalog.getPath()))) throw failure(Code.INVALID_ENDPOINT);
         return explicit;
     }
 
     public static String resolveEndpoint(String generationEndpoint, String override) throws Failure {
         String explicit = validateOverride(generationEndpoint, override);
         if (!explicit.isEmpty()) return explicit;
-        URI generation = endpoint(generationEndpoint);
-        String path = generation.getRawPath();
-        if (!path.endsWith(GENERATION_SUFFIX)) throw failure(Code.CATALOG_REQUIRED);
-        String prefix = path.substring(0, path.length() - GENERATION_SUFFIX.length());
+        URI generation = generationEndpoint(generationEndpoint);
+        String path = SkillImageProviderAddress.withoutTrailingSlash(generation.getRawPath());
+        if (!path.endsWith(SkillImageProviderAddress.GENERATION_SUFFIX)) throw failure(Code.CATALOG_REQUIRED);
+        String prefix = path.substring(0, path.length() - SkillImageProviderAddress.GENERATION_SUFFIX.length());
         return endpoint("https://" + generation.getRawAuthority() + prefix + "/models").toString();
     }
 
     /** The caller resolves the catalogue against the exact generation endpoint before choosing its credential. */
     public List<String> fetch(String resolvedModelsEndpoint, String bearer) throws Failure {
         URI catalog = endpoint(resolvedModelsEndpoint);
-        if (!AiCredentialVault.validBearer(bearer)) throw failure(Code.CREDENTIAL_REQUIRED);
-        if (catalog.toString().contains(bearer) || catalog.getPath().contains(bearer)) throw failure(Code.INVALID_ENDPOINT);
+        if (!AiCredentialVault.validImageBearer(bearer)) throw failure(Code.CREDENTIAL_REQUIRED);
+        if (AiCredentialVault.imageEndpointContainsCredential(catalog.toString(), bearer)) throw failure(Code.INVALID_ENDPOINT);
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("Accept", "application/json");
         headers.put("Authorization", "Bearer " + bearer);
@@ -189,7 +189,7 @@ public final class SkillImageModelCatalog {
             if (++rows > MAX_ROWS) throw failure(Code.INVALID_RESPONSE);
             String id = readId(json);
             if (id == null) continue;
-            if (id.contains(bearer)) throw failure(Code.UNSAFE_RESPONSE);
+            if (AiCredentialVault.containsImageCredential(id, bearer)) throw failure(Code.UNSAFE_RESPONSE);
             if (usableId(id)) values.add(id);
         }
         json.endArray();
@@ -229,6 +229,12 @@ public final class SkillImageModelCatalog {
     private static URI endpoint(String value) throws Failure {
         try { return AiExtensionHttp.exactEndpoint(trimmed(value)); }
         catch (IllegalArgumentException invalid) { throw failure(Code.INVALID_ENDPOINT); }
+    }
+
+    private static URI generationEndpoint(String value) throws Failure {
+        URI verified = endpoint(value);
+        if (SkillImageProviderAddress.isNonImageOperation(verified.toString())) throw failure(Code.INVALID_ENDPOINT);
+        return verified;
     }
 
     private static int port(URI uri) { return uri.getPort() < 0 ? 443 : uri.getPort(); }

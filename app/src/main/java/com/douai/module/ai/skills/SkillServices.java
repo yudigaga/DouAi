@@ -22,7 +22,6 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.ByteBuffer;
@@ -200,6 +199,7 @@ public final class SkillServices {
         Service input = new Service(serviceId, skillName, value(endpoint).trim(), costUnits, SkillResult.Type.IMAGE,
                 adapter, value(modelName).trim(), skillName, value(modelsEndpoint).trim());
         validateScoped(input);
+        requireImageOperation(input);
         String token = normalizeScopedBearer(bearer);
         if (!token.isEmpty() && (input.endpoint().isEmpty() || input.adapter() == Adapter.MOCK_IMAGE)) {
             throw problem(Code.INVALID_INPUT, "请先填写凭据所属的 HTTPS 地址");
@@ -223,6 +223,7 @@ public final class SkillServices {
             if (!token.isEmpty()) {
                 verifyNoMetadataSecret(service, token);
                 ciphertext = encrypt(service, token);
+                if (scopedOpenAi(service)) verifyImageSave(service, ciphertext, token);
             } else if (!ciphertext.isEmpty() && (!previous.service().modelName().equals(service.modelName())
                     || !previous.service().modelsEndpoint().equals(service.modelsEndpoint()))) {
                 verifyNoMetadataSecret(service, decrypt(previous));
@@ -250,7 +251,8 @@ public final class SkillServices {
             }
         }
         if (token.isEmpty()) throw problem(Code.CREDENTIAL_REQUIRED, "请输入此图片服务的 API 密钥");
-        if (endpointContainsSecret(endpoint, token) || endpointContainsSecret(resolved, token)) {
+        if (AiCredentialVault.imageEndpointContainsCredential(endpoint, token)
+                || AiCredentialVault.imageEndpointContainsCredential(resolved, token)) {
             throw problem(Code.INVALID_INPUT, "图片服务和模型列表地址不能包含凭据");
         }
         return imageModels.fetch(resolved, token);
@@ -350,8 +352,9 @@ public final class SkillServices {
                 throw problem(Code.CONFIRMATION_REQUIRED, "请先确认服务地址、权限与费用上限");
             }
             requireComplete(grant);
+            requireImageOperation(grant.service());
             token = decrypt(grant);
-            if (!token.isEmpty() && argument.contains(token)) {
+            if (AiCredentialVault.containsImageCredential(argument, token)) {
                 throw problem(Code.INVALID_INPUT, "服务输入中不能包含已登记的凭据");
             }
         }
@@ -484,7 +487,10 @@ public final class SkillServices {
     }
 
     private static void rejectEchoBytes(byte[] bytes, String token) throws Failure {
-        if (!token.isEmpty()) rejectEcho(new String(bytes, StandardCharsets.ISO_8859_1), token);
+        if (!token.isEmpty() && AiCredentialVault.containsImageCredential(
+                new String(bytes, StandardCharsets.ISO_8859_1), token)) {
+            throw problem(Code.REJECTED, "服务回复包含凭据，已拦截");
+        }
     }
 
     private static String utf8(byte[] bytes) throws CharacterCodingException {
@@ -553,18 +559,14 @@ public final class SkillServices {
     }
 
     private static void verifyNoMetadataSecret(Service service, String token) throws Failure {
-        if (service.id().contains(token) || service.label().contains(token)
-                || endpointContainsSecret(service.endpoint(), token) || endpointContainsSecret(service.modelsEndpoint(), token)
-                || service.modelName().contains(token) || service.skillName().contains(token)) {
+        if (AiCredentialVault.containsImageCredential(service.id(), token)
+                || AiCredentialVault.containsImageCredential(service.label(), token)
+                || AiCredentialVault.imageEndpointContainsCredential(service.endpoint(), token)
+                || AiCredentialVault.imageEndpointContainsCredential(service.modelsEndpoint(), token)
+                || AiCredentialVault.containsImageCredential(service.modelName(), token)
+                || AiCredentialVault.containsImageCredential(service.skillName(), token)) {
             throw problem(Code.INVALID_INPUT, "服务名称、标识、地址或模型不能包含凭据");
         }
-    }
-
-    private static boolean endpointContainsSecret(String endpoint, String token) {
-        if (endpoint.isEmpty()) return false;
-        if (endpoint.contains(token)) return true;
-        String decodedPath = URI.create(endpoint).getPath();
-        return decodedPath != null && decodedPath.contains(token);
     }
 
     private static Registration requireMatching(Map<String, Registration> entries, Service expected) throws Failure {
@@ -633,6 +635,16 @@ public final class SkillServices {
         }
     }
 
+    private static boolean scopedOpenAi(Service service) {
+        return service.scoped() && service.adapter() == Adapter.OPENAI_IMAGES;
+    }
+
+    private static void requireImageOperation(Service service) throws Failure {
+        if (scopedOpenAi(service) && SkillImageProviderAddress.isNonImageOperation(service.endpoint())) {
+            throw problem(Code.INVALID_INPUT, "请填写生图接口地址，聊天或模型列表接口不能用于生图");
+        }
+    }
+
     private static void validateEndpoint(String endpoint) throws Failure {
         try { AiExtensionHttp.exactEndpoint(endpoint); }
         catch (IllegalArgumentException invalid) { throw problem(Code.INVALID_INPUT, invalid.getMessage()); }
@@ -645,11 +657,16 @@ public final class SkillServices {
         int first = 0, last = input.length();
         while (first < last && clipboardSpace(input.charAt(first))) first++;
         while (last > first && clipboardSpace(input.charAt(last - 1))) last--;
-        String token = input.substring(first, last);
-        Matcher prefix = SCOPED_BEARER_PREFIX.matcher(token);
-        if (prefix.find()) token = token.substring(prefix.end());
-        validateToken(token);
+        Matcher prefix = SCOPED_BEARER_PREFIX.matcher(input).region(first, input.length());
+        boolean prefixed = prefix.lookingAt();
+        if (prefixed && prefix.end() >= last) throw invalidImageKey();
+        String token = input.substring(prefixed ? prefix.end() : first, last);
+        if (!token.isEmpty() && !AiCredentialVault.validImageBearer(token)) throw invalidImageKey();
         return token;
+    }
+
+    private static Failure invalidImageKey() {
+        return problem(Code.INVALID_INPUT, "图片服务密钥应为 1–4000 位有效 Bearer 字符");
     }
 
     private static boolean clipboardSpace(char value) {
@@ -712,7 +729,8 @@ public final class SkillServices {
                 }
                 Registration item = new Registration(service, ciphertext, max);
                 if (service.scoped() && max >= 0) requireComplete(item);
-                if (ciphertext.length() > 4096 || max < DISARMED || max > MAX_COST_UNITS
+                int maximumCiphertext = scopedOpenAi(service) ? AiCredentialVault.MAX_IMAGE_CIPHERTEXT : 4096;
+                if (ciphertext.length() > maximumCiphertext || max < DISARMED || max > MAX_COST_UNITS
                         || registrations.put(service.id(), item) != null) {
                     throw new JSONException("registration");
                 }
@@ -784,15 +802,28 @@ public final class SkillServices {
 
     private String encrypt(Service service, String secret) throws Failure {
         try {
+            if (scopedOpenAi(service)) return credentials.sealImage(service.id(), service.endpoint(), secret);
             return credentials.seal(CREDENTIAL_SCOPE, service.id(), service.endpoint(), secret);
         } catch (GeneralSecurityException failed) {
             throw problem(Code.CREDENTIAL_REQUIRED, "本机暂时无法保存凭据");
         }
     }
 
+    private void verifyImageSave(Service service, String ciphertext, String secret) throws Failure {
+        try {
+            if (secret.equals(credentials.openImage(service.id(), service.endpoint(), ciphertext))) return;
+        } catch (GeneralSecurityException unavailable) {
+            // The just-created record must reopen before it can replace any saved configuration.
+        }
+        throw problem(Code.CREDENTIAL_REQUIRED, "密钥保存校验失败，未写入配置");
+    }
+
     private String decrypt(Registration registration) throws Failure {
         Service service = registration.service();
         try {
+            if (scopedOpenAi(service)) {
+                return credentials.openImage(service.id(), service.endpoint(), registration.ciphertext());
+            }
             return credentials.open(CREDENTIAL_SCOPE, service.id(), service.endpoint(), registration.ciphertext());
         } catch (GeneralSecurityException failed) {
             throw problem(Code.CREDENTIAL_REQUIRED, "无法读取本机凭据，请重新登记并确认授权");

@@ -16,13 +16,17 @@ import android.view.inputmethod.EditorInfo;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
+import com.douai.module.ai.AiCredentialVault;
 import com.douai.module.ai.skills.SkillImageModelCatalog;
+import com.douai.module.ai.skills.SkillImageProviderAddress;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -41,7 +45,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         List<String> fetch(String name, String draftId, String endpoint, String modelsEndpoint, String bearer) throws Exception;
     }
 
-    private static final int MAX_KEY_ENTRY = 2112; // Allows a pasted Bearer prefix around a full-length token.
+    private static final int MAX_KEY_ENTRY = AiCredentialVault.MAX_IMAGE_BEARER_CHARS + 64;
     private static final String FETCHING_MODELS = "正在查询模型列表…";
     private final Context context;
     private final boolean miuix;
@@ -270,21 +274,30 @@ final class AiSkillDetailDialog implements AutoCloseable {
         LinearLayout fields = column();
         fields.setTag("skills.detail.openai");
         body.addView(fields, matchWrap());
-        EditText endpoint = input(fields, "HTTPS 生图接口", "skills.detail.endpoint",
+        SkillImageProviderAddress.Form savedAddress =
+                SkillImageProviderAddress.fromSaved(savedOpenAi ? saved.endpoint() : "");
+        EditText endpoint = input(fields, "API 基础地址", "skills.detail.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
+        endpoint.setText(savedAddress.address());
+        String completeLabel = "按完整生图接口填写";
+        CompoundButton complete = miuix ? MiuixFormControls.checkbox(context, completeLabel, savedAddress.complete())
+                : new CheckBox(context);
+        complete.setText(completeLabel);
+        complete.setTag("skills.detail.endpoint_complete");
+        complete.setChecked(savedAddress.complete());
+        fields.addView(MiuixFormControls.viewFor(complete), matchWrap());
         EditText modelsEndpoint = input(fields, "模型列表 HTTPS 地址（可选）", "skills.detail.models_endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
         EditText model = input(fields, "模型名称", "skills.detail.model", InputType.TYPE_CLASS_TEXT, 256, false);
         EditText cost = input(fields, "每次调用费用单位", "skills.detail.cost", InputType.TYPE_CLASS_NUMBER, 7, false);
-        EditText key = input(fields, "API 密钥", "skills.detail.key",
+        boolean credentialSaved = detail.fields().stream().anyMatch(field ->
+                "credential".equals(field.id()) && field.state() == SkillStore.FieldState.FILLED);
+        String keyLabel = credentialSaved ? "API 密钥（已保存，地址不变可留空）" : "API 密钥";
+        EditText key = input(fields, keyLabel, "skills.detail.key",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, MAX_KEY_ENTRY, true);
-        key.setSaveEnabled(false);
-        key.setSaveFromParentEnabled(false);
-        key.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
         key.setImeOptions(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         keyInput = key;
         if (savedOpenAi) {
-            endpoint.setText(saved.endpoint());
             modelsEndpoint.setText(saved.modelsEndpoint());
             model.setText(saved.modelName());
         }
@@ -302,9 +315,13 @@ final class AiSkillDetailDialog implements AutoCloseable {
         });
         modelLookupButton = button(fields, "拉取模型列表", "skills.detail.fetch_models", () -> {
             if (adapter.getSelectedItemPosition() != 0 || keyInput != key) return;
-            lookupModels(detail, fieldValue(endpoint), fieldValue(modelsEndpoint), key, model);
+            String generation = generationAddress(endpoint, complete);
+            if (generation != null) lookupModels(detail, generation, fieldValue(modelsEndpoint), key, model);
         });
         watchModelInputs(key, endpoint, modelsEndpoint, model, cost, key);
+        complete.setOnCheckedChangeListener((view, checked) -> {
+            if (keyInput == key) cancelModelLookup();
+        });
 
         button(body, "保存配置", "skills.detail.save", () -> {
             cancelModelLookup();
@@ -313,15 +330,19 @@ final class AiSkillDetailDialog implements AutoCloseable {
             int units;
             try { units = mock ? 0 : Integer.parseInt(fieldValue(cost)); }
             catch (NumberFormatException invalid) { status.setText("请输入有效的每次调用费用单位"); return; }
+            String generation = mock ? "" : generationAddress(endpoint, complete);
+            if (generation == null) return;
             String bearer = mock ? "" : key.getText().toString();
-            saveConfiguration(detail, selected, mock ? "" : fieldValue(endpoint),
+            saveConfiguration(detail, selected, generation,
                     mock ? "" : fieldValue(modelsEndpoint), mock ? "" : fieldValue(model), units, bearer);
         });
         if (detail.canAuthorize() && saved != null) {
             button(body, "授权已保存的服务", "skills.detail.authorize", () -> {
                 boolean mockSelected = adapter.getSelectedItemPosition() == 1;
+                String generation = mockSelected ? "" : generationAddress(endpoint, complete);
+                if (generation == null) return;
                 boolean changed = (savedMock != mockSelected) || (savedOpenAi && (
-                        !saved.endpoint().equals(fieldValue(endpoint))
+                        !saved.endpoint().equals(generation)
                                 || !saved.modelsEndpoint().equals(fieldValue(modelsEndpoint))
                                 || !saved.modelName().equals(fieldValue(model))
                                 || !Integer.toString(saved.costUnits()).equals(fieldValue(cost))
@@ -331,6 +352,14 @@ final class AiSkillDetailDialog implements AutoCloseable {
                         () -> store.authorizeConfiguration(name, detail.draftId(), saved), "授权已保存",
                         "授权或启用失败，请重新核对服务和费用"));
             });
+        }
+    }
+
+    private String generationAddress(EditText address, CompoundButton complete) {
+        try { return SkillImageProviderAddress.resolve(fieldValue(address), complete.isChecked()); }
+        catch (IllegalArgumentException invalid) {
+            status.setText(invalid.getMessage());
+            return null;
         }
     }
 
@@ -358,7 +387,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         for (SkillStore.Field field : detail.fields()) {
             if (field.required() && field.state() == SkillStore.FieldState.MISSING) {
                 if ("model".equals(field.id())) return "配置已保存，请选择或填写模型名称";
-                if ("endpoint".equals(field.id())) return "配置已保存，请填写 HTTPS 生图接口";
+                if ("endpoint".equals(field.id())) return "配置已保存，请填写 HTTPS API 基础地址";
                 if ("credential".equals(field.id())) return "配置已保存，请填写 API 密钥";
             }
         }
@@ -526,15 +555,26 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private EditText input(LinearLayout parent, String label, String tag, int type, int limit, boolean secret) {
-        EditText view = miuix && !secret ? MiuixFormControls.input(context, label, "", false) : new EditText(context);
+        EditText view = miuix ? MiuixFormControls.input(context, label, "", secret) : new EditText(context);
         view.setContentDescription(label);
         view.setHint(label);
         view.setTag(tag);
         view.setInputType(type);
         view.setMaxLines((type & InputType.TYPE_TEXT_FLAG_MULTI_LINE) != 0 ? 6 : 1);
         view.setFilters(new InputFilter[]{new InputFilter.LengthFilter(limit)});
-        parent.addView(MiuixFormControls.viewFor(view), matchWrap());
+        View control = MiuixFormControls.viewFor(view);
+        if (secret) {
+            disableSecretStateTransfer(view);
+            if (control != view) disableSecretStateTransfer(control);
+        }
+        parent.addView(control, matchWrap());
         return view;
+    }
+
+    private static void disableSecretStateTransfer(View view) {
+        view.setSaveEnabled(false);
+        view.setSaveFromParentEnabled(false);
+        view.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
     }
 
     private static LinearLayout.LayoutParams matchWrap() {

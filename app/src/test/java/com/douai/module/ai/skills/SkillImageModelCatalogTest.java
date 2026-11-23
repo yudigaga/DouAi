@@ -24,6 +24,7 @@ public final class SkillImageModelCatalogTest {
     @Test public void modelPathUsesTheExactGenerationPrefixOrAnExplicitSameOriginOverride() throws Exception {
         assertEquals("", SkillImageModelCatalog.validateOverride("", ""));
         assertEquals(MODELS, SkillImageModelCatalog.resolveEndpoint(IMAGE, ""));
+        assertEquals(MODELS, SkillImageModelCatalog.resolveEndpoint(IMAGE + "/", ""));
         String custom = "https://IMAGES.example.test:443/available";
         assertEquals(custom, SkillImageModelCatalog.validateOverride(IMAGE, " " + custom + " "));
         assertEquals(custom, SkillImageModelCatalog.resolveEndpoint("https://images.example.test/custom/generate", custom));
@@ -32,12 +33,14 @@ public final class SkillImageModelCatalogTest {
     }
 
     @Test public void differentPortHostAndGenerationPathAreNeverAcceptedAsTheCatalogTarget() {
+        assertEquals(SkillImageModelCatalog.Code.INVALID_ENDPOINT, assertThrows(SkillImageModelCatalog.Failure.class,
+                () -> SkillImageModelCatalog.resolveEndpoint("https://images.example.test/gateway/v1/chat/completions", MODELS)).code());
         for (String endpoint : List.of("https://images.example.test:444/models", "https://other.example.test/models")) {
             assertEquals(SkillImageModelCatalog.Code.DIFFERENT_ORIGIN, assertThrows(SkillImageModelCatalog.Failure.class,
                     () -> SkillImageModelCatalog.resolveEndpoint(IMAGE, endpoint)).code());
         }
         for (String endpoint : List.of("http://images.example.test/models", "https://user@images.example.test/models",
-                MODELS + "?key=fixture", "https://images.example.test:443/gateway/v1/images/generations")) {
+                MODELS + "?key=fixture", "https://images.example.test:443/gateway/v1/images/generations", IMAGE + "/")) {
             assertEquals(SkillImageModelCatalog.Code.INVALID_ENDPOINT, assertThrows(SkillImageModelCatalog.Failure.class,
                     () -> SkillImageModelCatalog.resolveEndpoint(IMAGE, endpoint)).code());
         }
@@ -92,6 +95,14 @@ public final class SkillImageModelCatalogTest {
             assertFalse(unsafe.toString().contains(path));
         }
         assertEquals(0, requests.get());
+    }
+
+    @Test public void shortImageKeysUseTheSameHeaderPolicyWithoutFalseCatalogueEchoes() throws Exception {
+        assertEquals(List.of("example-image"), catalog(200, "{\"data\":[{\"id\":\"example-image\"}]}")
+                .fetch(MODELS, "x"));
+        assertEquals(SkillImageModelCatalog.Code.UNSAFE_RESPONSE,
+                assertThrows(SkillImageModelCatalog.Failure.class, () -> catalog(200, "{\"data\":[{\"id\":\"x\"}]}")
+                        .fetch(MODELS, "x")).code());
     }
 
     @Test public void redirectAccessAndFormatFailuresExposeOnlyFixedMessages() {

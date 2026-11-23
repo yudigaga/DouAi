@@ -3,21 +3,35 @@ package com.douai.module.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.text.InputType;
 import android.text.method.PasswordTransformationMethod;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.douai.module.ai.AiCredentialVault;
+import com.douai.module.ai.skills.SkillImageModelCatalog;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.config.AiModelConfig;
+import com.douai.module.config.AiModelSettings;
+import com.douai.module.config.HostSettingsStore;
+import com.douai.module.feature.ChatCompletionClient;
+import com.douai.module.ui.miuix.MiuixFormControls;
 
+import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.Implementation;
+import org.robolectric.annotation.Implements;
+import org.robolectric.shadow.api.Shadow;
 import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
 
@@ -29,6 +43,7 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -39,10 +54,108 @@ import static org.junit.Assume.assumeTrue;
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
 public final class AiSkillImageProviderTest {
     private static final String NAME = "生图";
+    private static final String BASE_ENDPOINT = "https://images.example.test/v1";
     private static final String ENDPOINT = "https://images.example.test/v1/images/generations";
     private static final String MODELS_ENDPOINT = "https://images.example.test/v1/models";
     private static final String MODEL = "test-image-model";
     private static final String KEY = "fixture-image-token";
+
+    @Test
+    @Config(shadows = {FakeChatModelCatalog.class}, instrumentedPackages = {"com.douai.module.feature"})
+    public void theSameHttpsBaseCanListModelsFromChatAndTheScopedImageForm() throws Exception {
+        // Abort before pressing either fetch button if this runtime did not install the network shadow.
+        assertTrue(Shadow.extract(new ChatCompletionClient.ModelCatalogRequest()) instanceof FakeChatModelCatalog);
+        FakeChatModelCatalog.modelRequest = null;
+        ModelExecutor chatWorker = new ModelExecutor();
+        ModelExecutor imageWorker = new ModelExecutor();
+        AtomicReference<String> imageGeneration = new AtomicReference<>();
+        AtomicReference<String> imageLookup = new AtomicReference<>();
+        AiCredentialVault vault = new AiCredentialVault(() -> new SecretKeySpec(new byte[32], "AES"));
+        try (Fixture fixture = new Fixture(vault, (name, draftId, generation, models, bearer) -> {
+            assertEquals(KEY, bearer);
+            imageGeneration.set(generation);
+            imageLookup.set(SkillImageModelCatalog.resolveEndpoint(generation, models));
+            return List.of(MODEL);
+        }, imageWorker);
+             AiModelEditor chatEditor = new AiModelEditor(fixture.activity, new HostSettingsStore(fixture.activity),
+                     AiModelConfig.fromJson(new JSONObject().put("id", "catalog-comparison")
+                             .put("name", "聊天目录比较").put("apiEndpoint", "").put("modelName", "")),
+                     false, () -> { }, chatWorker)) {
+            chatEditor.show((dialog, dismissed) -> {
+                dialog.setOwnerActivity(fixture.activity);
+                dialog.setOnDismissListener(ignored -> dismissed.run());
+                dialog.show();
+            });
+            AlertDialog chat = chatEditor.dialog();
+            EditText chatEndpoint = findInput(chat.getWindow().getDecorView(), "API 基础地址");
+            EditText chatKey = findInput(chat.getWindow().getDecorView(), "API 密钥");
+            assertNotNull(chatEndpoint);
+            assertNotNull(chatKey);
+            chatEndpoint.setText(BASE_ENDPOINT);
+            chatKey.setText(KEY);
+            click(chat, "ai.fetch_models");
+            chatWorker.runNext();
+            ShadowLooper.idleMainLooper();
+            assertNotNull(FakeChatModelCatalog.modelRequest);
+            assertEquals(KEY, FakeChatModelCatalog.modelRequest.apiKey);
+            assertEquals(MODELS_ENDPOINT, ChatCompletionClient.modelsEndpoint(FakeChatModelCatalog.modelRequest));
+            assertEquals("已获取 1 个模型", ((TextView) view(chat, "ai.status")).getText().toString());
+            AlertDialog chatChoices = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals(MODEL, chatChoices.getListView().getItemAtPosition(0));
+            assertTrue(chatChoices.getListView().performItemClick(null, 0, 0));
+            ShadowLooper.idleMainLooper();
+            assertTrue(chat.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            ShadowLooper.idleMainLooper();
+            AiModelConfig chatProfile = AiModelSettings.read(new HostSettingsStore(fixture.activity)).configs.get(0);
+            assertEquals(BASE_ENDPOINT, chatProfile.apiEndpoint);
+            assertEquals(KEY, chatProfile.apiKey);
+
+            fixture.save(BASE_ENDPOINT, "", "");
+            SkillStore.Detail unconfigured = fixture.store.detail(NAME);
+            assertEquals(ENDPOINT, unconfigured.service().endpoint());
+            assertFalse(fixture.services.hasCredential(unconfigured.service()));
+            assertFalse(unconfigured.canAuthorize());
+
+            fixture.save(BASE_ENDPOINT, "", KEY);
+            SkillStore.Detail saved = fixture.store.detail(NAME);
+            assertEquals("配置已保存，请选择或填写模型名称", fixture.status());
+            assertEquals(ENDPOINT, saved.service().endpoint());
+            assertTrue(fixture.services.hasCredential(saved.service()));
+            assertFalse(fixture.services.isAuthorized(saved.service()));
+            EditText savedKey = (EditText) view(fixture.dialog, "skills.detail.key");
+            assertEquals(0, savedKey.length());
+            assertTrue(savedKey.getHint().toString().contains("已保存"));
+            assertEquals(BASE_ENDPOINT, ((EditText) view(fixture.dialog, "skills.detail.endpoint")).getText().toString());
+            fixture.fill(BASE_ENDPOINT, "", "", KEY);
+            click(fixture.dialog, "skills.detail.fetch_models");
+            imageWorker.runNext();
+            ShadowLooper.idleMainLooper();
+
+            assertEquals("生图配置页反馈：" + fixture.status(), MODELS_ENDPOINT, imageLookup.get());
+            assertEquals(ENDPOINT, imageGeneration.get());
+            AlertDialog imageChoices = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals(MODEL, imageChoices.getListView().getItemAtPosition(0));
+            assertTrue(imageChoices.getListView().performItemClick(null, 0, 0));
+            ShadowLooper.idleMainLooper();
+            ((EditText) view(fixture.dialog, "skills.detail.key")).setText("");
+            click(fixture.dialog, "skills.detail.save");
+            assertTrue(fixture.services.hasCredential(fixture.store.detail(NAME).service()));
+            click(fixture.dialog, "skills.detail.authorize");
+            AlertDialog authorization = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertTrue(((TextView) authorization.findViewById(android.R.id.message)).getText().toString().contains(ENDPOINT));
+            assertFalse(fixture.services.isAuthorized(fixture.store.detail(NAME).service()));
+        }
+    }
+
+    @Implements(value = ChatCompletionClient.ModelCatalogRequest.class, isInAndroidSdk = false)
+    public static final class FakeChatModelCatalog {
+        static AiModelConfig modelRequest;
+
+        @Implementation protected List<String> fetch(AiModelConfig draft) {
+            modelRequest = draft;
+            return List.of(MODEL);
+        }
+    }
 
     @Test public void editedMockDraftSavesTheExactHttpsProviderAndCredentialWithAWritableVault() throws Exception {
         AtomicInteger keyReads = new AtomicInteger();
@@ -123,6 +236,65 @@ public final class AiSkillImageProviderTest {
             EditText key = (EditText) view(fixture.dialog, "skills.detail.key");
             assertEquals(KEY.length(), key.length());
             assertTrue(key.getTransformationMethod() instanceof PasswordTransformationMethod);
+            assertFalse(key.getHint().toString().contains("已保存"));
+        }
+    }
+
+    @Test public void aCompleteCustomEndpointAndLongCredentialSurviveSaveAndReopen() throws Exception {
+        String custom = "https://images.example.test/provider/generate";
+        String longBearer = "  Bearer " + "a".repeat(4000) + "  ";
+        try (Fixture fixture = new Fixture(new AiCredentialVault(() -> new SecretKeySpec(new byte[32], "AES")))) {
+            ((CompoundButton) view(fixture.dialog, "skills.detail.endpoint_complete")).setChecked(true);
+            fixture.fill(custom, "", MODEL, longBearer);
+            assertEquals(longBearer.length(), ((EditText) view(fixture.dialog, "skills.detail.key")).length());
+            click(fixture.dialog, "skills.detail.save");
+            SkillStore.Detail saved = fixture.store.detail(NAME);
+            assertEquals(fixture.status(), custom, saved.service().endpoint());
+            assertTrue(fixture.services.hasCredential(saved.service()));
+            assertFalse(fixture.services.isAuthorized(saved.service()));
+            assertTrue(((CompoundButton) view(fixture.dialog, "skills.detail.endpoint_complete")).isChecked());
+
+            AiSkillDetailDialog reopened = new AiSkillDetailDialog(fixture.activity, false, NAME, null);
+            try {
+                AlertDialog reopenedDialog = reopened.dialog();
+                reopenedDialog.setOwnerActivity(fixture.activity);
+                reopenedDialog.show();
+                assertEquals(custom, ((EditText) view(reopenedDialog, "skills.detail.endpoint")).getText().toString());
+                assertTrue(((CompoundButton) view(reopenedDialog, "skills.detail.endpoint_complete")).isChecked());
+                assertEquals(0, ((EditText) view(reopenedDialog, "skills.detail.key")).length());
+            } finally {
+                reopened.close();
+                reopened.dialog().dismiss();
+            }
+        }
+    }
+
+    @Test public void miuixImageCredentialUsesTheSharedSecureFormControlAndIsClearedOnClose() throws Exception {
+        try (Fixture fixture = new Fixture(null)) {
+            fixture.save(ENDPOINT, "", "");
+            AiSkillDetailDialog miuix = new AiSkillDetailDialog(fixture.activity, true, NAME, null);
+            try {
+                EditText key = (EditText) field(AiSkillDetailDialog.class, "keyInput").get(miuix);
+                assertNotNull(key);
+                View surface = MiuixFormControls.viewFor(key);
+                assertNotSame(key, surface);
+                assertNotNull(surface.getParent());
+                assertEquals(0, key.length());
+                assertEquals(InputType.TYPE_TEXT_VARIATION_PASSWORD, key.getInputType() & InputType.TYPE_MASK_VARIATION);
+                assertFalse(key.isSaveEnabled());
+                assertFalse(key.isSaveFromParentEnabled());
+                assertFalse(surface.isSaveEnabled());
+                assertFalse(surface.isSaveFromParentEnabled());
+                assertEquals(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS, key.getImportantForAutofill());
+                assertEquals(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS, surface.getImportantForAutofill());
+                assertTrue((miuix.dialog().getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+                key.setText(KEY);
+                miuix.close();
+                assertEquals(0, key.length());
+            } finally {
+                miuix.close();
+                miuix.dialog().dismiss();
+            }
         }
     }
 
@@ -289,6 +461,17 @@ public final class AiSkillImageProviderTest {
         View view = dialog.getWindow().getDecorView().findViewWithTag(tag);
         assertNotNull(tag, view);
         return view;
+    }
+
+    private static EditText findInput(View view, String label) {
+        if (view instanceof EditText input && label.contentEquals(input.getContentDescription())) return input;
+        if (view instanceof ViewGroup group) {
+            for (int index = 0; index < group.getChildCount(); index++) {
+                EditText found = findInput(group.getChildAt(index), label);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     private static Field field(Class<?> type, String name) throws Exception {

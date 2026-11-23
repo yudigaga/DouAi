@@ -215,3 +215,32 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 本轮专项及相邻回归 379 项通过，0 失败，0 跳过。未发出真实服务请求，设备复测待独立执行。
+
+## 图片服务按 AI 供应商方式填写 · 基于 `cbc49ac`
+
+### 对照复现
+
+用同一合成密钥和 `https://images.example.test/v1` 填充两套实际表单。AI 供应商页保存基础地址，获取目录时请求 `/v1/models`，测试替身返回可选条目。生图详情则把 `/v1` 原样登记为生成地址，合成密钥可以在测试凭据库保存，但随后目录解析返回「无法从此生图地址推导模型列表」。这验证了基础地址解释的差异。普通 AI 可以接受较短 Bearer 值，旧图片凭据库至少需要八个字符，这也是可重现的校验差异。 [对照复现日志](../build/ai-extension-supplier-parity-baseline.log)
+
+复核了 15:46:57 的 LSPosed 导出，原件长度为 15643464 字节，SHA-256 与提供值一致。扫描中只统计匹配项，未输出原始日志。93 个可读日志文件未命中目标技能配置类、凭据异常或相关目录状态。点保存后密钥栏为空可以是遮蔽逻辑，用户手机当时是否加密、落盘或读取失败仍缺少直接证据。本机无已连接 ADB 设备。
+
+### 变更范围
+
+- `SkillImageProviderAddress.java`、`SkillImageModelCatalog.java` 解析表单基础地址。裸域名、`/v1` 和网关基址补齐生图操作路径，模型目录使用同一前缀的 `/models`。已知完整生图路径可直接填写，完整接口模式保留旧自定义地址。聊天和模型列表操作地址不能作为生图 POST 目标。
+- `AiSkillDetailDialog.java` 使用与供应商页同一 Miuix 密码控件，采用独立技能配置。输入有遮罩并关闭视图状态保存和自动填充。保存成功后清空输入值，同时在字段旁显示已保存状态。保存失败时保留遮罩中的本次输入。选择目录条目仍只填写表单。
+- `AiCredentialVault.java`、`SkillServices.java` 让图片技能使用与表单匹配的 4000 字符 Bearer 上限及短密钥支持，保留原 AES-GCM 及作用域/ID/实际生图地址绑定。新的密钥先加密并读取校验，校验失败不会写入服务配置。模型目录仍限 HTTPS、同一主机与有效端口，禁止重定向及凭据回显。
+- `AiSkillImageProviderTest.java`、`SkillImageProviderAddressTest.java`、`SkillImageScopeCredentialTest.java`、`SkillImageModelCatalogTest.java` 覆盖实际表单对照、旧地址、隔离凭据、重开状态、读取校验、模型发现和 Miuix 密码控件。
+
+### 独立验收清单
+
+1. 从已有 Skills 模拟图片版本进入「编辑 → 保存草稿 → 配置图片服务」，切到 OpenAI Images 兼容服务。用 AI 那边同样的方式填服务商的 HTTPS 基础地址和这条 Skill 自己的密钥。保存后应显示已保存，输入值为空。重开应仍显示已保存。
+2. 点击「拉取模型列表」，选择返回的模型后另行保存，再分别授权和启用新版。旧版可回退。可用本地替身复现目录认证失败和目录为空，继续用手填验证。
+3. 复测一个旧的完整自定义生图路径，核对完整模式和实际目标。有的旧记录把基址当作完整接口存了。纠正这种记录时，可关闭完整模式再保存，并重新填写这条 Skill 的密钥以绑定实际生图地址。
+4. 对照 AI 和生图页面的密码框，应使用同一 Miuix 控件。两个配置的密钥独立保存，生图页的已保存提示无需读取明文到表单。
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests '*AiSkillImageProviderTest' --tests '*SkillImageProviderAddressTest' --tests '*SkillImageScopeCredentialTest' --tests '*SkillImageModelCatalogTest' --tests '*MiuixEditorsInteractionTest'
+```
+
+本轮专项及相邻回归 409 项通过，0 失败，0 跳过。使用合成密钥与模拟目录，真机和签名构建待独立验收。
