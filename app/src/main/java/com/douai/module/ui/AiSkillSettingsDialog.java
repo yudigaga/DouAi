@@ -8,6 +8,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.util.TypedValue;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.widget.ArrayAdapter;
@@ -29,6 +30,7 @@ import com.douai.module.config.SettingsStore;
 import com.douai.module.feature.ChatCompletionClient;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
+import com.douai.module.ui.miuix.MiuixSettingsViews;
 
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -52,8 +54,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     private final TextView status;
     private final Button generate;
     private final Button simulate;
-    private final LinearLayout pendingRows;
-    private final LinearLayout installedRows;
+    private final LinearLayout skillRows;
     private final LinearLayout serviceRows;
     private ChatCompletionClient.IsolatedTextRequest generation;
     private Future<?> generationTask;
@@ -84,6 +85,10 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         enabled.setOnCheckedChangeListener(this::changeEnabled);
         content.addView(MiuixFormControls.viewFor(enabled), matchWrap());
 
+        section(content, "自定义技能");
+        skillRows = column();
+        content.addView(skillRows, matchWrap());
+
         section(content, "生成或更新技能");
         requirements = input(content, "描述想要的技能，例如生图", "skills.requirements",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE, 4000, false);
@@ -92,19 +97,12 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         status = text(content, "", "skills.status");
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
 
-        pendingRows = column();
-        content.addView(pendingRows, matchWrap());
-
-        section(content, "自定义技能");
-        installedRows = column();
-        content.addView(installedRows, matchWrap());
-
         section(content, "技能服务");
         serviceRows = column();
         content.addView(serviceRows, matchWrap());
         button(content, "登记或更新服务", "skills.service.register", this::showServiceEditor);
         try { refresh(); }
-        catch (SkillServices.Failure failure) { status.setText("无法读取服务登记"); }
+        catch (SkillServices.Failure | RuntimeException failure) { status.setText("暂时无法读取技能设置"); }
 
         dialog = builder("AI Skills").setView(scroll(content)).setNegativeButton("关闭", null).create();
     }
@@ -118,7 +116,10 @@ final class AiSkillSettingsDialog implements AutoCloseable {
             control.setChecked(!value);
             control.setOnCheckedChangeListener(this::changeEnabled);
             status.setText("暂时无法保存 Skills 开关");
+            return;
         }
+        try { refreshSkillRows(); }
+        catch (RuntimeException failure) { status.setText("请重新打开设置查看最新技能状态"); }
     }
 
     private void chooseModel() {
@@ -161,48 +162,42 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         ChatCompletionClient.IsolatedTextRequest request = offline ? null : new ChatCompletionClient.IsolatedTextRequest();
         prepareDraft(() -> offline ? SkillStore.mockDraft(description) : request.execute(modelSettings, modelId,
                 SkillStore.GENERATION_INSTRUCTION, store.generationPrompt(description),
-                System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048), request, "正在生成并校验…", null);
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048), request);
     }
 
-    private void retryPending(SkillStore.Pending pending) {
-        if (!active() || busy) return;
-        prepareDraft(() -> store.pendingDefinition(pending.name()), null, "正在检查技能服务…", pending.draftId());
-    }
-
-    private void prepareDraft(Callable<String> definition, ChatCompletionClient.IsolatedTextRequest request, String message, String expectedDraftId) {
+    private void prepareDraft(Callable<String> definition, ChatCompletionClient.IsolatedTextRequest request) {
         generation = request;
         setGenerating(true);
-        status.setText(message);
+        status.setText("正在生成并校验…");
         generationTask = worker.submit(() -> {
             try {
                 String draft = definition.call();
                 SkillStore.Preview preview = store.previewGenerated(draft);
-                main.post(() -> finishGeneration(request, draft, preview, expectedDraftId));
+                main.post(() -> finishGeneration(request, draft, preview));
             } catch (Exception failure) {
-                main.post(() -> finishGeneration(request, null, null, expectedDraftId));
+                main.post(() -> finishGeneration(request, null, null));
             }
         });
     }
 
-    private void finishGeneration(ChatCompletionClient.IsolatedTextRequest request, String draft, SkillStore.Preview preview, String expectedDraftId) {
+    private void finishGeneration(ChatCompletionClient.IsolatedTextRequest request, String draft, SkillStore.Preview preview) {
         if (!active() || generation != request) return;
         generation = null;
         generationTask = null;
         setGenerating(false);
         if (preview == null) {
-            if (expectedDraftId == null) status.setText("生成或校验失败，已安装的技能版本保留");
-            else refreshAfterChange("重试连接未完成，请核对当前草稿");
+            status.setText("生成或校验失败，已安装的技能版本保留");
         } else if (preview.pendingReason().isEmpty() && preview.needsConfirmation()) {
-            reviewDraft(draft, preview, expectedDraftId);
+            reviewDraft(draft, preview);
         } else {
-            save(draft, null, expectedDraftId);
+            save(draft, null);
         }
     }
 
-    private void reviewDraft(String draft, SkillStore.Preview preview, String expectedDraftId) {
+    private void reviewDraft(String draft, SkillStore.Preview preview) {
         boolean updating = preview.previousVersion() > 0;
         String details = "技能 /" + preview.name();
-        if (updating) details += "\n当前版本 v" + preview.previousVersion() + "，启用新版后可回退。";
+        if (updating) details += "\n启用新版将替换当前版本 v" + preview.previousVersion() + "。";
         if (preview.serviceLabel() != null && !preview.serviceLabel().isEmpty()) {
             details += "\n" + target(preview.serviceId(), preview.serviceLabel(), preview.endpoint(),
                     preview.costUnits(), preview.outputType());
@@ -212,24 +207,22 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         status.setText("");
         presenter.accept(builder(updating ? "确认更新技能" : "确认技能的服务权限")
                 .setMessage(details).setNegativeButton("取消", null)
-                .setPositiveButton(updating ? "启用新版" : "确认并启用", (child, which) -> save(draft, preview, expectedDraftId))
+                .setPositiveButton(updating ? "启用新版" : "确认并启用", (child, which) -> save(draft, preview))
                 .create(), null);
     }
 
-    private void save(String draft, SkillStore.Preview confirmation, String expectedDraftId) {
+    private void save(String draft, SkillStore.Preview confirmation) {
         if (!active()) return;
         SkillStore.SaveResult result;
         try {
-            result = expectedDraftId == null ? store.saveGenerated(draft, confirmation)
-                    : store.connectPending(draft, confirmation, expectedDraftId);
+            result = store.saveGenerated(draft, confirmation);
         } catch (Exception failure) {
-            if (expectedDraftId == null) status.setText("技能试跑或保存失败，已安装的技能版本保留");
-            else refreshAfterChange("重试连接未完成，请核对当前草稿");
+            status.setText("技能试跑或保存失败，已安装的技能版本保留");
             return;
         }
         SkillStore.Pending pending = result.pending();
         if (pending != null) {
-            refreshAfterChange("已保存待连接草稿 /" + pending.name() + "\n" + pending.reason());
+            refreshAfterChange("已保存草稿 /" + pending.name());
             return;
         }
         SkillStore.Installed installed = result.installed();
@@ -246,27 +239,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     }
 
     private void refresh() throws SkillServices.Failure {
-        installedRows.removeAllViews();
-        List<SkillStore.Installed> skills = store.list();
-        pendingRows.removeAllViews();
-        List<SkillStore.Pending> pending = store.pending();
-        if (!pending.isEmpty()) section(pendingRows, "待连接草稿");
-        for (SkillStore.Pending draft : pending) {
-            String tag = "skills.pending." + draft.name();
-            String details = "/" + draft.name() + " · " + outputLabel(draft.outputType()) + "\n" + draft.reason();
-            if (draft.outputType() == SkillResult.Type.IMAGE) details += "\n请先在技能服务中授权兼容的图片服务。";
-            SkillStore.Installed current = skills.stream().filter(skill -> skill.name().equals(draft.name())).findFirst().orElse(null);
-            if (current != null) details += "\n已安装 v" + current.version() + (current.enabled() ? " · 已启用" : " · 已停用");
-            text(pendingRows, details, tag);
-            button(pendingRows, "配置 /" + draft.name(), tag + ".configure", () -> showSkillDetail(draft.name()));
-            button(pendingRows, "重试连接", tag + ".retry", () -> retryPending(draft));
-        }
-        if (skills.isEmpty()) text(installedRows, "暂无自定义技能", null);
-        for (SkillStore.Installed skill : skills) {
-            String label = "/" + skill.name() + " · " + outputLabel(skill.outputType()) + " · v" + skill.version() + " · "
-                    + (skill.enabled() ? "已启用" : "已停用");
-            button(installedRows, label, "skills.installed." + skill.name(), () -> showSkillDetail(skill.name()));
-        }
+        refreshSkillRows();
         serviceRows.removeAllViews();
         for (SkillServices.Service service : services.list()) {
             String tag = "skills.service." + service.id();
@@ -285,6 +258,56 @@ final class AiSkillSettingsDialog implements AutoCloseable {
                         () -> authorize(service)).setEnabled(!authorized);
             }
         }
+    }
+
+    private void refreshSkillRows() {
+        SkillStore.SettingsSnapshot snapshot = store.settingsSnapshot();
+        skillRows.removeAllViews();
+        if (snapshot.rows().isEmpty()) text(skillRows, "暂无自定义技能", null);
+        for (SkillStore.SettingsRow skill : snapshot.rows()) {
+            SkillStore.Installed current = skill.current();
+            String summary = current == null ? "尚未启用" : "当前 v" + current.version()
+                    + " · " + outputLabel(current.outputType()) + " · " + installedState(current, snapshot.enabled());
+            if (skill.draftState() != null) {
+                summary += "\n草稿 · " + outputLabel(skill.draftOutputType()) + " · " + draftState(skill.draftState());
+            }
+            String name = skill.name();
+            addSkillRow("/" + name, summary, "skills.row." + name, () -> showSkillDetail(name));
+        }
+    }
+
+    private void addSkillRow(String title, String summary, String tag, Runnable action) {
+        View row;
+        if (miuix) {
+            row = new MiuixSettingsViews.Option(context, title, summary, null, true, action).getView();
+        } else {
+            LinearLayout item = column();
+            item.setPadding(dp(12), dp(10), dp(12), dp(10));
+            item.setMinimumHeight(dp(48));
+            TypedValue background = new TypedValue();
+            if (context.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, background, true)
+                    && background.resourceId != 0) item.setBackgroundResource(background.resourceId);
+            text(item, title, null).setTypeface(null, Typeface.BOLD);
+            text(item, summary, null);
+            item.setFocusable(true);
+            item.setOnClickListener(view -> action.run());
+            row = item;
+        }
+        row.setTag(tag);
+        skillRows.addView(row, matchWrap());
+    }
+
+    static String installedState(SkillStore.Installed current, boolean enabled) {
+        return !current.enabled() ? "已停用" : enabled ? "已启用" : "总开关已关闭";
+    }
+
+    static String draftState(SkillStore.DraftState state) {
+        return switch (state) {
+            case NEEDS_CONFIGURATION -> "待配置";
+            case NEEDS_AUTHORIZATION -> "待授权";
+            case READY -> "待启用";
+            case DRAFT -> "待检查";
+        };
     }
 
     private void refreshAfterChange(String message) {

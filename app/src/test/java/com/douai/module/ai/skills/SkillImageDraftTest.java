@@ -92,8 +92,40 @@ public final class SkillImageDraftTest {
         assertThrows(IllegalStateException.class, () -> fixture.store.saveGenerated(generated, null));
         assertEquals(new SkillResult.Text("文本"), AiSkills.executeResult(sameName, fixture.store));
         assertEquals(2, fixture.store.saveGenerated(generated, confirmation).installed().version());
-        fixture.store.rollback("生图");
-        assertEquals(new SkillResult.Text("文本"), AiSkills.executeResult(sameName, fixture.store));
+        SkillStore reopened = new SkillStore(fixture.directory, fixture.services);
+        assertEquals(1, reopened.detail("生图").deleteTarget().versionCount());
+        assertTrue(reopened.pending().isEmpty());
+        assertThrows(IllegalStateException.class, () -> AiSkills.executeResult(sameName, reopened));
+        for (AiSkills.Entry entry : AiSkills.Entry.values()) {
+            var replacement = AiSkills.match(entry, "/生图 画一只猫", reopened);
+            assertEquals(SkillResult.Type.IMAGE, replacement.command().outputType());
+            assertTrue(AiSkills.executeResult(replacement, reopened) instanceof SkillResult.Image);
+        }
+        assertEquals(0, fixture.network.get());
+    }
+
+    @Test public void replacementCannotUseADifferentImageServiceThanTheOneShownForConfirmation() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.store.installGenerated(textDraft("生图"));
+        var pending = fixture.store.saveGenerated(SkillStore.mockDraft("生图"), null).pending();
+        var mock = fixture.services.find(SkillServices.MOCK_IMAGE);
+        fixture.services.authorize(mock, 0);
+        var reviewed = fixture.store.retryConfiguration("生图", pending.draftId());
+        assertTrue(reviewed.canReplace());
+        assertEquals(mock, reviewed.service());
+
+        var available = new SkillServices.Service("other-image", "另一个图片服务",
+                "https://alternate.example.test/generate", 1, SkillResult.Type.IMAGE);
+        fixture.services.register(available, "");
+        fixture.services.authorize(available, 1);
+        fixture.services.revoke(mock);
+        assertEquals(available, fixture.store.detail("生图").service());
+
+        assertThrows(IllegalStateException.class, () -> fixture.store.activateReplacement(reviewed));
+        assertEquals(1, fixture.store.detail("生图").current().version());
+        assertEquals(SkillResult.Type.TEXT, fixture.store.detail("生图").current().outputType());
+        assertEquals(reviewed.draftId(), fixture.store.detail("生图").draftId());
+        assertEquals(0, fixture.network.get());
     }
 
     @Test public void preflightForRealAuthorizedImageServiceUsesOnlyTheLocalImageFixture() throws Exception {

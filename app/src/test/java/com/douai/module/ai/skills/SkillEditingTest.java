@@ -22,9 +22,10 @@ import static org.junit.Assert.*;
 public final class SkillEditingTest {
     @Rule public final TemporaryFolder temp = new TemporaryFolder();
 
-    @Test public void installedTextEditsWaitForExplicitActivationAndKeepTheOldInstructionOnRollback() throws Exception {
+    @Test public void installedTextEditsWaitForExplicitActivationAndInvalidateTheOldInvocation() throws Exception {
         Fixture fixture = new Fixture();
         fixture.store.saveAuthoredDraft(authored("周报", "text_model", "text", "用中文", 12));
+        var original = AiSkills.match(AiSkills.Entry.CONTACT, "/周报 任务进度", fixture.store);
         var current = fixture.store.detail("周报");
         var editor = fixture.store.editTarget(current.deleteTarget());
         assertEquals("初始说明", editor.documentation());
@@ -39,12 +40,13 @@ public final class SkillEditingTest {
         assertEquals(12, edited.getJSONObject("execution").getInt("maxInput"));
         assertEquals("新的使用说明", edited.getString("documentation"));
 
-        fixture.store.activateReplacement(pending.name(), pending.draftId(), pending.previousVersion());
+        fixture.store.activateReplacement(pending);
         var active = fixture.store.editTarget(fixture.store.detail("周报").deleteTarget());
         assertEquals("新的说明标题", active.description());
         assertEquals("用英文", runText(fixture.store, "周报", "任务进度"));
-        fixture.store.rollback("周报");
-        assertEquals("用中文", runText(fixture.store, "周报", "任务进度"));
+        assertEquals(1, fixture.store.detail("周报").deleteTarget().versionCount());
+        assertThrows(IllegalStateException.class,
+                () -> AiSkills.executeResult(original, fixture.store, (instruction, ignored) -> instruction));
     }
 
     @Test public void editingCurrentPendingDraftPreservesItsFieldsAndFencesStaleSave() throws Exception {
@@ -79,7 +81,7 @@ public final class SkillEditingTest {
                 () -> fixture.store.saveEdit(editor, "摘要", "摘要说明", "不应有模型指令"));
         var pending = fixture.store.saveEdit(editor, "摘要", "摘要说明", "");
         assertEquals(1, new JSONObject(fixture.store.pendingDefinition("模拟技能")).getInt("schemaVersion"));
-        fixture.store.activateReplacement(pending.name(), pending.draftId(), pending.previousVersion());
+        fixture.store.activateReplacement(pending);
         var call = AiSkills.match(AiSkills.Entry.WORK, "/模拟技能 头句。次句。其余。", fixture.store);
         assertEquals("头句。次句。", AiSkills.execute(call, fixture.store));
     }
@@ -113,13 +115,14 @@ public final class SkillEditingTest {
         assertFalse(fixture.store.retryConfiguration("生图", saved.draftId()).pending());
     }
 
-    @Test public void editingInstalledImageRetainsItsBindingThenUsesSeparateConfigurationAndRollsBack() throws Exception {
+    @Test public void editingInstalledImageRetainsItsBindingUntilASeparateConfigurationIsActivated() throws Exception {
         Fixture fixture = new Fixture();
         fixture.store.saveAuthoredDraft(authored("生图", "service", "image", null, 100));
         var draft = fixture.store.detail("生图");
         var initial = fixture.store.saveConfiguration("生图", draft.draftId(), SkillServices.Adapter.OPENAI_IMAGES,
                 "https://images.example.test/initial", "image-model-v1", 0, "fixture-first-image-key");
         var installed = fixture.store.authorizeConfiguration("生图", initial.draftId(), initial.service());
+        var original = AiSkills.match(AiSkills.Entry.CONTACT, "/生图 橘猫", fixture.store);
         var editor = fixture.store.editTarget(installed.deleteTarget());
 
         var pending = fixture.store.saveEdit(editor, "更改简介", "画图说明", null);
@@ -136,10 +139,36 @@ public final class SkillEditingTest {
         assertTrue(fixture.services.isAuthorized(initial.service()));
         var replacement = fixture.store.authorizeConfiguration("生图", newConfig.draftId(), newConfig.service());
         assertTrue(replacement.canReplace());
-        fixture.store.activateReplacement(replacement.name(), replacement.draftId(), replacement.previousVersion());
-        assertEquals(newConfig.service(), fixture.store.detail("生图").service());
-        fixture.store.rollback("生图");
-        assertEquals(initial.service(), fixture.store.detail("生图").service());
+        assertEquals(initial.service(), replacement.currentService());
+        fixture.store.activateReplacement(replacement);
+        SkillStore reopened = new SkillStore(fixture.directory, fixture.services);
+        SkillStore.Detail current = reopened.detail("生图");
+        assertEquals(newConfig.service(), current.currentService());
+        assertTrue(fixture.services.hasCredential(current.currentService()));
+        assertTrue(fixture.services.isAuthorized(current.currentService()));
+        assertEquals(1, current.deleteTarget().versionCount());
+        assertThrows(IllegalStateException.class, () -> AiSkills.executeResult(original, reopened));
+    }
+
+    @Test public void revocationAfterReviewDoesNotReportAnEditedImageSkillAsActivated() throws Exception {
+        Fixture fixture = new Fixture();
+        var service = new SkillServices.Service("retained-image", "图片服务",
+                "https://images.example.test/initial", 0, SkillResult.Type.IMAGE);
+        fixture.services.register(service, "");
+        fixture.services.authorize(service, 0);
+        fixture.store.saveAuthoredDraft(authored("生图", "service", "image", null, 100));
+        var editor = fixture.store.editTarget(fixture.store.detail("生图").deleteTarget());
+        var confirmed = fixture.store.saveEdit(editor, "新简介", "新说明", null);
+        assertTrue(confirmed.canReplace());
+        assertEquals(service, confirmed.service());
+
+        fixture.services.revoke(service);
+        assertThrows(IllegalStateException.class, () -> fixture.store.activateReplacement(confirmed));
+        var detail = fixture.store.detail("生图");
+        assertEquals(1, detail.current().version());
+        assertEquals(service, detail.currentService());
+        assertEquals(confirmed.draftId(), detail.draftId());
+        assertFalse(detail.canReplace());
     }
 
     @Test public void editWithRevokedImageBindingDoesNotSwitchToAnAuthorizedAlternative() throws Exception {

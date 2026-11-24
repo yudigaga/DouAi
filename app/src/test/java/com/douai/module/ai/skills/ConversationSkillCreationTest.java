@@ -128,18 +128,23 @@ public final class ConversationSkillCreationTest {
         assertEquals(0, fixture.transport.get());
     }
 
-    @Test public void reusesAuthorizedServiceButSameNameStillRequiresReplacementAndCanRollback() throws Exception {
+    @Test public void reusesAuthorizedServiceButSameNameStillRequiresExplicitReplacement() throws Exception {
         Fixture fixture = new Fixture();
         var mock = fixture.services.find(SkillServices.MOCK_IMAGE);
         fixture.services.authorize(mock, 0);
         assertNotNull(saveImage(fixture, "生图").installed());
+        var original = AiSkills.match(AiSkills.Entry.WORK, "/生图 橘猫", fixture.store);
         assertNotNull(saveImage(fixture, "生图").pending());
         var draft = fixture.store.detail("生图");
         assertTrue(draft.canReplace());
         assertEquals(1, fixture.store.list().get(0).version());
-        fixture.store.activateReplacement(draft.name(), draft.draftId(), 1);
+        assertTrue(AiSkills.executeResult(original, fixture.store) instanceof SkillResult.Image);
+        fixture.store.activateReplacement(draft);
         assertEquals(2, fixture.store.list().get(0).version());
-        assertEquals(1, fixture.store.rollback("生图").version());
+        assertEquals(1, fixture.store.detail("生图").deleteTarget().versionCount());
+        assertThrows(IllegalStateException.class, () -> AiSkills.executeResult(original, fixture.store));
+        var replacement = AiSkills.match(AiSkills.Entry.WORK, "/生图 橘猫", fixture.store);
+        assertTrue(AiSkills.executeResult(replacement, fixture.store) instanceof SkillResult.Image);
         assertEquals(0, fixture.transport.get());
     }
 
@@ -154,19 +159,21 @@ public final class ConversationSkillCreationTest {
         assertTrue(fixture.store.pending().isEmpty());
     }
 
-    @Test public void textModelReplacementKeepsItsNewRulePendingUntilAcceptedAndRollsBack() throws Exception {
+    @Test public void textModelReplacementKeepsItsNewRulePendingUntilAccepted() throws Exception {
         Fixture fixture = new Fixture();
         var first = SkillStore.validateAuthoredDraft(definition("改写", "text_model", "text", "用简洁的中文改写"));
         var second = SkillStore.validateAuthoredDraft(definition("改写", "text_model", "text", "用清晰的英文改写"));
         assertNotNull(fixture.store.saveAuthoredDraft(first).installed());
+        var original = AiSkills.match(AiSkills.Entry.WORK, "/改写 测试", fixture.store);
         assertNotNull(fixture.store.saveAuthoredDraft(second).pending());
         var pending = fixture.store.detail("改写");
         assertTrue(pending.canReplace());
         assertEquals(first.instruction(), executeInstruction(fixture.store, "改写"));
-        fixture.store.activateReplacement(pending.name(), pending.draftId(), pending.previousVersion());
+        fixture.store.activateReplacement(pending);
         assertEquals(second.instruction(), executeInstruction(fixture.store, "改写"));
-        fixture.store.rollback("改写");
-        assertEquals(first.instruction(), executeInstruction(fixture.store, "改写"));
+        assertEquals(1, fixture.store.detail("改写").deleteTarget().versionCount());
+        assertThrows(IllegalStateException.class,
+                () -> AiSkills.executeResult(original, fixture.store, (instruction, ignored) -> instruction));
     }
 
     @Test public void staleAuthorizationCannotApproveAnEditedDraft() throws Exception {
@@ -182,25 +189,36 @@ public final class ConversationSkillCreationTest {
         assertFalse(fixture.services.isAuthorized(second.service()));
     }
 
-    @Test public void replacingPrivateConfigurationKeepsThePreviousVersionUsableAfterRollback() throws Exception {
+    @Test public void replacingPrivateConfigurationKeepsTheCurrentServiceUsableUntilActivation() throws Exception {
         Fixture fixture = new Fixture();
         saveImage(fixture, "生图");
         var first = fixture.store.detail("生图");
         var mock = fixture.store.saveConfiguration("生图", first.draftId(), SkillServices.Adapter.MOCK_IMAGE, "", "", 0, "");
         fixture.store.authorizeConfiguration("生图", mock.draftId(), mock.service());
+        var original = AiSkills.match(AiSkills.Entry.CONTACT, "/生图 橘猫", fixture.store);
         saveImage(fixture, "生图");
         var next = fixture.store.detail("生图");
         assertEquals(mock.service(), next.service());
         var configured = fixture.store.saveConfiguration("生图", next.draftId(), SkillServices.Adapter.OPENAI_IMAGES,
                 "https://image.example.test/generate", "fixture", 1, "fixture-new-key-1234");
         assertNotEquals(mock.service().id(), configured.service().id());
+        assertTrue(fixture.services.hasCredential(configured.service()));
+        assertFalse(fixture.services.isAuthorized(configured.service()));
         var reviewed = fixture.store.authorizeConfiguration("生图", configured.draftId(), configured.service());
         assertTrue(reviewed.canReplace());
-        fixture.store.activateReplacement("生图", reviewed.draftId(), 1);
-        fixture.store.rollback("生图");
-        assertEquals(mock.service(), fixture.store.detail("生图").service());
-        var invocation = AiSkills.match(AiSkills.Entry.CONTACT, "/生图 橘猫", fixture.store);
-        assertTrue(AiSkills.executeResult(invocation, fixture.store) instanceof SkillResult.Image);
+        assertEquals(mock.service(), reviewed.currentService());
+        assertTrue(fixture.services.isAuthorized(mock.service()));
+        assertTrue(AiSkills.executeResult(original, fixture.store) instanceof SkillResult.Image);
+        fixture.store.activateReplacement(reviewed);
+
+        SkillStore reopened = new SkillStore(fixture.directory, fixture.services);
+        SkillStore.Detail current = reopened.detail("生图");
+        assertEquals(configured.service(), current.currentService());
+        assertEquals(1, current.deleteTarget().versionCount());
+        assertFalse(current.pending());
+        assertTrue(fixture.services.hasCredential(current.currentService()));
+        assertTrue(fixture.services.isAuthorized(current.currentService()));
+        assertThrows(IllegalStateException.class, () -> AiSkills.executeResult(original, reopened));
         assertEquals(0, fixture.transport.get());
     }
 

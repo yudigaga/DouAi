@@ -1,5 +1,7 @@
 package com.douai.module.ai.skills;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -10,6 +12,7 @@ import org.robolectric.annotation.Config;
 
 import java.io.File;
 import java.nio.file.Files;
+import java.util.UUID;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -23,7 +26,7 @@ import static org.junit.Assert.assertTrue;
 public class SkillStoreTest {
     @Rule public TemporaryFolder temp = new TemporaryFolder();
 
-    @Test public void onlyValidatedTrialPublishesAndBothDocumentsAreVersioned() throws Exception {
+    @Test public void onlyValidatedTrialPublishesAndReplacementKeepsOnlyTheCurrentDocuments() throws Exception {
         File root = temp.newFolder();
         SkillStore store = new SkillStore(root, SkillServices.forContext(RuntimeEnvironment.getApplication()));
         assertEquals(1, store.installGenerated(draft("第一版", "测试")).version());
@@ -35,39 +38,77 @@ public class SkillStoreTest {
         assertEquals(2, store.installGenerated(second, store.previewGenerated(second)).version());
         File[] revisions = new File(root, "versions").listFiles();
         assertNotNull(revisions);
-        assertEquals(2, revisions.length);
+        assertEquals(1, revisions.length);
         for (File revision : revisions) {
             assertTrue(Files.readString(new File(revision, "SKILL.md").toPath()).contains("name: 检查"));
             assertTrue(Files.readString(new File(revision, "execution.json").toPath()).contains("\"kind\":\"summary\""));
         }
-        assertEquals(1, store.rollback("检查").version());
         String third = draft("第三版", "测试");
         assertEquals(3, store.installGenerated(third, store.previewGenerated(third)).version());
+        assertFalse(revisions[0].exists());
+        assertEquals(1, new File(root, "versions").listFiles().length);
     }
 
-    @Test public void aPersistedV1TextExecutionAndCatalogRemainUsable() throws Exception {
+    @Test public void legacyCatalogueKeepsItsActiveSkillAndLeavesDormantFilesAlone() throws Exception {
         File root = temp.newFolder();
         SkillStore store = new SkillStore(root, SkillServices.forContext(RuntimeEnvironment.getApplication()));
         store.installGenerated(draft("旧文字", "测试"));
         File revision = new File(root, "versions").listFiles()[0];
         var execution = new File(revision, "execution.json").toPath();
-        var definition = new org.json.JSONObject(Files.readString(execution));
+        var definition = new JSONObject(Files.readString(execution));
         definition.put("schemaVersion", 1).remove("outputType");
         Files.writeString(execution, definition.toString());
 
         var catalog = new File(root, "catalog.json").toPath();
-        var index = new org.json.JSONObject(Files.readString(catalog));
+        var index = new JSONObject(Files.readString(catalog));
         index.remove("drafts");
-        var metadata = index.getJSONObject("skills").getJSONObject("检查").getJSONArray("versions").getJSONObject(0);
+        var skill = index.getJSONObject("skills").getJSONObject("检查");
+        var metadata = skill.getJSONObject("current");
         metadata.remove("outputType");
         metadata.remove("serviceLabel");
+        String dormantId = UUID.randomUUID().toString();
+        var dormant = new File(root, "versions/" + dormantId).toPath();
+        Files.createDirectory(dormant);
+        Files.writeString(dormant.resolve("execution.json"), "never read this dormant execution");
+        var later = new JSONObject().put("version", 2).put("directory", dormantId)
+                .put("description", "旧配置").put("outputType", "image");
+        skill.remove("current");
+        skill.put("active", 0).put("versions", new JSONArray().put(metadata).put(later));
         Files.writeString(catalog, index.toString());
 
+        SkillStore reopened = new SkillStore(root, SkillServices.forContext(RuntimeEnvironment.getApplication()));
+        assertEquals(1, reopened.settingsSnapshot().rows().get(0).current().version());
+        assertEquals(SkillResult.Type.TEXT, reopened.detail("检查").current().outputType());
         for (AiSkills.Entry entry : AiSkills.Entry.values()) {
-            var invocation = AiSkills.match(entry, "/检查 旧版参数", store);
+            var invocation = AiSkills.match(entry, "/检查 旧版参数", reopened);
             assertEquals(SkillResult.Type.TEXT, invocation.command().outputType());
-            assertEquals("旧版参数", AiSkills.execute(invocation, store));
+            assertEquals("旧版参数", AiSkills.execute(invocation, reopened));
         }
+        assertEquals(index.toString(), Files.readString(catalog));
+
+        String update = draft("新配置", "测试");
+        assertEquals(3, reopened.installGenerated(update, reopened.previewGenerated(update)).version());
+        assertEquals(4, reopened.installGenerated(update, reopened.previewGenerated(update)).version());
+        var saved = new JSONObject(Files.readString(catalog)).getJSONObject("skills").getJSONObject("检查");
+        assertEquals(4, saved.getJSONObject("current").getInt("version"));
+        assertEquals(skill.getJSONArray("versions").toString(), saved.getJSONArray("versions").toString());
+        assertEquals(3, new File(root, "versions").listFiles().length);
+        assertEquals("never read this dormant execution", Files.readString(dormant.resolve("execution.json")));
+        assertTrue(Files.exists(execution));
+    }
+
+    @Test public void aPreviewCannotReplaceADeletedSkillRecreatedAtTheSameVersion() throws Exception {
+        SkillStore store = new SkillStore(temp.newFolder(), SkillServices.forContext(RuntimeEnvironment.getApplication()));
+        String first = draft("初始配置", "测试");
+        String update = draft("过期确认", "测试");
+        store.installGenerated(first);
+        SkillStore.Preview stale = store.previewGenerated(update);
+        store.delete(store.detail("检查").deleteTarget());
+        store.installGenerated(first);
+
+        assertThrows(IllegalStateException.class, () -> store.installGenerated(update, stale));
+        assertEquals(1, store.detail("检查").current().version());
+        assertTrue(store.pending().isEmpty());
     }
 
     @Test public void reloadedStateControlsBothEntriesAndDisablesQueuedVersion() throws Exception {

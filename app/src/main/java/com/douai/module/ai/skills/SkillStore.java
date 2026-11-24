@@ -75,12 +75,15 @@ public final class SkillStore {
     private static final String TEXT_MODEL = "text_model";
     private static final String RETAINED_SERVICE = "retainedService";
 
-    public record Installed(String name, int version, boolean enabled, boolean canRollback,
+    public record Installed(String name, int version, boolean enabled,
                             SkillResult.Type outputType, String serviceLabel) {}
     public record Preview(String name, String serviceLabel, String endpoint, int costUnits,
                           boolean needsConfirmation, String serviceId, SkillResult.Type outputType,
-                          String pendingReason, int previousVersion, int latestVersion) {}
+                          String pendingReason, int previousVersion, DeleteTarget identity) {}
     public record Pending(String name, SkillResult.Type outputType, String reason, String draftId) {}
+    public enum DraftState { NEEDS_CONFIGURATION, NEEDS_AUTHORIZATION, READY, DRAFT }
+    public record SettingsRow(String name, Installed current, SkillResult.Type draftOutputType, DraftState draftState) {}
+    public record SettingsSnapshot(boolean enabled, List<SettingsRow> rows) {}
     public record SaveResult(Installed installed, Pending pending) {}
     public record DraftPreview(String name, String description, SkillResult.Type outputType,
                                String instruction, String definition) {}
@@ -91,12 +94,15 @@ public final class SkillStore {
                              String instruction, boolean instructionEditable) {}
     public record Detail(String name, SkillResult.Type outputType, String draftId, String reason,
                          List<Field> fields, SkillServices.Service service, boolean canAuthorize,
-                         boolean canReplace, int previousVersion, boolean installedEnabled, boolean canRollback,
-                         DeleteTarget deleteTarget) {
+                         boolean canReplace, int previousVersion, boolean installedEnabled,
+                         DeleteTarget deleteTarget, Installed current, SkillServices.Service currentService,
+                         boolean skillsEnabled, DraftState draftState) {
         public boolean pending() { return !draftId.isEmpty(); }
     }
     private enum SaveMode { GENERATE, RECONNECT, CONVERSATION }
     private record Configuration(List<Field> fields, boolean canAuthorize) {}
+    private record DraftStatus(SkillServices.Service service, List<Field> fields, String reason,
+                               boolean canAuthorize, boolean canReplace, DraftState state) {}
     private record EditSource(EditTarget target, JSONObject definition, JSONObject pending,
                               SkillServices.Service retainedService) {}
     record Available(AiSkills.Command command, int version, String revisionId) {}
@@ -181,6 +187,36 @@ public final class SkillStore {
         });
     }
 
+    public SettingsSnapshot settingsSnapshot() {
+        return read(state -> {
+            JSONObject skills = state.getJSONObject("skills");
+            JSONObject drafts = state.getJSONObject("drafts");
+            Set<String> names = new LinkedHashSet<>();
+            skills.keys().forEachRemaining(names::add);
+            drafts.keys().forEachRemaining(names::add);
+            List<SettingsRow> rows = new ArrayList<>();
+            for (String name : names) {
+                JSONObject revision = skills.optJSONObject(name);
+                Installed current = revision == null ? null : installed(name, revision);
+                JSONObject entry = drafts.optJSONObject(name);
+                SkillResult.Type draftOutputType = null;
+                DraftState pending = null;
+                if (entry != null) {
+                    draftOutputType = resultType(entry);
+                    try {
+                        Draft draft = parse(entry.getString("definition"));
+                        draftOutputType = draft.outputType();
+                        pending = draftStatus(state, draft, entry, current == null ? 0 : current.version()).state();
+                    } catch (SkillServices.Failure | IllegalArgumentException unavailable) {
+                        pending = DraftState.DRAFT;
+                    }
+                }
+                rows.add(new SettingsRow(name, current, draftOutputType, pending));
+            }
+            return new SettingsSnapshot(state.getBoolean("enabled"), Collections.unmodifiableList(rows));
+        });
+    }
+
     List<Available> available() {
         return read(state -> {
             if (!state.getBoolean("enabled")) return Collections.emptyList();
@@ -200,17 +236,6 @@ public final class SkillStore {
 
     public void setSkillEnabled(String name, boolean enabled) {
         read(state -> { skill(state, name).put("enabled", enabled); writeState(state); return null; });
-    }
-
-    public Installed rollback(String name) {
-        return read(state -> {
-            JSONObject skill = skill(state, name);
-            int active = skill.getInt("active");
-            if (active <= 0) throw new IllegalStateException("没有上一版本");
-            skill.put("active", active - 1);
-            writeState(state);
-            return installed(name, skill);
-        });
     }
 
     public AutoCloseable observeDeletions(Runnable listener) {
@@ -265,7 +290,7 @@ public final class SkillStore {
 
     private static DeleteTarget deleteTarget(String name, JSONObject installed, JSONObject draft) throws Exception {
         if (installed == null && draft == null) return null;
-        int versions = installed == null ? 0 : installed.getJSONArray("versions").length();
+        int versions = installed == null ? 0 : 1;
         JSONArray records = new JSONArray().put(name)
                 .put(installed == null ? JSONObject.NULL : installed)
                 .put(draft == null ? JSONObject.NULL : draft);
@@ -532,17 +557,27 @@ public final class SkillStore {
         });
     }
 
-    public Detail activateReplacement(String name, String draftId, int previousVersion) throws Exception {
-        if (previousVersion <= 0) throw new IllegalArgumentException("请确认要替换的版本");
+    public Detail activateReplacement(Detail confirmed) throws Exception {
+        if (confirmed == null || !confirmed.canReplace()) throw new IllegalArgumentException("请确认要替换的配置");
         return locked(state -> {
-            JSONObject entry = requirePending(state, name, draftId);
+            String name = confirmed.name();
+            JSONObject entry = requirePending(state, name, confirmed.draftId());
             Draft draft = parse(entry.getString("definition"));
             JSONObject active = state.getJSONObject("skills").optJSONObject(name);
-            if (active == null || activeRevision(active).getInt("version") != previousVersion
+            if (active == null || !Objects.equals(confirmed.deleteTarget(), deleteTarget(name, active, entry))
                     || !NEEDS_REPLACEMENT.equals(entry.getString("reason"))) {
                 throw new IllegalStateException("当前技能版本或配置已变化");
             }
-            return advancePending(state, entry, draft, previousVersion);
+            SkillServices.Service service = pendingService(state, draft, entry);
+            SkillServices.Service approved = confirmed.service();
+            boolean sameService = approved == null ? service == null
+                    : service != null && SkillServices.sameBinding(approved, service);
+            if (!sameService || service != null && !authorized(service)) {
+                throw new IllegalStateException("草稿的服务已变化，请重新核对后确认");
+            }
+            Detail updated = advancePending(state, entry, draft, confirmed.previousVersion(), false, service);
+            if (updated.pending()) throw new IllegalStateException("草稿尚未启用");
+            return updated;
         });
     }
 
@@ -559,8 +594,12 @@ public final class SkillStore {
 
     private Detail advancePending(JSONObject state, JSONObject entry, Draft draft, Integer replaceVersion,
                                   boolean stageOnly) throws Exception {
+        return advancePending(state, entry, draft, replaceVersion, stageOnly, pendingService(state, draft, entry));
+    }
+
+    private Detail advancePending(JSONObject state, JSONObject entry, Draft draft, Integer replaceVersion,
+                                  boolean stageOnly, SkillServices.Service service) throws Exception {
         String name = draft.name();
-        SkillServices.Service service = pendingService(state, draft, entry);
         Preview preview = preview(state, draft, service);
         String reason = preview.pendingReason();
         if (reason.isEmpty() && (service == null || authorized(service))) {
@@ -595,23 +634,50 @@ public final class SkillStore {
         Installed current = installed == null ? null : installed(name, installed);
         int version = current == null ? 0 : current.version();
         boolean enabled = current != null && current.enabled();
-        boolean rollback = current != null && current.canRollback();
+        boolean skillsEnabled = state.getBoolean("enabled");
         DeleteTarget deletion = deleteTarget(name, installed, entry);
+        SkillServices.Service currentService = installed == null ? null
+                : discoveryMetadata(readExecution(revisionDirectory(activeRevision(installed))).service());
         if (entry == null) {
             if (current == null) throw new IllegalStateException("技能不存在");
-            Executable execution = readExecution(revisionDirectory(activeRevision(installed)));
             return new Detail(name, current.outputType(), "", enabled ? "已启用" : "已停用", Collections.emptyList(),
-                    discoveryMetadata(execution.service()), false, false, version, enabled, rollback, deletion);
+                    currentService, false, false, version, enabled, deletion,
+                    current, currentService, skillsEnabled, null);
         }
         Draft draft = parse(entry.getString("definition"));
-        SkillServices.Service explicit = configured(entry, name);
+        DraftStatus pending = draftStatus(state, draft, entry, version);
+        return new Detail(name, draft.outputType(), draftIdentity(name, entry), pending.reason(), pending.fields(),
+                pending.service(), pending.canAuthorize(), pending.canReplace(), version, enabled, deletion,
+                current, currentService, skillsEnabled, pending.state());
+    }
+
+    private DraftStatus draftStatus(JSONObject state, Draft draft, JSONObject entry, int version) throws Exception {
+        SkillServices.Service explicit = configured(entry, draft.name());
         SkillServices.Service target = explicit == null ? discoveryMetadata(pendingService(state, draft, entry)) : explicit;
         Configuration status = configuration(draft, target);
         String reason = entry.getString("reason");
         boolean replace = version > 0 && NEEDS_REPLACEMENT.equals(reason)
                 && (!"service".equals(draft.kind()) || target != null && authorized(target));
-        return new Detail(name, draft.outputType(), draftIdentity(name, entry), reason, status.fields(), target,
-                explicit != null && status.canAuthorize(), replace, version, enabled, rollback, deletion);
+        DraftState stateOfDraft = draftState(reason, status.fields(), replace);
+        if (NEEDS_IMAGE_SERVICE.equals(reason) && stateOfDraft == DraftState.DRAFT && target != null) {
+            reason = "图片服务已就绪，请检查配置后继续";
+        } else if (NEEDS_REPLACEMENT.equals(reason) && stateOfDraft != DraftState.READY) {
+            reason = "草稿配置已变化，请检查后再启用";
+        }
+        return new DraftStatus(target, status.fields(), reason, explicit != null && status.canAuthorize(), replace,
+                stateOfDraft);
+    }
+
+    private static DraftState draftState(String reason, List<Field> fields, boolean canReplace) {
+        if (TRIAL_FAILED.equals(reason)) return DraftState.DRAFT;
+        boolean needsAuthorization = false;
+        for (Field field : fields) {
+            if (!field.required()) continue;
+            if (field.state() == FieldState.MISSING) return DraftState.NEEDS_CONFIGURATION;
+            needsAuthorization |= field.state() == FieldState.NEEDS_AUTHORIZATION;
+        }
+        if (needsAuthorization) return DraftState.NEEDS_AUTHORIZATION;
+        return canReplace || EDIT_STAGED.equals(reason) ? DraftState.READY : DraftState.DRAFT;
     }
 
     private Configuration configuration(Draft draft, SkillServices.Service service) throws Exception {
@@ -667,11 +733,8 @@ public final class SkillStore {
         if (scoped == null) return "";
         JSONObject installed = state.getJSONObject("skills").optJSONObject(name);
         if (installed != null) {
-            JSONArray revisions = installed.getJSONArray("versions");
-            for (int i = 0; i < revisions.length(); i++) {
-                SkillServices.Service binding = readExecution(revisionDirectory(revisions.getJSONObject(i))).service();
-                if (binding != null && scoped.id().equals(binding.id())) return "";
-            }
+            SkillServices.Service binding = readExecution(revisionDirectory(activeRevision(installed))).service();
+            if (binding != null && scoped.id().equals(binding.id())) return "";
         }
         return scoped.id();
     }
@@ -755,6 +818,9 @@ public final class SkillStore {
             }
             SkillServices.Service service = pendingService(state, draft, matchingDraft(state, draft, json));
             Preview current = preview(state, draft, service);
+            if (confirmation != null && !current.equals(confirmation)) {
+                throw new IllegalStateException("技能版本或服务已变化，请重新预览并确认");
+            }
             if (draft.schemaVersion() != AUTHORED_SCHEMA && !current.pendingReason().isEmpty()) {
                 return savePending(state, draft, json, current.pendingReason());
             }
@@ -768,7 +834,7 @@ public final class SkillStore {
             if (mode == SaveMode.CONVERSATION && current.needsConfirmation()) {
                 return savePending(state, draft, json, NEEDS_REPLACEMENT);
             }
-            if ((current.needsConfirmation() || confirmation != null) && !current.equals(confirmation)) {
+            if (current.needsConfirmation() && confirmation == null) {
                 throw new IllegalStateException("技能版本或服务已变化，请重新预览并确认");
             }
             if (service != null && !authorized(service)) {
@@ -899,25 +965,28 @@ public final class SkillStore {
     private Preview preview(JSONObject state, Draft draft, SkillServices.Service service) throws Exception {
         JSONObject existing = state.getJSONObject("skills").optJSONObject(draft.name());
         int previous = existing == null ? 0 : activeRevision(existing).getInt("version");
-        int latest = existing == null ? 0 : existing.getJSONArray("versions").length();
+        JSONObject existingDraft = state.getJSONObject("drafts").optJSONObject(draft.name());
         String pending = "unconfigured".equals(draft.kind()) ? NEEDS_OPERATION
                 : service == null && draft.outputType() == SkillResult.Type.IMAGE ? NEEDS_IMAGE_SERVICE : "";
         boolean reviewTextService = draft.outputType() == SkillResult.Type.TEXT && service != null
                 && !SkillServices.MOCK_ORDERS.equals(service.id());
         return new Preview(draft.name(), service == null ? "" : service.label(), service == null ? "" : service.endpoint(),
                 service == null ? 0 : service.costUnits(), pending.isEmpty() && (previous > 0 || reviewTextService),
-                service == null ? "" : service.id(), draft.outputType(), pending, previous, latest);
+                service == null ? "" : service.id(), draft.outputType(), pending, previous,
+                deleteTarget(draft.name(), existing, existingDraft));
     }
     private Installed publish(JSONObject state, Draft draft, SkillServices.Service service) throws Exception {
         JSONObject skills = state.getJSONObject("skills");
         JSONObject skill = skills.optJSONObject(draft.name());
+        int highWater = skill == null ? 0 : highestVersion(skill);
         if (skill == null) {
             if (skills.length() >= 50) throw new IllegalStateException("最多可登记 50 个技能");
-            skill = new JSONObject().put("versions", new JSONArray());
+            skill = new JSONObject();
             skills.put(draft.name(), skill);
         }
-        JSONArray versions = skill.getJSONArray("versions");
-        int number = versions.length() + 1;
+        if (highWater == Integer.MAX_VALUE) throw new IllegalStateException("技能版本号已达到上限");
+        int number = highWater + 1;
+        JSONObject previousCurrent = skill.optJSONObject("current");
         String ref = UUID.randomUUID().toString();
         JSONObject revision = new JSONObject().put("version", number).put("directory", ref)
                 .put("description", draft.description()).put("outputType", draft.outputType().wireName())
@@ -935,8 +1004,12 @@ public final class SkillStore {
             if (TEXT_MODEL.equals(draft.kind())) definition.put("instruction", draft.instruction());
             if (service != null) definition.put("service", serviceRecord(service));
             writeDocument(new File(target, "execution.json"), definition.toString());
-            versions.put(revision);
-            skill.put("active", versions.length() - 1).put("enabled", true);
+            if (previousCurrent != null) {
+                Set<String> retired = retiredVersions(state);
+                collectRevisionId(previousCurrent, retired);
+                if (!retired.isEmpty()) state.put(RETIRED_VERSIONS, new JSONArray(retired));
+            }
+            skill.put("current", revision).put("enabled", true);
             state.getJSONObject("drafts").remove(draft.name());
             writeState(state);
         } catch (Exception failure) {
@@ -945,6 +1018,7 @@ public final class SkillStore {
             target.delete();
             throw failure;
         }
+        if (previousCurrent != null) cleanupRetiredVersions(state);
         return installed(draft.name(), skill);
     }
 
@@ -1088,13 +1162,24 @@ public final class SkillStore {
     }
 
     private static JSONObject activeRevision(JSONObject skill) throws Exception {
+        if (skill.has("current")) return skill.getJSONObject("current");
         return skill.getJSONArray("versions").getJSONObject(skill.getInt("active"));
+    }
+
+    private static int highestVersion(JSONObject skill) throws Exception {
+        int highest = activeRevision(skill).getInt("version");
+        JSONArray legacy = skill.optJSONArray("versions");
+        if (legacy != null) for (int i = 0; i < legacy.length(); i++) {
+            JSONObject revision = legacy.optJSONObject(i);
+            if (revision != null) highest = Math.max(highest, revision.optInt("version", 0));
+        }
+        return highest;
     }
 
     private static Installed installed(String name, JSONObject skill) throws Exception {
         JSONObject revision = activeRevision(skill);
         return new Installed(name, revision.getInt("version"), skill.getBoolean("enabled"),
-                skill.getInt("active") > 0, resultType(revision), revision.optString("serviceLabel", ""));
+                resultType(revision), revision.optString("serviceLabel", ""));
     }
 
     private static String revisionId(JSONObject version) throws IOException, JSONException {
@@ -1107,9 +1192,17 @@ public final class SkillStore {
         return new File(new File(directory, "versions"), revisionId(version));
     }
 
-    private static void collectRevisionIds(JSONObject installed, Set<String> ids) throws IOException, JSONException {
-        JSONArray revisions = installed.getJSONArray("versions");
-        for (int i = 0; i < revisions.length(); i++) ids.add(revisionId(revisions.getJSONObject(i)));
+    private static void collectRevisionIds(JSONObject installed, Set<String> ids) {
+        collectRevisionId(installed.optJSONObject("current"), ids);
+        JSONArray revisions = installed.optJSONArray("versions");
+        if (revisions != null) for (int i = 0; i < revisions.length(); i++) {
+            collectRevisionId(revisions.optJSONObject(i), ids);
+        }
+    }
+
+    private static void collectRevisionId(JSONObject revision, Set<String> ids) {
+        Object value = revision == null ? null : revision.opt("directory");
+        if (value instanceof String && REVISION.matcher((String) value).matches()) ids.add((String) value);
     }
 
     private static Set<String> retiredVersions(JSONObject state) {

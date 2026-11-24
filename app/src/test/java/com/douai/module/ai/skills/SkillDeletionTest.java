@@ -29,7 +29,7 @@ import static org.junit.Assert.*;
 public final class SkillDeletionTest {
     @Rule public final TemporaryFolder temp = new TemporaryFolder();
 
-    @Test public void removesAllRevisionsAndSameNameDraftButKeepsOtherSkillsAfterReopen() throws Exception {
+    @Test public void removesCurrentConfigurationAndSameNameDraftButKeepsOtherSkillsAfterReopen() throws Exception {
         Fixture fixture = new Fixture();
         fixture.install("保留");
         Set<Path> other = revisions(fixture.directory);
@@ -37,7 +37,7 @@ public final class SkillDeletionTest {
         fixture.install("整理");
         fixture.store.saveAuthoredDraft(draft("整理", "summary", "text"));
         var target = fixture.store.detail("整理").deleteTarget();
-        assertEquals(2, target.versionCount());
+        assertEquals(1, target.versionCount());
         assertTrue(target.hasDraft());
 
         fixture.store.delete(target);
@@ -47,7 +47,7 @@ public final class SkillDeletionTest {
         assertEquals("保留", reopened.list().get(0).name());
         assertEquals(1, reopened.list().size());
         assertTrue(reopened.pending().isEmpty());
-        assertThrows(IllegalStateException.class, () -> reopened.rollback("整理"));
+        assertThrows(IllegalStateException.class, () -> reopened.detail("整理"));
         for (AiSkills.Entry entry : AiSkills.Entry.values()) {
             assertTrue(AiSkills.commands(entry, "/整", reopened).isEmpty());
             assertNull(AiSkills.match(entry, "/整理 待处理", reopened));
