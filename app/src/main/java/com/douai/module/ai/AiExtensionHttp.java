@@ -1,5 +1,7 @@
 package com.douai.module.ai;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -9,6 +11,7 @@ import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -41,6 +44,17 @@ public final class AiExtensionHttp {
         T read(int status, Headers headers, InputStream body) throws IOException;
     }
 
+    @FunctionalInterface interface ConnectionFactory {
+        HttpsURLConnection open(URI endpoint) throws IOException;
+    }
+
+    private enum ImagePhase {
+        QUEUED, OPEN_CONNECTION, OPEN_OUTPUT, WRITE_REQUEST, WAIT_STATUS,
+        STATUS_RECEIVED, STATUS_UNAVAILABLE, READ_RESPONSE;
+
+        private final String label = name().toLowerCase(Locale.ROOT);
+    }
+
     private static final int MAX_REQUEST_BYTES = 1024 * 1024;
     private static final int MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
     private static final ThreadPoolExecutor IO = pool(4, "DouAi-extension-http");
@@ -66,18 +80,43 @@ public final class AiExtensionHttp {
 
     public static <T> T request(String endpoint, String method, Map<String, String> headers, byte[] body,
                                 long deadlineNanos, int maxResponseBytes, ResponseReader<T> reader) throws Failure {
+        return request(endpoint, method, headers, body, deadlineNanos, maxResponseBytes, reader, null);
+    }
+
+    /** Image generation supplies its existing trace for the worker's local I/O phases. */
+    public static <T> T request(String endpoint, String method, Map<String, String> headers, byte[] body,
+                                long deadlineNanos, int maxResponseBytes, ResponseReader<T> reader,
+                                DouAiLog.Operation imageTrace) throws Failure {
+        return request(endpoint, method, headers, body, deadlineNanos, maxResponseBytes, reader, imageTrace,
+                uri -> (HttpsURLConnection) uri.toURL().openConnection());
+    }
+
+    static <T> T request(String endpoint, String method, Map<String, String> headers, byte[] body,
+                         long deadlineNanos, int maxResponseBytes, ResponseReader<T> reader,
+                         DouAiLog.Operation imageTrace, ConnectionFactory factory) throws Failure {
         URI uri = exactEndpoint(endpoint);
         if (maxResponseBytes < 1 || maxResponseBytes > MAX_RESPONSE_BYTES
                 || body != null && (body.length > MAX_REQUEST_BYTES || !"POST".equals(method))
                 || !("GET".equals(method) || "POST".equals(method) || "DELETE".equals(method))) {
             throw new IllegalArgumentException("无效的 HTTP 请求设置");
         }
-        Attempt attempt = new Attempt();
+        Attempt attempt = new Attempt(imageTrace);
+        try {
+            return exchangeOnWorker(uri, method, headers, body, deadlineNanos, maxResponseBytes, reader, attempt, factory);
+        } catch (Failure failure) {
+            attempt.imageFailure(failure.kind);
+            throw failure;
+        }
+    }
+
+    private static <T> T exchangeOnWorker(URI uri, String method, Map<String, String> headers, byte[] body,
+                                          long deadlineNanos, int maxResponseBytes, ResponseReader<T> reader,
+                                          Attempt attempt, ConnectionFactory factory) throws Failure {
         attempt.remainingMillis(deadlineNanos);
         Future<T> future;
         try {
             future = IO.submit(() -> exchange(uri, method, headers, body, deadlineNanos,
-                    maxResponseBytes, reader, attempt));
+                    maxResponseBytes, reader, attempt, factory));
         } catch (RejectedExecutionException busy) {
             throw new Failure(Kind.BUSY, false);
         }
@@ -116,10 +155,11 @@ public final class AiExtensionHttp {
 
     private static <T> T exchange(URI uri, String method, Map<String, String> headers, byte[] body,
                                   long deadline, int maxResponseBytes, ResponseReader<T> reader,
-                                  Attempt attempt) throws Failure {
+                                  Attempt attempt, ConnectionFactory factory) throws Failure {
         HttpsURLConnection connection = null;
         try {
-            connection = (HttpsURLConnection) uri.toURL().openConnection();
+            attempt.imagePhase(ImagePhase.OPEN_CONNECTION, 0);
+            connection = factory.open(uri);
             attempt.attach(connection, deadline);
             connection.setRequestMethod(method);
             connection.setInstanceFollowRedirects(false);
@@ -134,20 +174,27 @@ public final class AiExtensionHttp {
             if (body != null) {
                 connection.setFixedLengthStreamingMode(body.length);
                 connection.setDoOutput(true);
+                // getOutputStream can perform DNS, TCP and TLS on a lazy HTTPS connection.
+                attempt.imagePhase(ImagePhase.OPEN_OUTPUT, 0);
                 attempt.beginSend(deadline);
                 try (OutputStream stream = connection.getOutputStream()) {
+                    attempt.imagePhase(ImagePhase.WRITE_REQUEST, 0);
                     attempt.remainingMillis(deadline);
                     stream.write(body);
                 }
             } else {
                 attempt.beginSend(deadline);
             }
+            attempt.imagePhase(ImagePhase.WAIT_STATUS, 0);
             int status = connection.getResponseCode();
+            if (status >= 100 && status <= 599) attempt.imagePhase(ImagePhase.STATUS_RECEIVED, status);
+            else attempt.imagePhase(ImagePhase.STATUS_UNAVAILABLE, 0);
             attempt.remainingMillis(deadline);
             if (status < 200 || status >= 300) {
                 return reader.read(status, connection::getHeaderField, new ByteArrayInputStream(new byte[0]));
             }
             // MCP can stop reading SSE after the target response without waiting for server EOF.
+            attempt.imagePhase(ImagePhase.READ_RESPONSE, 0);
             try (InputStream raw = connection.getInputStream();
                  InputStream input = new BoundedInput(raw, maxResponseBytes, attempt, deadline)) {
                 T result = reader.read(status, connection::getHeaderField, input);
@@ -178,9 +225,41 @@ public final class AiExtensionHttp {
     }
 
     private static final class Attempt {
+        private final DouAiLog.Operation imageTrace;
+        private final long startedNanos;
+        private ImagePhase imagePhase = ImagePhase.QUEUED;
+        private int imageStatus;
         private volatile boolean cancelled;
         private volatile boolean sent;
         private HttpsURLConnection connection;
+
+        Attempt(DouAiLog.Operation imageTrace) {
+            this.imageTrace = imageTrace;
+            this.startedNanos = imageTrace == null ? 0 : System.nanoTime();
+        }
+
+        void imagePhase(ImagePhase phase, int status) {
+            if (imageTrace == null) return;
+            synchronized (this) {
+                if (cancelled) return;
+                imagePhase = phase;
+                if (status != 0) imageStatus = status;
+                imageTrace.stage("image_http_" + phase.label, imageEvidence());
+            }
+        }
+
+        void imageFailure(Kind kind) {
+            if (imageTrace == null) return;
+            synchronized (this) {
+                imageTrace.stage("image_http_failure", imageEvidence() + ";kind=" + kind.name().toLowerCase(Locale.ROOT));
+            }
+        }
+
+        private String imageEvidence() {
+            String status = imageStatus == 0 ? "" : ";http_status=" + imageStatus;
+            return "phase=" + imagePhase.label + status + ";elapsed_ms="
+                    + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+        }
 
         synchronized void attach(HttpsURLConnection opened, long deadline) throws Failure {
             remainingMillis(deadline);

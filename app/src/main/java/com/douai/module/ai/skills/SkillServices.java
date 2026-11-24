@@ -395,7 +395,7 @@ public final class SkillServices {
             }
             throw problem(Code.REJECTED, "服务拒绝本次请求");
         }
-        return expectsImage ? resultImage(reply, token) : new SkillResult.Text(resultText(reply, token));
+        return expectsImage ? resultImageWithDiagnostics(reply, token) : new SkillResult.Text(resultText(reply, token));
     }
 
     private static String requestBody(Service service, String argument) throws Failure {
@@ -423,7 +423,29 @@ public final class SkillServices {
         if (!token.isEmpty()) headers.put("Authorization", "Bearer " + token);
         return AiExtensionHttp.request(endpoint, "POST", headers, request.getBytes(StandardCharsets.UTF_8),
                 deadline, image ? MAX_IMAGE_WIRE_BYTES : MAX_WIRE_BYTES, (status, responseHeaders, input) ->
-                        new Response(status, responseHeaders.get("Content-Type"), AiExtensionHttp.readBytes(input)));
+                        new Response(status, responseHeaders.get("Content-Type"), AiExtensionHttp.readBytes(input)),
+                image ? DouAiLog.current() : null);
+    }
+
+    private static SkillResult.Image resultImageWithDiagnostics(Response reply, String token) throws Failure {
+        DouAiLog.Operation trace = DouAiLog.current();
+        if (trace == null) return resultImage(reply, token);
+
+        long started = System.nanoTime();
+        String status = "http_status=" + reply.status();
+        trace.stage("image_decode", status + ";elapsed_ms=0");
+        String outcome = "outcome=failed;code=UNEXPECTED";
+        try {
+            SkillResult.Image image = resultImage(reply, token);
+            outcome = "outcome=success";
+            return image;
+        } catch (Failure failure) {
+            outcome = "outcome=failed;code=" + failure.code().name();
+            throw failure;
+        } finally {
+            trace.stage("image_decode_result", outcome + ";" + status + ";elapsed_ms="
+                    + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+        }
     }
 
     private static String resultText(Response reply, String token) throws Failure {
