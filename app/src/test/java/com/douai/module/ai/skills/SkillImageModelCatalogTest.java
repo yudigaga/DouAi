@@ -148,10 +148,20 @@ public final class SkillImageModelCatalogTest {
                 SkillImageModelCatalog.Code.INVALID_RESPONSE);
     }
 
-    @Test public void deadlineFailureDoesNotProbeAgain() {
+    @Test public void missingHttpStatusIsATransportFailure() {
+        check(-1, BEARER, SkillImageModelCatalog.Code.TRANSPORT);
+    }
+
+    @Test public void deadlineFailureUsesOneTwelveSecondBudgetAndDoesNotProbeAgain() {
         AtomicInteger requests = new AtomicInteger();
+        long startedBeforeFetch = System.nanoTime();
         SkillImageModelCatalog catalog = new SkillImageModelCatalog((endpoint, method, headers, body, deadline, limit, reader) -> {
             requests.incrementAndGet();
+            assertEquals("GET", method);
+            assertNull(body);
+            long budget = TimeUnit.SECONDS.toNanos(12);
+            assertTrue(deadline - startedBeforeFetch >= budget);
+            assertTrue(deadline - System.nanoTime() <= budget);
             throw new AiExtensionHttp.Failure(AiExtensionHttp.Kind.DEADLINE, true);
         });
         assertEquals(SkillImageModelCatalog.Code.DEADLINE,
@@ -188,7 +198,8 @@ public final class SkillImageModelCatalogTest {
             assertTrue(DouAiLog.awaitIdle(5000));
 
             String correlation = "\"trace_id\":\"" + trace.traceId() + "\"";
-            assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_http_dispatch")));
+            assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_http_dispatch")
+                    && line.contains("route=prefixed_models")));
             assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_http_response")
                     && line.contains("status=200")));
             assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_parse_outcome")

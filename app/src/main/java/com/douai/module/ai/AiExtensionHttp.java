@@ -7,8 +7,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
@@ -22,20 +25,43 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLException;
 
 /** One bounded HTTPS exchange for explicitly authorized AI extensions. */
 public final class AiExtensionHttp {
     public enum Kind { DEADLINE, TRANSPORT, RESPONSE_LIMIT, CANCELLED, BUSY }
+    public enum TransportReason { NONE, DNS, TLS, CONNECT, SOCKET_TIMEOUT, BUDGET, OTHER }
+
+    public enum Phase {
+        UNAVAILABLE, QUEUED, OPEN_CONNECTION, OPEN_OUTPUT, WRITE_REQUEST, WAIT_STATUS,
+        STATUS_RECEIVED, STATUS_UNAVAILABLE, READ_RESPONSE;
+
+        private final String label = name().toLowerCase(Locale.ROOT);
+    }
 
     public static final class Failure extends IOException {
         public final Kind kind;
         public final boolean mayHaveSent;
+        private final Phase phase;
+        private final TransportReason transportReason;
+        private final int httpStatus;
 
         public Failure(Kind kind, boolean mayHaveSent) {
+            this(kind, mayHaveSent, Phase.UNAVAILABLE, TransportReason.NONE, 0);
+        }
+
+        private Failure(Kind kind, boolean mayHaveSent, Phase phase, TransportReason transportReason, int httpStatus) {
             super("HTTPS exchange " + kind.name());
             this.kind = kind;
             this.mayHaveSent = mayHaveSent;
+            this.phase = phase;
+            this.transportReason = transportReason;
+            this.httpStatus = httpStatus;
         }
+
+        public Phase phase() { return phase; }
+        public TransportReason transportReason() { return transportReason; }
+        public int httpStatus() { return httpStatus; }
     }
 
     public interface Headers { String get(String name); }
@@ -46,13 +72,6 @@ public final class AiExtensionHttp {
 
     @FunctionalInterface interface ConnectionFactory {
         HttpsURLConnection open(URI endpoint) throws IOException;
-    }
-
-    private enum ImagePhase {
-        QUEUED, OPEN_CONNECTION, OPEN_OUTPUT, WRITE_REQUEST, WAIT_STATUS,
-        STATUS_RECEIVED, STATUS_UNAVAILABLE, READ_RESPONSE;
-
-        private final String label = name().toLowerCase(Locale.ROOT);
     }
 
     private static final int MAX_REQUEST_BYTES = 1024 * 1024;
@@ -118,7 +137,7 @@ public final class AiExtensionHttp {
             future = IO.submit(() -> exchange(uri, method, headers, body, deadlineNanos,
                     maxResponseBytes, reader, attempt, factory));
         } catch (RejectedExecutionException busy) {
-            throw new Failure(Kind.BUSY, false);
+            throw attempt.failure(Kind.BUSY);
         }
         try {
             long remaining = deadlineNanos - System.nanoTime();
@@ -136,7 +155,7 @@ public final class AiExtensionHttp {
         } catch (ExecutionException failure) {
             Throwable cause = failure.getCause();
             if (cause instanceof Failure) throw (Failure) cause;
-            throw attempt.failure(Kind.TRANSPORT);
+            throw attempt.failure(Kind.TRANSPORT, transportReason(cause));
         }
     }
 
@@ -158,7 +177,7 @@ public final class AiExtensionHttp {
                                   Attempt attempt, ConnectionFactory factory) throws Failure {
         HttpsURLConnection connection = null;
         try {
-            attempt.imagePhase(ImagePhase.OPEN_CONNECTION, 0);
+            attempt.phase(Phase.OPEN_CONNECTION, 0);
             connection = factory.open(uri);
             attempt.attach(connection, deadline);
             connection.setRequestMethod(method);
@@ -175,26 +194,27 @@ public final class AiExtensionHttp {
                 connection.setFixedLengthStreamingMode(body.length);
                 connection.setDoOutput(true);
                 // getOutputStream can perform DNS, TCP and TLS on a lazy HTTPS connection.
-                attempt.imagePhase(ImagePhase.OPEN_OUTPUT, 0);
+                attempt.phase(Phase.OPEN_OUTPUT, 0);
                 attempt.beginSend(deadline);
                 try (OutputStream stream = connection.getOutputStream()) {
-                    attempt.imagePhase(ImagePhase.WRITE_REQUEST, 0);
+                    attempt.phase(Phase.WRITE_REQUEST, 0);
                     attempt.remainingMillis(deadline);
                     stream.write(body);
                 }
             } else {
                 attempt.beginSend(deadline);
             }
-            attempt.imagePhase(ImagePhase.WAIT_STATUS, 0);
+            // getResponseCode can perform DNS, TCP and TLS on a lazy HTTPS connection.
+            attempt.phase(Phase.WAIT_STATUS, 0);
             int status = connection.getResponseCode();
-            if (status >= 100 && status <= 599) attempt.imagePhase(ImagePhase.STATUS_RECEIVED, status);
-            else attempt.imagePhase(ImagePhase.STATUS_UNAVAILABLE, 0);
+            if (status >= 100 && status <= 599) attempt.phase(Phase.STATUS_RECEIVED, status);
+            else attempt.phase(Phase.STATUS_UNAVAILABLE, 0);
             attempt.remainingMillis(deadline);
             if (status < 200 || status >= 300) {
                 return reader.read(status, connection::getHeaderField, new ByteArrayInputStream(new byte[0]));
             }
             // MCP can stop reading SSE after the target response without waiting for server EOF.
-            attempt.imagePhase(ImagePhase.READ_RESPONSE, 0);
+            attempt.phase(Phase.READ_RESPONSE, 0);
             try (InputStream raw = connection.getInputStream();
                  InputStream input = new BoundedInput(raw, maxResponseBytes, attempt, deadline)) {
                 T result = reader.read(status, connection::getHeaderField, input);
@@ -204,9 +224,9 @@ public final class AiExtensionHttp {
         } catch (Failure failure) {
             throw failure;
         } catch (SocketTimeoutException timeout) {
-            throw attempt.failure(Kind.DEADLINE);
+            throw attempt.failure(Kind.DEADLINE, TransportReason.SOCKET_TIMEOUT);
         } catch (IOException | RuntimeException failure) {
-            throw attempt.failure(Kind.TRANSPORT);
+            throw attempt.failure(Kind.TRANSPORT, transportReason(failure));
         } finally {
             attempt.detach();
             if (connection != null) {
@@ -214,6 +234,16 @@ public final class AiExtensionHttp {
                 catch (RuntimeException ignored) { }
             }
         }
+    }
+
+    private static TransportReason transportReason(Throwable error) {
+        for (int depth = 0; error != null && depth < 4; depth++, error = error.getCause()) {
+            if (error instanceof UnknownHostException) return TransportReason.DNS;
+            if (error instanceof SSLException) return TransportReason.TLS;
+            if (error instanceof ConnectException || error instanceof NoRouteToHostException) return TransportReason.CONNECT;
+            if (error instanceof SocketTimeoutException) return TransportReason.SOCKET_TIMEOUT;
+        }
+        return TransportReason.OTHER;
     }
 
     private static ThreadPoolExecutor pool(int threads, String name) {
@@ -227,8 +257,8 @@ public final class AiExtensionHttp {
     private static final class Attempt {
         private final DouAiLog.Operation imageTrace;
         private final long startedNanos;
-        private ImagePhase imagePhase = ImagePhase.QUEUED;
-        private int imageStatus;
+        private Phase phase = Phase.QUEUED;
+        private int status;
         private volatile boolean cancelled;
         private volatile boolean sent;
         private HttpsURLConnection connection;
@@ -238,14 +268,11 @@ public final class AiExtensionHttp {
             this.startedNanos = imageTrace == null ? 0 : System.nanoTime();
         }
 
-        void imagePhase(ImagePhase phase, int status) {
-            if (imageTrace == null) return;
-            synchronized (this) {
-                if (cancelled) return;
-                imagePhase = phase;
-                if (status != 0) imageStatus = status;
-                imageTrace.stage("image_http_" + phase.label, imageEvidence());
-            }
+        synchronized void phase(Phase phase, int status) {
+            if (cancelled) return;
+            this.phase = phase;
+            if (status != 0) this.status = status;
+            if (imageTrace != null) imageTrace.stage("image_http_" + phase.label, imageEvidence());
         }
 
         void imageFailure(Kind kind) {
@@ -256,8 +283,8 @@ public final class AiExtensionHttp {
         }
 
         private String imageEvidence() {
-            String status = imageStatus == 0 ? "" : ";http_status=" + imageStatus;
-            return "phase=" + imagePhase.label + status + ";elapsed_ms="
+            String httpStatus = status == 0 ? "" : ";http_status=" + status;
+            return "phase=" + phase.label + httpStatus + ";elapsed_ms="
                     + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
         }
 
@@ -292,7 +319,13 @@ public final class AiExtensionHttp {
             return (int) Math.max(1, Math.min(Integer.MAX_VALUE, TimeUnit.NANOSECONDS.toMillis(remaining)));
         }
 
-        Failure failure(Kind kind) { return new Failure(kind, sent); }
+        Failure failure(Kind kind) {
+            return failure(kind, kind == Kind.DEADLINE ? TransportReason.BUDGET : TransportReason.NONE);
+        }
+
+        synchronized Failure failure(Kind kind, TransportReason reason) {
+            return new Failure(kind, sent, phase, reason, status);
+        }
     }
 
     private static final class BoundedInput extends InputStream {

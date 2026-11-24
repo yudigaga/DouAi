@@ -128,6 +128,54 @@ public final class SkillImageDiscoveryTest {
         assertTrue(fixture.targets.isEmpty());
     }
 
+    @Test public void retainedImageScopeKeepsItsCredentialAfterChangingOnlyTheCatalogueAddress() throws Exception {
+        Fixture fixture = new Fixture();
+        var draft = fixture.pending();
+        var initial = fixture.store.saveConfiguration(NAME, draft.draftId(), SkillServices.Adapter.OPENAI_IMAGES,
+                IMAGE, MODELS, "image-fixture", 0, KEY);
+        var installed = fixture.store.authorizeConfiguration(NAME, initial.draftId(), initial.service());
+        assertFalse(installed.pending());
+        SkillServices.Service approved = installed.service();
+        var editor = fixture.store.editTarget(installed.deleteTarget());
+        var pending = fixture.store.saveEdit(editor, "更新图片说明", "输入绘图描述。", "");
+        assertEquals(approved.id(), pending.service().id());
+
+        String updatedCatalogue = MODELS + "-other";
+        var saved = fixture.store.saveConfiguration(NAME, pending.draftId(), SkillServices.Adapter.OPENAI_IMAGES,
+                IMAGE, updatedCatalogue, approved.modelName(), approved.costUnits(), "");
+        SkillStore reopened = new SkillStore(fixture.directory, fixture.services);
+        var after = reopened.detail(NAME);
+        assertTrue(after.pending());
+        assertEquals(1, after.previousVersion());
+        assertEquals(saved.draftId(), after.draftId());
+        assertNotEquals(pending.draftId(), after.draftId());
+        assertEquals(approved.id(), after.service().id());
+        assertEquals(IMAGE, after.service().endpoint());
+        assertEquals(updatedCatalogue, after.service().modelsEndpoint());
+        assertTrue(fixture.services.hasCredential(after.service()));
+        assertTrue(fixture.services.isAuthorized(approved));
+        assertTrue(fixture.services.isAuthorized(after.service()));
+        assertTrue(fixture.targets.isEmpty());
+        assertThrows(IllegalStateException.class, () ->
+                reopened.discoverImageModels(NAME, pending.draftId(), IMAGE, updatedCatalogue, ""));
+
+        assertEquals(List.of("image-fixture"),
+                reopened.discoverImageModels(NAME, after.draftId(), IMAGE, updatedCatalogue, ""));
+        assertEquals(List.of(updatedCatalogue), fixture.targets);
+        assertEquals(List.of("Bearer " + KEY), fixture.authorizations);
+
+        for (String rejected : List.of("https://other.example.test/models", MODELS + "/%66" + KEY.substring(1))) {
+            assertThrows(SkillServices.Failure.class, () -> reopened.saveConfiguration(NAME, after.draftId(),
+                    SkillServices.Adapter.OPENAI_IMAGES, IMAGE, rejected, approved.modelName(), approved.costUnits(), ""));
+        }
+        assertEquals(SkillServices.Code.CONFIRMATION_REQUIRED, assertThrows(SkillServices.Failure.class, () ->
+                fixture.services.updateImageModelsEndpoint(approved, MODELS + "-stale")).code());
+        assertEquals(after.draftId(), reopened.detail(NAME).draftId());
+        assertEquals(updatedCatalogue, reopened.detail(NAME).service().modelsEndpoint());
+        assertTrue(fixture.services.isAuthorized(approved));
+        assertEquals(List.of(updatedCatalogue), fixture.targets);
+    }
+
     @Test public void modelListAddressesCannotPersistAnEncodedFreshOrSavedKey() throws Exception {
         Fixture fixture = new Fixture();
         var draft = fixture.pending();

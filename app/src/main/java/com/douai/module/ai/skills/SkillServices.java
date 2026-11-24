@@ -237,6 +237,26 @@ public final class SkillServices {
         return saved[0];
     }
 
+    /** Updates catalogue-only metadata for one existing approved image binding. */
+    Service updateImageModelsEndpoint(Service expected, String override) throws Failure {
+        if (expected == null || !scopedOpenAi(expected)) {
+            throw problem(Code.INVALID_INPUT, "只能修改已授权技能图片服务的模型列表地址");
+        }
+        Service updated = new Service(expected.id(), expected.label(), expected.endpoint(), expected.costUnits(),
+                expected.outputType(), expected.adapter(), expected.modelName(), expected.skillName(), value(override).trim());
+        validateScoped(updated);
+        edit(registrations -> {
+            Registration current = requireMatching(registrations, expected);
+            if (current.maximumCost() < current.service().costUnits()
+                    || !current.service().modelsEndpoint().equals(expected.modelsEndpoint())) {
+                throw problem(Code.CONFIRMATION_REQUIRED, "模型列表配置或授权已变化，请重新打开技能配置");
+            }
+            verifyNoMetadataSecret(updated, decrypt(current));
+            registrations.put(updated.id(), new Registration(updated, current.ciphertext(), current.maximumCost()));
+        });
+        return updated;
+    }
+
     List<String> discoverImageModels(String name, Service saved, String generationEndpoint, String modelsEndpoint,
                                     String typedBearer) throws IOException {
         DouAiLog.Operation trace = DouAiLog.current();

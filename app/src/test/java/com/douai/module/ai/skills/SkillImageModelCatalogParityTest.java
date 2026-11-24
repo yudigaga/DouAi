@@ -44,6 +44,30 @@ public final class SkillImageModelCatalogParityTest {
                         "https://images.example.test/custom/render", "")).code());
     }
 
+    @Test public void dzhRootUsesTheDocumentedCatalogueWithoutChangingTheGenerationAddress() throws Exception {
+        String host = "https://dzhsmartai.com";
+        String generation = SkillImageProviderAddress.resolve(host, false);
+        assertEquals(host + "/images/generations", generation);
+        assertEquals(host + "/v1/models", SkillImageModelCatalog.resolveEndpoint(generation, ""));
+        assertEquals(host + "/v1/models", SkillImageModelCatalog.resolveEndpoint(host, ""));
+
+        String legacy = "https://DzHsMaRtAi.CoM:443/";
+        SkillImageProviderAddress.Form reopened = SkillImageProviderAddress.fromSaved(legacy);
+        String original = SkillImageProviderAddress.resolve(reopened.address(), reopened.complete());
+        assertEquals(legacy, original);
+        assertEquals("https://DzHsMaRtAi.CoM:443/v1/models", SkillImageModelCatalog.resolveEndpoint(original, ""));
+    }
+
+    @Test public void dzhCatalogueDefaultPreservesExplicitOverridesAndOtherPrefixesOrOrigins() throws Exception {
+        String host = "https://dzhsmartai.com";
+        assertEquals(host + "/models", SkillImageModelCatalog.resolveEndpoint(host + "/images/generations", host + "/models"));
+        assertEquals(host + "/gateway/models", SkillImageModelCatalog.resolveEndpoint(host + "/gateway/images/generations", ""));
+        assertEquals(host + "/v2/models", SkillImageModelCatalog.resolveEndpoint(host + "/v2", ""));
+        for (String other : List.of("https://api.dzhsmartai.com", host + ":9443", "https://dzhsmartai.com.example.test")) {
+            assertEquals(other + "/models", SkillImageModelCatalog.resolveEndpoint(other + "/images/generations", ""));
+        }
+    }
+
     private static List<String> primaryAiModels(String json) {
         return ReflectionHelpers.callStaticMethod(ChatCompletionClient.class, "parseModelIds",
                 ReflectionHelpers.ClassParameter.from(String.class, AiModelConfig.CHAT),

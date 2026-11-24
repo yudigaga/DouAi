@@ -104,6 +104,10 @@ public final class SkillImageModelCatalog {
         } else if (!path.isEmpty() && !LEGACY_VERSION_BASE.matcher(path).matches()) {
             throw failure(Code.CATALOG_REQUIRED);
         }
+        if (prefix.isEmpty() && port(generation) == 443 && "dzhsmartai.com".equalsIgnoreCase(generation.getHost())) {
+            // DZHSmartAI's documented catalogue is versioned even for a root image binding.
+            prefix = "/v1";
+        }
         // Older settings could store the API base as the exact generation binding. Only the lookup target is derived.
         return endpoint("https://" + generation.getRawAuthority() + prefix + "/models").toString();
     }
@@ -120,9 +124,13 @@ public final class SkillImageModelCatalog {
         DouAiLog.Operation trace = DouAiLog.current();
         Reply reply;
         try {
-            stage(trace, "catalog_http_dispatch", "method=GET");
+            stage(trace, "catalog_http_dispatch", "method=GET;route=" + routeKind(catalog));
             reply = transport.request(catalog.toString(), "GET", Collections.unmodifiableMap(headers), null,
                     deadline, MAX_RESPONSE_BYTES, (status, ignored, body) -> {
+                        if (status < 100 || status > 599) {
+                            stage(trace, "catalog_transport_failure", "kind=TRANSPORT;phase=STATUS_UNAVAILABLE");
+                            return error(Code.TRANSPORT);
+                        }
                         stage(trace, "catalog_http_response", "status=" + status);
                         Reply parsed = readReply(status, body, bearer);
                         if (status == 200) stage(trace, "catalog_parse_outcome",
@@ -130,7 +138,9 @@ public final class SkillImageModelCatalog {
                         return parsed;
                     });
         } catch (AiExtensionHttp.Failure failure) {
-            stage(trace, "catalog_transport_failure", "kind=" + failure.kind.name());
+            String status = failure.httpStatus() == 0 ? "" : ";http_status=" + failure.httpStatus();
+            stage(trace, "catalog_transport_failure", "kind=" + failure.kind.name()
+                    + ";phase=" + failure.phase().name() + ";transport_reason=" + failure.transportReason().name() + status);
             switch (failure.kind) {
                 case DEADLINE: throw failure(Code.DEADLINE);
                 case CANCELLED: throw failure(Code.CANCELLED);
@@ -143,6 +153,13 @@ public final class SkillImageModelCatalog {
         }
         if (reply.error() != null) throw failure(reply.error());
         return reply.models();
+    }
+
+    private static String routeKind(URI catalog) {
+        String path = catalog.getRawPath();
+        if ("/models".equals(path)) return "root_models";
+        if ("/v1/models".equals(path)) return "v1_models";
+        return path.endsWith("/models") ? "prefixed_models" : "custom";
     }
 
     private static Reply readReply(int status, InputStream body, String bearer) throws IOException {

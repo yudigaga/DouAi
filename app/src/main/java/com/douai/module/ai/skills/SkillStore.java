@@ -501,13 +501,18 @@ public final class SkillStore {
             String token = SkillServices.normalizeScopedBearer(bearerToken);
             if (token.isEmpty()) {
                 SkillServices.Service binding = discoveryMetadata(pendingService(state, draft, entry));
-                if (sameConfiguration(binding, adapter, endpoint, modelsEndpoint, modelName, costUnits)
+                if (sameGenerationConfiguration(binding, adapter, endpoint, modelName, costUnits)
                         && authorized(binding)) {
-                    if (!entry.has("serviceId") && !entry.has(RETAINED_SERVICE)) {
-                        entry.put(RETAINED_SERVICE, serviceRecord(binding))
-                                .put("draftId", UUID.randomUUID().toString());
+                    boolean catalogueChanged = modelsEndpoint != null
+                            && !binding.modelsEndpoint().equals(modelsEndpoint.trim());
+                    if (!catalogueChanged || binding.adapter() == SkillServices.Adapter.OPENAI_IMAGES
+                            && name.equals(binding.skillName())) {
+                        if (catalogueChanged) binding = services.updateImageModelsEndpoint(binding, modelsEndpoint);
+                        boolean pinBinding = !entry.has("serviceId") && !entry.has(RETAINED_SERVICE);
+                        if (pinBinding) entry.put(RETAINED_SERVICE, serviceRecord(binding));
+                        if (catalogueChanged || pinBinding) entry.put("draftId", UUID.randomUUID().toString());
+                        return advancePending(state, entry, draft, null);
                     }
-                    return advancePending(state, entry, draft, null);
                 }
             }
             SkillServices.Service saved = services.configureForSkill(editableServiceId(state, entry, name), name, adapter,
@@ -518,11 +523,10 @@ public final class SkillStore {
         });
     }
 
-    private static boolean sameConfiguration(SkillServices.Service binding, SkillServices.Adapter adapter,
-                                             String endpoint, String modelsEndpoint, String modelName, int costUnits) {
+    private static boolean sameGenerationConfiguration(SkillServices.Service binding, SkillServices.Adapter adapter,
+                                                       String endpoint, String modelName, int costUnits) {
         return binding != null && binding.adapter() == adapter && binding.costUnits() == costUnits
                 && binding.endpoint().equals(endpoint == null ? "" : endpoint.trim())
-                && (modelsEndpoint == null || binding.modelsEndpoint().equals(modelsEndpoint.trim()))
                 && binding.modelName().equals(modelName == null ? "" : modelName.trim());
     }
 

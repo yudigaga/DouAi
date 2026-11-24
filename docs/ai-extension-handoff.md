@@ -268,3 +268,20 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 ```
 
 专项及相邻回归共 437 项通过，0 失败，0 跳过，包括两个聊天入口、主 AI 表单、设置菜单、顶部色带及全屏回缩。使用合成密钥和模拟服务。真机待独立复测，本轮未构建安装包。 [运行日志](../build/ai-extension-image-catalogue-final.log)
+
+## 2026-11-24 生图模型目录复测 · 基于 `bc38a6f`
+
+真机同链路日志里，早期三次在已存凭据绑定检查处停止。其余八次发起了模型目录 GET，包含本次输入和绑定准确的已存凭据，两种方式均无 HTTP 状态。约五至六秒的失败归为传输错误，最后两次约十二秒耗尽总预算。将生图 API Base 加上 `/v1` 后，用户仍反馈拉取失败。 [问题反馈](https://app.slack.com/archives/C0CK9FJ74UC/p1795527625833179)
+
+两入口按各自配置构建目录。普通 AI 的裸域默认拼 `/models`，版本基址或标准完整对话地址保留其前缀。同源的生图配置原来也在空前缀下拼 `/models`，`/v1/images/generations` 派生 `/v1/models`。本机 DZH 服务说明列出 `/v1/models`。本轮仅对该准确域名及 HTTPS 默认端口的空前缀默认值采用这一路径，显式同源目录优先，自定义完整接口继续使用原规则。原生图地址保持原样。
+
+离线还复现了只修改同源目录时，已启用图片 Skill 的编辑草稿会失去已存凭据。现在仅更新目录元数据并核对原绑定与授权，密文、实际生图地址和费用授权保持原值。诊断新增路径类型、传输阶段和有限失败分类。有实际 HTTP 状态才记录数值。`WAIT_STATUS` 对延迟建连的 HTTPS 客户端也可能包含 DNS、TCP 和 TLS。总预算仍为十二秒，每次点击仅发起一次 GET。 [基线复现](../build/ai-extension-model-pull-baseline.log)
+
+独立真机验收沿用已有生图配置和密钥，开启全局调试日志后点击一次「拉取模型列表」。同一条 `image_model_catalogue` trace 需有实际 2xx、成功解析的非空目录和 `options_presented`，界面可选择返回的模型。无状态时核对 `catalog_transport_failure` 的 `phase` 和 `transport_reason`。本候选未使用真实密钥或发出生图请求。
+
+专项及相邻回归 236 项通过，0 失败，0 跳过。 [运行日志](../build/ai-extension-model-pull-verified.log)
+
+```powershell
+$env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests 'com.douai.module.ai.*' --tests '*AiSkillImageProviderTest' --tests '*AiSkillSettingsDialogTest' --tests '*AiModelEditorTest' --tests '*ChatCompletionClientTest' --tests '*MiuixEditorsInteractionTest'
+```
