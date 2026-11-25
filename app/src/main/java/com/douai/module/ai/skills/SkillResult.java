@@ -3,7 +3,6 @@ package com.douai.module.ai.skills;
 import com.douai.module.feature.ChatImage;
 
 import java.util.Objects;
-import java.util.UUID;
 
 /** A typed Skill payload. */
 public interface SkillResult {
@@ -44,8 +43,4 @@ public interface SkillResult {
         @Override public Type type() { return Type.TABLE; }
     }
 
-    record Video(UUID requestId) implements SkillResult {
-        public Video { Objects.requireNonNull(requestId); }
-        @Override public Type type() { return Type.VIDEO; }
-    }
 }

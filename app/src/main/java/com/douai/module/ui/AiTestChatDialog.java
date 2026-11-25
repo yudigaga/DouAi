@@ -53,7 +53,6 @@ import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.ai.skills.SkillTable;
-import com.douai.module.ai.skills.SkillVideoTasks;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.SettingsStore;
@@ -66,18 +65,12 @@ import com.douai.module.feature.TestChatMemory;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixChatEditorSurface;
 
-import java.io.File;
-import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -140,8 +133,6 @@ final class AiTestChatDialog extends Dialog {
     private final SessionFactory sessions;
     private final ExecutorService worker;
     private final ExecutorService historyWorker;
-    private final SkillVideoTasks videoTasks;
-    private final Runnable videoPoll = this::refreshVideoTasks;
     private final ThumbnailLoader thumbnailLoader;
     private final MediaLoader mediaLoader;
     private final Map<ChatImage, Bitmap> thumbnails = new IdentityHashMap<>();
@@ -177,10 +168,6 @@ final class AiTestChatDialog extends Dialog {
     private Dialog skillDetails;
     private AlertDialog customReviewDialog;
     private AiChatImagePreview imagePreview;
-    private AiSkillVideoPreview videoPreview;
-    private SkillVideoTasks.Scope videoScope;
-    private int videoViewGeneration;
-    private boolean videoPollScheduled;
     private Runnable contactEditAction;
     private HostSpeechInput speechInput;
     private HostAccountAvatar accountAvatar;
@@ -354,21 +341,6 @@ final class AiTestChatDialog extends Dialog {
                      ExecutorService worker, ExecutorService historyWorker, boolean useMiuix,
                      ThumbnailLoader thumbnailLoader, boolean messageContact, HostNativeChatViews nativeViews,
                      MediaLoader mediaLoader) {
-        this(baseContext, config, sessions, worker, historyWorker, useMiuix, thumbnailLoader, messageContact,
-                nativeViews, mediaLoader, SkillVideoTasks.forContext(baseContext));
-    }
-
-    AiTestChatDialog(Context baseContext, AiModelConfig config, SessionFactory sessions,
-                     ExecutorService worker, ExecutorService historyWorker, ThumbnailLoader thumbnailLoader,
-                     SkillVideoTasks videoTasks) {
-        this(baseContext, config, sessions, worker, historyWorker, false, thumbnailLoader, false, null,
-                AiTestChatDialog::readMedia, videoTasks);
-    }
-
-    private AiTestChatDialog(Context baseContext, AiModelConfig config, SessionFactory sessions,
-                             ExecutorService worker, ExecutorService historyWorker, boolean useMiuix,
-                             ThumbnailLoader thumbnailLoader, boolean messageContact, HostNativeChatViews nativeViews,
-                             MediaLoader mediaLoader, SkillVideoTasks videoTasks) {
         super(nativeViews == null ? ModuleTheme.themedContext(baseContext) : baseContext,
                 nativeViews == null ? ModuleTheme.dialogTheme(baseContext) : android.R.style.Theme_DeviceDefault_NoActionBar);
         this.mediaLoader = mediaLoader;
@@ -377,7 +349,6 @@ final class AiTestChatDialog extends Dialog {
         this.sessions = sessions;
         this.worker = worker;
         this.historyWorker = historyWorker;
-        this.videoTasks = videoTasks;
         this.thumbnailLoader = thumbnailLoader;
         this.useMiuix = useMiuix;
         this.nativeViews = nativeViews;
@@ -695,11 +666,15 @@ final class AiTestChatDialog extends Dialog {
     }
 
     void enableSkills(AiSkills.Entry entry, SettingsStore settings) {
+        enableSkills(entry, settings, entry == null ? null : SkillStore.forContext(getContext()));
+    }
+
+    void enableSkills(AiSkills.Entry entry, SettingsStore settings, SkillStore store) {
         if (disposed) return;
         closeSkillDeletionObserver();
         subAgentSettings = entry == AiSkills.Entry.WORK ? settings : null;
         skillEntry = entry;
-        skillStore = entry == null ? null : SkillStore.forContext(getContext());
+        skillStore = entry == null ? null : store;
         if (skillStore != null) {
             SkillStore observed = skillStore;
             skillDeletionObserver = observed.observeDeletions(() -> main.post(() -> {
@@ -872,7 +847,6 @@ final class AiTestChatDialog extends Dialog {
         Future<?> clearBarrier = historyClear;
         RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, selected, answer, skill, authoring,
                 com.douai.module.analytics.LocalAnalytics.get(getContext()).beginOperation(null, "ai"));
-        AiSkills.Entry entry = skillEntry;
         pending = turn;
         busy = true;
         state.setText(answer.text);
@@ -954,13 +928,13 @@ final class AiTestChatDialog extends Dialog {
                                 return askSkillModel(turn, active, system,
                                         SkillAuthoring.textInput(instruction, input, settings));
                             }
-                        }, ignored -> submitVideo(turn, entry));
+                        });
                         if (result instanceof SkillResult.Image image) {
                             generatedImage = image.image();
                             reply = "";
                         } else if (result instanceof SkillResult.Text text) {
                             reply = text.text();
-                        } else if (result instanceof SkillResult.Table || result instanceof SkillResult.Video) {
+                        } else if (result instanceof SkillResult.Table) {
                             artifact = result;
                             reply = "";
                         } else {
@@ -1172,11 +1146,6 @@ final class AiTestChatDialog extends Dialog {
             answer.text = reply;
             answer.color = TEXT;
             answer.artifact = artifact;
-            if (artifact instanceof SkillResult.Video) {
-                videoScope = turn.videoScope;
-                answer.videoTask = turn.videoTask;
-                scheduleVideoPoll();
-            }
             if (turn.manualSkill()) answer.settingsSkillName = turn.settingsSkillName;
             if (generatedImage != null) {
                 answer.images.add(generatedImage);
@@ -1247,9 +1216,6 @@ final class AiTestChatDialog extends Dialog {
                 HistorySave result;
                 try {
                     result = memory.append(turn.transcriptEpoch, saved) ? HistorySave.SAVED : HistorySave.UNCONFIRMED;
-                    if (result == HistorySave.SAVED && artifact instanceof SkillResult.Video video) {
-                        markVideoLinked(turn.videoScope, video.requestId());
-                    }
                 } catch (RuntimeException | OutOfMemoryError unavailable) {
                     result = HistorySave.UNCONFIRMED;
                 }
@@ -1310,7 +1276,6 @@ final class AiTestChatDialog extends Dialog {
         }
     }
 
-    private static final class VideoHistoryRequired extends IllegalStateException { }
     private static final class ServiceCapabilityMismatch extends IllegalArgumentException { }
 
     private void showCustomServiceReview(AiSkills.Invocation invocation, String prompt) {
@@ -1327,9 +1292,8 @@ final class AiTestChatDialog extends Dialog {
         }
 
         SkillCustomService.Preview call = review.preview();
-        SkillCustomService.Preset preset = call.preset();
-        String message = preset.label() + " · " + preset.costUnits() + " 费用单位\nPOST " + preset.endpoint()
-                + "\n传输字段 " + preset.requestField() + "\n\n" + call.argument();
+        String message = "POST " + call.endpoint() + "\n传输字段 " + SkillCustomService.REQUEST_FIELD
+                + "\n费用由服务商决定\n\n" + call.argument();
         AlertDialog child = new MiuixDialogBuilder(getContext(), useMiuix)
                 .setTitle("确认本次技能服务调用").setMessage(message)
                 .setNegativeButton("取消", null).setPositiveButton("确认调用", null).create();
@@ -1359,132 +1323,6 @@ final class AiTestChatDialog extends Dialog {
         }
     }
 
-    private static SkillVideoTasks.Scope videoScope(AiSkills.Entry entry, TestChatMemory memory) {
-        return entry == null || memory == null ? null : new SkillVideoTasks.Scope(entry, memory.conversationKey());
-    }
-
-    private SkillResult.Video submitVideo(RequestTurn turn, AiSkills.Entry entry) throws Exception {
-        SkillVideoTasks.Scope scope = videoScope(entry, turn.transcriptMemory);
-        if (scope == null || !turn.transcriptMemory.historyEnabled()) throw new VideoHistoryRequired();
-        long expectedGeneration = videoTasks.generation(scope);
-        turn.checkStopped();
-        if (turn.discardHistory) throw new InterruptedException("会话已清空");
-        SkillVideoTasks.Task task = videoTasks.submit(scope, expectedGeneration, turn.videoRequestId, turn.prompt);
-        if (turn.stopRequested) videoTasks.cancel(scope, task.requestId());
-        turn.videoScope = scope;
-        turn.videoTask = task;
-        return new SkillResult.Video(task.requestId());
-    }
-
-    private void markVideoLinked(SkillVideoTasks.Scope scope, UUID requestId) {
-        if (scope == null) return;
-        try { videoTasks.markLinked(scope, requestId); }
-        catch (IOException unavailable) { /* Reopen can reconcile the durable task and its transcript row. */ }
-    }
-
-    private void scheduleVideoPoll() {
-        if (disposed || videoScope == null || videoPollScheduled) return;
-        if (transcript.stream().noneMatch(message -> message.videoTask != null && !message.videoTask.state().terminal())) {
-            return;
-        }
-        videoPollScheduled = true;
-        main.postDelayed(videoPoll, 800);
-    }
-
-    private void refreshVideoTasks() {
-        SkillVideoTasks.Scope scope = videoScope;
-        int view = videoViewGeneration;
-        if (disposed || scope == null) {
-            videoPollScheduled = false;
-            return;
-        }
-        historyWorker.execute(() -> {
-            Map<UUID, SkillVideoTasks.Task> updates;
-            try { updates = videoIndex(videoTasks.list(scope)); }
-            catch (IOException unavailable) { updates = null; }
-            Map<UUID, SkillVideoTasks.Task> tasks = updates;
-            main.post(() -> {
-                if (disposed || view != videoViewGeneration) return;
-                videoPollScheduled = false;
-                if (tasks == null) {
-                    state.setText("无法刷新本机视频任务，重新打开会话可继续查看");
-                    return;
-                }
-                for (ChatMessage message : transcript) {
-                    if (message.artifact instanceof SkillResult.Video video) {
-                        message.videoTask = tasks.get(video.requestId());
-                    }
-                }
-                messageRows.notifyDataSetChanged();
-                scheduleVideoPoll();
-            });
-        });
-    }
-
-    private static Map<UUID, SkillVideoTasks.Task> videoIndex(List<SkillVideoTasks.Task> tasks) {
-        Map<UUID, SkillVideoTasks.Task> index = new HashMap<>();
-        for (SkillVideoTasks.Task task : tasks) index.put(task.requestId(), task);
-        return index;
-    }
-
-    private void resetVideoUi() {
-        ++videoViewGeneration;
-        main.removeCallbacks(videoPoll);
-        videoPollScheduled = false;
-        videoScope = null;
-        if (videoPreview != null) videoPreview.dismiss();
-        videoPreview = null;
-    }
-
-    private void cancelVideo(ChatMessage row, UUID requestId) {
-        SkillVideoTasks.Scope scope = videoScope;
-        if (disposed || scope == null) return;
-        int view = videoViewGeneration;
-        historyWorker.execute(() -> {
-            SkillVideoTasks.Task task;
-            try { task = videoTasks.cancel(scope, requestId); }
-            catch (IOException unavailable) { task = null; }
-            SkillVideoTasks.Task result = task;
-            main.post(() -> {
-                if (disposed || view != videoViewGeneration || !transcript.contains(row)) return;
-                if (result == null) state.setText("无法取消此视频任务");
-                else {
-                    row.videoTask = result;
-                    messageRows.notifyDataSetChanged();
-                }
-            });
-        });
-    }
-
-    private void playVideo(UUID requestId) {
-        SkillVideoTasks.Scope scope = videoScope;
-        if (disposed || scope == null) return;
-        int view = videoViewGeneration;
-        historyWorker.execute(() -> {
-            File media;
-            try { media = videoTasks.playableFile(scope, requestId); }
-            catch (IOException unavailable) { media = null; }
-            File local = media;
-            main.post(() -> {
-                if (disposed || view != videoViewGeneration) return;
-                Activity owner = ownerActivity();
-                if (local == null || owner == null || owner.isFinishing() || owner.isDestroyed()) {
-                    state.setText("本机视频无法播放");
-                    return;
-                }
-                if (videoPreview != null) videoPreview.dismiss();
-                AiSkillVideoPreview child = new AiSkillVideoPreview(owner, local);
-                videoPreview = child;
-                child.setOnDismissListener(ignored -> { if (videoPreview == child) videoPreview = null; });
-                try { child.show(); }
-                catch (RuntimeException unavailable) {
-                    videoPreview = null;
-                    state.setText("本机视频无法播放");
-                }
-            });
-        });
-    }
-
     private static String authoringFailure(SkillAuthoring.Action action, Exception failure) {
         if (failure instanceof ServiceCapabilityMismatch) return "请求需要受控服务能力，本次草案未保存";
         if (failure instanceof OutputMismatch mismatch) {
@@ -1502,8 +1340,8 @@ final class AiTestChatDialog extends Dialog {
                 && service.code() == SkillServices.Code.UNKNOWN_RESULT) return "请求结果未知，请先核实";
         if (failure instanceof McpClient.Failure mcp && mcp.resultUnknown()) return mcp.getMessage();
         if (failure instanceof McpRegistry.Failure registry && registry.resultUnknown()) return registry.getMessage();
+        if (failure instanceof SkillCustomService.Failure custom && custom.resultUnknown()) return custom.getMessage();
         if (stopped) return "已停止";
-        if (failure instanceof VideoHistoryRequired) return "模拟视频任务需要启用本地对话历史";
         if (failure instanceof SkillServices.Failure || failure instanceof McpClient.Failure
                 || failure instanceof McpRegistry.Failure || failure instanceof AiSubAgents.Failure
                 || failure instanceof SkillCustomService.Failure) {
@@ -1532,7 +1370,6 @@ final class AiTestChatDialog extends Dialog {
         if (disposed) return;
         if (customReviewDialog != null) customReviewDialog.dismiss();
         closeImagePreview();
-        resetVideoUi();
         if (pending != null) pending.discardHistory = true;
         cancelRequest();
         skillDraft = null;
@@ -1541,7 +1378,6 @@ final class AiTestChatDialog extends Dialog {
         cancelThumbnails();
         searchVideoCards.clear();
         Session previous = session;
-        AiSkills.Entry entry = skillEntry;
         session = sessions.create();
         transcript.clear();
         messageRows.notifyDataSetChanged();
@@ -1556,13 +1392,8 @@ final class AiTestChatDialog extends Dialog {
         // Keep the clear operation ordered after any in-flight history read, including on close.
         historyClear = historyWorker.submit(() -> {
             RuntimeException error = null;
-            try {
-                SkillVideoTasks.Scope scope = videoScope(entry, previous.transcriptMemory());
-                if (scope != null) videoTasks.clear(scope);
-                previous.clear();
-            } catch (IOException | RuntimeException failure) {
-                error = new IllegalStateException("无法清空已保存的对话");
-            }
+            try { previous.clear(); }
+            catch (RuntimeException failure) { error = failure; }
             RuntimeException failure = error;
             main.post(() -> {
                 if (disposed || ticket != clearGeneration) return;
@@ -1596,7 +1427,6 @@ final class AiTestChatDialog extends Dialog {
         disposed = true;
         if (customReviewDialog != null) customReviewDialog.dismiss();
         closeImagePreview();
-        resetVideoUi();
         closeSkillDeletionObserver();
         skillDraft = null;
         if (contactAvatar != null) contactAvatar.setImageDrawable(null);
@@ -2084,35 +1914,6 @@ final class AiTestChatDialog extends Dialog {
         container.addView(export, wrap());
     }
 
-    private void bindVideoTask(LinearLayout container, ChatMessage message) {
-        container.removeAllViews();
-        container.setVisibility(message.artifact instanceof SkillResult.Video ? View.VISIBLE : View.GONE);
-        if (!(message.artifact instanceof SkillResult.Video video)) return;
-        SkillVideoTasks.Task task = message.videoTask;
-        String outcome = task == null ? "任务不可用" : switch (task.state()) {
-            case QUEUED -> "排队中";
-            case RUNNING -> "处理中";
-            case COMPLETED -> "已完成";
-            case CANCELLED -> "已取消";
-            case TIMED_OUT -> "已超时";
-            case FAILED -> "失败";
-        };
-        TextView caption = label("本机模拟视频 · " + outcome, 13, MUTED);
-        caption.setTag("ai.chat.video_task.state");
-        container.addView(caption, wrap());
-        if (task == null || task.state().terminal() && task.state() != SkillVideoTasks.State.COMPLETED) return;
-        boolean complete = task.state() == SkillVideoTasks.State.COMPLETED;
-        Button action = new Button(getContext());
-        action.setAllCaps(false);
-        action.setText(complete ? "播放示例视频" : "取消任务");
-        action.setTag(complete ? "ai.chat.video_task.play" : "ai.chat.video_task.cancel");
-        action.setOnClickListener(ignored -> {
-            if (complete) playVideo(video.requestId());
-            else cancelVideo(message, video.requestId());
-        });
-        container.addView(action, wrap());
-    }
-
     private void addTableRow(LinearLayout grid, List<String> values, int columns, boolean heading) {
         LinearLayout row = new LinearLayout(getContext());
         for (int column = 0; column < columns; column++) {
@@ -2196,9 +1997,6 @@ final class AiTestChatDialog extends Dialog {
         boolean savingHistory;
         volatile boolean discardHistory;
         String settingsSkillName;
-        final UUID videoRequestId;
-        SkillVideoTasks.Scope videoScope;
-        SkillVideoTasks.Task videoTask;
 
         RequestTurn(int ticket, String prompt, List<ChatImage> images, List<Document> documents,
                     List<PendingAttachment> attachments, ChatMessage answer, AiSkills.Invocation skill, SkillAuthoring.Action authoring,
@@ -2213,8 +2011,6 @@ final class AiTestChatDialog extends Dialog {
             this.preparedDocuments = new ArrayList<>(documents);
             this.answer = answer;
             this.skill = skill;
-            this.videoRequestId = skill != null && skill.command().outputType() == SkillResult.Type.VIDEO
-                    ? UUID.randomUUID() : null;
             this.authoring = authoring;
         }
 
@@ -2241,7 +2037,6 @@ final class AiTestChatDialog extends Dialog {
         String settingsSkillName;
         AiSearchVideoCards.Group videos;
         SkillResult artifact;
-        SkillVideoTasks.Task videoTask;
 
         ChatMessage(String role, String text, boolean user, List<ChatImage> images) {
             this.role = role;
@@ -2287,7 +2082,6 @@ final class AiTestChatDialog extends Dialog {
         private final LinearLayout images;
         private final LinearLayout videos;
         private final LinearLayout table;
-        private final LinearLayout videoTask;
         private final ImageButton retry;
         private final Button settingsAction;
         private final HostNativeChatViews.TextBubble nativeBubble;
@@ -2345,10 +2139,6 @@ final class AiTestChatDialog extends Dialog {
             table.setOrientation(VERTICAL);
             table.setTag("ai.chat.table");
             bubble.addView(table, new LayoutParams(dp(240), ViewGroup.LayoutParams.WRAP_CONTENT));
-            videoTask = new LinearLayout(context);
-            videoTask.setOrientation(VERTICAL);
-            videoTask.setTag("ai.chat.video_task");
-            bubble.addView(videoTask, new LayoutParams(dp(240), ViewGroup.LayoutParams.WRAP_CONTENT));
             videos = new LinearLayout(context);
             videos.setOrientation(VERTICAL);
             videos.setTag("ai.chat.message.videos");
@@ -2404,8 +2194,6 @@ final class AiTestChatDialog extends Dialog {
             videos.getLayoutParams().width = Math.min(dp(240), Math.max(dp(120), rowWidthForVideos - reservedForVideos));
             table.getLayoutParams().width = videos.getLayoutParams().width;
             bindTable(table, message.artifact instanceof SkillResult.Table result ? result.table() : null);
-            videoTask.getLayoutParams().width = videos.getLayoutParams().width;
-            bindVideoTask(videoTask, message);
             searchVideoCards.bind(videos, message.user ? null : message.videos);
             retry.setVisibility(message.retry ? VISIBLE : GONE);
             retry.setOnClickListener(message.retry ? ignored -> sendMessage(message.retryPrompt,
@@ -2466,27 +2254,14 @@ final class AiTestChatDialog extends Dialog {
     private void restoreConversation() {
         int ticket = ++restoreGeneration;
         Session active = session;
-        AiSkills.Entry entry = skillEntry;
+        boolean showSkills = skillEntry != null;
         restoreLoad = historyWorker.submit(() -> {
-            List<TestChatMemory.Turn> saved = Collections.emptyList();
-            SkillVideoTasks.Scope scope = null;
-            List<SkillVideoTasks.Task> video = Collections.emptyList();
+            List<TestChatMemory.Turn> saved;
             try {
                 TestChatMemory memory = active.transcriptMemory();
-                saved = memory == null ? active.savedTurns() : entry != null ? memory.readTranscript() : memory.read();
-                scope = videoScope(entry, memory);
-                if (scope != null && videoTasks.hasCatalog(scope)) {
-                    if (memory.historyEnabled()) {
-                        video = videoTasks.list(scope);
-                        saved = recoverVideoTurns(memory, saved, scope, video);
-                    } else {
-                        videoTasks.clear(scope);
-                    }
-                }
+                saved = memory == null ? active.savedTurns() : showSkills ? memory.readTranscript() : memory.read();
             }
-            catch (IOException | RuntimeException unavailable) { /* Keep readable transcript rows. */ }
-            Map<UUID, SkillVideoTasks.Task> tasks = videoIndex(video);
-            SkillVideoTasks.Scope restoredScope = scope;
+            catch (RuntimeException failure) { saved = Collections.emptyList(); }
             List<TestChatMemory.Turn> retained = new ArrayList<>();
             Map<ChatImage, Bitmap> decoded = new IdentityHashMap<>();
             int bytes = 0;
@@ -2503,7 +2278,6 @@ final class AiTestChatDialog extends Dialog {
             main.post(() -> {
                 if (disposed || ticket != restoreGeneration) { recycle(decoded); return; }
                 restoreLoad = null;
-                videoScope = restoredScope;
                 for (Map.Entry<ChatImage, Bitmap> item : decoded.entrySet()) {
                     if (item.getValue() != null) thumbnails.put(item.getKey(), item.getValue());
                 }
@@ -2515,40 +2289,12 @@ final class AiTestChatDialog extends Dialog {
                     ChatMessage answer = addMessage(assistantName, turn.answer, false, turn.assistantImages);
                     answer.settingsSkillName = turn.settingsSkillName;
                     answer.artifact = turn.artifact;
-                    if (turn.artifact instanceof SkillResult.Video result) {
-                        answer.videoTask = tasks.get(result.requestId());
-                    }
                 }
                 messageRows.notifyDataSetChanged();
-                scheduleVideoPoll();
                 scrollToBottom();
                 updateSend();
             });
         });
-    }
-
-    private List<TestChatMemory.Turn> recoverVideoTurns(TestChatMemory memory, List<TestChatMemory.Turn> saved,
-                                                       SkillVideoTasks.Scope scope, List<SkillVideoTasks.Task> tasks) {
-        Set<UUID> known = new HashSet<>();
-        for (TestChatMemory.Turn turn : saved) {
-            if (turn.artifact instanceof SkillResult.Video result) known.add(result.requestId());
-        }
-        long epoch = memory.epoch();
-        boolean added = false;
-        for (SkillVideoTasks.Task task : tasks) {
-            if (task.linked() || Thread.currentThread().isInterrupted()) continue;
-            if (known.contains(task.requestId())) {
-                markVideoLinked(scope, task.requestId());
-            } else {
-                TestChatMemory.Turn recovered = TestChatMemory.Turn.displayedSkill(task.prompt(), "",
-                        Collections.emptyList(), null, new SkillResult.Video(task.requestId()));
-                if (memory.append(epoch, recovered)) {
-                    added = true;
-                    markVideoLinked(scope, task.requestId());
-                }
-            }
-        }
-        return added ? memory.readTranscript() : saved;
     }
 
     private void cancelRestore() {

@@ -111,6 +111,48 @@ public class SkillStoreTest {
         assertTrue(store.pending().isEmpty());
     }
 
+    @Test public void retiredCustomServicePresetStaysBlockedUntilAnEndpointIsExplicitlySavedAndEnabled() throws Exception {
+        File root = temp.newFolder();
+        SkillServices services = SkillServices.forContext(RuntimeEnvironment.getApplication());
+        SkillStore store = new SkillStore(root, services);
+        var proposal = SkillStore.validateAuthoredDraft("""
+                {"schemaVersion":4,"name":"检查接口","description":"提取内容","documentation":"输入待处理文字",
+                 "instructions":"检查内容","capabilityId":"custom_service","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"样例","expectedType":"text"}}
+                """);
+        assertNotNull(store.saveAuthoredDraft(proposal).pending());
+        String target = "https://skill-api.example.com/v1/process";
+        store.configureCustomService(store.detail("检查接口"), target, "");
+
+        var catalog = new File(root, "catalog.json").toPath();
+        var index = new JSONObject(Files.readString(catalog));
+        var record = index.getJSONObject("skills").getJSONObject("检查接口");
+        record.put("customBinding", new JSONObject().put("preset", "mock_text_v1")
+                .put("revision", UUID.randomUUID().toString()).put("sealed", "retired-fixture"));
+        Files.writeString(catalog, index.toString());
+
+        SkillStore reopened = new SkillStore(root, services);
+        SkillStore.Detail blocked = reopened.detail("检查接口");
+        assertFalse(blocked.installedEnabled());
+        assertNull(blocked.customConfiguration());
+        assertTrue(blocked.reason().contains("公网 HTTPS"));
+        assertThrows(AiSkills.CommandUnavailable.class,
+                () -> AiSkills.match(AiSkills.Entry.WORK, "/检查接口 样例", reopened));
+        assertThrows(IllegalStateException.class, () -> reopened.setSkillEnabled("检查接口", true));
+
+        SkillStore.Detail replacement = reopened.configureCustomService(blocked, target, "");
+        assertTrue(replacement.canReplace());
+        assertThrows(AiSkills.CommandUnavailable.class,
+                () -> AiSkills.match(AiSkills.Entry.CONTACT, "/检查接口 样例", reopened));
+        SkillStore.Detail ready = reopened.activateReplacement(replacement);
+        assertEquals(target, ready.customConfiguration().endpoint());
+        assertFalse(ready.customConfiguration().hasCredential());
+        var call = AiSkills.match(AiSkills.Entry.CONTACT, "/检查接口 样例", reopened);
+        assertTrue(call.command().requiresReview());
+        assertThrows(IllegalStateException.class, () -> AiSkills.executeResult(call, reopened));
+    }
+
     @Test public void reloadedStateControlsBothEntriesAndDisablesQueuedVersion() throws Exception {
         File root = temp.newFolder();
         SkillServices services = SkillServices.forContext(RuntimeEnvironment.getApplication());

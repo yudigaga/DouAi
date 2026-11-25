@@ -18,7 +18,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Bounded private test-chat history. Epochs prevent an older request from undoing Clear. */
@@ -62,8 +61,6 @@ public final class TestChatMemory {
 
     public boolean historyEnabled() { return rounds > 0; }
 
-    public String conversationKey() { return file.getName().substring(0, 64); }
-
     /** Ordinary model context, excluding all local-only Skill turns. */
     public List<Turn> read() { return readStored(false); }
 
@@ -104,6 +101,8 @@ public final class TestChatMemory {
                             String type = text(input, 12);
                             if (!type.isEmpty()) {
                                 String payload = text(input, MAX_ARTIFACT_PAYLOAD);
+                                // v3 included retired local video fixtures. Consume their record without restoring it.
+                                if (SkillResult.Type.VIDEO.wireName().equals(type)) continue;
                                 artifactBytes += utf8Length(payload);
                                 if (artifactBytes > MAX_ARTIFACT_BYTES) throw new IOException("History artifact size");
                                 if (includeDisplay) artifact = readArtifact(type, payload);
@@ -156,9 +155,6 @@ public final class TestChatMemory {
         synchronized (IO_LOCK) {
             if (rounds == 0 || expectedEpoch != state.epoch) return false;
             List<Turn> turns = new ArrayList<>(readTranscript());
-            if (turn.artifact instanceof SkillResult.Video && turns.stream().anyMatch(saved -> turn.artifact.equals(saved.artifact))) {
-                return true;
-            }
             turns.add(turn);
             turns = bounded(turns);
             if (turn.displayOnly && !turns.contains(turn)) return false;
@@ -249,18 +245,11 @@ public final class TestChatMemory {
             try { return new SkillResult.Table(SkillTable.parse(payload)); }
             catch (IllegalArgumentException invalid) { return null; }
         }
-        if (SkillResult.Type.VIDEO.wireName().equals(type)) {
-            try {
-                UUID requestId = UUID.fromString(payload);
-                if (requestId.toString().equals(payload)) return new SkillResult.Video(requestId);
-            } catch (IllegalArgumentException invalid) { return null; }
-        }
         return null;
     }
 
     private static String artifactPayload(SkillResult artifact) {
         if (artifact instanceof SkillResult.Table table) return table.table().toJson();
-        if (artifact instanceof SkillResult.Video video) return video.requestId().toString();
         throw new IllegalArgumentException("Unsupported history artifact");
     }
 

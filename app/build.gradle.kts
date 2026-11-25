@@ -120,6 +120,7 @@ dependencies {
     implementation("io.github.libxposed:service:102.0.0")
     implementation("com.android.tools.smali:smali-dexlib2:3.0.9")
     implementation("com.caverock:androidsvg-aar:1.4")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")

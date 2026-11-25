@@ -38,7 +38,7 @@ public final class SkillAuthoring {
             生图使用 capabilityId: "image_generation"，outputType: "image"，configFields 为空，输入最大 4000 字。
             输出表格或 CSV 使用 capabilityId: "table_model"，outputType: "table"，输入最大 2000 字。
             生成视频使用 capabilityId: "video_task"，outputType: "video"，configFields 为空，输入最大 2000 字。
-            视频目前是本机模拟任务，不能编造视频供应商或声称输出由实际提示词生成。
+            视频草稿需要用户选定供应商的公开任务接口才能启用。不要生成、猜测或承诺供应商地址。
             需要用户在设置中选定的自定义服务使用 capabilityId: "custom_service"，outputType: "text"，
             configFields 为空，输入最大 2000 字。清单不能提供服务选项、接口、映射或密钥。
             如提供了 requiredOutputType，必须使用该输出类型对应的能力。
@@ -105,7 +105,7 @@ public final class SkillAuthoring {
     private static final Pattern TABLE_OUTPUT = Pattern.compile(
             "(?i)(?:表格|CSV)(?:输出|导出)?$|(?:输出|提取为|提取成|整理成|转成|生成|导出)\\s*(?:结构化)?\\s*(?:表格|CSV)");
     private static final Pattern VIDEO_OUTPUT = Pattern.compile("生成\\s*视频|视频生成|(?:模拟)?视频$");
-    private static final Pattern CUSTOM_SERVICE = Pattern.compile("(?i)(?:自定义|模拟)\\s*(?:HTTPS\\s*)?(?:接口|服务)");
+    private static final Pattern CUSTOM_SERVICE = Pattern.compile("(?i)自定义\\s*(?:HTTPS\\s*)?(?:接口|服务)");
 
     private SkillAuthoring() { }
 

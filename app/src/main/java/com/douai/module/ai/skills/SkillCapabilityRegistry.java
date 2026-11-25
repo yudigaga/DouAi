@@ -62,13 +62,12 @@ public final class SkillCapabilityRegistry {
 
     static SkillResult execute(Capability capability, SkillServices services, SkillServices.Service boundService,
                                String instruction, String input, Map<String, Object> values,
-                               AiSkills.TextExecutor executor, AiSkills.VideoExecutor video) throws Exception {
+                               AiSkills.TextExecutor executor) throws Exception {
         switch (capability) {
             case CUSTOM_SERVICE:
                 throw new IllegalStateException("请先确认本次技能服务调用");
             case VIDEO_TASK:
-                if (video == null) throw new IllegalStateException("视频任务缺少会话环境");
-                return video.submit(input);
+                throw new IllegalStateException(SkillStore.NEEDS_VIDEO_PROVIDER);
             case TABLE_MODEL:
                 if (executor == null) throw new IllegalStateException("此入口未选择文本模型");
                 SkillAuthoring.textInput(instruction, input, values);

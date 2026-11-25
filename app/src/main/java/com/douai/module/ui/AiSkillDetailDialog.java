@@ -152,12 +152,15 @@ final class AiSkillDetailDialog implements AutoCloseable {
             String enabled = AiSkillSettingsDialog.installedState(current, detail.skillsEnabled());
             text(body, "v" + current.version() + " · " + outputLabel(current.outputType()) + " · " + enabled,
                     "skills.detail.summary");
+            if (!current.configurationRequired().isEmpty() && !detail.pending()) {
+                text(body, current.configurationRequired(), "skills.detail.pending_configuration");
+            }
             SkillServices.Service service = detail.currentService();
             if (service != null) {
                 String label = service.modelName().isEmpty() ? service.label() : service.label() + " · " + service.modelName();
                 text(body, label, "skills.detail.service");
             }
-            installedActions(detail);
+            if (current.configurationRequired().isEmpty()) installedActions(detail);
         }
         if (detail.pending()) {
             section(current == null ? "技能草稿" : "待启用修改", "skills.detail.draft");
@@ -290,31 +293,38 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (detail.manifest() == null
                 || detail.manifest().capability() != SkillCapabilityRegistry.Capability.CUSTOM_SERVICE) return;
         SkillStore.CustomConfiguration current = detail.customConfiguration();
-        SkillCustomService.Preset preset = current == null ? SkillCustomService.Preset.MOCK_TEXT : current.preset();
-        section("技能服务", "skills.detail.custom");
-        text(body, preset.label() + " · " + preset.costUnits() + " 费用单位\nPOST " + preset.endpoint()
-                        + "\n发送字段 " + preset.requestField() + " · 读取字段 " + preset.responseField(),
-                "skills.detail.custom.preset");
-        if (current != null) {
-            text(body, current.hasCredential() ? "已绑定 · 模拟凭据已保存" : "已绑定 · 无模拟凭据",
-                    "skills.detail.custom.binding");
-        }
-        String hint = current != null && current.hasCredential()
-                ? "更换模拟凭据（留空保留）" : "模拟凭据（可选）";
+        section("HTTPS 服务", "skills.detail.custom");
+        text(body, "请求 POST JSON，发送字段 " + SkillCustomService.REQUEST_FIELD
+                        + "，读取响应字段 " + SkillCustomService.RESPONSE_FIELD + "。",
+                "skills.detail.custom.contract");
+        EditText endpoint = input(body, "公网 HTTPS 完整接口地址", "skills.detail.custom.endpoint",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
+        if (current != null) endpoint.setText(current.endpoint());
+        boolean hasCredential = current != null && current.hasCredential();
+        String hint = hasCredential ? "更换服务密钥（地址相同且留空时保留）" : "服务密钥（可选）";
         EditText bearer = input(body, hint, "skills.detail.custom.credential",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 2048, true);
-        button(body, current == null ? "绑定此模拟服务" : "保存服务配置", "skills.detail.custom.save", () -> {
-            try {
-                SkillStore.Detail saved = store.configureCustomService(detail, preset, fieldValue(bearer));
-                bearer.setText("");
-                render(saved, saved.pending() ? "服务配置已保存，确认启用新版后生效" : "模拟服务已绑定");
-                if (onChanged != null) onChanged.run();
-            } catch (SkillCustomService.Failure invalid) {
-                status.setText(invalid.getMessage());
-            } catch (Exception unavailable) {
-                status.setText("无法保存服务配置，请重新打开技能详情");
-            }
-        });
+        button(body, "保存服务配置", "skills.detail.custom.save", () ->
+                saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false));
+        if (hasCredential) {
+            button(body, "移除此技能密钥", "skills.detail.custom.remove_credential", () -> review("移除服务密钥",
+                    "确认后生成待启用配置。", "移除密钥", () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true)));
+        }
+    }
+
+    private void saveCustomConfiguration(SkillStore.Detail detail, String endpoint, EditText bearer, boolean clear) {
+        try {
+            SkillStore.Detail saved = store.configureCustomService(detail, endpoint, clear ? "" : fieldValue(bearer), clear);
+            bearer.setText("");
+            render(saved, saved.pending() ? "服务配置已保存，确认启用新版后生效" : "服务配置已保存，可在聊天中确认调用");
+            if (onChanged != null) onChanged.run();
+        } catch (SkillCustomService.Failure invalid) {
+            status.setText(invalid.getMessage());
+        } catch (IllegalArgumentException invalid) {
+            status.setText("请输入公网 HTTPS 完整接口地址，地址中请勿包含凭据、查询参数或片段");
+        } catch (Exception unavailable) {
+            status.setText("无法保存服务配置，请重新打开技能详情");
+        }
     }
 
     private Supplier<String> manifestInput(SkillManifest.ConfigField field, Object value) {
@@ -414,7 +424,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (detail.canReplace()) {
             button(body, "启用新版", "skills.detail.replace", () -> review("确认更新技能",
                     "将以草稿替换 /" + name + " 的当前配置 v" + detail.previousVersion() + "。"
-                            + (detail.service() == null ? "" : "\n\n" + target(detail.service())),
+                            + (detail.service() == null ? "" : "\n\n" + target(detail.service()))
+                            + (detail.customConfiguration() == null ? "" : "\n\nPOST " + detail.customConfiguration().endpoint()),
                     "启用新版", () -> apply(() -> store.activateReplacement(detail),
                             "技能已更新", "启用未完成，请重新打开详情核对配置")));
         } else if (detail.outputType() == SkillResult.Type.IMAGE || detail.manifest() == null) {

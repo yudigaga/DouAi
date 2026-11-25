@@ -275,6 +275,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     }
 
     static String installedState(SkillStore.Installed current, boolean enabled) {
+        if (!current.configurationRequired().isEmpty()) return "待配置";
         return !current.enabled() ? "已停用" : enabled ? "已启用" : "总开关已关闭";
     }
 
