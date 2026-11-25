@@ -729,9 +729,14 @@ public final class ChatCompletionClient {
         }
     }
 
+    /** Returns the provider base with the selected protocol's terminal operation removed. */
+    public static String providerBase(AiModelConfig config) {
+        return stripOperation(config.apiEndpoint, config.protocol);
+    }
+
     public static String modelsEndpoint(AiModelConfig config) {
         if (!config.modelsEndpoint.isEmpty()) return config.modelsEndpoint;
-        String base = stripOperation(config.apiEndpoint, config.protocol);
+        String base = providerBase(config);
         switch (config.protocol) {
             case AiModelConfig.ANTHROPIC:
             case AiModelConfig.GEMINI:

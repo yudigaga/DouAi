@@ -7,14 +7,19 @@ import android.text.method.PasswordTransformationMethod;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.ListView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.config.AiModelConfig;
+import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.HostSettingsStore;
+import com.douai.module.feature.ChatCompletionClient;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -25,6 +30,8 @@ import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.Implementation;
+import org.robolectric.annotation.Implements;
 import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
 
@@ -76,6 +83,7 @@ public final class AiSkillSettingsDialogTest {
         SkillServices.Service existing = new SkillServices.Service("fixture-existing", "存量图片服务",
                 "https://images.example.test/generate", 0, SkillResult.Type.IMAGE);
         services.register(existing, "");
+        services.authorize(existing, 0);
         reopenManager();
 
         assertTrue(manager.dialog().isShowing());
@@ -86,8 +94,10 @@ public final class AiSkillSettingsDialogTest {
         assertNull(root.findViewWithTag("skills.service.register"));
         assertNull(root.findViewWithTag("skills.service.fixture-existing"));
         assertNull(root.findViewWithTag("skills.service." + SkillServices.MOCK_IMAGE + ".authorize"));
-        assertNotNull(root.findViewWithTag("skills.generate.shared_services"));
+        assertNull(root.findViewWithTag("skills.generate.shared_services"));
+        assertFalse(visibleText(root).contains("共享接口设置"));
         assertEquals(existing, services.find(existing.id()));
+        assertTrue(services.isAuthorized(existing));
     }
 
     @Test public void oneWordImageRequirementStaysPendingUntilExplicitConnectAfterAuthorization() throws Exception {
@@ -98,13 +108,8 @@ public final class AiSkillSettingsDialogTest {
         String name = store.pending().get(0).name();
         assertTrue(visibleText(view(skillRow(name))).contains("草稿 · 图片 · 待配置"));
 
-        AlertDialog shared = openSharedServices();
-        assertTrue(dialogView(shared, "skills.service." + SkillServices.MOCK_IMAGE + ".authorize").performClick());
-        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
-        assertTrue(((TextView) review.findViewById(android.R.id.message)).getText().toString().contains("本地模拟"));
-        confirm(review);
+        services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
         assertTrue(store.list().isEmpty());
-        shared.dismiss();
 
         reopenManager();
         assertTrue(store.list().isEmpty());
@@ -147,51 +152,6 @@ public final class AiSkillSettingsDialogTest {
         assertEquals("保持段落结构", activeInstruction(name));
         assertTrue(store.detail(name).pending());
         detail.dismiss();
-    }
-
-    @Test public void registeringAnImageServiceInTheSharedChildDoesNotGrantAuthorization() throws Exception {
-        AlertDialog shared = openSharedServices();
-        assertTrue(dialogView(shared, "skills.service.register").performClick());
-        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
-        View form = editor.getWindow().getDecorView();
-        ((Spinner) form.findViewWithTag("skills.service.output")).setSelection(1);
-        ((EditText) form.findViewWithTag("skills.service.id")).setText("fixture-image");
-        ((EditText) form.findViewWithTag("skills.service.label")).setText("示例图片服务");
-        ((EditText) form.findViewWithTag("skills.service.endpoint")).setText("https://images.example.test/generate");
-        ((EditText) form.findViewWithTag("skills.service.cost")).setText("2");
-        confirm(editor);
-
-        SkillServices.Service service = services.find("fixture-image");
-        assertEquals(SkillResult.Type.IMAGE, service.outputType());
-        assertFalse(services.isAuthorized(service));
-        assertTrue(visibleText(dialogView(shared, "skills.service.fixture-image")).contains("图片"));
-        assertNull(dialogView(manager.dialog(), "skills.service.fixture-image"));
-        shared.dismiss();
-    }
-
-    @Test public void sharedMockRevocationAndReauthorizationKeepOtherSharedGrants() throws Exception {
-        SkillServices.Service existing = new SkillServices.Service("fixture-orders", "共享订单接口",
-                "https://orders.example.test/query", 1);
-        services.register(existing, "");
-        services.authorize(existing, 1);
-        SkillServices.Service mock = services.find(SkillServices.MOCK_IMAGE);
-        services.authorize(mock, 0);
-
-        AlertDialog shared = openSharedServices();
-        assertNull(dialogView(shared, "skills.service." + SkillServices.MOCK_ORDERS));
-        String mockTag = "skills.service." + SkillServices.MOCK_IMAGE;
-        assertTrue(dialogView(shared, mockTag + ".revoke").performClick());
-        assertFalse(services.isAuthorized(mock));
-        assertTrue(services.isAuthorized(existing));
-        assertTrue(dialogView(shared, mockTag + ".authorize").performClick());
-        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
-        assertTrue(message(review).contains("本地模拟"));
-        confirm(review);
-        assertTrue(services.isAuthorized(mock));
-        assertTrue(services.isAuthorized(existing));
-        assertEquals(existing, services.find(existing.id()));
-        assertNull(dialogView(manager.dialog(), mockTag + ".revoke"));
-        shared.dismiss();
     }
 
     @Test public void pendingListOpensTheExactSkillConfiguration() {
@@ -253,6 +213,52 @@ public final class AiSkillSettingsDialogTest {
         enterAndGenerate("提取摘要", "skills.generate.mock");
         confirm((AlertDialog) ShadowDialog.getLatestDialog());
         assertEquals(2, store.list().get(0).version());
+    }
+
+    @Test @Config(shadows = PolishingModelShadow.class)
+    public void selectedModelAuthorsAPolishingSkillThatCanBeEditedEnabledAndRun() throws Exception {
+        String requirement = "把口语句子润色成简洁的正式表达";
+        var provider = AiModelConfig.fromJson(new JSONObject().put("id", "fixture-polishing")
+                .put("name", "离线润色模型").put("modelName", "fixture-text")
+                .put("apiEndpoint", "http://no-network.invalid/v1").put("allowInsecureHttp", true));
+        new AiModelSettings(List.of(provider), provider.id).save(new HostSettingsStore(activity));
+        PolishingModelShadow.instruction = null;
+        PolishingModelShadow.input = null;
+        PolishingModelShadow.selectedId = null;
+        enterAndGenerate(requirement, "skills.generate.model");
+        AlertDialog chooser = (AlertDialog) ShadowDialog.getLatestDialog();
+        ListView choices = chooser.getListView();
+        assertNotNull(choices);
+        assertTrue(choices.performItemClick(choices, 0, choices.getItemIdAtPosition(0)));
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(provider.id, PolishingModelShadow.selectedId);
+        assertEquals(SkillAuthoring.DESIGN_INSTRUCTION, PolishingModelShadow.instruction);
+        JSONObject modelInput = new JSONObject(PolishingModelShadow.input);
+        assertEquals(1, modelInput.length());
+        assertEquals(requirement, modelInput.getString("requirement"));
+        assertFalse(modelInput.has("registeredServices"));
+        assertEquals("句子润色", store.list().get(0).name());
+        assertEquals("保留事实，提高表达流畅度。", activeInstruction("句子润色"));
+
+        AlertDialog detail = skillDetail(skillRow("句子润色"));
+        AlertDialog editor = requestEdit(detail);
+        assertEquals("保留事实，提高表达流畅度。", editField(editor, "instruction").getText().toString());
+        editField(editor, "instruction").setText("改写为一句正式通知。");
+        confirm(editor);
+        assertTrue(store.detail("句子润色").canReplace());
+        assertEquals("保留事实，提高表达流畅度。", activeInstruction("句子润色"));
+
+        assertTrue(dialogView(detail, "skills.detail.replace").performClick());
+        confirm((AlertDialog) ShadowDialog.getLatestDialog());
+        var call = AiSkills.match(AiSkills.Entry.WORK, "/句子润色 通知发出去了", store);
+        assertNotNull(call);
+        assertEquals(new SkillResult.Text("通知已发布。"), AiSkills.executeResult(call, store, (instruction, input) -> {
+            assertEquals("改写为一句正式通知。", instruction);
+            assertEquals("通知发出去了", input);
+            return "通知已发布。";
+        }));
+        detail.dismiss();
     }
 
     @Test public void cancellingThenConfirmingDeleteCoversOnlyTheNamedSkillAndDraft() throws Exception {
@@ -531,14 +537,6 @@ public final class AiSkillSettingsDialogTest {
         assertFalse(visibleText(decor).contains("回退上一版本"));
     }
 
-    private AlertDialog openSharedServices() {
-        assertTrue(view("skills.generate.shared_services").performClick());
-        AlertDialog shared = (AlertDialog) ShadowDialog.getLatestDialog();
-        assertTrue(visibleText(shared.getWindow().getDecorView()).contains("共享接口设置"));
-        assertNotNull(dialogView(shared, "skills.service.register"));
-        return shared;
-    }
-
     private static EditText editField(AlertDialog editor, String field) {
         EditText input = dialogView(editor, "skills.edit." + field);
         assertNotNull(input);
@@ -631,5 +629,20 @@ public final class AiSkillSettingsDialogTest {
         @Override public boolean isTerminated() { return closed; }
         @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return closed; }
         @Override public void execute(Runnable task) { task.run(); }
+    }
+
+    @Implements(ChatCompletionClient.IsolatedTextRequest.class)
+    public static final class PolishingModelShadow {
+        static String instruction;
+        static String input;
+        static String selectedId;
+
+        @Implementation protected String execute(AiModelSettings models, String modelId, String system, String prompt,
+                                                 long deadline, int maxTokens) throws Exception {
+            selectedId = modelId;
+            instruction = system;
+            input = prompt;
+            return textSkillDefinition("句子润色", "保留事实，提高表达流畅度。");
+        }
     }
 }

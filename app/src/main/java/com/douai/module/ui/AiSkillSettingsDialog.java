@@ -10,17 +10,15 @@ import android.text.InputFilter;
 import android.text.InputType;
 import android.util.TypedValue;
 import android.view.View;
-import android.view.inputmethod.EditorInfo;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -46,7 +44,6 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     private final boolean miuix;
     private final BiConsumer<Dialog, Runnable> presenter;
     private final SkillStore store;
-    private final SkillServices services;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker;
     private final AlertDialog dialog;
@@ -73,7 +70,6 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         this.presenter = presenter;
         this.worker = worker;
         store = SkillStore.forContext(context);
-        services = SkillServices.forContext(context);
 
         LinearLayout content = form();
         CompoundButton enabled = miuix ? MiuixFormControls.checkbox(context, "启用 Skills", store.enabled())
@@ -89,9 +85,8 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         content.addView(skillRows, matchWrap());
 
         section(content, "生成或更新技能");
-        button(content, "共享接口设置", "skills.generate.shared_services", this::showSharedServices);
         requirements = input(content, "描述想要的技能，例如生图", "skills.requirements",
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE, 4000, false);
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE, 4000);
         generate = button(content, "选择模型生成", "skills.generate.model", this::chooseModel);
         simulate = button(content, "离线模拟生成", "skills.generate.mock", () -> generate(null, null));
         status = text(content, "", "skills.status");
@@ -156,9 +151,12 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         if (description.isEmpty()) return;
         boolean offline = modelId == null || SkillStore.requiresImage(description);
         ChatCompletionClient.IsolatedTextRequest request = offline ? null : new ChatCompletionClient.IsolatedTextRequest();
-        prepareDraft(() -> offline ? SkillStore.mockDraft(description) : request.execute(modelSettings, modelId,
-                SkillStore.GENERATION_INSTRUCTION, store.generationPrompt(description),
-                System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048), request);
+        prepareDraft(() -> {
+            if (offline) return SkillStore.mockDraft(description);
+            String raw = request.execute(modelSettings, modelId, SkillAuthoring.DESIGN_INSTRUCTION,
+                    store.generationPrompt(description), System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048);
+            return SkillStore.validateAuthoredDraft(raw).definition();
+        }, request);
     }
 
     private void prepareDraft(Callable<String> definition, ChatCompletionClient.IsolatedTextRequest request) {
@@ -300,128 +298,6 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         presenter.accept(page.dialog(), page::close);
     }
 
-    private record SharedServicesPage(AlertDialog dialog, LinearLayout rows, TextView status) { }
-
-    private void showSharedServices() {
-        if (!active()) return;
-        LinearLayout content = form();
-        LinearLayout rows = column();
-        TextView feedback = text(content, "", "skills.service.status");
-        feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        content.addView(rows, matchWrap());
-        AlertDialog child = builder("共享接口设置").setView(scroll(content)).setNegativeButton("关闭", null).create();
-        SharedServicesPage page = new SharedServicesPage(child, rows, feedback);
-        button(content, "登记或更新共享接口", "skills.service.register", () -> showServiceEditor(page));
-        refreshSharedServices(page);
-        presenter.accept(child, null);
-    }
-
-    private void refreshSharedServices(SharedServicesPage page) {
-        page.rows().removeAllViews();
-        try {
-            for (SkillServices.Service service : services.list()) {
-                if (SkillServices.MOCK_ORDERS.equals(service.id())) continue;
-                String tag = "skills.service." + service.id();
-                boolean authorized = services.isAuthorized(service);
-                boolean localImage = SkillServices.MOCK_IMAGE.equals(service.id());
-                text(page.rows(), service.label() + " · " + outputLabel(service.outputType()) + "\n"
-                        + (localImage ? "本地模拟" : service.id() + " · " + service.endpoint()), tag);
-                if (localImage && authorized) {
-                    button(page.rows(), "撤销模拟服务授权", tag + ".revoke", () -> revoke(page, service));
-                } else {
-                    button(page.rows(), authorized ? "已授权" : "授权此服务", tag + ".authorize",
-                            () -> authorize(page, service)).setEnabled(!authorized);
-                }
-            }
-        } catch (SkillServices.Failure unavailable) {
-            page.status().setText("暂时无法读取共享接口");
-        }
-    }
-
-    private boolean sharedActive(SharedServicesPage page) { return active() && page.dialog().isShowing(); }
-
-    private void sharedChanged(SharedServicesPage page, String message) {
-        page.status().setText(message);
-        refreshSharedServices(page);
-        refreshAfterChange("");
-    }
-
-    private void showServiceEditor(SharedServicesPage page) {
-        if (!sharedActive(page)) return;
-        LinearLayout fields = form();
-        EditText id = input(fields, "服务标识", "skills.service.id", InputType.TYPE_CLASS_TEXT, 64, false);
-        EditText label = input(fields, "显示名称", "skills.service.label", InputType.TYPE_CLASS_TEXT, 80, false);
-        EditText endpoint = input(fields, "HTTPS 地址", "skills.service.endpoint",
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
-        Spinner output = miuix ? MiuixFormControls.spinner(context) : new Spinner(context);
-        output.setTag("skills.service.output");
-        output.setContentDescription("服务输出类型");
-        ArrayAdapter<String> outputs = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item,
-                new String[]{outputLabel(SkillResult.Type.TEXT), outputLabel(SkillResult.Type.IMAGE)});
-        outputs.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        output.setAdapter(outputs);
-        output.setSelection(0);
-        if (!miuix) text(fields, "服务输出类型", null);
-        fields.addView(MiuixFormControls.viewFor(output), matchWrap());
-        EditText cost = input(fields, "每次调用费用单位", "skills.service.cost", InputType.TYPE_CLASS_NUMBER, 9, false);
-        EditText token = input(fields, "Bearer 密钥（可选）", "skills.service.token",
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 4096, true);
-        token.setSaveEnabled(false);
-        token.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
-        token.setImeOptions(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
-        TextView error = text(fields, "", "skills.service.error");
-        error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-
-        AlertDialog editor = builder("登记或更新共享接口").setView(scroll(fields))
-                .setPositiveButton("保存", null).setNegativeButton("取消", null).create();
-        presenter.accept(editor, () -> token.setText(""));
-        if (!editor.isShowing()) return;
-        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
-            if (!sharedActive(page) || !editor.isShowing()) return;
-            try {
-                int units = Integer.parseInt(cost.getText().toString().trim());
-                SkillServices.Service service = new SkillServices.Service(id.getText().toString().trim(),
-                        label.getText().toString().trim(), endpoint.getText().toString().trim(), units,
-                        output.getSelectedItemPosition() == 1 ? SkillResult.Type.IMAGE : SkillResult.Type.TEXT);
-                services.register(service, token.getText().toString());
-            } catch (Exception failure) {
-                token.setText("");
-                error.setText("无法保存服务，请检查标识、HTTPS 地址和费用单位");
-                return;
-            }
-            token.setText("");
-            editor.dismiss();
-            sharedChanged(page, "服务已登记，请核对目标后授权");
-        });
-    }
-
-    private void authorize(SharedServicesPage page, SkillServices.Service service) {
-        if (!sharedActive(page)) return;
-        presenter.accept(builder("授权技能服务")
-                .setMessage(target(service.id(), service.label(), service.endpoint(), service.costUnits(), service.outputType()))
-                .setNegativeButton("取消", null)
-                .setPositiveButton("确认授权", (child, which) -> {
-                    if (!sharedActive(page)) return;
-                    try {
-                        services.authorize(service, service.costUnits());
-                    } catch (Exception failure) {
-                        page.status().setText("授权失败，请重新核对服务配置");
-                        return;
-                    }
-                    sharedChanged(page, "服务已授权");
-                }).create(), null);
-    }
-
-    private void revoke(SharedServicesPage page, SkillServices.Service service) {
-        if (!sharedActive(page)) return;
-        try { services.revoke(service); }
-        catch (SkillServices.Failure failure) {
-            page.status().setText("撤销授权失败");
-            return;
-        }
-        sharedChanged(page, "已撤销模拟服务授权");
-    }
-
     private static String target(String id, String label, String endpoint, int units, SkillResult.Type type) {
         String destination = SkillServices.MOCK_IMAGE.equals(id) ? "本地模拟" : "目标 " + endpoint;
         return label + "\n输出 " + outputLabel(type) + "\n" + destination + "\n每次调用最多 " + units + " 费用单位";
@@ -476,8 +352,8 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         return button;
     }
 
-    private EditText input(LinearLayout parent, String label, String tag, int type, int length, boolean secret) {
-        EditText input = miuix && !secret ? MiuixFormControls.input(context, label, "", false) : new EditText(context);
+    private EditText input(LinearLayout parent, String label, String tag, int type, int length) {
+        EditText input = miuix ? MiuixFormControls.input(context, label, "", false) : new EditText(context);
         input.setContentDescription(label);
         input.setHint(label);
         input.setTag(tag);

@@ -70,7 +70,7 @@ public final class AiExtensionHttpImageTraceTest {
         assertFalse(fixture.connection.getInstanceFollowRedirects());
 
         List<JSONObject> stages = stages(trace);
-        assertEquals(List.of("image_http_open_connection", "image_http_open_output", "image_http_write_request",
+        assertEquals(List.of("image_http_dispatch", "image_http_open_connection", "image_http_open_output", "image_http_write_request",
                 "image_http_wait_status", "image_http_status_received", "image_http_read_response"), names(stages));
         assertTrue(evidence(stages, "image_http_status_received").contains("http_status=200"));
         assertSafeEvidence(stages);
@@ -103,6 +103,24 @@ public final class AiExtensionHttpImageTraceTest {
         List<JSONObject> stages = stages(trace);
         assertTrue(evidence(stages, "image_http_status_received").contains("http_status=503"));
         assertFalse(names(stages).contains("image_http_read_response"));
+        assertSafeEvidence(stages);
+    }
+
+    @Test public void generationTargetRecordsItsOwnMethodHostAndRedactedPathWithTheObservedStatus() throws Exception {
+        String custom = "https://image-trace.example.test/private-provider-route/images/generations";
+        Fixture fixture = new Fixture(Point.NONE, 405);
+        DouAiLog.Operation trace = trace();
+        assertEquals("", fixture.request(custom, trace, 128));
+        trace.finish(DouAiLog.Outcome.FAILED, "fixture_http_error", "");
+
+        assertEquals(1, fixture.opens.get());
+        assertEquals(custom, fixture.connection.getURL().toString());
+        assertEquals(0, fixture.connection.bodyOpens.get());
+        List<JSONObject> stages = stages(trace);
+        assertEquals("method=POST;host=image-trace.example.test;path=/<redacted>/images/generations",
+                evidence(stages, "image_http_dispatch"));
+        assertTrue(evidence(stages, "image_http_status_received").contains("http_status=405"));
+        assertTrue(records.stream().noneMatch(line -> line.contains("private-provider-route")));
         assertSafeEvidence(stages);
     }
 
@@ -178,6 +196,11 @@ public final class AiExtensionHttpImageTraceTest {
     private void assertSafeEvidence(List<JSONObject> stages) {
         long priorElapsed = -1;
         for (JSONObject stage : stages) {
+            if ("image_http_dispatch".equals(stage.optString("stage"))) {
+                assertTrue(stage.optString("evidence").matches(
+                        "method=POST;host=image-trace\\.example\\.test;path=/(?:v1|<redacted>)/images/generations"));
+                continue;
+            }
             boolean hasElapsed = false;
             for (String field : stage.optString("evidence").split(";")) {
                 assertTrue("unexpected telemetry field", field.matches(
@@ -209,7 +232,11 @@ public final class AiExtensionHttpImageTraceTest {
         }
 
         String request(DouAiLog.Operation trace, int limit) throws AiExtensionHttp.Failure {
-            return AiExtensionHttp.request(ENDPOINT, "POST", Map.of("Authorization", "Bearer " + BEARER), REQUEST,
+            return request(ENDPOINT, trace, limit);
+        }
+
+        String request(String endpoint, DouAiLog.Operation trace, int limit) throws AiExtensionHttp.Failure {
+            return AiExtensionHttp.request(endpoint, "POST", Map.of("Authorization", "Bearer " + BEARER), REQUEST,
                     System.nanoTime() + TimeUnit.SECONDS.toNanos(8), limit,
                     (code, headers, body) -> AiExtensionHttp.readUtf8(body), trace, this::open);
         }

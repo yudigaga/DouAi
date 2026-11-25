@@ -124,7 +124,8 @@ public final class SkillImageModelCatalog {
         DouAiLog.Operation trace = DouAiLog.current();
         Reply reply;
         try {
-            stage(trace, "catalog_http_dispatch", "method=GET;route=" + routeKind(catalog));
+            stage(trace, "catalog_http_dispatch", AiExtensionHttp.imageRouteEvidence("GET", catalog)
+                    + ";route=" + routeKind(catalog));
             reply = transport.request(catalog.toString(), "GET", Collections.unmodifiableMap(headers), null,
                     deadline, MAX_RESPONSE_BYTES, (status, ignored, body) -> {
                         if (status < 100 || status > 599) {

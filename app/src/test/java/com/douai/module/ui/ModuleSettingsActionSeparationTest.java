@@ -170,49 +170,47 @@ public final class ModuleSettingsActionSeparationTest {
         assertPresent(manager, "skills.enabled");
         assertPresent(manager, "skills.requirements");
         assertTrue(manager.findViewWithTag("skills.generate.mock").isEnabled());
-        assertPresent(manager, "skills.generate.shared_services");
+        assertNull(manager.findViewWithTag("skills.generate.shared_services"));
         assertNull(manager.findViewWithTag("skills.service.register"));
         assertNull(manager.findViewWithTag("skills.service.mock-orders"));
         assertNull(manager.findViewWithTag("skills.service." + SkillServices.MOCK_IMAGE + ".authorize"));
     }
 
-    @Test public void sharedServiceChildRequiresSeparateConfirmationOfItsEndpointAndBudget() throws Exception {
-        assertTrue(option(open("EXTENSION"), "AI Skills").performClick());
-        AlertDialog manager = (AlertDialog) ShadowDialog.getLatestDialog();
-        View managerRoot = manager.getWindow().getDecorView();
-        assertNull(managerRoot.findViewWithTag("skills.service.register"));
-        assertTrue(managerRoot.findViewWithTag("skills.generate.shared_services").performClick());
-        AlertDialog shared = (AlertDialog) ShadowDialog.getLatestDialog();
-        assertNotSame(manager, shared);
-        View sharedRoot = shared.getWindow().getDecorView();
-        assertNull(sharedRoot.findViewWithTag("skills.service.mock-orders"));
-        assertTrue(sharedRoot.findViewWithTag("skills.service.register").performClick());
-        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
-        View form = editor.getWindow().getDecorView();
-        String endpoint = "https://orders.example.test/query";
-        ((EditText) form.findViewWithTag("skills.service.id")).setText("fixture-orders");
-        ((EditText) form.findViewWithTag("skills.service.label")).setText("订单模拟目标");
-        ((EditText) form.findViewWithTag("skills.service.endpoint")).setText(endpoint);
-        ((EditText) form.findViewWithTag("skills.service.cost")).setText("2");
-        EditText token = form.findViewWithTag("skills.service.token");
-        assertTrue(token.getTransformationMethod() instanceof PasswordTransformationMethod);
-        assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
-        ShadowLooper.idleMainLooper();
-
+    @Test public void legacyInstalledSkillKeepsItsServiceAndAuthorizationWithoutSharedSettings() throws Exception {
+        String name = "旧版查单";
         SkillServices services = SkillServices.forContext(activity);
-        SkillServices.Service registered = services.list().stream()
-                .filter(service -> service.id().equals("fixture-orders")).findFirst().orElseThrow();
-        assertFalse(services.isAuthorized(registered));
-        assertNull(managerRoot.findViewWithTag("skills.service.fixture-orders.authorize"));
-        assertTrue(sharedRoot.findViewWithTag("skills.service.fixture-orders.authorize").performClick());
-        AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
-        TextView message = confirmation.findViewById(android.R.id.message);
-        assertNotNull(message);
-        assertTrue(message.getText().toString().contains(endpoint));
-        assertTrue(message.getText().toString().contains("每次调用最多 2 费用单位"));
-        assertTrue(confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        SkillServices.Service existing = new SkillServices.Service("fixture-orders", "订单模拟目标",
+                "https://orders.example.test/query", 2);
+        services.register(existing, "");
+        services.authorize(existing, existing.costUnits());
+        SkillStore skills = SkillStore.forContext(activity);
+        String definition = new JSONObject().put("schemaVersion", 1).put("name", name)
+                .put("description", "读取订单状态").put("documentation", "输入需要查询的订单号。")
+                .put("execution", new JSONObject().put("kind", "service").put("maxInput", 100)
+                        .put("serviceId", existing.id()))
+                .put("trial", new JSONObject().put("input", "A123").put("expected", "模拟服务响应"))
+                .toString();
+        skills.installGenerated(definition, skills.previewGenerated(definition));
+
+        assertTrue(option(open("EXTENSION"), "AI Skills").performClick());
+        View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertNull(manager.findViewWithTag("skills.generate.shared_services"));
+        assertNull(manager.findViewWithTag("skills.service.register"));
+        assertNull(manager.findViewWithTag("skills.service." + existing.id()));
+        assertTrue(manager.findViewWithTag("skills.row." + name).performClick());
+        View detail = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertNull(detail.findViewWithTag("skills.generate.shared_services"));
+        assertNull(detail.findViewWithTag("skills.service.register"));
+        TextView service = detail.findViewWithTag("skills.detail.service");
+        assertEquals(existing.label(), service.getText().toString());
+        assertEquals(existing, skills.detail(name).currentService());
+        assertTrue(services.isAuthorized(existing));
+
+        assertTrue(detail.findViewWithTag("skills.detail.toggle").performClick());
         ShadowLooper.idleMainLooper();
-        assertTrue(services.isAuthorized(registered));
+        assertFalse(skills.detail(name).current().enabled());
+        assertEquals(existing, services.find(existing.id()));
+        assertTrue(services.isAuthorized(existing));
     }
 
     @Test public void skillsRowOpensItsOwnImageConfigurationAndCanAuthorizeAScopedMock() throws Exception {
@@ -223,6 +221,7 @@ public final class ModuleSettingsActionSeparationTest {
 
         assertTrue(option(open("EXTENSION"), "AI Skills").performClick());
         View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertNull(manager.findViewWithTag("skills.generate.shared_services"));
         assertNull(manager.findViewWithTag("skills.service.register"));
         assertTrue(manager.findViewWithTag("skills.row." + name).performClick());
         AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
@@ -234,6 +233,7 @@ public final class ModuleSettingsActionSeparationTest {
         EditText key = form.findViewWithTag("skills.detail.key");
         assertTrue(key.getTransformationMethod() instanceof PasswordTransformationMethod);
         assertEquals(0, key.length());
+        assertNull(form.findViewWithTag("skills.generate.shared_services"));
         assertNull(form.findViewWithTag("skills.service.register"));
 
         ((Spinner) form.findViewWithTag("skills.detail.adapter")).setSelection(1);

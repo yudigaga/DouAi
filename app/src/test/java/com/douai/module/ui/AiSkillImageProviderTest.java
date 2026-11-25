@@ -14,6 +14,7 @@ import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.douai.module.ai.AiCredentialVault;
+import com.douai.module.ai.AiExtensionHttp;
 import com.douai.module.ai.skills.SkillImageModelCatalog;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -37,11 +38,15 @@ import org.robolectric.shadow.api.Shadow;
 import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
 
+import java.io.ByteArrayInputStream;
 import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
 import java.security.Security;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -63,6 +68,7 @@ public final class AiSkillImageProviderTest {
     private static final String MODELS_ENDPOINT = "https://images.example.test/v1/models";
     private static final String MODEL = "test-image-model";
     private static final String KEY = "fixture-image-token";
+    private static final String ORDINARY_KEY = "ordinary-model-key-not-for-image";
 
     @Test
     @Config(shadows = {FakeChatModelCatalog.class}, instrumentedPackages = {"com.douai.module.feature"})
@@ -273,6 +279,113 @@ public final class AiSkillImageProviderTest {
         }
     }
 
+    @Test public void ordinaryBaseDefaultsAndPickerOnlyCopyTheBaseAndClearKeysForChangedDestinations() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        try {
+            AiModelConfig ordinary = saveOrdinaryProfile(activity);
+            SkillStore store = SkillStore.forContext(activity);
+            SkillStore.Pending draft = createImageDraft(store);
+            try (AiSkillDetailDialog page = new AiSkillDetailDialog(activity, false, NAME, null)) {
+                AlertDialog dialog = page.dialog();
+                dialog.setOwnerActivity(activity);
+                dialog.show();
+                EditText endpoint = (EditText) view(dialog, "skills.detail.endpoint");
+                EditText catalogue = (EditText) view(dialog, "skills.detail.models_endpoint");
+                EditText model = (EditText) view(dialog, "skills.detail.model");
+                EditText key = (EditText) view(dialog, "skills.detail.key");
+                assertEquals(BASE_ENDPOINT, endpoint.getText().toString());
+                assertFalse(((CompoundButton) view(dialog, "skills.detail.endpoint_complete")).isChecked());
+                assertTrue(((TextView) view(dialog, "skills.detail.ai_base_source")).getText().toString().contains(ordinary.name));
+                assertEquals(0, catalogue.length());
+                assertEquals(0, model.length());
+                assertEquals(0, key.length());
+
+                key.setText(KEY);
+                endpoint.setText(BASE_ENDPOINT + "/");
+                ShadowLooper.idleMainLooper();
+                assertEquals(KEY, key.getText().toString());
+                endpoint.setText("https://other-images.example.test/v1");
+                ShadowLooper.idleMainLooper();
+                assertEquals(0, key.length());
+                String override = "https://other-images.example.test/custom-models";
+                catalogue.setText(override);
+                key.setText(KEY);
+
+                click(dialog, "skills.detail.use_ai_base");
+                AlertDialog picker = (AlertDialog) ShadowDialog.getLatestDialog();
+                assertTrue(picker.getListView().getItemAtPosition(0).toString().contains(ordinary.name));
+                assertTrue(picker.getListView().performItemClick(null, 0, 0));
+                ShadowLooper.idleMainLooper();
+                assertEquals(BASE_ENDPOINT, endpoint.getText().toString());
+                assertEquals(override, catalogue.getText().toString());
+                assertEquals(0, key.length());
+                assertEquals(0, model.length());
+                assertTrue(((TextView) view(dialog, "skills.detail.ai_base_source")).getText().toString().contains(ordinary.name));
+                assertEquals(draft.draftId(), store.detail(NAME).draftId());
+                assertNull(store.detail(NAME).service());
+                assertEquals(ORDINARY_KEY, AiModelSettings.read(new HostSettingsStore(activity)).selected().apiKey);
+                dialog.dismiss();
+            }
+        } finally {
+            activity.finish();
+        }
+    }
+
+    @Test public void reopenedCustomCatalogueUsesOnlyTheSavedImageKeyAndDoesNotRunOrSaveASelection() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        try {
+            saveOrdinaryProfile(activity);
+            String custom = "https://images.example.test/provider/generate";
+            String override = "https://images.example.test/provider/catalog";
+            AiCredentialVault vault = new AiCredentialVault(() -> new SecretKeySpec(new byte[32], "AES"));
+            SkillStore setup = SkillStore.forContext(activity);
+            SkillServices seedServices = (SkillServices) field(SkillStore.class, "services").get(setup);
+            field(SkillServices.class, "credentials").set(seedServices, vault);
+            SkillStore.Pending pending = createImageDraft(setup);
+            SkillStore.Detail saved = setup.saveConfiguration(NAME, pending.draftId(), SkillServices.Adapter.OPENAI_IMAGES,
+                    custom, override, "", 0, KEY);
+
+            ModelExecutor executor = new ModelExecutor();
+            try (AiSkillDetailDialog reopened = new AiSkillDetailDialog(activity, false, NAME, null, null, executor)) {
+                SkillStore store = (SkillStore) field(AiSkillDetailDialog.class, "store").get(reopened);
+                SkillServices services = (SkillServices) field(SkillStore.class, "services").get(store);
+                field(SkillServices.class, "credentials").set(services, vault);
+                AtomicInteger gets = new AtomicInteger();
+                AtomicInteger posts = new AtomicInteger();
+                AtomicReference<String> authorization = new AtomicReference<>();
+                stubImageCatalogue(services, override, gets, posts, authorization);
+
+                AlertDialog dialog = reopened.dialog();
+                dialog.setOwnerActivity(activity);
+                dialog.show();
+                assertEquals(custom, ((EditText) view(dialog, "skills.detail.endpoint")).getText().toString());
+                assertTrue(((CompoundButton) view(dialog, "skills.detail.endpoint_complete")).isChecked());
+                assertEquals(override, ((EditText) view(dialog, "skills.detail.models_endpoint")).getText().toString());
+                assertEquals(0, ((EditText) view(dialog, "skills.detail.key")).length());
+
+                click(dialog, "skills.detail.fetch_models");
+                assertEquals(0, gets.get());
+                executor.runNext();
+                ShadowLooper.idleMainLooper();
+                assertEquals(1, gets.get());
+                assertEquals("Bearer " + KEY, authorization.get());
+                assertEquals(0, posts.get());
+                AlertDialog picker = (AlertDialog) ShadowDialog.getLatestDialog();
+                assertEquals(MODEL, picker.getListView().getItemAtPosition(0));
+                assertTrue(picker.getListView().performItemClick(null, 0, 0));
+                ShadowLooper.idleMainLooper();
+                assertEquals(MODEL, ((EditText) view(dialog, "skills.detail.model")).getText().toString());
+                assertEquals(saved.draftId(), store.detail(NAME).draftId());
+                assertEquals("", store.detail(NAME).service().modelName());
+                assertFalse(services.isAuthorized(saved.service()));
+                assertTrue(store.list().isEmpty());
+                dialog.dismiss();
+            }
+        } finally {
+            activity.finish();
+        }
+    }
+
     @Test public void miuixImageCredentialUsesTheSharedSecureFormControlAndIsClearedOnClose() throws Exception {
         try (Fixture fixture = new Fixture(null)) {
             fixture.save(ENDPOINT, "", "");
@@ -471,11 +584,7 @@ public final class AiSkillImageProviderTest {
 
         Fixture(AiCredentialVault vault, AiSkillDetailDialog.ModelDiscovery discovery, ModelExecutor executor) throws Exception {
             SkillStore setup = SkillStore.forContext(activity);
-            setup.saveAuthoredDraft(SkillStore.validateAuthoredDraft("""
-                    {"schemaVersion":3,"name":"生图","description":"生成图片","documentation":"输入画面描述。",
-                     "execution":{"kind":"service","outputType":"image","maxInput":4000},
-                     "trial":{"input":"一只猫","expectedType":"image"}}
-                    """));
+            createImageDraft(setup);
             SkillStore.Detail pending = setup.detail(NAME);
             SkillStore.Detail saved = setup.saveConfiguration(NAME, pending.draftId(), SkillServices.Adapter.MOCK_IMAGE,
                     "", "", 0, "");
@@ -531,6 +640,52 @@ public final class AiSkillImageProviderTest {
             activity.finish();
             ShadowLooper.idleMainLooper();
         }
+    }
+
+    private static AiModelConfig saveOrdinaryProfile(Activity activity) throws Exception {
+        AiModelConfig profile = AiModelConfig.fromJson(new JSONObject().put("id", "base-source")
+                .put("name", "普通 AI 配置").put("apiEndpoint", BASE_ENDPOINT + "/chat/completions")
+                .put("modelsEndpoint", BASE_ENDPOINT + "/custom-ordinary-models")
+                .put("modelName", "ordinary-text-model").put("apiKey", ORDINARY_KEY));
+        new AiModelSettings(List.of(profile), profile.id).save(new HostSettingsStore(activity));
+        return profile;
+    }
+
+    private static SkillStore.Pending createImageDraft(SkillStore store) throws Exception {
+        var source = SkillStore.validateAuthoredDraft("""
+                {"schemaVersion":3,"name":"生图","description":"生成图片","documentation":"输入画面描述。",
+                 "execution":{"kind":"service","outputType":"image","maxInput":4000},
+                 "trial":{"input":"一只猫","expectedType":"image"}}
+                """);
+        SkillStore.Pending pending = store.saveAuthoredDraft(source).pending();
+        assertNotNull(pending);
+        return pending;
+    }
+
+    private static void stubImageCatalogue(SkillServices services, String expectedAddress, AtomicInteger gets,
+                                          AtomicInteger posts, AtomicReference<String> authorization) throws Exception {
+        SkillImageModelCatalog catalog = new SkillImageModelCatalog();
+        Field catalogTransport = field(SkillImageModelCatalog.class, "transport");
+        Class<?> transportType = catalogTransport.getType();
+        catalogTransport.set(catalog, Proxy.newProxyInstance(transportType.getClassLoader(), new Class<?>[]{transportType},
+                (proxy, method, arguments) -> {
+                    assertEquals(expectedAddress, arguments[0]);
+                    assertEquals("GET", arguments[1]);
+                    assertNull(arguments[3]);
+                    gets.incrementAndGet();
+                    authorization.set((String) ((Map<?, ?>) arguments[2]).get("Authorization"));
+                    AiExtensionHttp.ResponseReader<?> reader = (AiExtensionHttp.ResponseReader<?>) arguments[6];
+                    byte[] response = ("{\"data\":[{\"id\":\"" + MODEL + "\"}]}").getBytes(StandardCharsets.UTF_8);
+                    return reader.read(200, ignored -> "application/json", new ByteArrayInputStream(response));
+                }));
+        field(SkillServices.class, "imageModels").set(services, catalog);
+        Field imageTransport = field(SkillServices.class, "transport");
+        Class<?> imageType = imageTransport.getType();
+        imageTransport.set(services, Proxy.newProxyInstance(imageType.getClassLoader(), new Class<?>[]{imageType},
+                (proxy, method, arguments) -> {
+                    posts.incrementAndGet();
+                    throw new AssertionError("Model lookup must not send an image POST");
+                }));
     }
 
     private static final class ModelExecutor extends AbstractExecutorService {

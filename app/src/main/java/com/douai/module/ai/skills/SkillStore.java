@@ -39,19 +39,6 @@ import java.util.regex.Pattern;
 
 /** Publishes a version only after validation, simulation and both documents reach disk. */
 public final class SkillStore {
-    public static final String GENERATION_INSTRUCTION = """
-            你在为 DouAi 生成声明式技能。只返回一个 JSON 对象，别加代码围栏或额外字段。
-            对象包含 schemaVersion:2、name（1-24 字，不含空格和斜杠）、description、
-            documentation（SKILL.md 正文）、execution 和 trial。
-            文本摘要 execution: {kind:"summary",maxInput:4000,outputType:"text"}。
-            文本服务 execution: {kind:"service",maxInput:4000,outputType:"text",serviceId:"已登记的文本服务 ID"}。
-            图片服务 execution: {kind:"service",maxInput:4000,outputType:"image"}。
-            图片需求应声明 image，若指定服务则可加 serviceId，由应用找已授权的匹配服务。
-            文本试跑格式为 {input:"测试文本",expected:"完整的模拟输出"}。
-            摘要可用同一句短文本作为输入和输出。mock-orders 输入 DA-1001，结果为 模拟查询：订单 DA-1001 已发货。
-            其他文本服务的模拟输出为 模拟服务响应。图片试跑格式为 {input:"示例提示词",expectedType:"image"}。
-            不得输出代码、接口地址、密钥、请求头或图片数据。
-            """;
     private static final Pattern NAME = Pattern.compile("[\\p{L}\\p{N}_-]{1,24}");
     private static final Pattern REVISION = Pattern.compile("[a-f0-9-]{36}");
     private static final Pattern IMAGE_INTENT = Pattern.compile(
@@ -408,12 +395,8 @@ public final class SkillStore {
 
     public String generationPrompt(String requirements) throws Exception {
         String input = text(requirements == null ? "" : requirements.trim(), 4000);
-        JSONArray metadata = new JSONArray();
-        for (SkillServices.Service service : services.list()) {
-            metadata.put(new JSONObject().put("id", service.id()).put("name", service.label())
-                    .put("outputType", service.outputType().wireName()));
-        }
-        return new JSONObject().put("requirements", input).put("registeredServices", metadata).toString();
+        SkillAuthoring.rejectCredential(input);
+        return new JSONObject().put("requirement", input).toString();
     }
 
     public static DraftPreview validateAuthoredDraft(String raw) {

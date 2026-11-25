@@ -97,6 +97,22 @@ public final class AiExtensionHttp {
         }
     }
 
+    /** Log the requested image operation without retaining user-defined path segments. */
+    public static String imageRouteEvidence(String method, URI endpoint) {
+        String suffix = switch (method) {
+            case "GET" -> "/models";
+            case "POST" -> "/images/generations";
+            default -> "";
+        };
+        String path = endpoint.getRawPath();
+        String safePath = "/<redacted>";
+        if (!suffix.isEmpty() && path != null) {
+            if (path.equals(suffix) || path.equals("/v1" + suffix)) safePath = path;
+            else if (path.endsWith(suffix)) safePath += suffix;
+        }
+        return "method=" + method + ";host=" + endpoint.getHost() + ";path=" + safePath;
+    }
+
     public static <T> T request(String endpoint, String method, Map<String, String> headers, byte[] body,
                                 long deadlineNanos, int maxResponseBytes, ResponseReader<T> reader) throws Failure {
         return request(endpoint, method, headers, body, deadlineNanos, maxResponseBytes, reader, null);
@@ -119,6 +135,7 @@ public final class AiExtensionHttp {
                 || !("GET".equals(method) || "POST".equals(method) || "DELETE".equals(method))) {
             throw new IllegalArgumentException("无效的 HTTP 请求设置");
         }
+        if (imageTrace != null) imageTrace.stage("image_http_dispatch", imageRouteEvidence(method, uri));
         Attempt attempt = new Attempt(imageTrace);
         try {
             return exchangeOnWorker(uri, method, headers, body, deadlineNanos, maxResponseBytes, reader, attempt, factory);

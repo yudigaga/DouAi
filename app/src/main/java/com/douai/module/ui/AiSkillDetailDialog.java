@@ -30,16 +30,21 @@ import com.douai.module.ai.skills.SkillImageProviderAddress;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.config.AiModelConfig;
+import com.douai.module.config.AiModelSettings;
+import com.douai.module.config.HostSettingsStore;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Consumer;
 
 /** Configuration for one exact skill, shared by manual chats and the Skills list. */
 final class AiSkillDetailDialog implements AutoCloseable {
@@ -287,9 +292,13 @@ final class AiSkillDetailDialog implements AutoCloseable {
         body.addView(fields, matchWrap());
         SkillImageProviderAddress.Form savedAddress =
                 SkillImageProviderAddress.fromSaved(savedOpenAi ? saved.endpoint() : "");
+        AiProviderBase suggested = (saved == null || saved.endpoint().isEmpty())
+                ? availableAiBases().stream().filter(AiProviderBase::selected).findFirst().orElse(null) : null;
         EditText endpoint = input(fields, "API 基础地址", "skills.detail.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
-        endpoint.setText(savedAddress.address());
+        endpoint.setText(suggested == null ? savedAddress.address() : suggested.address());
+        TextView aiBaseSource = text(fields, "", "skills.detail.ai_base_source");
+        showAiBaseSource(aiBaseSource, suggested);
         String completeLabel = "按完整生图接口填写";
         CompoundButton complete = miuix ? MiuixFormControls.checkbox(context, completeLabel, savedAddress.complete())
                 : new CheckBox(context);
@@ -324,13 +333,37 @@ final class AiSkillDetailDialog implements AutoCloseable {
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
+        button(fields, "从 AI 选择基础地址", "skills.detail.use_ai_base", () -> {
+            if (adapter.getSelectedItemPosition() != 0 || keyInput != key) return;
+            chooseAiBase(provider -> {
+                if (active() && keyInput == key && adapter.getSelectedItemPosition() == 0) {
+                    applyAiBase(provider, endpoint, complete, modelsEndpoint, key, aiBaseSource);
+                }
+            });
+        });
         modelLookupButton = button(fields, "拉取模型列表", "skills.detail.fetch_models", () ->
                 lookupModels(detail, adapter, endpoint, complete, modelsEndpoint, key, model));
         modelLookupStatus = text(fields, "", "skills.detail.model_status");
         modelLookupStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        watchModelInputs(key, endpoint, modelsEndpoint, key);
+        String[] lastAddress = {resolvedGenerationAddress(endpoint, complete)};
+        Runnable addressChanged = () -> {
+            String address = resolvedGenerationAddress(endpoint, complete);
+            if (address != null && !address.isEmpty()) {
+                if (lastAddress[0] != null && !lastAddress[0].isEmpty() && !lastAddress[0].equals(address)
+                        && key.length() != 0) {
+                    key.getText().clear();
+                    modelLookupStatus.setText("生图地址已变化，请填写这个地址的图片密钥");
+                }
+                lastAddress[0] = address;
+            }
+            showAiBaseSource(aiBaseSource, null);
+        };
+        watchModelInputs(key, endpoint, modelsEndpoint, addressChanged);
         complete.setOnCheckedChangeListener((view, checked) -> {
-            if (keyInput == key) cancelModelLookup("address_mode_changed");
+            if (keyInput == key) {
+                cancelModelLookup("address_mode_changed");
+                addressChanged.run();
+            }
         });
 
         button(body, "保存配置", "skills.detail.save", () -> {
@@ -363,6 +396,59 @@ final class AiSkillDetailDialog implements AutoCloseable {
                         "授权或启用失败，请重新核对服务和费用"));
             });
         }
+    }
+
+    private record AiProviderBase(String label, String address, boolean selected) { }
+
+    private List<AiProviderBase> availableAiBases() {
+        AiModelSettings models;
+        try { models = AiModelSettings.read(new HostSettingsStore(context)); }
+        catch (RuntimeException unavailable) { return List.of(); }
+        List<AiProviderBase> bases = new ArrayList<>();
+        for (AiModelConfig config : models.configs) {
+            String base = SkillImageProviderAddress.fromAiProvider(config);
+            if (!base.isEmpty()) bases.add(new AiProviderBase(config.name, base, config.id.equals(models.activeId)));
+        }
+        return bases;
+    }
+
+    private void chooseAiBase(Consumer<AiProviderBase> selected) {
+        cancelModelLookup("ai_provider_picker_opened");
+        List<AiProviderBase> bases = availableAiBases();
+        if (bases.isEmpty()) {
+            modelLookupStatus.setText("暂无可选的 HTTPS AI 基础地址，可手动填写");
+            return;
+        }
+        String[] labels = bases.stream().map(base -> base.label() + " · " + base.address()).toArray(String[]::new);
+        showChild(builder("选择 AI 基础地址").setItems(labels, (child, which) -> {
+            if (active() && confirmation == child) selected.accept(bases.get(which));
+        }).setNegativeButton("取消", null).create());
+    }
+
+    private void applyAiBase(AiProviderBase provider, EditText endpoint, CompoundButton complete,
+                             EditText modelsEndpoint, EditText key, TextView source) {
+        String previous = resolvedGenerationAddress(endpoint, complete);
+        String generation = SkillImageProviderAddress.resolve(provider.address(), false);
+        if (!generation.equals(previous)) key.getText().clear();
+        complete.setChecked(false);
+        endpoint.setText(provider.address());
+        showAiBaseSource(source, provider);
+        try { SkillImageModelCatalog.validateOverride(generation, fieldValue(modelsEndpoint)); }
+        catch (SkillImageModelCatalog.Failure invalid) {
+            modelLookupStatus.setText(invalid.code() == SkillImageModelCatalog.Code.DIFFERENT_ORIGIN
+                    ? "保留的模型列表地址与新基础地址不同源，请修改或清空后再查询或保存"
+                    : invalid.getMessage());
+        }
+    }
+
+    private static void showAiBaseSource(TextView source, AiProviderBase provider) {
+        source.setText(provider == null ? "" : "基础地址来源 · " + provider.label());
+        source.setVisibility(provider == null ? View.GONE : View.VISIBLE);
+    }
+
+    private static String resolvedGenerationAddress(EditText endpoint, CompoundButton complete) {
+        try { return SkillImageProviderAddress.resolve(fieldValue(endpoint), complete.isChecked()); }
+        catch (IllegalArgumentException invalid) { return null; }
     }
 
     private String generationAddress(EditText address, CompoundButton complete) {
@@ -408,15 +494,18 @@ final class AiSkillDetailDialog implements AutoCloseable {
         return detail.canAuthorize() ? "配置已保存，请授权已保存的服务" : "配置已保存";
     }
 
-    private void watchModelInputs(EditText key, EditText... fields) {
-        TextWatcher watcher = new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
-            @Override public void onTextChanged(CharSequence text, int start, int before, int count) {
-                if (keyInput == key) cancelModelLookup("request_inputs_changed");
-            }
-            @Override public void afterTextChanged(Editable text) { }
-        };
-        for (EditText field : fields) field.addTextChangedListener(watcher);
+    private void watchModelInputs(EditText key, EditText endpoint, EditText modelsEndpoint, Runnable addressChanged) {
+        for (EditText field : new EditText[]{endpoint, modelsEndpoint, key}) {
+            field.addTextChangedListener(new TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+                @Override public void onTextChanged(CharSequence text, int start, int before, int count) {
+                    if (keyInput != key) return;
+                    cancelModelLookup("request_inputs_changed");
+                    if (field == endpoint) addressChanged.run();
+                }
+                @Override public void afterTextChanged(Editable text) { }
+            });
+        }
     }
 
     private void lookupModels(SkillStore.Detail detail, Spinner adapter, EditText endpoint, CompoundButton complete,

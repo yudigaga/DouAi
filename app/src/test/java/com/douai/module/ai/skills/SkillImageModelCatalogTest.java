@@ -199,12 +199,13 @@ public final class SkillImageModelCatalogTest {
 
             String correlation = "\"trace_id\":\"" + trace.traceId() + "\"";
             assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_http_dispatch")
-                    && line.contains("route=prefixed_models")));
+                    && line.contains("method=GET;host=images.example.test;path=/<redacted>/models;route=prefixed_models")));
             assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_http_response")
                     && line.contains("status=200")));
             assertTrue(events.stream().anyMatch(line -> line.contains(correlation) && line.contains("catalog_parse_outcome")
                     && line.contains("outcome=ok")));
-            assertTrue(events.stream().noneMatch(line -> line.contains(MODELS) || line.contains(BEARER) || line.contains(fixtureId)));
+            assertTrue(events.stream().noneMatch(line -> line.contains(MODELS) || line.contains(BEARER)
+                    || line.contains(fixtureId) || line.contains("gateway")));
         } finally {
             DouAiLog.setFrameworkSink(null);
             DebugLog.setEnabled(detailed);
