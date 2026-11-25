@@ -44,6 +44,7 @@ import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.AiSubAgents;
 import com.douai.module.ai.skills.SkillAuthoring;
+import com.douai.module.ai.skills.SkillManifest;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -882,9 +883,17 @@ final class AiTestChatDialog extends Dialog {
                         reply = AiSubAgents.run(AiModelSettings.read(selectedSettings), subAgent,
                                 turn.skill.argument(), delegationDeadline);
                     } else {
-                        SkillResult result = AiSkills.executeResult(turn.skill, activeSkillStore,
-                                (instruction, argument) -> askSkillModel(turn, active, SkillAuthoring.TEXT_INSTRUCTION,
-                                        SkillAuthoring.textInput(instruction, argument)));
+                        SkillResult result = AiSkills.executeResult(turn.skill, activeSkillStore, new AiSkills.TextExecutor() {
+                            @Override public String run(String instruction, String input) throws Exception {
+                                return runConfigured(instruction, input, Map.of());
+                            }
+
+                            @Override public String runConfigured(String instruction, String input,
+                                                                  Map<String, Object> settings) throws Exception {
+                                return askSkillModel(turn, active, SkillAuthoring.TEXT_INSTRUCTION,
+                                        SkillAuthoring.textInput(instruction, input, settings));
+                            }
+                        });
                         if (result instanceof SkillResult.Image image) {
                             generatedImage = image.image();
                             reply = "";
@@ -1218,6 +1227,7 @@ final class AiTestChatDialog extends Dialog {
 
     private static String authoringFailure(SkillAuthoring.Action action, Exception failure) {
         if (failure instanceof ImageOutputMismatch) return "生图技能需要图片输出，模型返回了文本，本次草案未保存。";
+        if (failure instanceof SkillManifest.Invalid invalid) return invalid.getMessage();
         if (failure instanceof java.net.SocketTimeoutException) return "技能请求超时，请稍后再试";
         if (action.mode() == SkillAuthoring.Mode.SAVE) return "保存技能失败，原草案仍保留";
         return "技能草案处理失败，请检查技能需求与模型设置";

@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -18,6 +19,11 @@ public final class AiSkills {
     @FunctionalInterface
     public interface TextExecutor {
         String run(String instruction, String input) throws Exception;
+
+        default String runConfigured(String instruction, String input, Map<String, Object> settings) throws Exception {
+            if (!settings.isEmpty()) throw new IllegalStateException("当前入口无法执行带配置参数的技能");
+            return run(instruction, input);
+        }
     }
 
     public record Command(String name, String description, SkillResult.Type outputType) {

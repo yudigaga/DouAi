@@ -27,6 +27,7 @@ import android.widget.TextView;
 import com.douai.module.ai.AiCredentialVault;
 import com.douai.module.ai.skills.SkillImageModelCatalog;
 import com.douai.module.ai.skills.SkillImageProviderAddress;
+import com.douai.module.ai.skills.SkillManifest;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -37,14 +38,18 @@ import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /** Configuration for one exact skill, shared by manual chats and the Skills list. */
 final class AiSkillDetailDialog implements AutoCloseable {
@@ -119,9 +124,19 @@ final class AiSkillDetailDialog implements AutoCloseable {
         modelLookupStatus = null;
         clearKey();
         body.removeAllViews();
+        SkillManifest manifest = detail == null ? null : detail.manifest();
+        String displayName = manifest == null ? name : manifest.displayName();
+        boolean hasDisplayName = displayName != null && !displayName.isBlank() && !displayName.equals(name);
+        if (hasDisplayName) {
+            TextView label = text(body, displayName, "skills.detail.display_name");
+            label.setTypeface(null, Typeface.BOLD);
+            label.setAccessibilityHeading(true);
+        }
         TextView title = text(body, "/" + name, "skills.detail.name");
-        title.setTypeface(null, Typeface.BOLD);
-        title.setAccessibilityHeading(true);
+        if (!hasDisplayName) {
+            title.setTypeface(null, Typeface.BOLD);
+            title.setAccessibilityHeading(true);
+        }
         if (detail == null) {
             status = text(body, feedback.isEmpty() ? "此技能已不存在" : feedback, "skills.detail.status");
             status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
@@ -154,8 +169,9 @@ final class AiSkillDetailDialog implements AutoCloseable {
                     text(body, field.label() + " · " + fieldState(field), "skills.detail.field." + field.id());
                 }
             }
-            pendingActions(detail, showImageConfiguration);
         }
+        manifestConfiguration(detail);
+        if (detail.pending()) pendingActions(detail, showImageConfiguration);
         SkillStore.DeleteTarget deleteTarget = detail.deleteTarget();
         if (deleteTarget != null) {
             button(body, detail.pending() ? "编辑草稿" : "编辑当前配置", "skills.detail.edit", () -> showEdit(deleteTarget));
@@ -183,6 +199,12 @@ final class AiSkillDetailDialog implements AutoCloseable {
         command.setTypeface(null, Typeface.BOLD);
         command.setAccessibilityHeading(true);
         int multiline = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+        String savedDisplayName = edit.manifestDisplayName();
+        String displayNameLabel = "显示名称（可选）";
+        if (savedDisplayName != null && !miuix) text(form, displayNameLabel, "skills.edit.display_name.label");
+        EditText displayName = savedDisplayName == null ? null : input(form, displayNameLabel,
+                "skills.edit.display_name", InputType.TYPE_CLASS_TEXT, 48, false);
+        if (displayName != null) displayName.setText(savedDisplayName);
         EditText description = input(form, "技能简介", "skills.edit.description", InputType.TYPE_CLASS_TEXT, 100, false);
         description.setText(edit.description());
         EditText usage = input(form, "使用说明", "skills.edit.documentation", multiline, 6000, false);
@@ -190,6 +212,10 @@ final class AiSkillDetailDialog implements AutoCloseable {
         EditText instruction = edit.instructionEditable()
                 ? input(form, "执行指令", "skills.edit.instruction", multiline, 1600, false) : null;
         if (instruction != null) instruction.setText(edit.instruction());
+        String fieldDefinitions = edit.instructionEditable() ? edit.manifestFieldsJson() : null;
+        EditText declarations = fieldDefinitions == null ? null
+                : input(form, "配置字段声明（高级）", "skills.edit.config_fields", multiline, 16000, false);
+        if (declarations != null) declarations.setText(fieldDefinitions);
         TextView error = text(form, "", "skills.edit.error");
         error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         ScrollView scroll = new ScrollView(context);
@@ -208,14 +234,20 @@ final class AiSkillDetailDialog implements AutoCloseable {
                 error.setText("请填写所有编辑字段");
                 return;
             }
-            saveEdit(editor, error, edit, nextDescription, nextUsage, nextInstruction);
+            saveEdit(editor, error, edit, nextDescription, nextUsage, nextInstruction,
+                    declarations == null ? null : declarations.getText().toString(),
+                    displayName == null ? null : displayName.getText().toString());
         });
     }
 
     private void saveEdit(AlertDialog editor, TextView error, SkillStore.EditTarget expected,
-                          String description, String usage, String instruction) {
+                          String description, String usage, String instruction, String declarations, String displayName) {
         SkillStore.Detail updated;
-        try { updated = store.saveEdit(expected, description, usage, instruction); }
+        try { updated = store.saveEdit(expected, description, usage, instruction, declarations, displayName); }
+        catch (SkillManifest.Invalid invalid) {
+            error.setText(invalid.getMessage());
+            return;
+        }
         catch (Exception failure) {
             SkillStore.Detail current;
             try { current = store.detail(name); }
@@ -230,6 +262,93 @@ final class AiSkillDetailDialog implements AutoCloseable {
         }
         editor.dismiss();
         render(updated, "编辑已保存为草稿");
+        if (onChanged != null) onChanged.run();
+    }
+
+    private void manifestConfiguration(SkillStore.Detail detail) {
+        SkillManifest manifest = detail.manifest();
+        if (detail.outputType() != SkillResult.Type.TEXT || manifest == null || manifest.configFields().isEmpty()) return;
+        section("配置字段", "skills.detail.config");
+        text(body, "配置值将提供给执行模型，仅填写非敏感内容", "skills.detail.config.guidance");
+        Map<String, Supplier<String>> values = new LinkedHashMap<>();
+        for (SkillManifest.ConfigField field : manifest.configFields()) {
+            String key = field.key();
+            Object value = detail.manifestValues().get(key);
+            values.put(key, manifestInput(field, value));
+        }
+        button(body, "保存配置", "skills.detail.config.save", () -> {
+            Map<String, String> entered = new LinkedHashMap<>();
+            values.forEach((key, value) -> entered.put(key, value.get()));
+            saveManifestConfiguration(detail, entered);
+        });
+    }
+
+    private Supplier<String> manifestInput(SkillManifest.ConfigField field, Object value) {
+        String tag = "skills.detail.config." + field.key();
+        String label = field.label() + (field.required() ? "（必填）" : "");
+        String current = value == null ? "" : value instanceof BigDecimal decimal
+                ? decimal.toPlainString() : value.toString();
+        if (field.description() != null && !field.description().isEmpty()) {
+            text(body, field.description(), tag + ".description");
+        }
+        return switch (field.type()) {
+            case BOOLEAN -> manifestChoice(label, tag, current, List.of("true", "false"), List.of("是", "否"));
+            case ENUM -> manifestChoice(label, tag, current, field.options(), field.options());
+            case TEXT, MULTILINE, INTEGER, DECIMAL -> {
+                if (!miuix) text(body, label, tag + ".label");
+                int type = switch (field.type()) {
+                    case MULTILINE -> InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+                    case INTEGER -> InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED;
+                    case DECIMAL -> InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED
+                            | InputType.TYPE_NUMBER_FLAG_DECIMAL;
+                    default -> InputType.TYPE_CLASS_TEXT;
+                };
+                Integer limit = field.maxLength();
+                EditText input = input(body, label, tag, type, limit == null || limit <= 0 ? 16000 : limit, false);
+                input.setText(current);
+                yield () -> input.getText().toString();
+            }
+        };
+    }
+
+    private Supplier<String> manifestChoice(String label, String tag, String current,
+                                            List<String> values, List<String> labels) {
+        text(body, label, tag + ".label");
+        Spinner spinner = miuix ? MiuixFormControls.spinner(context) : new Spinner(context);
+        spinner.setTag(tag);
+        spinner.setContentDescription(label);
+        List<String> choices = new ArrayList<>();
+        choices.add("未填写");
+        choices.addAll(labels);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item, choices);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setSelection(values.indexOf(current) + 1);
+        body.addView(MiuixFormControls.viewFor(spinner), matchWrap());
+        return () -> {
+            int position = spinner.getSelectedItemPosition();
+            return position <= 0 ? "" : values.get(position - 1);
+        };
+    }
+
+    private void saveManifestConfiguration(SkillStore.Detail expected, Map<String, String> entered) {
+        SkillStore.Detail updated;
+        try { updated = store.saveManifestValues(expected, entered); }
+        catch (IllegalStateException stale) {
+            reload("配置未保存，请核对当前技能后再试");
+            if (onChanged != null) onChanged.run();
+            return;
+        } catch (SkillManifest.Invalid invalid) {
+            status.setText(invalid.getMessage());
+            return;
+        } catch (IllegalArgumentException invalid) {
+            status.setText("配置未保存，请检查字段值和范围");
+            return;
+        } catch (Exception unavailable) {
+            status.setText("暂时无法保存技能配置");
+            return;
+        }
+        render(updated, updated.pending() ? "配置已保存为草稿" : "配置已保存");
         if (onChanged != null) onChanged.run();
     }
 
@@ -264,7 +383,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
                             + (detail.service() == null ? "" : "\n\n" + target(detail.service())),
                     "启用新版", () -> apply(() -> store.activateReplacement(detail),
                             "技能已更新", "启用未完成，请重新打开详情核对配置")));
-        } else {
+        } else if (detail.outputType() == SkillResult.Type.IMAGE || detail.manifest() == null) {
             button(body, "重试连接", "skills.detail.retry", () -> apply(
                     () -> store.retryConfiguration(name, detail.draftId()), "已检查连接状态", "重试失败，请核对配置后再试"));
         }

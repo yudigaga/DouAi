@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -57,10 +58,12 @@ public final class SkillStore {
     private static final Map<Path, List<DeletionObserver>> DELETION_OBSERVERS = new HashMap<>();
     private static final int DRAFT_LIMIT = 16000;
     private static final int AUTHORED_SCHEMA = 3;
+    private static final int MANIFEST_SCHEMA = 4;
     private static final int TEXT_MODEL_MAX_INPUT = 2000;
     private static final int TEXT_MODEL_MAX_INSTRUCTION = 1600;
     private static final String TEXT_MODEL = "text_model";
     private static final String RETAINED_SERVICE = "retainedService";
+    private static final String NEEDS_MANIFEST_VALUES = "请填写技能必填设置";
 
     public record Installed(String name, int version, boolean enabled,
                             SkillResult.Type outputType, String serviceLabel) {}
@@ -69,7 +72,8 @@ public final class SkillStore {
                           String pendingReason, int previousVersion, DeleteTarget identity) {}
     public record Pending(String name, SkillResult.Type outputType, String reason, String draftId) {}
     public enum DraftState { NEEDS_CONFIGURATION, NEEDS_AUTHORIZATION, READY, DRAFT }
-    public record SettingsRow(String name, Installed current, SkillResult.Type draftOutputType, DraftState draftState) {}
+    public record SettingsRow(String name, Installed current, SkillResult.Type draftOutputType, DraftState draftState,
+                              String displayName) {}
     public record SettingsSnapshot(boolean enabled, List<SettingsRow> rows) {}
     public record SaveResult(Installed installed, Pending pending) {}
     public record DraftPreview(String name, String description, SkillResult.Type outputType,
@@ -78,12 +82,14 @@ public final class SkillStore {
     public record Field(String id, String label, boolean required, FieldState state) {}
     public record DeleteTarget(String name, int versionCount, boolean hasDraft, String proof) {}
     public record EditTarget(DeleteTarget identity, String description, String documentation,
-                             String instruction, boolean instructionEditable) {}
+                             String instruction, boolean instructionEditable, String manifestFieldsJson,
+                             String manifestDisplayName) {}
     public record Detail(String name, SkillResult.Type outputType, String draftId, String reason,
                          List<Field> fields, SkillServices.Service service, boolean canAuthorize,
                          boolean canReplace, int previousVersion, boolean installedEnabled,
                          DeleteTarget deleteTarget, Installed current, SkillServices.Service currentService,
-                         boolean skillsEnabled, DraftState draftState) {
+                         boolean skillsEnabled, DraftState draftState, SkillManifest manifest,
+                         Map<String, Object> manifestValues) {
         public boolean pending() { return !draftId.isEmpty(); }
     }
     private enum SaveMode { GENERATE, RECONNECT, CONVERSATION }
@@ -91,17 +97,18 @@ public final class SkillStore {
     private record DraftStatus(SkillServices.Service service, List<Field> fields, String reason,
                                boolean canAuthorize, boolean canReplace, DraftState state) {}
     private record EditSource(EditTarget target, JSONObject definition, JSONObject pending,
-                              SkillServices.Service retainedService) {}
+                              SkillServices.Service retainedService, Map<String, Object> values) {}
     record Available(AiSkills.Command command, int version, String revisionId) {}
     private record Draft(String name, String description, String documentation, String kind,
                          int maxInput, SkillResult.Type outputType, String serviceId, String trialInput,
-                         String expected, String instruction, int schemaVersion) {
+                         String expected, String instruction, int schemaVersion, SkillManifest manifest) {
         DraftPreview preview(String definition) {
             return new DraftPreview(name, description, outputType, instruction, definition);
         }
     }
     private record Executable(String kind, int maxInput, SkillResult.Type outputType,
-                              SkillServices.Service service, String instruction, int schemaVersion) {}
+                              SkillServices.Service service, String instruction, int schemaVersion,
+                              SkillManifest manifest, Map<String, Object> values) {}
     private interface StateAction<T> { T run(JSONObject state) throws Exception; }
     private final File directory;
     private final Path directoryKey;
@@ -185,6 +192,7 @@ public final class SkillStore {
             for (String name : names) {
                 JSONObject revision = skills.optJSONObject(name);
                 Installed current = revision == null ? null : installed(name, revision);
+                String displayName = current == null ? name : activeRevision(revision).optString("displayName", name);
                 JSONObject entry = drafts.optJSONObject(name);
                 SkillResult.Type draftOutputType = null;
                 DraftState pending = null;
@@ -193,12 +201,13 @@ public final class SkillStore {
                     try {
                         Draft draft = parse(entry.getString("definition"));
                         draftOutputType = draft.outputType();
+                        if (current == null && draft.manifest() != null) displayName = draft.manifest().displayName();
                         pending = draftStatus(state, draft, entry, current == null ? 0 : current.version()).state();
                     } catch (SkillServices.Failure | IllegalArgumentException unavailable) {
                         pending = DraftState.DRAFT;
                     }
                 }
-                rows.add(new SettingsRow(name, current, draftOutputType, pending));
+                rows.add(new SettingsRow(name, current, draftOutputType, pending, displayName));
             }
             return new SettingsSnapshot(state.getBoolean("enabled"), Collections.unmodifiableList(rows));
         });
@@ -293,6 +302,16 @@ public final class SkillStore {
 
     public Detail saveEdit(EditTarget expected, String description, String documentation, String instruction)
             throws Exception {
+        return saveEdit(expected, description, documentation, instruction, null);
+    }
+
+    public Detail saveEdit(EditTarget expected, String description, String documentation, String instruction,
+                           String manifestFieldsJson) throws Exception {
+        return saveEdit(expected, description, documentation, instruction, manifestFieldsJson, null);
+    }
+
+    public Detail saveEdit(EditTarget expected, String description, String documentation, String instruction,
+                           String manifestFieldsJson, String displayName) throws Exception {
         if (expected == null) throw new IllegalArgumentException("编辑目标无效");
         return locked(state -> {
             EditSource source = editSource(state, expected.identity());
@@ -304,29 +323,75 @@ public final class SkillStore {
             SkillAuthoring.rejectCredential(body);
 
             JSONObject definition = source.definition();
+            Draft previous = parse(definition.toString());
             definition.put("description", heading).put("documentation", body);
             if (expected.instructionEditable()) {
                 String rule = modelInstruction(instruction);
                 SkillAuthoring.rejectCredential(rule);
-                definition.getJSONObject("execution").put("instruction", rule);
+                if (previous.manifest() == null) definition.getJSONObject("execution").put("instruction", rule);
+                else definition.put("instructions", rule);
             } else if (instruction != null && !instruction.isEmpty()) {
                 throw new IllegalArgumentException("此技能没有可编辑的模型指令");
+            }
+            if (manifestFieldsJson != null) {
+                if (previous.manifest() == null) throw new IllegalArgumentException("此技能没有可编辑的配置声明");
+                JSONObject wrapped = SkillAuthoring.readObject("{\"configFields\":" + manifestFieldsJson + "}", DRAFT_LIMIT);
+                JSONArray descriptors = wrapped.optJSONArray("configFields");
+                if (wrapped.length() != 1 || descriptors == null) {
+                    throw new SkillManifest.Invalid("技能配置声明需要一个 JSON 数组");
+                }
+                definition.put("configFields", descriptors);
+            }
+            if (displayName != null) {
+                if (previous.manifest() == null) throw new IllegalArgumentException("此技能没有可编辑的显示名称");
+                String label = displayName.trim();
+                if (label.isEmpty()) definition.remove("displayName");
+                else definition.put("displayName", label);
             }
 
             String json = definition.toString();
             Draft draft = parse(json);
-            JSONObject entry = source.pending();
-            if (entry == null) {
-                entry = new JSONObject();
-                if (source.retainedService() != null) {
-                    entry.put(RETAINED_SERVICE, serviceRecord(source.retainedService()));
-                }
-                state.getJSONObject("drafts").put(draft.name(), entry);
-            }
-            entry.put("definition", json).put("draftId", UUID.randomUUID().toString())
-                    .put("outputType", draft.outputType().wireName());
+            Map<String, Object> values = draft.manifest() == null ? Collections.emptyMap()
+                    : draft.manifest().retainValues(previous.manifest(), source.values());
+            JSONObject entry = stageEdit(state, source, draft, json, values);
             return advancePending(state, entry, draft, null, true);
         });
+    }
+
+    public Detail saveManifestValues(Detail expected, Map<String, String> entered) throws Exception {
+        if (expected == null || expected.manifest() == null || expected.deleteTarget() == null
+                || expected.manifest().capability() != SkillCapabilityRegistry.Capability.TEXT_MODEL) {
+            throw new IllegalArgumentException("技能配置目标无效");
+        }
+        return locked(state -> {
+            EditSource source = editSource(state, expected.deleteTarget());
+            String json = source.definition().toString();
+            Draft draft = parse(json);
+            String draftId = source.pending() == null ? "" : draftIdentity(draft.name(), source.pending());
+            if (!expected.name().equals(draft.name()) || !expected.draftId().equals(draftId)
+                    || !expected.manifest().equals(draft.manifest()) || !expected.manifestValues().equals(source.values())) {
+                throw new IllegalStateException("技能配置已变化，请重新打开");
+            }
+            Map<String, Object> values = draft.manifest().enteredValues(entered == null ? Collections.emptyMap() : entered);
+            JSONObject entry = stageEdit(state, source, draft, json, values);
+            return advancePending(state, entry, draft, null);
+        });
+    }
+
+    private JSONObject stageEdit(JSONObject state, EditSource source, Draft draft, String json,
+                                 Map<String, Object> values) throws Exception {
+        JSONObject entry = source.pending();
+        if (entry == null) {
+            entry = new JSONObject();
+            if (source.retainedService() != null) {
+                entry.put(RETAINED_SERVICE, serviceRecord(source.retainedService()));
+            }
+            state.getJSONObject("drafts").put(draft.name(), entry);
+        }
+        entry.put("definition", json).put("draftId", UUID.randomUUID().toString())
+                .put("outputType", draft.outputType().wireName());
+        storeManifestState(state, entry, draft, values);
+        return entry;
     }
 
     private EditSource editSource(JSONObject state, DeleteTarget expected) throws Exception {
@@ -343,17 +408,28 @@ public final class SkillStore {
         if (pending != null) {
             String json = pending.getString("definition");
             Draft draft = parse(json);
+            boolean editable = TEXT_MODEL.equals(draft.kind());
             return new EditSource(new EditTarget(expected, draft.description(), draft.documentation(),
-                    draft.instruction(), TEXT_MODEL.equals(draft.kind())), object(json, DRAFT_LIMIT), pending, null);
+                    editable ? draft.instruction() : "", editable, manifestFields(draft.manifest()),
+                    draft.manifest() == null ? null : draft.manifest().displayName()),
+                    object(json, DRAFT_LIMIT), pending, null, manifestValues(draft, pending));
         }
         JSONObject revision = activeRevision(installed);
         File slot = revisionDirectory(revision);
         Executable executable = readExecution(slot);
         String description = revision.getString("description");
         String documentation = readDocumentation(slot, name, revision.getInt("version"));
-        JSONObject definition = editDefinition(name, description, documentation, executable);
-        return new EditSource(new EditTarget(expected, description, documentation, executable.instruction(),
-                TEXT_MODEL.equals(executable.kind())), definition, null, executable.service());
+        JSONObject definition = executable.manifest() == null
+                ? editDefinition(name, description, documentation, executable) : executable.manifest().toJson();
+        boolean editable = TEXT_MODEL.equals(executable.kind());
+        return new EditSource(new EditTarget(expected, description, documentation,
+                editable ? executable.instruction() : "", editable, manifestFields(executable.manifest()),
+                executable.manifest() == null ? null : executable.manifest().displayName()),
+                definition, null, executable.service(), executable.values());
+    }
+
+    private static String manifestFields(SkillManifest manifest) throws Exception {
+        return manifest == null ? null : manifest.toJson().getJSONArray("configFields").toString();
     }
 
     private static JSONObject editDefinition(String name, String description, String documentation,
@@ -536,7 +612,8 @@ public final class SkillStore {
             JSONObject entry = requirePending(state, name, draftId);
             Draft draft = parse(entry.getString("definition"));
             SkillServices.Service target = configured(entry, name);
-            if (target == null || !target.equals(expected) || !configuration(draft, target).canAuthorize()) {
+            if (target == null || !target.equals(expected)
+                    || !configuration(draft, target, manifestValues(draft, entry)).canAuthorize()) {
                 throw new IllegalStateException("服务配置已变化或仍缺必填项");
             }
             services.authorize(target, target.costUnits());
@@ -587,11 +664,12 @@ public final class SkillStore {
     private Detail advancePending(JSONObject state, JSONObject entry, Draft draft, Integer replaceVersion,
                                   boolean stageOnly, SkillServices.Service service) throws Exception {
         String name = draft.name();
-        Preview preview = preview(state, draft, service);
+        Map<String, Object> values = manifestValues(draft, entry);
+        Preview preview = preview(state, draft, service, values);
         String reason = preview.pendingReason();
         if (reason.isEmpty() && (service == null || authorized(service))) {
             try {
-                verifyTrial(draft, service);
+                verifyTrial(draft, service, values);
             } catch (Exception failure) {
                 reason = TRIAL_FAILED;
             }
@@ -604,7 +682,7 @@ public final class SkillStore {
                 } else if (stageOnly) {
                     reason = EDIT_STAGED;
                 } else {
-                    publish(state, draft, service);
+                    publish(state, draft, service, values);
                     return detail(state, name);
                 }
             }
@@ -623,27 +701,28 @@ public final class SkillStore {
         boolean enabled = current != null && current.enabled();
         boolean skillsEnabled = state.getBoolean("enabled");
         DeleteTarget deletion = deleteTarget(name, installed, entry);
-        SkillServices.Service currentService = installed == null ? null
-                : discoveryMetadata(readExecution(revisionDirectory(activeRevision(installed))).service());
+        Executable active = installed == null ? null : readExecution(revisionDirectory(activeRevision(installed)));
+        SkillServices.Service currentService = active == null ? null : discoveryMetadata(active.service());
         if (entry == null) {
             if (current == null) throw new IllegalStateException("技能不存在");
             return new Detail(name, current.outputType(), "", enabled ? "已启用" : "已停用", Collections.emptyList(),
                     currentService, false, false, version, enabled, deletion,
-                    current, currentService, skillsEnabled, null);
+                    current, currentService, skillsEnabled, null, active.manifest(), active.values());
         }
         Draft draft = parse(entry.getString("definition"));
         DraftStatus pending = draftStatus(state, draft, entry, version);
         return new Detail(name, draft.outputType(), draftIdentity(name, entry), pending.reason(), pending.fields(),
                 pending.service(), pending.canAuthorize(), pending.canReplace(), version, enabled, deletion,
-                current, currentService, skillsEnabled, pending.state());
+                current, currentService, skillsEnabled, pending.state(), draft.manifest(), manifestValues(draft, entry));
     }
 
     private DraftStatus draftStatus(JSONObject state, Draft draft, JSONObject entry, int version) throws Exception {
         SkillServices.Service explicit = configured(entry, draft.name());
         SkillServices.Service target = explicit == null ? discoveryMetadata(pendingService(state, draft, entry)) : explicit;
-        Configuration status = configuration(draft, target);
+        Map<String, Object> values = manifestValues(draft, entry);
+        Configuration status = configuration(draft, target, values);
         String reason = entry.getString("reason");
-        boolean replace = version > 0 && NEEDS_REPLACEMENT.equals(reason)
+        boolean replace = version > 0 && NEEDS_REPLACEMENT.equals(reason) && !missingManifestValues(draft, values)
                 && (!"service".equals(draft.kind()) || target != null && authorized(target));
         DraftState stateOfDraft = draftState(reason, status.fields(), replace);
         if (NEEDS_IMAGE_SERVICE.equals(reason) && stateOfDraft == DraftState.DRAFT && target != null) {
@@ -667,30 +746,27 @@ public final class SkillStore {
         return canReplace || EDIT_STAGED.equals(reason) ? DraftState.READY : DraftState.DRAFT;
     }
 
-    private Configuration configuration(Draft draft, SkillServices.Service service) throws Exception {
+    private Configuration configuration(Draft draft, SkillServices.Service service, Map<String, Object> values) throws Exception {
         List<Field> fields = new ArrayList<>();
         if ("unconfigured".equals(draft.kind())) {
             fields.add(required("operation", "受支持的执行方式", false));
             return new Configuration(Collections.unmodifiableList(fields), false);
         }
-        boolean needsImageFields = draft.outputType() == SkillResult.Type.IMAGE
-                && (service == null || service.adapter() == SkillServices.Adapter.OPENAI_IMAGES);
-        boolean filled = true;
-        if (needsImageFields) {
-            boolean endpoint = service != null && !service.endpoint().isEmpty();
-            boolean model = service != null && !service.modelName().isEmpty();
-            boolean key = service != null && services.hasCredential(service);
-            fields.add(required("endpoint", "API 地址", endpoint));
-            fields.add(required("model", "模型名", model));
-            fields.add(required("credential", "密钥", key));
-            filled = endpoint && model && key;
-        }
         boolean usable = authorized(service);
         if ("service".equals(draft.kind())) {
-            fields.add(new Field("authorization", "服务授权", true,
-                    usable ? FieldState.FILLED : FieldState.NEEDS_AUTHORIZATION));
+            if (draft.outputType() == SkillResult.Type.IMAGE) {
+                fields.addAll(SkillCapabilityRegistry.imageFields(services, service, usable));
+            } else {
+                fields.add(new Field("authorization", "服务授权", true,
+                        usable ? FieldState.FILLED : FieldState.NEEDS_AUTHORIZATION));
+            }
         }
-        return new Configuration(Collections.unmodifiableList(fields), filled && service != null && !usable);
+        boolean canAuthorize = service != null && !usable && fields.stream().noneMatch(field -> field.state() == FieldState.MISSING);
+        if (draft.manifest() != null) for (SkillManifest.ConfigField field : draft.manifest().configFields()) {
+            fields.add(new Field(field.key(), field.label(), field.required(),
+                    values.containsKey(field.key()) ? FieldState.FILLED : FieldState.MISSING));
+        }
+        return new Configuration(Collections.unmodifiableList(fields), canAuthorize);
     }
 
     private static Field required(String id, String label, boolean filled) {
@@ -756,7 +832,8 @@ public final class SkillStore {
     }
     public Preview previewGenerated(String json) throws Exception {
         Draft draft = parse(json);
-        return locked(state -> preview(state, draft, pendingService(state, draft, matchingDraft(state, draft, json))));
+        return locked(state -> preview(state, draft, pendingService(state, draft, matchingDraft(state, draft, json)),
+                proposedManifestValues(state, draft)));
     }
 
     public Installed installGenerated(String json) throws Exception {
@@ -804,45 +881,100 @@ public final class SkillStore {
                 }
             }
             SkillServices.Service service = pendingService(state, draft, matchingDraft(state, draft, json));
-            Preview current = preview(state, draft, service);
+            Map<String, Object> values = proposedManifestValues(state, draft);
+            Preview current = preview(state, draft, service, values);
             if (confirmation != null && !current.equals(confirmation)) {
                 throw new IllegalStateException("技能版本或服务已变化，请重新预览并确认");
             }
             if (draft.schemaVersion() != AUTHORED_SCHEMA && !current.pendingReason().isEmpty()) {
-                return savePending(state, draft, json, current.pendingReason());
+                return savePending(state, draft, json, current.pendingReason(), values);
             }
             try {
-                verifyTrial(draft, service);
+                verifyTrial(draft, service, values);
             } catch (Exception failure) {
-                if (mode == SaveMode.CONVERSATION) return savePending(state, draft, json, TRIAL_FAILED);
+                if (mode == SaveMode.CONVERSATION) return savePending(state, draft, json, TRIAL_FAILED, values);
                 throw failure;
             }
-            if (!current.pendingReason().isEmpty()) return savePending(state, draft, json, current.pendingReason());
+            if (!current.pendingReason().isEmpty()) return savePending(state, draft, json, current.pendingReason(), values);
             if (mode == SaveMode.CONVERSATION && current.needsConfirmation()) {
-                return savePending(state, draft, json, NEEDS_REPLACEMENT);
+                return savePending(state, draft, json, NEEDS_REPLACEMENT, values);
             }
             if (current.needsConfirmation() && confirmation == null) {
                 throw new IllegalStateException("技能版本或服务已变化，请重新预览并确认");
             }
             if (service != null && !authorized(service)) {
-                if (draft.outputType() == SkillResult.Type.IMAGE) return savePending(state, draft, json, NEEDS_IMAGE_SERVICE);
+                if (draft.outputType() == SkillResult.Type.IMAGE) return savePending(state, draft, json, NEEDS_IMAGE_SERVICE, values);
                 throw new IllegalStateException("请先授权登记的服务");
             }
-            return new SaveResult(publish(state, draft, service), null);
+            return new SaveResult(publish(state, draft, service, values), null);
         });
     }
 
-    private SaveResult savePending(JSONObject state, Draft draft, String json, String reason) throws Exception {
+    private SaveResult savePending(JSONObject state, Draft draft, String json, String reason,
+                                   Map<String, Object> values) throws Exception {
         JSONObject drafts = state.getJSONObject("drafts");
         JSONObject entry = drafts.optJSONObject(draft.name());
         if (entry == null || !json.equals(entry.optString("definition"))) {
+            String skillId = draft.manifest() == null ? null : manifestSkillId(state, draft.name(), entry);
             entry = new JSONObject().put("definition", json).put("draftId", UUID.randomUUID().toString());
+            if (skillId != null) entry.put("skillId", skillId);
             drafts.put(draft.name(), entry);
         }
         entry.put("outputType", draft.outputType().wireName()).put("reason", reason);
+        storeManifestState(state, entry, draft, values);
         writeState(state);
         return new SaveResult(null, new Pending(draft.name(), draft.outputType(), reason,
                 draftIdentity(draft.name(), entry)));
+    }
+
+    private Map<String, Object> proposedManifestValues(JSONObject state, Draft draft) throws Exception {
+        SkillManifest manifest = draft.manifest();
+        if (manifest == null) return Collections.emptyMap();
+        JSONObject pending = state.getJSONObject("drafts").optJSONObject(draft.name());
+        if (pending != null) {
+            Draft previous = parse(pending.getString("definition"));
+            if (previous.manifest() != null) {
+                return manifest.retainValues(previous.manifest(), manifestValues(previous, pending));
+            }
+        }
+        JSONObject installed = state.getJSONObject("skills").optJSONObject(draft.name());
+        if (installed != null) {
+            Executable previous = readExecution(revisionDirectory(activeRevision(installed)));
+            if (previous.manifest() != null) return manifest.retainValues(previous.manifest(), previous.values());
+        }
+        return manifest.readValues(null);
+    }
+
+    private static Map<String, Object> manifestValues(Draft draft, JSONObject entry) throws Exception {
+        return draft.manifest() == null ? Collections.emptyMap() : readManifestValues(draft.manifest(), entry);
+    }
+
+    private static Map<String, Object> readManifestValues(SkillManifest manifest, JSONObject record) throws Exception {
+        JSONObject values = record == null || !record.has("configValues") ? null : record.getJSONObject("configValues");
+        return Collections.unmodifiableMap(new LinkedHashMap<>(manifest.readValues(values)));
+    }
+
+    private static boolean missingManifestValues(Draft draft, Map<String, Object> values) throws Exception {
+        return draft.manifest() != null && !draft.manifest().missing(values).isEmpty();
+    }
+
+    private static void storeManifestState(JSONObject state, JSONObject entry, Draft draft, Map<String, Object> values)
+            throws Exception {
+        if (draft.manifest() == null) return;
+        entry.put("skillId", manifestSkillId(state, draft.name(), entry))
+                .put("configValues", SkillManifest.valuesJson(values));
+    }
+
+    private static String manifestSkillId(JSONObject state, String name, JSONObject pending) throws Exception {
+        JSONObject installed = state.getJSONObject("skills").optJSONObject(name);
+        String id = installed == null ? "" : installed.optString("skillId");
+        if (!canonicalSkillId(id) && pending != null) id = pending.optString("skillId");
+        return canonicalSkillId(id) ? id : UUID.randomUUID().toString();
+    }
+
+    private static boolean canonicalSkillId(String id) {
+        try { return UUID.fromString(id).toString().equals(id); }
+        catch (IllegalArgumentException invalid) { return false; }
     }
 
     private static JSONObject matchingDraft(JSONObject state, Draft draft, String json) throws Exception {
@@ -862,12 +994,24 @@ public final class SkillStore {
         });
         if (definition.outputType() != expectedType) throw new IllegalStateException("技能结果类型已变化");
         checkArgument(argument, definition.maxInput());
-        if ("summary".equals(definition.kind())) return new SkillResult.Text(AiSkills.summarize(argument));
-        if (TEXT_MODEL.equals(definition.kind())) {
+        SkillResult result;
+        if (definition.manifest() != null) {
+            if (!definition.manifest().missing(definition.values()).isEmpty()) {
+                throw new IllegalStateException(NEEDS_MANIFEST_VALUES);
+            }
+            result = SkillCapabilityRegistry.execute(definition.manifest().capability(), services, definition.service(),
+                    definition.instruction(), argument, definition.values(), textExecutor);
+        } else if ("summary".equals(definition.kind())) {
+            return new SkillResult.Text(AiSkills.summarize(argument));
+        } else if (TEXT_MODEL.equals(definition.kind())) {
             if (textExecutor == null) throw new IllegalStateException("此入口的技能模型不可用");
             return executeTextModel(definition.instruction(), argument, textExecutor);
+        } else if (definition.outputType() == SkillResult.Type.IMAGE) {
+            result = SkillCapabilityRegistry.execute(SkillCapabilityRegistry.Capability.IMAGE_GENERATION, services,
+                    definition.service(), "", argument, Collections.emptyMap(), textExecutor);
+        } else {
+            result = services.executeResult(definition.service(), argument);
         }
-        SkillResult result = services.executeResult(definition.service(), argument);
         if (result.type() != definition.outputType()) throw new IOException("服务返回的结果类型不符合技能声明");
         return result;
     }
@@ -920,18 +1064,22 @@ public final class SkillStore {
         return service != null && services.isAuthorized(service)
                 && (service.adapter() != SkillServices.Adapter.OPENAI_IMAGES || services.hasCredential(service));
     }
-    private static void verifyTrial(Draft draft, SkillServices.Service service) throws Exception {
-        SkillResult simulated = trial(draft, service);
+    private static void verifyTrial(Draft draft, SkillServices.Service service, Map<String, Object> values) throws Exception {
+        SkillResult simulated = trial(draft, service, values);
         if (simulated.type() != draft.outputType()
                 || (draft.expected() != null && simulated instanceof SkillResult.Text text
                 && !text.text().equals(draft.expected()))) {
             throw new IllegalArgumentException("模拟试跑结果与预期不符");
         }
     }
-    private static SkillResult trial(Draft draft, SkillServices.Service service) throws Exception {
+    private static SkillResult trial(Draft draft, SkillServices.Service service, Map<String, Object> values) throws Exception {
         checkArgument(draft.trialInput(), draft.maxInput());
         if (draft.outputType() == SkillResult.Type.IMAGE) return SkillServices.mockImageResult();
         if (TEXT_MODEL.equals(draft.kind())) {
+            if (draft.manifest() != null) {
+                SkillAuthoring.textInput(draft.instruction(), draft.trialInput(), values);
+                return new SkillResult.Text("模拟文本响应");
+            }
             return executeTextModel(draft.instruction(), draft.trialInput(), (instruction, input) -> "模拟文本响应");
         }
         if (service == null) return new SkillResult.Text(AiSkills.summarize(draft.trialInput()));
@@ -949,11 +1097,13 @@ public final class SkillStore {
         return new SkillResult.Text(result);
     }
 
-    private Preview preview(JSONObject state, Draft draft, SkillServices.Service service) throws Exception {
+    private Preview preview(JSONObject state, Draft draft, SkillServices.Service service, Map<String, Object> values)
+            throws Exception {
         JSONObject existing = state.getJSONObject("skills").optJSONObject(draft.name());
         int previous = existing == null ? 0 : activeRevision(existing).getInt("version");
         JSONObject existingDraft = state.getJSONObject("drafts").optJSONObject(draft.name());
-        String pending = "unconfigured".equals(draft.kind()) ? NEEDS_OPERATION
+        String pending = missingManifestValues(draft, values) ? NEEDS_MANIFEST_VALUES
+                : "unconfigured".equals(draft.kind()) ? NEEDS_OPERATION
                 : service == null && draft.outputType() == SkillResult.Type.IMAGE ? NEEDS_IMAGE_SERVICE : "";
         boolean reviewTextService = draft.outputType() == SkillResult.Type.TEXT && service != null
                 && !SkillServices.MOCK_ORDERS.equals(service.id());
@@ -962,7 +1112,9 @@ public final class SkillStore {
                 service == null ? "" : service.id(), draft.outputType(), pending, previous,
                 deleteTarget(draft.name(), existing, existingDraft));
     }
-    private Installed publish(JSONObject state, Draft draft, SkillServices.Service service) throws Exception {
+    private Installed publish(JSONObject state, Draft draft, SkillServices.Service service, Map<String, Object> values)
+            throws Exception {
+        if (missingManifestValues(draft, values)) throw new IllegalStateException(NEEDS_MANIFEST_VALUES);
         JSONObject skills = state.getJSONObject("skills");
         JSONObject skill = skills.optJSONObject(draft.name());
         int highWater = skill == null ? 0 : highestVersion(skill);
@@ -979,18 +1131,32 @@ public final class SkillStore {
                 .put("description", draft.description()).put("outputType", draft.outputType().wireName())
                 .put("kind", draft.kind())
                 .put("serviceLabel", service == null ? "" : service.label());
+        if (draft.manifest() != null && !draft.name().equals(draft.manifest().displayName())) {
+            revision.put("displayName", draft.manifest().displayName());
+        }
         File target = revisionDirectory(revision);
         if (!target.mkdirs()) throw new IOException("无法创建技能版本");
         try {
             writeDocument(new File(target, "SKILL.md"),
                     "---\nname: " + draft.name() + "\nversion: " + number + "\noutput: " + draft.outputType().wireName() + "\n---\n\n" + draft.documentation() + "\n");
-            int schema = draft.schemaVersion() == AUTHORED_SCHEMA ? AUTHORED_SCHEMA : 2;
+            int schema = draft.manifest() != null ? MANIFEST_SCHEMA
+                    : draft.schemaVersion() == AUTHORED_SCHEMA ? AUTHORED_SCHEMA : 2;
             JSONObject definition = new JSONObject().put("schemaVersion", schema)
                     .put("version", number).put("kind", draft.kind()).put("maxInput", draft.maxInput())
                     .put("outputType", draft.outputType().wireName());
-            if (TEXT_MODEL.equals(draft.kind())) definition.put("instruction", draft.instruction());
+            if (draft.manifest() != null) {
+                definition.put("manifest", draft.manifest().toJson()).put("configValues", SkillManifest.valuesJson(values));
+                JSONObject pending = state.getJSONObject("drafts").optJSONObject(draft.name());
+                skill.put("skillId", manifestSkillId(state, draft.name(), pending));
+            } else if (TEXT_MODEL.equals(draft.kind())) {
+                definition.put("instruction", draft.instruction());
+            }
             if (service != null) definition.put("service", serviceRecord(service));
-            writeDocument(new File(target, "execution.json"), definition.toString());
+            String execution = definition.toString();
+            if (execution.getBytes(StandardCharsets.UTF_8).length > LIMIT) {
+                throw new IOException("技能配置过长");
+            }
+            writeDocument(new File(target, "execution.json"), execution);
             if (previousCurrent != null) {
                 Set<String> retired = retiredVersions(state);
                 collectRevisionId(previousCurrent, retired);
@@ -1027,9 +1193,11 @@ public final class SkillStore {
         try {
             JSONObject value = object(json, DRAFT_LIMIT);
             int schema = integer(value, "schemaVersion");
-            if (schema == AUTHORED_SCHEMA) return parseAuthored(json);
+            if (schema == AUTHORED_SCHEMA || schema == MANIFEST_SCHEMA) return parseAuthored(json);
             if (schema != 1 && schema != 2) throw new IllegalArgumentException();
             return declaration(value, schema);
+        } catch (SkillManifest.Invalid invalid) {
+            throw invalid;
         } catch (Exception invalid) {
             throw invalidDraft();
         }
@@ -1038,11 +1206,21 @@ public final class SkillStore {
     private static Draft parseAuthored(String json) {
         try {
             JSONObject value = SkillAuthoring.readObject(json, DRAFT_LIMIT);
-            if (integer(value, "schemaVersion") != AUTHORED_SCHEMA) throw new IllegalArgumentException();
+            int schema = integer(value, "schemaVersion");
+            if (schema == MANIFEST_SCHEMA) return manifestDraft(SkillManifest.parse(json));
+            if (schema != AUTHORED_SCHEMA) throw new SkillManifest.Invalid("此技能清单版本不受支持");
             return declaration(value, AUTHORED_SCHEMA);
+        } catch (SkillManifest.Invalid invalid) {
+            throw invalid;
         } catch (Exception invalid) {
             throw invalidDraft();
         }
+    }
+
+    private static Draft manifestDraft(SkillManifest manifest) {
+        return new Draft(manifest.name(), manifest.description(), manifest.documentation(), manifest.capability().kind(),
+                manifest.maxInput(), manifest.capability().outputType(), null, manifest.trialInput(), null,
+                manifest.instructions(), MANIFEST_SCHEMA, manifest);
     }
 
     private static IllegalArgumentException invalidDraft() {
@@ -1100,7 +1278,7 @@ public final class SkillStore {
             expected = text(test.get("expected"), 4000);
         }
         return new Draft(name, description, documentation, kind, maxInput, output, service,
-                text(test.get("input"), maxInput), expected, instruction, schema);
+                text(test.get("input"), maxInput), expected, instruction, schema, null);
     }
 
     private static String modelInstruction(Object value) {
@@ -1270,13 +1448,14 @@ public final class SkillStore {
         }
         JSONObject definition = object(content, LIMIT);
         int schema = definition.getInt("schemaVersion");
+        if (schema == MANIFEST_SCHEMA) return readManifestExecution(definition);
         if (schema != 1 && schema != 2 && schema != AUTHORED_SCHEMA) throw new IOException("技能版本不兼容");
         SkillResult.Type output = schema == 1 ? SkillResult.Type.TEXT
                 : SkillResult.Type.fromWire(definition.getString("outputType"));
         String kind = definition.getString("kind");
         int maxInput = definition.getInt("maxInput");
         if ("summary".equals(kind) && output == SkillResult.Type.TEXT) {
-            return new Executable(kind, maxInput, output, null, "", schema);
+            return new Executable(kind, maxInput, output, null, "", schema, null, Collections.emptyMap());
         }
         if (schema == AUTHORED_SCHEMA && TEXT_MODEL.equals(kind) && output == SkillResult.Type.TEXT) {
             JSONObject authored = SkillAuthoring.readObject(content, LIMIT);
@@ -1284,10 +1463,30 @@ public final class SkillStore {
             int validatedLimit = integer(authored, "maxInput");
             if (integer(authored, "schemaVersion") != AUTHORED_SCHEMA || validatedLimit < 1
                     || validatedLimit > TEXT_MODEL_MAX_INPUT) throw new IOException("技能版本不兼容");
-            return new Executable(kind, validatedLimit, output, null, modelInstruction(authored.get("instruction")), schema);
+            return new Executable(kind, validatedLimit, output, null, modelInstruction(authored.get("instruction")),
+                    schema, null, Collections.emptyMap());
         }
         if (!"service".equals(kind)) throw new IOException("技能类型不支持");
-        return new Executable(kind, maxInput, output, readService(definition.getJSONObject("service"), output), "", schema);
+        return new Executable(kind, maxInput, output, readService(definition.getJSONObject("service"), output),
+                "", schema, null, Collections.emptyMap());
+    }
+
+    private static Executable readManifestExecution(JSONObject definition) throws Exception {
+        SkillManifest manifest = SkillManifest.parse(definition.getJSONObject("manifest").toString());
+        String kind = manifest.capability().kind();
+        SkillResult.Type output = manifest.capability().outputType();
+        boolean service = "service".equals(kind);
+        if (service) keys(definition, "schemaVersion", "version", "kind", "maxInput",
+                "outputType", "manifest", "configValues", "service");
+        else keys(definition, "schemaVersion", "version", "kind", "maxInput", "outputType", "manifest", "configValues");
+        if (integer(definition, "schemaVersion") != MANIFEST_SCHEMA || integer(definition, "version") <= 0
+                || !kind.equals(definition.get("kind")) || !output.wireName().equals(definition.get("outputType"))
+                || manifest.maxInput() != integer(definition, "maxInput")) {
+            throw new IOException("技能版本不兼容");
+        }
+        SkillServices.Service binding = service ? readService(definition.getJSONObject("service"), output) : null;
+        return new Executable(kind, manifest.maxInput(), output, binding, manifest.instructions(), MANIFEST_SCHEMA,
+                manifest, readManifestValues(manifest, definition));
     }
 
     private <T> T read(StateAction<T> action) {

@@ -812,6 +812,114 @@ public final class AiTestChatDialogTest {
         return services;
     }
 
+    @Test public void workManifestWaitsForRequiredConfigurationAndRunsFromContact() throws Exception {
+        String name = "值班通知";
+        String instruction = "按已配置的语气和长度整理值班通知。";
+        FakeSession author = new FakeSession();
+        author.skillReplies.add("""
+                {"schemaVersion":4,"name":"值班通知","description":"整理值班通知","documentation":"输入待整理的内容。",
+                 "instructions":"按已配置的语气和长度整理值班通知。","capabilityId":"text_model",
+                 "configFields":[{"key":"tone","label":"语气","type":"enum","required":true,"options":["正式","温和"]},
+                   {"key":"length","label":"输出长度","type":"integer","required":true,"min":20,"max":200}],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"}}
+                """);
+        reopen(author, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("帮我创建一个值班通知技能并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        SkillStore store = SkillStore.forContext(activity);
+        assertEquals("The authored manifest with missing required fields must be saved as a pending draft",
+                List.of(name), store.pending().stream().map(SkillStore.Pending::name).toList());
+        assertTrue(store.list().isEmpty());
+        assertTrue(lastAnswer().contains("待配置草稿"));
+        assertTrue(lastAnswer().contains("语气"));
+        assertTrue(lastAnswer().contains("输出长度"));
+        assertFalse(lastAnswer().contains("schemaVersion"));
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION), author.skillInstructions);
+        assertTrue(author.prompts.isEmpty());
+        input.setText("/值班");
+        assertNull(root.findViewWithTag("ai.chat.skill." + name));
+
+        AlertDialog settings = openChatSkillSettings(name);
+        View detail = settings.getWindow().getDecorView();
+        Spinner tone = detail.findViewWithTag("skills.detail.config.tone");
+        assertNotNull(tone);
+        int formal = -1;
+        for (int index = 0; index < tone.getCount(); index++) {
+            if ("正式".equals(tone.getItemAtPosition(index).toString())) formal = index;
+        }
+        assertTrue("The declared enum option must be available in settings", formal >= 0);
+        tone.setSelection(formal);
+        ShadowLooper.idleMainLooper();
+        assertTrue(detail.findViewWithTag("skills.detail.config.save").performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(store.detail(name).pending());
+        assertTrue(store.list().isEmpty());
+        assertNull(root.findViewWithTag("ai.chat.skill." + name));
+        settings.dismiss();
+
+        settings = openChatSkillSettings(name);
+        detail = settings.getWindow().getDecorView();
+        tone = detail.findViewWithTag("skills.detail.config.tone");
+        assertEquals("The partially saved enum value survives reopening settings",
+                "正式", String.valueOf(tone.getSelectedItem()));
+        EditText length = detail.findViewWithTag("skills.detail.config.length");
+        assertNotNull(length);
+        length.setText("68");
+        assertTrue(detail.findViewWithTag("skills.detail.config.save").performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(store.pending().isEmpty());
+        assertEquals(List.of(name), store.list().stream().filter(SkillStore.Installed::enabled)
+                .map(SkillStore.Installed::name).toList());
+        assertNotNull(root.findViewWithTag("ai.chat.skill." + name));
+        settings.dismiss();
+
+        author.skillReplies.add("周二由小周值班。");
+        submit("/值班通知 周二小周值班");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals("周二由小周值班。", lastAnswer());
+        assertTrue(author.prompts.isEmpty());
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION, SkillAuthoring.TEXT_INSTRUCTION), author.skillInstructions);
+        assertConfiguredNoticeRequest(author.skillInputs.get(1), instruction, "周二小周值班");
+
+        FakeSession contact = new FakeSession();
+        contact.skillReplies.add("周三由小林值班。");
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        input.setText("/值班");
+        assertNotNull(root.findViewWithTag("ai.chat.skill." + name));
+        submit("/值班通知 周三小林值班");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals("周三由小林值班。", lastAnswer());
+        assertTrue(contact.prompts.isEmpty());
+        assertEquals(List.of(SkillAuthoring.TEXT_INSTRUCTION), contact.skillInstructions);
+        assertConfiguredNoticeRequest(contact.skillInputs.get(0), instruction, "周三小林值班");
+    }
+
+    private AlertDialog openChatSkillSettings(String name) {
+        assertTrue(findView("ai.chat.skill.settings." + name).performClick());
+        return (AlertDialog) ShadowDialog.getLatestDialog();
+    }
+
+    private static void assertConfiguredNoticeRequest(String input, String instruction, String argument) throws Exception {
+        JSONObject request = new JSONObject(input);
+        assertEquals(instruction, request.getString("instruction"));
+        assertEquals(argument, request.getString("argument"));
+        JSONObject configuration = request.getJSONObject("config");
+        assertEquals(2, configuration.length());
+        assertEquals("正式", configuration.getString("tone"));
+        assertTrue(configuration.get("length") instanceof Number);
+        assertEquals(68, configuration.getInt("length"));
+    }
+
     @Test public void explicitImageCreationConfiguresItsOwnMockAndRendersFromPersistedSkill() throws Exception {
         dialog.enableSkills(AiSkills.Entry.WORK);
         sessions.get(0).skillReplies.add(imageSkillDraft());

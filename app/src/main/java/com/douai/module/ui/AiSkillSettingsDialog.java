@@ -244,7 +244,12 @@ final class AiSkillSettingsDialog implements AutoCloseable {
                 summary += "\n草稿 · " + outputLabel(skill.draftOutputType()) + " · " + draftState(skill.draftState());
             }
             String name = skill.name();
-            addSkillRow("/" + name, summary, "skills.row." + name, () -> showSkillDetail(name));
+            String title = "/" + name;
+            if (!name.equals(skill.displayName())) {
+                summary = title + "\n" + summary;
+                title = skill.displayName();
+            }
+            addSkillRow(title, summary, "skills.row." + name, () -> showSkillDetail(name));
         }
     }
 
