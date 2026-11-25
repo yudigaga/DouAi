@@ -30,6 +30,7 @@ import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.SkillAuthoring;
+import com.douai.module.ai.skills.SkillManifest;
 import com.douai.module.ai.skills.SkillCustomServiceTest;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillSelection;
@@ -1081,7 +1082,7 @@ public final class AiTestChatDialogTest {
         assertTrue(session.prompts.isEmpty());
         assertEquals(1, session.skillInputs.size());
         assertEquals(2, messageCount());
-        assertEquals(SkillStore.NEEDS_VIDEO_PROVIDER, text("ai.chat.state").getText().toString());
+        assertTrue(text("ai.chat.state").getText().toString().startsWith(SkillStore.NEEDS_VIDEO_PROVIDER));
         var scope = new SkillVideoJobs.Scope(entry, session.transcriptMemory.conversationKey());
         assertTrue(jobs.list(scope).isEmpty());
         assertEquals(0, submits.get());
@@ -1260,10 +1261,7 @@ public final class AiTestChatDialogTest {
     @Test public void validatedPreviewCopiesExactDeclarationSeparatelyFromSummaryAfterRestore() throws Exception {
         FakeSession author = new FakeSession();
         author.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
-        JSONObject provider = new JSONObject(videoDeclarationPayload());
-        JSONObject manifest = new JSONObject(videoDraftWithoutProvider())
-                .put("http", provider.getJSONObject("http"))
-                .put("configFields", provider.getJSONArray("configFields"));
+        JSONObject manifest = new JSONObject(videoDraftWithoutProvider());
         String rawDeclaration = " \n" + manifest.toString(2) + "\n  ";
         author.skillReplies.add(rawDeclaration);
         reopen(author, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
@@ -1327,100 +1325,139 @@ public final class AiTestChatDialogTest {
         return clipboard.getPrimaryClip().getItemAt(0).getText().toString();
     }
 
-    @Test public void pendingVideoCanSaveADeclarationAndExplicitlyConfigureItFromChat() throws Exception {
-        FakeSession session = new FakeSession();
-        session.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
-        session.skillReplies.add(videoDraftWithoutProvider());
-        AtomicInteger submits = new AtomicInteger();
-        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
-        reopen(session, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, jobs);
-        historyWorker.runAllOnThread();
-        ShadowLooper.idleMainLooper();
-        for (String prompt : List.of("/技能 生成一个视频技能", "帮我内置")) {
-            submit(prompt);
-            worker.runNext();
-            ShadowLooper.idleMainLooper();
-            historyWorker.runAllOnThread();
-            ShadowLooper.idleMainLooper();
-        }
+    @Test public void completeVideoNotesGenerateNestedDeclarationAndOpenConfiguration() throws Exception {
+        FakeSession session = createVideoFromNotes(AiSkills.Entry.WORK, true);
+        SkillStore store = SkillStore.forContext(activity);
+        SkillStore.Detail pending = store.detail("电影片段");
+        assertTrue(pending.pending());
+        assertNotNull(pending.manifest().http());
+        assertEquals("data.id", pending.manifest().http().responseField());
+        assertEquals("data.status", pending.manifest().http().video().stateField());
+        assertEquals(List.of("model"), pending.manifest().configFields().stream().map(SkillManifest.ConfigField::key).toList());
+        assertNull(pending.customConfiguration());
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertEquals(1, session.skillInputs.size());
+        assertFalse(session.skillInputs.get(0).contains("video-api.example.com"));
+        assertFalse(session.skillInputs.get(0).contains("data.status"));
+        assertTrue(session.skillInputs.get(0).contains("自动轮询自动发送"));
 
+        AlertDialog settings = openChatSkillSettings("电影片段");
+        View body = settings.getWindow().getDecorView();
+        EditText endpoint = body.findViewWithTag("skills.detail.custom.endpoint");
+        assertNotNull(endpoint);
+        assertEquals("https://video-api.example.com/v1/jobs", endpoint.getText().toString());
+        assertNotNull(body.findViewWithTag("skills.detail.custom.credential"));
+        EditText model = body.findViewWithTag("skills.detail.config.model");
+        assertNotNull(model);
+        model.setText("documented-demo-model");
+        assertNull(body.findViewWithTag("skills.detail.video_declaration.input"));
+        assertNull(body.findViewWithTag("skills.detail.video_facts.open"));
+        assertTrue(body.findViewWithTag("skills.detail.custom.save").performClick());
+        ShadowLooper.idleMainLooper();
+        settings.dismiss();
+        ShadowLooper.idleMainLooper();
+        settings = openChatSkillSettings("电影片段");
+        assertEquals("https://video-api.example.com/v1/jobs",
+                ((EditText) settings.getWindow().getDecorView().findViewWithTag("skills.detail.custom.endpoint")).getText().toString());
+        assertEquals("data.id", SkillStore.forContext(activity).detail("电影片段").manifest().http().responseField());
+        assertEquals("documented-demo-model", SkillStore.forContext(activity).detail("电影片段").manifestValues().get("model"));
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(SkillVideoJobs.forContext(activity).list(new SkillVideoJobs.Scope(AiSkills.Entry.WORK,
+                session.transcriptMemory.conversationKey())).isEmpty());
+    }
+
+    @Test public void missingStatusStaysPendingAndSupplementRestoresSameVideoDraft() throws Exception {
+        FakeSession session = createVideoFromNotes(AiSkills.Entry.CONTACT, false);
         SkillStore store = SkillStore.forContext(activity);
         SkillStore.Detail original = store.detail("电影片段");
         assertTrue(original.pending());
         assertNull(original.manifest().http());
-        String fencedDeclaration = "```json\n" + videoDeclarationPayload() + "```";
-        session.answer = fencedDeclaration;
-        submit("请展示接口说明");
-        worker.runNext();
-        ShadowLooper.idleMainLooper();
-        ClipboardManager clipboard = activity.getSystemService(ClipboardManager.class);
-        clipboard.setPrimaryClip(ClipData.newPlainText("test", "原有剪贴板"));
-        assertEquals(fencedDeclaration, copyDisplayedMessage(messageCount() - 1, "ai.chat.answer", "复制消息", clipboard));
+        assertTrue(original.reason().contains("状态字段"));
+        assertTrue(original.videoMissing().stream().anyMatch(name -> name.contains("状态字段")));
+        assertTrue(store.selectionCatalog().isEmpty());
 
         AlertDialog settings = openChatSkillSettings("电影片段");
         View body = settings.getWindow().getDecorView();
-        View openDeclaration = body.findViewWithTag("skills.detail.video_declaration.open");
-        assertNotNull("A video draft missing its declaration needs a way to supply it", openDeclaration);
-        assertTrue(openDeclaration.performClick());
-        AlertDialog declaration = (AlertDialog) ShadowDialog.getLatestDialog();
-        assertNotSame(settings, declaration);
-        EditText input = declaration.getWindow().getDecorView().findViewWithTag("skills.detail.video_declaration.input");
-        TextView error = declaration.getWindow().getDecorView().findViewWithTag("skills.detail.video_declaration.error");
-        assertNotNull(input);
-        assertNotNull(error);
-        View save = declaration.getButton(AlertDialog.BUTTON_POSITIVE);
-        assertEquals("保存声明", ((TextView) save).getText().toString());
-        input.setText("{\"http\":{},\"configFields\":[]}");
-        assertTrue(save.performClick());
-        ShadowLooper.idleMainLooper();
-        assertTrue(declaration.isShowing());
-        assertFalse(error.getText().toString().isBlank());
-        SkillStore.Detail stillPending = store.detail("电影片段");
-        assertEquals(original.draftId(), stillPending.draftId());
-        assertNull(stillPending.manifest().http());
-        assertNull(stillPending.customConfiguration());
-
-        input.setText("");
-        assertTrue(input.onTextContextMenuItem(android.R.id.paste));
-        assertEquals(fencedDeclaration, input.getText().toString());
-        assertTrue(save.performClick());
-        ShadowLooper.idleMainLooper();
-        assertFalse(declaration.isShowing());
-        SkillStore.Detail declared = store.detail("电影片段");
-        assertTrue(declared.pending());
-        assertNotNull(declared.manifest().http());
-        assertNull(declared.customConfiguration());
-        assertTrue(store.selectionCatalog().isEmpty());
-        assertNull(body.findViewWithTag("skills.detail.video_declaration.open"));
-
-        String endpoint = "https://video-api.example.com/v1/jobs";
-        EditText endpointInput = body.findViewWithTag("skills.detail.custom.endpoint");
-        EditText bearer = body.findViewWithTag("skills.detail.custom.credential");
-        EditText seconds = body.findViewWithTag("skills.detail.config.seconds");
-        assertNotNull(endpointInput);
-        assertNotNull(bearer);
-        assertNotNull(seconds);
-        assertEquals("", bearer.getText().toString());
-        endpointInput.setText(endpoint);
-        seconds.setText("4");
-        assertTrue(body.findViewWithTag("skills.detail.custom.save").performClick());
-        ShadowLooper.idleMainLooper();
-        SkillStore.Detail configured = store.detail("电影片段");
-        assertFalse(configured.pending());
-        assertEquals(endpoint, configured.customConfiguration().endpoint());
-        assertEquals(4, ((Number) configured.manifestValues().get("seconds")).intValue());
+        assertNull(body.findViewWithTag("skills.detail.custom.endpoint"));
         settings.dismiss();
         ShadowLooper.idleMainLooper();
+        settings = openChatSkillSettings("电影片段");
+        assertEquals(original.draftId(), SkillStore.forContext(activity).detail("电影片段").draftId());
 
-        AlertDialog reopened = openChatSkillSettings("电影片段");
-        View reopenedBody = reopened.getWindow().getDecorView();
-        assertEquals(endpoint, ((EditText) reopenedBody.findViewWithTag("skills.detail.custom.endpoint")).getText().toString());
-        assertEquals("4", ((EditText) reopenedBody.findViewWithTag("skills.detail.config.seconds")).getText().toString());
-        assertNull(reopenedBody.findViewWithTag("skills.detail.video_declaration.open"));
-        assertEquals(0, submits.get());
-        assertTrue(jobs.list(new SkillVideoJobs.Scope(AiSkills.Entry.WORK,
-                session.transcriptMemory.conversationKey())).isEmpty());
+        body = settings.getWindow().getDecorView();
+        assertTrue(body.findViewWithTag("skills.detail.video_facts.open").performClick());
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        EditText notes = editor.getWindow().getDecorView().findViewWithTag("skills.detail.video_facts.input");
+        assertNotNull(notes);
+        assertNull(editor.getWindow().getDecorView().findViewWithTag("skills.detail.video_declaration.input"));
+        notes.setText("状态字段: data.status");
+        assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(editor.isShowing());
+        SkillStore.Detail ready = SkillStore.forContext(activity).detail("电影片段");
+        assertEquals(original.name(), ready.name());
+        assertTrue(ready.pending());
+        assertNull(ready.customConfiguration());
+        assertEquals("data.id", ready.manifest().http().responseField());
+        assertEquals("data.status", ready.manifest().http().video().stateField());
+        assertEquals(List.of("电影片段"), store.pending().stream().map(SkillStore.Pending::name).toList());
+
+        EditText endpoint = body.findViewWithTag("skills.detail.custom.endpoint");
+        assertNotNull(endpoint);
+        assertEquals("https://video-api.example.com/v1/jobs", endpoint.getText().toString());
+        EditText model = body.findViewWithTag("skills.detail.config.model");
+        assertNotNull(model);
+        model.setText("documented-demo-model");
+        assertTrue(body.findViewWithTag("skills.detail.custom.save").performClick());
+        ShadowLooper.idleMainLooper();
+        settings.dismiss();
+        ShadowLooper.idleMainLooper();
+        settings = openChatSkillSettings("电影片段");
+        body = settings.getWindow().getDecorView();
+        assertEquals("https://video-api.example.com/v1/jobs",
+                ((EditText) body.findViewWithTag("skills.detail.custom.endpoint")).getText().toString());
+        assertEquals("documented-demo-model",
+                ((EditText) body.findViewWithTag("skills.detail.config.model")).getText().toString());
+        assertEquals(1, session.skillInputs.size());
+        settings.dismiss();
+        ShadowLooper.idleMainLooper();
+        submit(VIDEO_AUTHORING_REQUEST + "\n接口资料：\nAuthorization: Bearer synthetic-video-key");
+        assertTrue(text("ai.chat.state").getText().toString().contains("移除密钥"));
+        assertEquals(1, session.skillInputs.size());
         assertTrue(worker.tasks.isEmpty());
+        assertTrue(SkillVideoJobs.forContext(activity).list(new SkillVideoJobs.Scope(AiSkills.Entry.CONTACT,
+                session.transcriptMemory.conversationKey())).isEmpty());
+    }
+
+    private FakeSession createVideoFromNotes(AiSkills.Entry entry, boolean status) throws Exception {
+        FakeSession model = new FakeSession();
+        model.transcriptMemory = entry == AiSkills.Entry.CONTACT
+                ? TestChatMemory.messageConversation(activity, restoreConfiguration())
+                : new TestChatMemory(activity, restoreConfiguration());
+        JSONObject guessed = new JSONObject(videoDeclarationPayload());
+        model.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("http", guessed.getJSONObject("http"))
+                .put("configFields", guessed.getJSONArray("configFields")).toString());
+        reopen(model, ChatImageLoader::thumbnail, entry);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        String notes = """
+                提交: POST https://video-api.example.com/v1/jobs
+                提示词字段: prompt
+                必填文本字段: model 模型名
+                提交响应ID: data.id
+                查询: GET /v1/jobs/{id}
+                查询响应ID: data.id
+                状态映射: waiting=queued,working=running,done=completed,error=failed,stop=cancelled
+                取消: POST /v1/jobs/{id}/cancel
+                下载: GET /v1/jobs/{id}/content
+                """ + (status ? "状态字段: data.status" : "");
+        submit(VIDEO_AUTHORING_REQUEST + "\n接口资料：\n" + notes);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("已保存待配置草稿"));
+        return model;
     }
 
     private static String videoDeclarationPayload() {
@@ -1434,12 +1471,10 @@ public final class AiTestChatDialogTest {
     }
 
     @Test public void declaredVideoRoutesRequireConfiguredFieldsAndConsentBeforeAnyJob() throws Exception {
-        FakeSession contact = new FakeSession();
-        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
-        AtomicInteger submits = new AtomicInteger();
-        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
-        contact.skillReplies.add("""
-                {"schemaVersion":4,"name":"视频创作","description":"合成原创视频","documentation":"填写画面提示",
+        SkillStore store = SkillStore.forContext(activity);
+        String endpoint = "https://video-api.example.com/v1/jobs";
+        String sourceDefinition = """
+                {"schemaVersion":4,"name":"视频来源","description":"合成原创视频","documentation":"填写画面提示",
                  "instructions":"用提供的契约提交视频","capabilityId":"video_task",
                  "configFields":[{"key":"seconds","label":"时长","type":"integer","required":true,"min":1,"max":10}],
                  "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
@@ -1449,24 +1484,40 @@ public final class AiTestChatDialogTest {
                  "video":{"statusPath":"/v1/jobs/{id}","cancelPath":"/v1/jobs/{id}/cancel","cancelMethod":"POST",
                  "downloadPath":"/v1/jobs/{id}/content","idField":"id","stateField":"status",
                  "states":{"waiting":"queued","working":"running","done":"completed","error":"failed","stop":"cancelled"}}}}
-                """);
+                """;
+        store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(sourceDefinition));
+        SkillStore.Detail source = store.configureCustomService(store.detail("视频来源"), endpoint, "", false,
+                java.util.Map.of("seconds", "4"));
+        assertFalse(source.pending());
+
+        FakeSession contact = new FakeSession();
+        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        contact.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "视频创作").toString());
         reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT, null, jobs);
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
-        submit("帮我创建一个生成视频技能：用 https://video-api.example.com/v1/jobs 并内置");
+        submit("帮我创建一个生成视频技能并内置\n沿用技能：视频来源");
         worker.runNext();
         ShadowLooper.idleMainLooper();
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
-        SkillStore store = SkillStore.forContext(activity);
-        assertTrue(store.selectionCatalog().isEmpty());
-        assertNull(store.detail("视频创作").customConfiguration());
+        assertEquals(List.of("视频来源"), store.selectionCatalog().stream().map(SkillSelection.Candidate::name).toList());
+        SkillStore.Detail target = store.detail("视频创作");
+        assertTrue(target.pending());
+        assertEquals("config.seconds", target.manifest().http().request().get("seconds"));
+        assertNull(target.customConfiguration());
         AlertDialog settings = openChatSkillSettings("视频创作");
-        assertNull(settings.getWindow().getDecorView().findViewWithTag("skills.detail.video_declaration.open"));
-        EditText seconds = settings.getWindow().getDecorView().findViewWithTag("skills.detail.config.seconds");
+        assertNull(settings.getWindow().getDecorView().findViewWithTag("skills.detail.video_facts.open"));
+        View settingsBody = settings.getWindow().getDecorView();
+        EditText endpointInput = settingsBody.findViewWithTag("skills.detail.custom.endpoint");
+        EditText seconds = settingsBody.findViewWithTag("skills.detail.config.seconds");
+        assertNotNull(endpointInput);
         assertNotNull(seconds);
+        endpointInput.setText(endpoint);
         seconds.setText("4");
-        assertTrue(settings.getWindow().getDecorView().findViewWithTag("skills.detail.custom.save").performClick());
+        assertTrue(settingsBody.findViewWithTag("skills.detail.custom.save").performClick());
         ShadowLooper.idleMainLooper();
         assertFalse(store.detail("视频创作").pending());
         settings.dismiss();

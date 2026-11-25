@@ -20,6 +20,7 @@ public final class SkillAuthoring {
     public enum Mode { DESIGN, REVISE, SAVE }
 
     public record Action(Mode mode, String request, boolean saveAfter) { }
+    public record VideoSource(Action action, String command, String notes, String relatedSkill) { }
 
     public static final String DESIGN_INSTRUCTION = """
             你为 DouAi 设计或修订一个供用户手动调用的 Skill。只依据输入 JSON 的 requirement
@@ -41,12 +42,10 @@ public final class SkillAuthoring {
             输出表格或 CSV 使用 capabilityId: "table_model"，outputType: "table"，输入最大 2000 字。
             自定义 HTTPS 结果使用 capabilityId: "custom_service"，outputType 可为 text、table、image。
             生成视频使用 capabilityId: "video_task"，outputType: "video"。HTTPS 输入最大 2000 字。
-            仅这两种能力支持可选 http 声明，键为 version（整数 1）、label、可选 suggestedEndpoint、
+            自定义 HTTPS 能力支持可选 http 声明，键为 version（整数 1）、label、可选 suggestedEndpoint、
             request（对象，键为 JSON 请求字段，值为 argument 或 config.字段名）、response（JSON 响应字段名）。
-            视频还需 http.video，键为 statusPath、cancelPath、cancelMethod（POST 或 DELETE）、downloadPath、
-            idField、stateField、states（供应商状态字符串映射到 queued/running/completed/failed/cancelled）。
-            三个路径各有一个完整的 {id} 段，使用同源的绝对路径。response 是提交结果的任务 ID 字段。
-            缺少明确的视频接口合同时省略 http，把技能留待配置。
+            视频只需生成名称、说明和输入定义。DouAi 从用户提供的资料在本机生成视频接口声明和配置字段。
+            在视频技能的模型输出中省略 http，并使用空的 configFields，保留视频输出类型。
             自动轮询与下载限用户已确认提交的原任务 ID。未指定收件人时，自动发送或回传指在发起任务的
             DouAi 会话显示结果。请求中的自动发送不能替代外部提交审核或授权给新收件人。
             suggestedEndpoint 只在用户明确提供协议地址时填写，地址须经本人保存后才可用。
@@ -139,6 +138,37 @@ public final class SkillAuthoring {
 
     public static boolean isCreationCommand(String text) {
         return text != null && CREATION_COMMAND.matcher(text.trim()).lookingAt();
+    }
+
+    public static VideoSource videoSource(String text) {
+        if (text == null || text.length() > MAX_MODEL_INPUT) return null;
+        int lineEnd = text.indexOf('\n');
+        if (lineEnd < 0) return null;
+        String command = text.substring(0, lineEnd).trim();
+        Action action = match(command, false);
+        if (action == null || action.mode() != Mode.DESIGN || explicitOutput(action.request()) != SkillResult.Type.VIDEO) return null;
+        String supplied = text.substring(lineEnd + 1).trim();
+        String related = "";
+        StringBuilder notes = new StringBuilder();
+        for (String line : supplied.split("\\r?\\n", -1)) {
+            String trimmed = line.trim();
+            if (trimmed.matches("接口资料\\s*[：:]?")) continue;
+            if (trimmed.matches("沿用技能\\s*[：:].*")) {
+                int separator = trimmed.indexOf('：');
+                String name = trimmed.substring((separator >= 0 ? separator : trimmed.indexOf(':')) + 1).trim();
+                if (name.startsWith("/")) name = name.substring(1);
+                if (!related.isEmpty() || !name.matches("[\\p{L}\\p{N}_-]{1,24}")) {
+                    throw new IllegalArgumentException("请提供一个已配置的视频技能的命令名");
+                }
+                related = name;
+                continue;
+            }
+            if (!trimmed.isEmpty()) {
+                if (notes.length() > 0) notes.append('\n');
+                notes.append(trimmed);
+            }
+        }
+        return new VideoSource(action, command, notes.toString(), related);
     }
 
     public static Action match(String typed, boolean hasDraft) {

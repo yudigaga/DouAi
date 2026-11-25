@@ -233,7 +233,7 @@ public final class SkillVideoJobs {
         }
         if (definiteRefusal(response.status())) return finish(scope, intent, State.FAILED, "", 0, "").job();
         try {
-            String remoteId = SkillHttpDeclaration.validateTaskId(field(response, binding.declaration().responseField()));
+            String remoteId = binding.declaration().readSubmittedTaskId(json(response));
             if (AiCredentialVault.containsImageCredential(remoteId, access.bearer())) return intent.job();
             return finish(scope, intent, State.QUEUED, remoteId, 0, "").job();
         } catch (IllegalArgumentException | Failure invalid) {
@@ -543,10 +543,6 @@ public final class SkillVideoJobs {
 
     private static int httpsPort(URI endpoint) { return endpoint.getPort() < 0 ? 443 : endpoint.getPort(); }
 
-    private static String field(SkillHttpsTransport.Response reply, String field) throws Failure {
-        return string(json(reply), field);
-    }
-
     private static JSONObject json(SkillHttpsTransport.Response reply) throws Failure {
         if (reply.status() < 200 || reply.status() >= 300 || !"application/json".equals(reply.contentType())
                 || reply.body().length == 0 || reply.body().length > MAX_JSON_BYTES) throw new Failure(Code.RESPONSE);
@@ -556,12 +552,6 @@ public final class SkillVideoJobs {
         } catch (IOException | IllegalArgumentException malformed) {
             throw new Failure(Code.RESPONSE);
         }
-    }
-
-    private static String string(JSONObject json, String field) throws Failure {
-        Object value = json.opt(field);
-        if (!(value instanceof String text)) throw new Failure(Code.RESPONSE);
-        return text;
     }
 
     private <T> T locked(Scope scope, Transaction<T> action) throws Failure { return locked(scope, true, action); }

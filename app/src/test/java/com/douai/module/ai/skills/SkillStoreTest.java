@@ -33,6 +33,7 @@ public class SkillStoreTest {
         SkillStore.Detail initial = store.detail("镜头动画");
         assertEquals(SkillStore.NEEDS_VIDEO_PROVIDER, initial.reason());
         assertNull(initial.manifest().http());
+        assertFalse(initial.videoMissing().isEmpty());
 
         JSONObject http = videoHttp();
         http.getJSONObject("request").put("duration", "config.duration");
@@ -202,6 +203,109 @@ public class SkillStoreTest {
         assertEquals(2, published.current().version());
         assertEquals(nextEndpoint, published.customConfiguration().endpoint());
         assertFalse(published.customConfiguration().hasCredential());
+    }
+
+    @Test public void ungroundedVideoContractIsRemovedBeforePreviewAndWhenPersisting() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        JSONObject plain = videoDraft("镜头动画");
+        String original = "\n" + plain.toString(2) + "\n";
+        assertEquals(original, SkillStore.prepareAuthoredVideoDraft(original, null).definition());
+
+        JSONObject model = videoDraft("镜头动画").put("http", videoHttp());
+        model.put("configFields", new JSONArray().put(new JSONObject().put("key", "quality").put("label", "画质")
+                .put("type", "text").put("required", false).put("maxLength", 20)));
+        String raw = model.toString();
+        JSONObject preview = new JSONObject(SkillStore.prepareAuthoredVideoDraft(raw, null).definition());
+        assertFalse(preview.has("http"));
+        assertEquals(0, preview.getJSONArray("configFields").length());
+
+        SkillStore.SaveResult result = store.saveAuthoredVideoDraft(SkillStore.validateAuthoredDraft(raw), null);
+        assertNull(result.installed());
+        assertNotNull(result.pending());
+        SkillStore.Detail saved = videoStore(root).detail("镜头动画");
+        assertTrue(saved.pending());
+        assertNull(saved.manifest().http());
+        assertNull(saved.customConfiguration());
+        assertFalse(saved.videoMissing().isEmpty());
+        assertTrue(store.list().isEmpty());
+    }
+
+    @Test public void explicitReusePreservesSchemaAndSameNameValuesWithoutInheritingApproval() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        String endpoint = "https://saved.example.com/v1/submit";
+        String secret = "synthetic-grounded-video-source";
+        JSONObject http = videoHttp();
+        http.getJSONObject("request").put("duration", "config.duration");
+        JSONArray fields = new JSONArray().put(new JSONObject().put("key", "duration").put("label", "时长")
+                .put("type", "integer").put("required", true).put("min", 1).put("max", 15));
+        saveVideoDraft(store, videoDraft("镜头动画").put("http", http).put("configFields", fields));
+        assertThrows(IllegalStateException.class, () -> store.videoFactsForSkill("镜头动画"));
+        SkillStore.Detail valued = store.saveManifestValues(store.detail("镜头动画"), java.util.Map.of("duration", "8"));
+        SkillStore.Detail active = store.configureCustomService(valued, endpoint, secret);
+
+        assertThrows(IllegalStateException.class, () -> store.videoFactsForSkill("视频工作台"));
+        SkillVideoFacts facts = store.videoFactsForSkill("镜头动画");
+        assertTrue(facts.missing().isEmpty());
+        assertFalse(facts.toJson().toString().contains(secret));
+        String draft = videoDraft("镜头动画").toString();
+        SkillStore.DraftPreview prepared = SkillStore.prepareAuthoredVideoDraft(draft, facts);
+        assertEquals(endpoint, new JSONObject(prepared.definition()).getJSONObject("http").getString("suggestedEndpoint"));
+        assertFalse(prepared.definition().contains(secret));
+        store.saveAuthoredVideoDraft(prepared, facts);
+
+        SkillStore.Detail pending = videoStore(root).detail("镜头动画");
+        assertTrue(pending.pending());
+        assertEquals(active.current(), pending.current());
+        assertNull(pending.customConfiguration());
+        assertEquals(8, pending.manifestValues().get("duration"));
+        assertEquals("config.duration", pending.manifest().http().request().get("duration"));
+        assertEquals(endpoint, pending.manifest().http().suggestedEndpoint());
+        assertEquals(1, AiSkills.match(AiSkills.Entry.WORK, "/镜头动画 海边", store).version());
+        assertFalse(Files.readString(new File(root, "catalog.json").toPath()).contains(secret));
+    }
+
+    @Test public void partialVideoFactsSurviveReopenAndOnlyTheExactDraftCanBeCompleted() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        SkillVideoFacts submit = SkillVideoFacts.parse("""
+                提交: POST https://video.example.com/v1/jobs
+                提示词字段: prompt
+                提交响应ID: job_id
+                """);
+        SkillStore.DraftPreview preview = SkillStore.prepareAuthoredVideoDraft(videoDraft("镜头动画").toString(), submit);
+        SkillStore.SaveResult saved = store.saveAuthoredVideoDraft(preview, submit);
+        assertNotNull(saved.pending());
+        assertTrue(saved.pending().reason().contains("状态字段"));
+        SkillStore reopened = videoStore(root);
+        SkillStore.Detail before = reopened.detail("镜头动画");
+        assertTrue(before.videoMissing().stream().anyMatch(field -> field.contains("查询")));
+        assertEquals("https://video.example.com/v1/jobs", before.videoFacts().toJson().getString("submitEndpoint"));
+        assertNull(before.manifest().http());
+        AiSkills.CommandUnavailable blocked = assertThrows(AiSkills.CommandUnavailable.class,
+                () -> AiSkills.match(AiSkills.Entry.WORK, "/镜头动画 海边", reopened));
+        assertEquals(before.reason(), blocked.getMessage());
+
+        SkillStore.Detail withQuery = reopened.addVideoFacts(before, SkillVideoFacts.parse("查询: GET /v1/jobs/{id}"));
+        assertFalse(before.draftId().equals(withQuery.draftId()));
+        SkillVideoFacts remainder = SkillVideoFacts.parse("""
+                查询响应ID: id
+                状态字段: status
+                状态映射: waiting=queued,running=running,done=completed,failed=failed,canceled=cancelled
+                取消: POST /v1/jobs/{id}/cancel
+                下载: GET /v1/jobs/{id}/file
+                """);
+        assertThrows(IllegalStateException.class, () -> reopened.addVideoFacts(before, remainder));
+        SkillStore.Detail complete = reopened.addVideoFacts(withQuery, remainder);
+        assertTrue(complete.pending());
+        assertEquals("镜头动画", complete.name());
+        assertTrue(complete.videoMissing().isEmpty());
+        assertEquals("argument", complete.manifest().http().request().get("prompt"));
+        assertEquals("/v1/jobs/{id}", complete.manifest().http().video().statusPath());
+        assertNull(complete.customConfiguration());
+        assertTrue(complete.reason().contains("公网 HTTPS"));
+        assertTrue(reopened.list().isEmpty());
     }
 
     private static SkillStore videoStore(File root) {

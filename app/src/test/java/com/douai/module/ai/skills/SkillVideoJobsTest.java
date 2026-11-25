@@ -123,6 +123,44 @@ public class SkillVideoJobsTest {
                 "GET https://video.example.com:9443/jobs/task_1/content"), sent);
     }
 
+    @Test public void nestedRepliesRequireTheDeclaredIdAndStateBeforeUsingTheOriginalDownloadRoute() throws Exception {
+        List<String> sent = new ArrayList<>();
+        var access = access(binding("data.task.id", "data.task.id", "data.task.lifecycle.state"), () -> {});
+        var jobs = new SkillVideoJobs(temporary.newFolder(), clock::get, (method, media, url, bearer, body, deadline, gate) -> {
+            gate.check();
+            sent.add(method.name() + " " + url);
+            return switch (sent.size()) {
+                case 1 -> json(202, "{\"data.task.id\":\"other_task\",\"data\":{\"task\":{}}}");
+                case 2 -> json(202, "{\"data\":{\"task\":{\"id\":\"nested_01\"}}}");
+                case 3 -> json(200, "{\"data\":{\"task\":{\"id\":\"other_task\",\"lifecycle\":{\"state\":\"done\"}}}}");
+                case 4 -> json(200, "{\"data\":{\"task\":{\"id\":\"nested_01\",\"lifecycle\":{\"state\":\"running\"}}}}");
+                case 5 -> json(200, "{\"data\":{\"task\":{\"id\":\"nested_01\",\"lifecycle\":{\"state\":\"done\"}}}}");
+                case 6 -> new SkillHttpsTransport.Response(200, "video/mp4", structuralMp4());
+                default -> throw new AssertionError("unexpected network");
+            };
+        });
+        long generation = jobs.generation(WORK);
+        UUID missing = UUID.randomUUID();
+        var unknown = jobs.submit(WORK, generation, missing, access, POST, Long.MAX_VALUE);
+        assertEquals(SkillVideoJobs.State.SUBMIT_UNKNOWN, unknown.state());
+        assertEquals(unknown, jobs.submit(WORK, generation, missing, access, POST, Long.MAX_VALUE));
+
+        UUID local = UUID.randomUUID();
+        assertEquals(SkillVideoJobs.State.QUEUED, jobs.submit(WORK, generation, local, access, POST, Long.MAX_VALUE).state());
+        var wrong = assertThrows(SkillVideoJobs.Failure.class, () -> jobs.refresh(WORK, local, access, Long.MAX_VALUE));
+        assertEquals(SkillVideoJobs.Code.RESPONSE, wrong.code());
+        assertNull(jobs.playableFile(WORK, local));
+        clock.addAndGet(60_000);
+        assertEquals(SkillVideoJobs.State.RUNNING, jobs.refresh(WORK, local, access, Long.MAX_VALUE).state());
+        clock.addAndGet(60_000);
+        assertEquals(SkillVideoJobs.State.COMPLETED, jobs.refresh(WORK, local, access, Long.MAX_VALUE).state());
+        assertArrayEquals(structuralMp4(), Files.readAllBytes(jobs.playableFile(WORK, local).toPath()));
+
+        String status = "GET https://video.example.com:9443/jobs/nested_01";
+        assertEquals(List.of("POST " + ENDPOINT, "POST " + ENDPOINT, status, status, status,
+                status + "/content"), sent);
+    }
+
     @Test public void cancellationSendsOnceUsesTheOriginalIdAndOnlyThenPolls() throws Exception {
         List<SkillHttpsTransport.Method> sent = new ArrayList<>();
         var jobs = new SkillVideoJobs(temporary.newFolder(), clock::get, (method, media, url, bearer, body, deadline, gate) -> {
@@ -169,13 +207,17 @@ public class SkillVideoJobsTest {
     }
 
     private static SkillVideoJobs.Binding binding() {
+        return binding("job_id", "id", "state");
+    }
+
+    private static SkillVideoJobs.Binding binding(String response, String idField, String stateField) {
         var declaration = SkillHttpDeclaration.parse("""
-                {"version":1,"label":"视频服务","request":{"prompt":"argument"},"response":"job_id",
+                {"version":1,"label":"视频服务","request":{"prompt":"argument"},"response":"%s",
                  "video":{"statusPath":"/jobs/{id}","cancelPath":"/jobs/{id}/cancel","cancelMethod":"DELETE",
-                 "downloadPath":"/jobs/{id}/content","idField":"id","stateField":"state",
+                 "downloadPath":"/jobs/{id}/content","idField":"%s","stateField":"%s",
                  "states":{"queued":"queued","running":"running","done":"completed","error":"failed",
                            "cancelled":"cancelled"}}}
-                """, SkillResult.Type.VIDEO, List.of());
+                """.formatted(response, idField, stateField), SkillResult.Type.VIDEO, List.of());
         return new SkillVideoJobs.Binding(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
                 UUID.randomUUID().toString(), declaration, ENDPOINT);
     }

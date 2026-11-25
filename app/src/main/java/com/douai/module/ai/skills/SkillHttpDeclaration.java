@@ -24,6 +24,7 @@ public final class SkillHttpDeclaration {
     private static final int MAX_ARGUMENT_CHARS = 4000;
     private static final int MAX_REQUEST_BYTES = 64 * 1024;
     private static final int MAX_VIDEO_STATES = 12;
+    private static final int MAX_RESPONSE_DEPTH = 4;
     private static final String ARGUMENT = "argument";
     private static final String CONFIG = "config.";
     private static final String TASK_SEGMENT = "{id}";
@@ -58,8 +59,8 @@ public final class SkillHttpDeclaration {
             validatePath(cancelPath);
             validatePath(downloadPath);
             if (!"POST".equals(cancelMethod) && !"DELETE".equals(cancelMethod)) throw new Invalid();
-            member(idField);
-            member(stateField);
+            responsePath(idField);
+            responsePath(stateField);
             if (idField.equals(stateField) || states == null || !states.containsValue(VideoState.COMPLETED)
                     || states.size() > MAX_VIDEO_STATES) throw new Invalid();
             for (Map.Entry<String, VideoState> state : states.entrySet()) {
@@ -78,9 +79,8 @@ public final class SkillHttpDeclaration {
 
         public VideoState readStatus(JSONObject response, String expectedId) {
             String original = validateTaskId(expectedId);
-            if (response == null || !original.equals(response.opt(idField))
-                    || !(response.opt(stateField) instanceof String providerState)) throw new Invalid();
-            return state(providerState);
+            if (!original.equals(readResponseString(response, idField))) throw new Invalid();
+            return state(readResponseString(response, stateField));
         }
 
         public String statusEndpoint(String configuredEndpoint, String id) {
@@ -133,6 +133,11 @@ public final class SkillHttpDeclaration {
     public Video video() { return video; }
     public SkillResult.Type outputType() { return outputType; }
 
+    public String readSubmittedTaskId(JSONObject response) {
+        if (video == null) throw new Invalid();
+        return validateTaskId(readResponseString(response, responseField));
+    }
+
     public static SkillHttpDeclaration parse(String raw, SkillResult.Type outputType,
                                              List<SkillManifest.ConfigField> fields) {
         JSONObject object;
@@ -158,7 +163,8 @@ public final class SkillHttpDeclaration {
             String label = text(object.get("label"), 48, false);
             if (label.contains("://")) throw new Invalid();
             String suggestion = object.has("suggestedEndpoint") ? suggestion(object.get("suggestedEndpoint")) : "";
-            String response = member(object.get("response"));
+            Object responseField = object.get("response");
+            String response = videoOutput ? responsePath(responseField) : member(responseField);
 
             Map<String, SkillManifest.ConfigField> declared = new LinkedHashMap<>();
             for (SkillManifest.ConfigField field : fields) {
@@ -255,7 +261,7 @@ public final class SkillHttpDeclaration {
         }
         return new Video(text(value.get("statusPath"), 320, false), text(value.get("cancelPath"), 320, false),
                 text(value.get("cancelMethod"), 6, false), text(value.get("downloadPath"), 320, false),
-                member(value.get("idField")), member(value.get("stateField")), states);
+                responsePath(value.get("idField")), responsePath(value.get("stateField")), states);
     }
 
     private static String expand(String configuredEndpoint, String template, String id) {
@@ -337,6 +343,24 @@ public final class SkillHttpDeclaration {
             throw new Invalid();
         }
         return name;
+    }
+
+    private static String responsePath(Object value) {
+        String path = text(value, MAX_RESPONSE_DEPTH * 33 - 1, false);
+        String[] segments = path.split("\\.", -1);
+        if (segments.length > MAX_RESPONSE_DEPTH) throw new Invalid();
+        for (String segment : segments) member(segment);
+        return path;
+    }
+
+    private static String readResponseString(JSONObject response, String path) {
+        Object value = response;
+        for (String segment : path.split("\\.", -1)) {
+            if (!(value instanceof JSONObject object)) throw new Invalid();
+            value = object.opt(segment);
+        }
+        if (!(value instanceof String text)) throw new Invalid();
+        return text;
     }
 
     private static String text(Object value, int max, boolean multiline) {

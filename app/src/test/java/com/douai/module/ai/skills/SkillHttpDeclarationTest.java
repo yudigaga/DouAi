@@ -122,6 +122,51 @@ public final class SkillHttpDeclarationTest {
         assertEquals("DELETE", SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of()).video().cancelMethod());
     }
 
+    @Test public void videoResponsePathsReadOnlyExactStringLeavesInsideObjects() throws Exception {
+        JSONObject raw = new JSONObject(VIDEO).put("response", "data.task.id");
+        raw.getJSONObject("video").put("idField", "data.task.id").put("stateField", "data.task.lifecycle.state");
+        SkillHttpDeclaration declaration = SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of());
+        assertEquals("data.task.id", declaration.responseField());
+        assertEquals("data.task.id", declaration.video().idField());
+        assertEquals("data.task.lifecycle.state", declaration.video().stateField());
+        assertEquals(declaration, parse(declaration.toJson().toString(), SkillResult.Type.VIDEO));
+        var video = declaration.video();
+        assertEquals(SkillHttpDeclaration.VideoState.RUNNING,
+                video.readStatus(new JSONObject("{\"data\":{\"task\":{\"id\":\"task_01\","
+                        + "\"lifecycle\":{\"state\":\"processing\"}}}}"), "task_01"));
+        for (String invalid : List.of(
+                "{\"data.task.id\":\"task_01\",\"data.task.lifecycle.state\":\"done\"}",
+                "{\"data\":{\"task\":[{\"id\":\"task_01\",\"lifecycle\":{\"state\":\"done\"}}]}}",
+                "{\"data\":{\"task\":{\"id\":1,\"lifecycle\":{\"state\":\"done\"}}}}",
+                "{\"data\":{\"task\":{\"id\":\"TASK_01\",\"lifecycle\":{\"state\":\"done\"}}}}",
+                "{\"data\":{\"task\":{\"id\":\"task_01\",\"lifecycle\":{\"state\":true}}}}",
+                "{\"data\":{\"task\":{\"id\":\"task_01\",\"lifecycle\":{\"state\":\"DONE\"}}}}",
+                "{\"data\":{\"task\":{\"id\":\"task_01\"}}}")) {
+            assertThrows(SkillHttpDeclaration.Invalid.class, () -> video.readStatus(new JSONObject(invalid), "task_01"));
+        }
+    }
+
+    @Test public void rejectsUnsafeVideoResponsePathsAndKeepsNonVideoResponseFieldsFlat() throws Exception {
+        for (String path : List.of(".id", "data.", "data..id", "data.0.id", "data[0].id", "data.*.id",
+                "../id", "/data/id", "$.data.id", "data.任务.id", "data._id", "data.api_key.id",
+                "data.authorization", "data.password.value", "a.b.c.d.e", "a." + "b".repeat(33))) {
+            JSONObject raw = new JSONObject(VIDEO).put("response", path);
+            assertThrows(path, SkillHttpDeclaration.Invalid.class,
+                    () -> SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of()));
+            for (String key : List.of("idField", "stateField")) {
+                JSONObject status = new JSONObject(VIDEO);
+                status.getJSONObject("video").put(key, path);
+                assertThrows(path, SkillHttpDeclaration.Invalid.class,
+                        () -> SkillHttpDeclaration.parse(status, SkillResult.Type.VIDEO, List.of()));
+            }
+        }
+        for (SkillResult.Type output : List.of(SkillResult.Type.TEXT, SkillResult.Type.IMAGE, SkillResult.Type.TABLE)) {
+            JSONObject raw = new JSONObject(INVOKE).put("response", "data.output");
+            assertThrows(SkillHttpDeclaration.Invalid.class,
+                    () -> SkillHttpDeclaration.parse(raw, output, List.of()));
+        }
+    }
+
     @Test public void rejectsVideoRouteEscapesAmbiguousStatesAndInvalidOperationFields() throws Exception {
         for (String path : List.of("https://other.example.com/jobs/{id}", "//other.example.com/{id}", "/jobs",
                 "/jobs/{id}/next/{id}", "/jobs/prefix-{id}", "/jobs/{id}.json", "/jobs/{id}/../content",

@@ -35,6 +35,7 @@ import com.douai.module.ai.skills.SkillHttpDeclaration;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.ai.skills.SkillVideoFacts;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.HostSettingsStore;
@@ -303,7 +304,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (manifest == null) return;
         if (!manifest.usesHttp()) {
             if (detail.pending() && detail.outputType() == SkillResult.Type.VIDEO) {
-                button(body, "填写视频接口声明", "skills.detail.video_declaration.open", () -> showVideoDeclaration(detail));
+                button(body, "补充接口资料", "skills.detail.video_facts.open", () -> showVideoFacts(detail));
             }
             return;
         }
@@ -339,45 +340,67 @@ final class AiSkillDetailDialog implements AutoCloseable {
         }
     }
 
-    private void showVideoDeclaration(SkillStore.Detail detail) {
+    private void showVideoFacts(SkillStore.Detail detail) {
         LinearLayout form = column();
         int padding = dp(16);
         form.setPadding(padding, 0, padding, padding);
-        text(form, "按服务商文档填写或粘贴接口声明 JSON，也可粘贴完整的视频 Skill JSON。密钥请在后续服务配置填写。",
-                "skills.detail.video_declaration.guidance");
+        text(form, "按文档逐行填写接口资料，例如「状态字段：data.status」。也可关联已有的视频技能。密钥在服务配置单独填写。",
+                "skills.detail.video_facts.guidance");
+        if (!detail.videoMissing().isEmpty()) {
+            text(form, "待补充 " + String.join("、", detail.videoMissing()), "skills.detail.video_facts.missing");
+        }
         int multiline = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-        EditText input = input(form, "视频接口声明 JSON", "skills.detail.video_declaration.input", multiline, 16000, false);
+        EditText input = input(form, "接口资料", "skills.detail.video_facts.input", multiline, 4096, false);
         input.setMinLines(5);
         input.setGravity(Gravity.TOP | Gravity.START);
         disableSecretStateTransfer(input);
         View control = MiuixFormControls.viewFor(input);
         if (control != input) disableSecretStateTransfer(control);
-        TextView error = text(form, "", "skills.detail.video_declaration.error");
+        EditText related = input(form, "关联已配置的视频技能命令名（可选）", "skills.detail.video_facts.related",
+                InputType.TYPE_CLASS_TEXT, 25, false);
+        TextView error = text(form, "", "skills.detail.video_facts.error");
         error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         ScrollView scroll = new ScrollView(context);
         scroll.addView(form);
-        AlertDialog editor = builder("填写视频接口声明").setView(scroll).setNegativeButton("取消", null)
-                .setPositiveButton("保存声明", null).create();
+        AlertDialog editor = builder("补充视频接口资料").setView(scroll).setNegativeButton("取消", null)
+                .setPositiveButton("保存资料", null).create();
         showChild(editor);
         if (!editor.isShowing()) return;
         editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
             if (!active() || !editor.isShowing() || confirmation != editor) return;
             SkillStore.Detail updated;
             try {
-                updated = store.saveVideoDeclaration(detail, input.getText().toString());
-            } catch (SkillManifest.Invalid invalid) {
-                error.setText(invalid.getMessage());
+                SkillVideoFacts supplied = SkillVideoFacts.parse(input.getText().toString());
+                String command = fieldValue(related);
+                if (command.startsWith("/")) command = command.substring(1);
+                if (!command.isEmpty()) {
+                    SkillVideoFacts existing;
+                    try { existing = store.videoFactsForSkill(command); }
+                    catch (Exception unavailable) {
+                        error.setText("找不到已启用且已配置的对应视频技能");
+                        return;
+                    }
+                    supplied = existing.merge(supplied);
+                }
+                if (supplied.isEmpty()) {
+                    error.setText("请补充接口资料或填写一个已配置的视频技能命令名");
+                    return;
+                }
+                updated = store.addVideoFacts(detail, supplied);
+            } catch (IllegalArgumentException invalid) {
+                error.setText("接口资料无效，请核对接口字段并移除密钥");
                 return;
             } catch (IllegalStateException stale) {
                 error.setText("草稿已变化，请重新打开技能配置后再试");
                 return;
             } catch (Exception unavailable) {
-                error.setText("暂时无法保存视频接口声明");
+                error.setText("暂时无法保存视频接口资料");
                 return;
             }
             input.setText("");
             editor.dismiss();
-            render(updated, "声明已保存，请填写服务配置");
+            render(updated, updated.manifest().http() == null ? "资料已保存，请继续补充缺项"
+                    : "接口声明已生成，请核对服务配置");
             if (onChanged != null) onChanged.run();
         });
     }
