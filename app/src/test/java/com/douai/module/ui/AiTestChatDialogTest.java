@@ -273,6 +273,66 @@ public final class AiTestChatDialogTest {
         assertEquals(Collections.singletonList("原有图片占满会话预算"), model.prompts);
     }
 
+    @Test public void completedSkillHistoryRestoresAuthoringTextAndAssistantImageWithoutReplay() throws Exception {
+        installMockImageSkill();
+        FakeSession first = new FakeSession();
+        first.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(first, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        String creation = "帮我做一个周报 Skill 并内置";
+        String textCommand = "/周报润色 进度已更新";
+        String imageCommand = "/生图 白猫";
+        first.skillReplies.add(textSkillDraft("保留事实，使用分点格式。"));
+        submit(creation);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("已创建技能 /周报润色"));
+
+        first.skillReplies.add("一、已更新进度");
+        submit(textCommand);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals("一、已更新进度", lastAnswer());
+
+        submit(imageCommand);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(6, messageCount());
+        assertNotNull(messageRow(5).findViewWithTag("ai.chat.image"));
+        assertTrue(first.prompts.isEmpty());
+
+        FakeSession reopened = new FakeSession();
+        reopened.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(reopened, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(6, messageCount());
+        assertEquals(creation, bubble(0, "ai.chat.user"));
+        assertTrue(bubble(1, "ai.chat.answer").contains("已创建技能 /周报润色"));
+        assertNotNull(messageRow(1).findViewWithTag("ai.chat.skill.settings.周报润色"));
+        assertEquals(textCommand, bubble(2, "ai.chat.user"));
+        assertEquals("一、已更新进度", bubble(3, "ai.chat.answer"));
+        assertEquals(imageCommand, bubble(4, "ai.chat.user"));
+        assertNull(messageRow(4).findViewWithTag("ai.chat.image"));
+        ImageView assistantImage = messageRow(5).findViewWithTag("ai.chat.image");
+        assertNotNull(assistantImage);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(assistantImage.getDrawable());
+        assertTrue(reopened.prompts.isEmpty());
+        assertTrue(reopened.skillInputs.isEmpty());
+
+        assertTrue(root.findViewWithTag("ai.chat.clear").performClick());
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, messageCount());
+        assertTrue(reopened.transcriptMemory.readTranscript().isEmpty());
+    }
+
     @Test public void anImageSkillRevokedWhileQueuedProducesNoImageOrRetry() throws Exception {
         SkillServices services = installMockImageSkill();
         dialog.enableSkills(AiSkills.Entry.WORK);
@@ -1381,6 +1441,11 @@ public final class AiTestChatDialogTest {
     }
 
     private void reopen(FakeSession saved, AiTestChatDialog.ThumbnailLoader thumbnails) throws Exception {
+        reopen(saved, thumbnails, null);
+    }
+
+    private void reopen(FakeSession saved, AiTestChatDialog.ThumbnailLoader thumbnails, AiSkills.Entry skills)
+            throws Exception {
         dialog.dismiss();
         worker.shutdownNow();
         historyWorker.shutdownNow();
@@ -1388,17 +1453,21 @@ public final class AiTestChatDialogTest {
         historyWorker = new ManualExecutor();
         sessions = new ArrayList<>();
         sessions.add(saved);
-        AiModelConfig config = AiModelConfig.fromJson(new JSONObject()
-                .put("id", "restore-test").put("name", "恢复模型")
-                .put("apiEndpoint", "https://example.com/v1").put("modelName", "restore-model"));
-        dialog = new AiTestChatDialog(activity, config, () -> {
+        dialog = new AiTestChatDialog(activity, restoreConfiguration(), () -> {
             if (sessions.isEmpty()) throw new AssertionError("Unexpected session creation");
             return sessions.get(0);
         }, worker, historyWorker, false, thumbnails);
+        if (skills != null) dialog.enableSkills(skills);
         dialog.show();
         root = dialog.getWindow().getDecorView().findViewWithTag("ai.chat");
         input = root.findViewWithTag("ai.chat.input");
         send = root.findViewWithTag("ai.chat.send");
+    }
+
+    private static AiModelConfig restoreConfiguration() throws Exception {
+        return AiModelConfig.fromJson(new JSONObject()
+                .put("id", "restore-test").put("name", "恢复模型")
+                .put("apiEndpoint", "https://example.com/v1").put("modelName", "restore-model"));
     }
 
     private TextView text(String tag) {
@@ -1432,6 +1501,11 @@ public final class AiTestChatDialogTest {
 
     private ListView messages() { return root.findViewWithTag("ai.chat.messages"); }
     private int messageCount() { return messages().getAdapter().getCount(); }
+    private View messageRow(int index) { return messages().getAdapter().getView(index, null, messages()); }
+    private String bubble(int index, String tag) {
+        return ((TextView) messageRow(index).findViewWithTag(tag)).getText().toString();
+    }
+
     private String lastAnswer() {
         ListView list = messages();
         View row = list.getAdapter().getView(list.getCount() - 1, null, list);
@@ -1465,6 +1539,7 @@ public final class AiTestChatDialogTest {
         Exception failure;
         int cancelCount;
         List<TestChatMemory.Turn> saved = Collections.emptyList();
+        TestChatMemory transcriptMemory;
         List<DouyinSearch.Result> found = Collections.emptyList();
         int savedCalls;
         int clearCalls;
@@ -1514,8 +1589,10 @@ public final class AiTestChatDialogTest {
         @Override public List<TestChatMemory.Turn> savedTurns() {
             savedCalls++;
             readOnMain = Looper.myLooper() == Looper.getMainLooper();
-            return saved;
+            return transcriptMemory == null ? saved : transcriptMemory.read();
         }
+
+        @Override public TestChatMemory transcriptMemory() { return transcriptMemory; }
 
         @Override public List<DouyinSearch.Result> searchResults() {
             List<DouyinSearch.Result> result = found;
@@ -1527,6 +1604,7 @@ public final class AiTestChatDialogTest {
             clearCalls++;
             clearOnMain = Looper.myLooper() == Looper.getMainLooper();
             saved = Collections.emptyList();
+            if (transcriptMemory != null) transcriptMemory.clear();
         }
     }
 

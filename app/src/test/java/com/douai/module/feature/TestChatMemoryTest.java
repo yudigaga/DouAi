@@ -132,6 +132,34 @@ public final class TestChatMemoryTest {
         }
     }
 
+    @Test public void displayedSkillHistoryNeverEntersTheNextProviderRequest() throws Exception {
+        File directory = temporary.newFolder();
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(reply("下一轮回答"));
+            server.start();
+            AiModelConfig config = config(server.url("/v1").toString(), 3, "普通模型偏好");
+            AiModelSettings models = new AiModelSettings(List.of(config), config.id);
+            TestChatMemory memory = new TestChatMemory(directory, config);
+            assertTrue(memory.append(memory.epoch(), turn("普通历史问题", "普通历史回答")));
+            ChatImage image = new ChatImage("image/png", new byte[]{19, 48, 59, 105, 83});
+            assertTrue(memory.append(memory.epoch(), TestChatMemory.Turn.displayedSkill(
+                    "本地技能专用输入", "本地技能专用输出", List.of(image), "本地技能")));
+
+            ChatCompletionClient client = new ChatCompletionClient(new TestChatMemory(directory, config), null);
+            assertEquals("下一轮回答", client.reply("test", "新问题", models));
+            var request = server.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(request);
+            String body = request.getBody().readUtf8();
+            assertTrue(body.contains("普通历史问题"));
+            assertTrue(body.contains("普通历史回答"));
+            assertFalse(body.contains("本地技能"));
+            assertFalse(body.contains(image.base64Data));
+            assertEquals(1, server.getRequestCount());
+            assertEquals(3, memory.readTranscript().size());
+            assertEquals(2, memory.read().size());
+        }
+    }
+
     @Test public void anotherInstanceClearingDuringAResponseCannotBeUndoneByItsLateSuccess() throws Exception {
         File directory = temporary.newFolder();
         try (MockWebServer server = new MockWebServer()) {

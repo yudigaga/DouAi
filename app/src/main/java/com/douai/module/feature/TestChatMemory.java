@@ -21,7 +21,14 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Bounded private test-chat history. Epochs prevent an older request from undoing Clear. */
 public final class TestChatMemory {
     public static final int MAX_IMAGE_BYTES = 12 * 1024 * 1024;
-    private static final int MAX_FILE_BYTES = 20 * 1024 * 1024;
+    private static final int LEGACY_VERSION = 1;
+    private static final int MIXED_VERSION = 2;
+    private static final int MODEL_TURN = 0;
+    private static final int DISPLAY_TURN = 1;
+    private static final int MAX_ROUNDS = 50;
+    private static final int MAX_SETTINGS_NAME = 24;
+    private static final int MAX_LEGACY_FILE_BYTES = 20 * 1024 * 1024;
+    private static final int MAX_MIXED_FILE_BYTES = 32 * 1024 * 1024;
     private static final int MAX_DIRECTORY_BYTES = 48 * 1024 * 1024;
     private static final ConcurrentHashMap<String, State> STATES = new ConcurrentHashMap<>();
     private static final Object IO_LOCK = new Object();
@@ -39,7 +46,7 @@ public final class TestChatMemory {
     }
 
     TestChatMemory(File directory, AiModelConfig config) {
-        rounds = Math.max(0, Math.min(50, config.contextRounds));
+        rounds = Math.max(0, Math.min(MAX_ROUNDS, config.contextRounds));
         file = new File(directory, key(config) + ".bin");
         state = STATES.computeIfAbsent(file.getAbsolutePath(), ignored -> new State());
         if (rounds == 0) clear();
@@ -47,35 +54,43 @@ public final class TestChatMemory {
 
     public long epoch() { synchronized (IO_LOCK) { return state.epoch; } }
 
-    public List<Turn> read() {
+    /** Ordinary model context, excluding all local-only Skill turns. */
+    public List<Turn> read() { return readStored(false); }
+
+    /** Visible local transcript, including Skill turns in their original order. */
+    public List<Turn> readTranscript() { return readStored(true); }
+
+    private List<Turn> readStored(boolean includeDisplay) {
         synchronized (IO_LOCK) {
             if (rounds == 0) return Collections.emptyList();
             try {
-                if (file.length() > MAX_FILE_BYTES) throw new IOException("History size");
+                long fileBytes = file.length();
+                if (fileBytes > MAX_MIXED_FILE_BYTES) throw new IOException("History size");
                 try (DataInputStream input = new DataInputStream(new java.io.FileInputStream(file))) {
-                    if (input.readInt() != 1) throw new IOException("History version");
+                    int version = input.readInt();
+                    boolean mixed = version == MIXED_VERSION;
+                    if (!mixed && version != LEGACY_VERSION) throw new IOException("History version");
+                    if (!mixed && fileBytes > MAX_LEGACY_FILE_BYTES) throw new IOException("History size");
                     int count = input.readInt();
-                    if (count < 0 || count > 50) throw new IOException("History count");
+                    if (count < 0 || count > (mixed ? 2 * MAX_ROUNDS : MAX_ROUNDS)) throw new IOException("History count");
                     List<Turn> result = new ArrayList<>();
-                    int bytes = 0;
+                    int[] bytesByKind = new int[2];
+                    int[] turnsByKind = new int[2];
                     for (int index = 0; index < count; index++) {
-                        String prompt = text(input, 16000);
-                        String document = text(input, 131072);
-                        String answer = text(input, 16000);
-                        int images = input.readInt();
-                        if (images < 0 || images > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE) throw new IOException("Images");
-                        List<ChatImage> attachments = new ArrayList<>();
-                        for (int image = 0; image < images; image++) {
-                            String mime = text(input, 100);
-                            int size = input.readInt();
-                            if (size <= 0 || size > ChatImage.MAX_BYTES || bytes + size > MAX_IMAGE_BYTES) throw new IOException("Image size");
-                            byte[] data = new byte[size];
-                            input.readFully(data);
-                            bytes += size;
-                            attachments.add(new ChatImage(mime, data));
+                        int kind = mixed ? input.readUnsignedByte() : MODEL_TURN;
+                        if ((kind != MODEL_TURN && kind != DISPLAY_TURN) || ++turnsByKind[kind] > MAX_ROUNDS) {
+                            throw new IOException("History turn");
                         }
-                        result.add(new Turn(prompt, document, attachments, answer));
+                        String prompt = text(input, 16000);
+                        String document = kind == MODEL_TURN ? text(input, 131072) : "";
+                        String answer = text(input, 16000);
+                        String settings = kind == DISPLAY_TURN ? text(input, MAX_SETTINGS_NAME * 4) : null;
+                        boolean keep = kind == MODEL_TURN || includeDisplay;
+                        List<ChatImage> attachments = readImages(input, bytesByKind, kind, keep);
+                        if (kind == MODEL_TURN) result.add(new Turn(prompt, document, attachments, answer));
+                        else if (includeDisplay) result.add(Turn.displayedSkill(prompt, answer, attachments, settings));
                     }
+                    if (mixed && input.read() != -1) throw new IOException("History trailing bytes");
                     return bounded(result);
                 }
             } catch (java.io.FileNotFoundException ignored) { return Collections.emptyList(); }
@@ -85,12 +100,44 @@ public final class TestChatMemory {
         }
     }
 
+    private static List<ChatImage> readImages(DataInputStream input, int[] bytesByKind, int kind, boolean keep)
+            throws IOException {
+        int count = input.readInt();
+        if (count < 0 || count > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE) throw new IOException("Images");
+        List<ChatImage> images = keep ? new ArrayList<>() : Collections.emptyList();
+        byte[] scratch = null;
+        for (int index = 0; index < count; index++) {
+            String mime = text(input, 100);
+            int size = input.readInt();
+            if (size <= 0 || size > ChatImage.MAX_BYTES || bytesByKind[kind] + size > MAX_IMAGE_BYTES) {
+                throw new IOException("Image size");
+            }
+            bytesByKind[kind] += size;
+            if (keep) {
+                byte[] data = new byte[size];
+                input.readFully(data);
+                images.add(new ChatImage(mime, data));
+            } else {
+                if (scratch == null) scratch = new byte[8192];
+                // Read through the record without allocating or decoding its assistant image.
+                for (int remaining = size; remaining > 0;) {
+                    int chunk = Math.min(remaining, scratch.length);
+                    input.readFully(scratch, 0, chunk);
+                    remaining -= chunk;
+                }
+            }
+        }
+        return images;
+    }
+
     public boolean append(long expectedEpoch, Turn turn) {
         synchronized (IO_LOCK) {
             if (rounds == 0 || expectedEpoch != state.epoch) return false;
-            List<Turn> turns = new ArrayList<>(read());
+            List<Turn> turns = new ArrayList<>(readTranscript());
             turns.add(turn);
             turns = bounded(turns);
+            if (turn.displayOnly && !turns.contains(turn)) return false;
+            boolean mixed = turns.stream().anyMatch(saved -> saved.displayOnly);
             File directory = file.getParentFile();
             if (!directory.isDirectory() && !directory.mkdirs()) return false;
             File temporary = null;
@@ -98,19 +145,15 @@ public final class TestChatMemory {
                 temporary = File.createTempFile("memory-", ".tmp", directory);
                 try (FileOutputStream stream = new FileOutputStream(temporary);
                      DataOutputStream output = new DataOutputStream(stream)) {
-                    output.writeInt(1);
+                    output.writeInt(mixed ? MIXED_VERSION : LEGACY_VERSION);
                     output.writeInt(turns.size());
                     for (Turn saved : turns) {
+                        if (mixed) output.writeByte(saved.displayOnly ? DISPLAY_TURN : MODEL_TURN);
                         text(output, saved.prompt);
-                        text(output, saved.document);
+                        if (!saved.displayOnly) text(output, saved.document);
                         text(output, saved.answer);
-                        output.writeInt(saved.images.size());
-                        for (ChatImage image : saved.images) {
-                            text(output, image.mimeType);
-                            byte[] data = Base64.getDecoder().decode(image.base64Data);
-                            output.writeInt(data.length);
-                            output.write(data);
-                        }
+                        if (saved.displayOnly) text(output, saved.settingsSkillName == null ? "" : saved.settingsSkillName);
+                        writeImages(output, saved.displayOnly ? saved.assistantImages : saved.images);
                     }
                     output.flush();
                     stream.getFD().sync();
@@ -129,20 +172,37 @@ public final class TestChatMemory {
         }
     }
 
+    private static void writeImages(DataOutputStream output, List<ChatImage> images) throws IOException {
+        output.writeInt(images.size());
+        for (ChatImage image : images) {
+            text(output, image.mimeType);
+            byte[] data = Base64.getDecoder().decode(image.base64Data);
+            output.writeInt(data.length);
+            output.write(data);
+        }
+    }
+
     public void clear() {
         synchronized (IO_LOCK) { state.epoch++; file.delete(); }
     }
 
     private List<Turn> bounded(List<Turn> turns) {
-        int bytes = 0;
+        int[] bytesByKind = new int[2];
+        int[] turnsByKind = new int[2];
         List<Turn> retained = new ArrayList<>();
-        for (int index = turns.size() - 1; index >= 0 && retained.size() < rounds; index--) {
+        for (int index = turns.size() - 1; index >= 0 && retained.size() < rounds * 2; index--) {
             Turn turn = turns.get(index);
+            int kind = turn.displayOnly ? DISPLAY_TURN : MODEL_TURN;
+            if (turnsByKind[kind] >= rounds) continue;
+            List<ChatImage> images = turn.displayOnly ? turn.assistantImages : turn.images;
+            if (images.size() > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE) continue;
             int imageBytes = 0;
-            for (ChatImage image : turn.images) imageBytes += image.sizeBytes();
-            if (bytes + imageBytes > MAX_IMAGE_BYTES) continue;
+            for (ChatImage image : images) imageBytes += image.sizeBytes();
+            if (bytesByKind[kind] + imageBytes > MAX_IMAGE_BYTES) continue;
             if (turn.prompt.length() > 4000 || turn.document.length() > 32768 || turn.answer.length() > 4000) continue;
-            bytes += imageBytes;
+            if (turn.settingsSkillName != null && turn.settingsSkillName.length() > MAX_SETTINGS_NAME) continue;
+            turnsByKind[kind]++;
+            bytesByKind[kind] += imageBytes;
             retained.add(0, turn);
         }
         return Collections.unmodifiableList(retained);
@@ -198,11 +258,28 @@ public final class TestChatMemory {
         public final String document;
         public final List<ChatImage> images;
         public final String answer;
+        public final boolean displayOnly;
+        public final List<ChatImage> assistantImages;
+        public final String settingsSkillName;
+
         public Turn(String prompt, String document, List<ChatImage> images, String answer) {
+            this(prompt, document, images, answer, false, Collections.emptyList(), null);
+        }
+
+        public static Turn displayedSkill(String prompt, String answer, List<ChatImage> assistantImages,
+                                          String settingsSkillName) {
+            return new Turn(prompt, "", Collections.emptyList(), answer, true, assistantImages, settingsSkillName);
+        }
+
+        private Turn(String prompt, String document, List<ChatImage> images, String answer, boolean displayOnly,
+                     List<ChatImage> assistantImages, String settingsSkillName) {
             this.prompt = prompt;
             this.document = document;
             this.images = Collections.unmodifiableList(new ArrayList<>(images));
             this.answer = answer;
+            this.displayOnly = displayOnly;
+            this.assistantImages = Collections.unmodifiableList(new ArrayList<>(assistantImages));
+            this.settingsSkillName = settingsSkillName == null || settingsSkillName.isEmpty() ? null : settingsSkillName;
         }
     }
 }

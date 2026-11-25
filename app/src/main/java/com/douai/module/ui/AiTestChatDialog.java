@@ -89,6 +89,7 @@ final class AiTestChatDialog extends Dialog {
         }
         default void clear() { }
         default List<TestChatMemory.Turn> savedTurns() { return Collections.emptyList(); }
+        default TestChatMemory transcriptMemory() { return null; }
         default List<DouyinSearch.Result> searchResults() { return Collections.emptyList(); }
         default DouyinSearch searchBridge() { return null; }
     }
@@ -110,6 +111,7 @@ final class AiTestChatDialog extends Dialog {
     private static final int ERROR = Color.rgb(174, 49, 57);
     private static final int MAX_VISIBLE_TURNS = 100;
     private static final int MAX_VISIBLE_IMAGE_BYTES = 16 * 1024 * 1024;
+    private static final String DRAFT_CONTINUATION = "\n可以继续修改，或发送“帮我内置”保存。";
     private static final ExecutorService HISTORY_IO = Executors.newSingleThreadExecutor(new ThreadFactory() {
         @Override public Thread newThread(Runnable task) {
             Thread thread = new Thread(task, "DouAi-chat-history");
@@ -172,6 +174,7 @@ final class AiTestChatDialog extends Dialog {
     private int restoreGeneration;
     private int clearGeneration;
     private int thumbnailGeneration;
+    private boolean restoreStarted;
     private boolean busy;
     private boolean disposed;
     private MiuixChatEditorSurface miuixSurface;
@@ -203,14 +206,19 @@ final class AiTestChatDialog extends Dialog {
             AiModelSettings snapshot = new AiModelSettings(Collections.singletonList(config), config.id);
             return new Session() {
                 private volatile ChatCompletionClient client;
+                private TestChatMemory memory;
                 private volatile ChatCompletionClient.IsolatedTextRequest activeSkillRequest;
                 private final List<DouyinSearch.Result> found = new ArrayList<>();
                 private long searchEpoch;
                 private synchronized ChatCompletionClient client() {
-                    if (client == null) client = new ChatCompletionClient(messageContact
-                            ? TestChatMemory.messageConversation(context, config) : new TestChatMemory(context, config),
+                    if (client == null) client = new ChatCompletionClient(transcriptMemory(),
                             diagnostic -> DouAiLog.legacy(4, messageContact ? "DouAi.AiContact" : "DouAi.ModelTest", diagnostic, null));
                     return client;
+                }
+                @Override public synchronized TestChatMemory transcriptMemory() {
+                    if (memory == null) memory = messageContact ? TestChatMemory.messageConversation(context, config)
+                            : new TestChatMemory(context, config);
+                    return memory;
                 }
                 @Override public String reply(String message, List<ChatImage> images) throws Exception {
                     return client().reply(messageContact ? "message-contact" : "model-test", message, images, snapshot);
@@ -272,7 +280,6 @@ final class AiTestChatDialog extends Dialog {
                     synchronized (found) { searchEpoch++; found.clear(); }
                     client().clearHistory();
                 }
-                @Override public List<TestChatMemory.Turn> savedTurns() { return client().savedTurns(); }
             };
         }, Executors.newSingleThreadExecutor(), HISTORY_IO, useMiuix, ChatImageLoader::thumbnail,
                 messageContact, nativeViews);
@@ -500,7 +507,6 @@ final class AiTestChatDialog extends Dialog {
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) { updateSend(); }
             @Override public void afterTextChanged(Editable s) { }
         });
-        restoreConversation();
         Activity activity = ownerActivity();
         if (nativeViews != null) {
             bindNativeConversation();
@@ -634,6 +640,10 @@ final class AiTestChatDialog extends Dialog {
 
     @Override protected void onStart() {
         super.onStart();
+        if (!restoreStarted && !disposed) {
+            restoreStarted = true;
+            restoreConversation();
+        }
         if (miuixSurface != null) miuixSurface.bindBackNavigation(this);
         Window window = getWindow();
         if (window != null) sizeWindow(window.getDecorView().getRootWindowInsets());
@@ -823,8 +833,19 @@ final class AiTestChatDialog extends Dialog {
                     if (turn.stopRequested) throw new java.util.concurrent.CancellationException();
                     turn.started = true;
                 }
-                if (clearBarrier != null && !turn.manualSkill()) clearBarrier.get();
+                if (clearBarrier != null) clearBarrier.get();
                 turn.checkStopped();
+                if (turn.manualSkill()) {
+                    try {
+                        TestChatMemory memory = active.transcriptMemory();
+                        if (memory != null) {
+                            turn.transcriptEpoch = memory.epoch();
+                            turn.transcriptMemory = memory;
+                        }
+                    } catch (RuntimeException unavailable) {
+                        turn.trace.stage("local_skill_history", "outcome=unavailable");
+                    }
+                }
                 if (!selected.isEmpty()) {
                     turn.trace.stage("media_read", "attachments=" + selected.size());
                     turn.reading = true;
@@ -1057,6 +1078,7 @@ final class AiTestChatDialog extends Dialog {
             if (!turn.manualSkill() && !turn.stopRequested) {
                 answer.videos = searchVideoCards.group(turn.searchResults, turn.searchBridge, turn.analytics);
             }
+            if (turn.manualSkill()) saveSkillTranscript(turn, answer);
             state.setText("");
         } else if (turn.manualSkill()) {
             answer.text = turn.authoring != null && !turn.stopRequested ? authoringFailure(turn.authoring, failure)
@@ -1092,6 +1114,25 @@ final class AiTestChatDialog extends Dialog {
                 "response_chars=" + (reply == null ? 0 : reply.length()) + ";view_notified=true;remote_delivery=not_applicable");
     }
 
+    private void saveSkillTranscript(RequestTurn turn, ChatMessage answer) {
+        TestChatMemory memory = turn.transcriptMemory;
+        if (memory == null) return;
+        String savedAnswer = answer.text == null ? "" : answer.text;
+        if (turn.authoring != null && savedAnswer.endsWith(DRAFT_CONTINUATION)) {
+            savedAnswer = savedAnswer.substring(0, savedAnswer.length() - DRAFT_CONTINUATION.length());
+        }
+        try {
+            TestChatMemory.Turn saved = TestChatMemory.Turn.displayedSkill(turn.prompt, savedAnswer,
+                    answer.images, answer.settingsSkillName);
+            historyWorker.execute(() -> {
+                boolean written = memory.append(turn.transcriptEpoch, saved);
+                DouAiLog.event("ai_chat", "skill_history_write", written ? "saved" : "not_saved", "scope=local_display");
+            });
+        } catch (RuntimeException unavailable) {
+            turn.trace.stage("local_skill_history", "outcome=unavailable");
+        }
+    }
+
     private String completeSkillAuthoring(RequestTurn turn, SkillStore.DraftPreview draft) throws Exception {
         if (!skillStore.enabled()) throw new IllegalStateException("技能已停用");
         if (draft == null) throw new IllegalStateException("没有可用的技能草案");
@@ -1100,7 +1141,7 @@ final class AiTestChatDialog extends Dialog {
             String instruction = TextUtils.isEmpty(draft.instruction()) ? "" : "\n指令 " + draft.instruction();
             skillDraft = draft;
             return "技能草案 /" + draft.name() + " · " + output + " · 尚未保存\n"
-                    + draft.description() + instruction + "\n可以继续修改，或发送“帮我内置”保存。";
+                    + draft.description() + instruction + DRAFT_CONTINUATION;
         }
         skillDraft = draft;
         SkillStore.SaveResult result = skillStore.saveAuthoredDraft(draft);
@@ -1693,6 +1734,8 @@ final class AiTestChatDialog extends Dialog {
         boolean reading;
         List<DouyinSearch.Result> searchResults = Collections.emptyList();
         DouyinSearch searchBridge;
+        TestChatMemory transcriptMemory;
+        long transcriptEpoch;
 
         RequestTurn(int ticket, String prompt, List<ChatImage> images, List<Document> documents,
                     List<PendingAttachment> attachments, ChatMessage answer, AiSkills.Invocation skill, SkillAuthoring.Action authoring,
@@ -1939,9 +1982,13 @@ final class AiTestChatDialog extends Dialog {
     private void restoreConversation() {
         int ticket = ++restoreGeneration;
         Session active = session;
+        boolean showSkills = skillEntry != null;
         restoreLoad = historyWorker.submit(() -> {
             List<TestChatMemory.Turn> saved;
-            try { saved = active.savedTurns(); }
+            try {
+                TestChatMemory memory = active.transcriptMemory();
+                saved = memory == null ? active.savedTurns() : showSkills ? memory.readTranscript() : memory.read();
+            }
             catch (RuntimeException failure) { saved = Collections.emptyList(); }
             List<TestChatMemory.Turn> retained = new ArrayList<>();
             Map<ChatImage, Bitmap> decoded = new IdentityHashMap<>();
@@ -1949,11 +1996,12 @@ final class AiTestChatDialog extends Dialog {
             for (int index = saved.size() - 1; index >= 0 && retained.size() < MAX_VISIBLE_TURNS; index--) {
                 if (Thread.currentThread().isInterrupted()) { recycle(decoded); return; }
                 TestChatMemory.Turn turn = saved.get(index);
-                int imageBytes = imageBytes(turn.images);
+                int imageBytes = imageBytes(turn.images) + imageBytes(turn.assistantImages);
                 if (bytes + imageBytes > MAX_VISIBLE_IMAGE_BYTES) continue;
                 bytes += imageBytes;
                 retained.add(0, turn);
                 for (ChatImage image : turn.images) decoded.put(image, thumbnail(image));
+                for (ChatImage image : turn.assistantImages) decoded.put(image, thumbnail(image));
             }
             main.post(() -> {
                 if (disposed || ticket != restoreGeneration) { recycle(decoded); return; }
@@ -1966,8 +2014,10 @@ final class AiTestChatDialog extends Dialog {
                     if (!turn.document.isEmpty()) {
                         user.documentLabels.add("文本");
                     }
-                    addMessage(assistantName, turn.answer, false, Collections.emptyList());
+                    ChatMessage answer = addMessage(assistantName, turn.answer, false, turn.assistantImages);
+                    answer.settingsSkillName = turn.settingsSkillName;
                 }
+                messageRows.notifyDataSetChanged();
                 scrollToBottom();
                 updateSend();
             });

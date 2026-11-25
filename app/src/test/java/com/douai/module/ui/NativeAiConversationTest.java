@@ -14,6 +14,7 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Rect;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Looper;
@@ -199,6 +200,55 @@ public final class NativeAiConversationTest {
         ShadowLooper.idleMainLooper();
         assertNotNull(image.getDrawable());
         assertTrue(session.prompts.isEmpty());
+    }
+
+    @Test public void reopenedContactRendersSavedNativeTextAndAssistantImageInItsOwnScope() throws Exception {
+        SkillServices services = SkillServices.forContext(activity);
+        services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
+        SkillStore.forContext(activity).installGenerated(SkillStore.mockDraft("生图"));
+        AiModelConfig config = nativeContactConfiguration();
+
+        dialog.dismiss();
+        FakeSession first = new FakeSession();
+        first.transcriptMemory = TestChatMemory.messageConversation(activity, config);
+        open(first, null, ChatImageLoader::thumbnail, true);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/摘要 首句。第二句。第三句。");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals("首句。第二句。", renderedText(1));
+        submit("/生图 白猫");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(4, messageCount());
+        assertTrue(first.prompts.isEmpty());
+
+        dialog.dismiss();
+        FakeSession reopened = new FakeSession();
+        reopened.transcriptMemory = TestChatMemory.messageConversation(activity, config);
+        open(reopened, null, ChatImageLoader::thumbnail, true);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(4, messageCount());
+        assertEquals("/摘要 首句。第二句。第三句。", renderedText(0));
+        assertEquals("首句。第二句。", renderedText(1));
+        assertEquals("/生图 白猫", renderedText(2));
+        assertNull(row(2).findViewWithTag("ai.chat.image"));
+        ImageView image = row(3).findViewWithTag("ai.chat.image");
+        assertNotNull(image);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals("生成的图片", image.getContentDescription());
+        assertTrue(image.getDrawable() instanceof BitmapDrawable);
+        assertTrue(((BitmapDrawable) image.getDrawable()).getBitmap().getWidth() > 0);
+        assertTrue(reopened.prompts.isEmpty());
+        assertTrue(reopened.skillModelInputs.isEmpty());
+        assertTrue(new TestChatMemory(activity, config).readTranscript().isEmpty());
+        AiModelConfig other = AiModelConfig.fromJson(config.toJson().put("id", "other-native-contact"));
+        assertTrue(TestChatMemory.messageConversation(activity, other).readTranscript().isEmpty());
     }
 
     @Test public void explicitPluralImageRequestNeverInstallsATextDraftInContact() throws Exception {
@@ -749,22 +799,32 @@ public final class NativeAiConversationTest {
 
     private void open(FakeSession selected, AiTestChatDialog.MediaLoader mediaLoader,
                       AiTestChatDialog.ThumbnailLoader thumbnailLoader) throws Exception {
+        open(selected, mediaLoader, thumbnailLoader, false);
+    }
+
+    private void open(FakeSession selected, AiTestChatDialog.MediaLoader mediaLoader,
+                      AiTestChatDialog.ThumbnailLoader thumbnailLoader, boolean enableSkills) throws Exception {
         session = selected;
         nativeViews = HostNativeChatViews.create(activity);
         worker = new ManualExecutor();
         historyWorker = new ManualExecutor();
-        AiModelConfig config = AiModelConfig.fromJson(new JSONObject().put("id", "native-contact")
-                .put("name", "模型配置").put("messageContactEnabled", true)
-                .put("messageContactName", "小助手").put("apiEndpoint", "https://example.com/v1")
-                .put("modelName", "test-model"));
+        AiModelConfig config = nativeContactConfiguration();
         dialog = mediaLoader == null ? new AiTestChatDialog(activity, config, () -> selected, worker, historyWorker,
                 false, thumbnailLoader, true, nativeViews)
                 : new AiTestChatDialog(activity, config, () -> selected, worker, historyWorker,
                 false, thumbnailLoader, true, nativeViews, mediaLoader);
         dialog.setOwnerActivity(activity);
+        if (enableSkills) dialog.enableSkills(AiSkills.Entry.CONTACT);
         dialog.show();
         send = nativeViews.root.findViewWithTag("ai.chat.send");
         messages = nativeViews.root.findViewWithTag("ai.chat.messages");
+    }
+
+    private static AiModelConfig nativeContactConfiguration() throws Exception {
+        return AiModelConfig.fromJson(new JSONObject().put("id", "native-contact")
+                .put("name", "模型配置").put("messageContactEnabled", true)
+                .put("messageContactName", "小助手").put("apiEndpoint", "https://example.com/v1")
+                .put("modelName", "test-model"));
     }
 
     private void installHostVersion(String version, long code) {
@@ -968,6 +1028,7 @@ public final class NativeAiConversationTest {
         final List<List<ChatImage>> images = new ArrayList<>();
         final List<String> documents = new ArrayList<>();
         List<TestChatMemory.Turn> saved = Collections.emptyList();
+        TestChatMemory transcriptMemory;
         Exception failure;
         String answer = "模型回复";
         int cancelCalls;
@@ -1004,9 +1065,13 @@ public final class NativeAiConversationTest {
         }
         @Override public List<TestChatMemory.Turn> savedTurns() {
             historyOnMain = Looper.myLooper() == Looper.getMainLooper();
-            return saved;
+            return transcriptMemory == null ? saved : transcriptMemory.read();
         }
-        @Override public void clear() { saved = Collections.emptyList(); }
+        @Override public TestChatMemory transcriptMemory() { return transcriptMemory; }
+        @Override public void clear() {
+            saved = Collections.emptyList();
+            if (transcriptMemory != null) transcriptMemory.clear();
+        }
         @Override public void cancel() { cancelCalls++; }
     }
 
