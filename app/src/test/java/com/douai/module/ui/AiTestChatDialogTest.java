@@ -3,6 +3,8 @@ package com.douai.module.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
@@ -1086,7 +1088,7 @@ public final class AiTestChatDialogTest {
         var transcript = session.transcriptMemory.readTranscript();
         assertEquals(1, transcript.size());
         assertEquals(VIDEO_AUTHORING_REQUEST, transcript.get(0).prompt);
-        assertNull(transcript.get(0).artifact);
+        assertEquals(videoDraftWithoutProvider(), ((SkillResult.Declaration) transcript.get(0).artifact).json());
     }
 
     @Test public void workSlashSkillPreviewsAndRequiresAnExplicitInstall() throws Exception {
@@ -1216,6 +1218,115 @@ public final class AiTestChatDialogTest {
         assertTrue(store.list().isEmpty());
     }
 
+    @Test public void workCopiesCompleteMessageTextOnlyAfterChoosingCopy() throws Exception {
+        FakeSession session = new FakeSession();
+        session.answer = "```json\n  {\"text\": \"x  y\", \"flag\": false}\n```\n  保留原样";
+        reopen(session, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        ClipboardManager clipboard = activity.getSystemService(ClipboardManager.class);
+        clipboard.setPrimaryClip(ClipData.newPlainText("test", "原有剪贴板"));
+
+        String prompt = "第一行  \n  第二行 {\"key\": \":\"}\n保留缩进";
+        submit(prompt);
+        TextView placeholder = messageRow(1).findViewWithTag("ai.chat.answer");
+        assertEquals("正在回复…", placeholder.getText().toString());
+        assertFalse(placeholder.performLongClick());
+        assertEquals("原有剪贴板", clipboardText(clipboard));
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(prompt, copyDisplayedMessage(0, "ai.chat.user", "复制消息", clipboard));
+        assertEquals(session.answer, copyDisplayedMessage(1, "ai.chat.answer", "复制消息", clipboard));
+    }
+
+    @Test public void contactCopiesRestoredMultilineAnswerVerbatimWithoutReplay() throws Exception {
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        String answer = "旧回复  \n\n```json\n  {\"a\": [\"b\", \"c\"]}\n```\n结束  ";
+        assertTrue(restored.transcriptMemory.append(restored.transcriptMemory.epoch(),
+                new TestChatMemory.Turn("历史问题", "", List.of(), answer)));
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        ClipboardManager clipboard = activity.getSystemService(ClipboardManager.class);
+        clipboard.setPrimaryClip(ClipData.newPlainText("test", "原有剪贴板"));
+
+        assertEquals(answer, copyDisplayedMessage(1, "ai.chat.answer", "复制消息", clipboard));
+        assertTrue(restored.prompts.isEmpty());
+        assertTrue(restored.skillInputs.isEmpty());
+    }
+
+    @Test public void validatedPreviewCopiesExactDeclarationSeparatelyFromSummaryAfterRestore() throws Exception {
+        FakeSession author = new FakeSession();
+        author.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        JSONObject provider = new JSONObject(videoDeclarationPayload());
+        JSONObject manifest = new JSONObject(videoDraftWithoutProvider())
+                .put("http", provider.getJSONObject("http"))
+                .put("configFields", provider.getJSONArray("configFields"));
+        String rawDeclaration = " \n" + manifest.toString(2) + "\n  ";
+        author.skillReplies.add(rawDeclaration);
+        reopen(author, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit("/技能 生成一个视频技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        String summary = lastAnswer();
+        assertTrue(summary.contains("技能草案 /电影片段"));
+        assertTrue(summary.contains("尚未保存"));
+        assertFalse(summary.contains("schemaVersion"));
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+        ClipboardManager clipboard = activity.getSystemService(ClipboardManager.class);
+        clipboard.setPrimaryClip(ClipData.newPlainText("test", "原有剪贴板"));
+        assertEquals(rawDeclaration, copyDisplayedMessage(1, "ai.chat.answer", "复制技能声明", clipboard));
+
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        String restoredSummary = lastAnswer();
+        assertTrue(restoredSummary.contains("技能草案 /电影片段"));
+        assertTrue(summary.startsWith(restoredSummary + "\n"));
+        assertFalse(restoredSummary.contains("schemaVersion"));
+        clipboard.setPrimaryClip(ClipData.newPlainText("test", "恢复后的剪贴板"));
+        assertEquals(rawDeclaration, copyDisplayedMessage(1, "ai.chat.answer", "复制技能声明", clipboard));
+        assertTrue(restored.prompts.isEmpty());
+        assertTrue(restored.skillInputs.isEmpty());
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+    }
+
+    private String copyDisplayedMessage(int row, String tag, String action, ClipboardManager clipboard) {
+        String before = clipboardText(clipboard);
+        View message = messageRow(row).findViewWithTag(tag);
+        assertNotNull(message);
+        assertTrue("Long press should open the copy menu", message.performLongClick());
+        ShadowLooper.idleMainLooper();
+        assertEquals("Opening the menu must leave the clipboard unchanged", before, clipboardText(clipboard));
+        AlertDialog menu = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(menu.isShowing());
+        ListView items = menu.getListView();
+        for (int index = 0; index < items.getCount(); index++) {
+            if (action.equals(String.valueOf(items.getAdapter().getItem(index)))) {
+                org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(menu).clickOnItem(index);
+                ShadowLooper.idleMainLooper();
+                return clipboardText(clipboard);
+            }
+        }
+        throw new AssertionError("Missing menu option " + action);
+    }
+
+    private static String clipboardText(ClipboardManager clipboard) {
+        return clipboard.getPrimaryClip().getItemAt(0).getText().toString();
+    }
+
     @Test public void pendingVideoCanSaveADeclarationAndExplicitlyConfigureItFromChat() throws Exception {
         FakeSession session = new FakeSession();
         session.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
@@ -1237,6 +1348,15 @@ public final class AiTestChatDialogTest {
         SkillStore.Detail original = store.detail("电影片段");
         assertTrue(original.pending());
         assertNull(original.manifest().http());
+        String fencedDeclaration = "```json\n" + videoDeclarationPayload() + "```";
+        session.answer = fencedDeclaration;
+        submit("请展示接口说明");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        ClipboardManager clipboard = activity.getSystemService(ClipboardManager.class);
+        clipboard.setPrimaryClip(ClipData.newPlainText("test", "原有剪贴板"));
+        assertEquals(fencedDeclaration, copyDisplayedMessage(messageCount() - 1, "ai.chat.answer", "复制消息", clipboard));
+
         AlertDialog settings = openChatSkillSettings("电影片段");
         View body = settings.getWindow().getDecorView();
         View openDeclaration = body.findViewWithTag("skills.detail.video_declaration.open");
@@ -1260,13 +1380,9 @@ public final class AiTestChatDialogTest {
         assertNull(stillPending.manifest().http());
         assertNull(stillPending.customConfiguration());
 
-        input.setText("""
-                {"http":{"version":1,"label":"视频接口","request":{"prompt":"argument","seconds":"config.seconds"},
-                 "response":"job_id","video":{"statusPath":"/v1/jobs/{id}","cancelPath":"/v1/jobs/{id}/cancel",
-                 "cancelMethod":"POST","downloadPath":"/v1/jobs/{id}/content","idField":"id","stateField":"status",
-                 "states":{"waiting":"queued","working":"running","done":"completed","error":"failed","stop":"cancelled"}}},
-                 "configFields":[{"key":"seconds","label":"时长","type":"integer","required":true,"min":1,"max":10}]}
-                """);
+        input.setText("");
+        assertTrue(input.onTextContextMenuItem(android.R.id.paste));
+        assertEquals(fencedDeclaration, input.getText().toString());
         assertTrue(save.performClick());
         ShadowLooper.idleMainLooper();
         assertFalse(declaration.isShowing());
@@ -1305,6 +1421,16 @@ public final class AiTestChatDialogTest {
         assertTrue(jobs.list(new SkillVideoJobs.Scope(AiSkills.Entry.WORK,
                 session.transcriptMemory.conversationKey())).isEmpty());
         assertTrue(worker.tasks.isEmpty());
+    }
+
+    private static String videoDeclarationPayload() {
+        return """
+                {"http":{"version":1,"label":"视频接口","request":{"prompt":"argument","seconds":"config.seconds"},
+                 "response":"job_id","video":{"statusPath":"/v1/jobs/{id}","cancelPath":"/v1/jobs/{id}/cancel",
+                 "cancelMethod":"POST","downloadPath":"/v1/jobs/{id}/content","idField":"id","stateField":"status",
+                 "states":{"waiting":"queued","working":"running","done":"completed","error":"failed","stop":"cancelled"}}},
+                 "configFields":[{"key":"seconds","label":"时长","type":"integer","required":true,"min":1,"max":10}]}
+                """;
     }
 
     @Test public void declaredVideoRoutesRequireConfiguredFieldsAndConsentBeforeAnyJob() throws Exception {

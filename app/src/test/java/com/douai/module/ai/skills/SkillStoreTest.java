@@ -105,6 +105,59 @@ public class SkillStoreTest {
         assertNotNull(store.saveVideoDeclaration(changed, videoHttp().toString()).manifest().http());
     }
 
+    @Test public void aSingleCopiedJsonFenceAcceptsEachSupportedVideoDeclarationShape() throws Exception {
+        JSONObject wrapper = new JSONObject().put("http", videoHttp()).put("configFields", new JSONArray());
+        JSONObject full = videoDraft("复制来的名称").put("http", videoHttp());
+        for (String clipboard : java.util.List.of(
+                "```json\n" + videoHttp().toString(2) + "\n```",
+                "```\r\n" + wrapper.toString(2).replace("\n", "\r\n") + "\r\n```\r\n",
+                "\n```json\n" + full.toString(2) + "\n```\n")) {
+            File root = temp.newFolder();
+            SkillStore store = videoStore(root);
+            saveVideoDraft(store, videoDraft("镜头动画"));
+            SkillStore.Detail saved = store.saveVideoDeclaration(store.detail("镜头动画"), clipboard);
+
+            assertTrue(saved.pending());
+            assertEquals("镜头动画", saved.name());
+            assertEquals("/v1/jobs/{id}", saved.manifest().http().video().statusPath());
+            assertNull(saved.customConfiguration());
+            assertTrue(store.list().isEmpty());
+            assertEquals(saved.deleteTarget(), videoStore(root).detail("镜头动画").deleteTarget());
+        }
+    }
+
+    @Test public void fencedVideoDeclarationRejectsProseExtraBlocksAndUnsafeJsonWithoutWriting() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        saveVideoDraft(store, videoDraft("镜头动画"));
+        SkillStore.Detail before = store.detail("镜头动画");
+        var catalog = new File(root, "catalog.json").toPath();
+        String untouched = Files.readString(catalog);
+        String body = videoHttp().toString();
+        String fenced = "```json\n" + body + "\n```";
+        String secret = "synthetic-fenced-bearer-value";
+        String withSecret = videoHttp().put("headers", new JSONObject().put("Authorization", "Bearer " + secret))
+                .toString();
+        for (String clipboard : java.util.List.of(
+                "接口配置如下\n" + fenced,
+                fenced + "\n请检查",
+                fenced + "\n\n" + fenced,
+                "```yaml\n" + body + "\n```",
+                "```json\n" + body,
+                body + "\n```",
+                "```json\n" + body + "\n````",
+                "```json\n" + body.replaceFirst("\\{", "{\"version\":1,") + "\n```",
+                "```json\n" + withSecret + "\n```")) {
+            var invalid = assertThrows(SkillManifest.Invalid.class, () -> store.saveVideoDeclaration(before, clipboard));
+            assertEquals("视频接口声明或配置字段无效", invalid.getMessage());
+            assertFalse(invalid.toString().contains(secret));
+            assertNull(invalid.getCause());
+        }
+        assertEquals(untouched, Files.readString(catalog));
+        assertEquals(before.deleteTarget(), store.detail("镜头动画").deleteTarget());
+        assertNull(store.detail("镜头动画").manifest().http());
+    }
+
     @Test public void fullVideoManifestCannotReplaceTheDraftIdentityOrInheritTheActiveBinding() throws Exception {
         File root = temp.newFolder();
         SkillStore store = videoStore(root);

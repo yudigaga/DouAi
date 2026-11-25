@@ -80,13 +80,13 @@ final class ManualAiToolProtocol {
         }
     }
 
-    static Turn json(String protocol, String body) throws IOException {
-        try { return parse(protocol, new JSONObject(body)); }
+    static Turn json(String protocol, String body, boolean preserveReply) throws IOException {
+        try { return parse(protocol, new JSONObject(body), preserveReply); }
         catch (ResponsesAnalysisStream.Failure failure) { throw failure; }
         catch (Exception invalid) { throw failure(ResponsesAnalysisStream.Failure.Kind.FORMAT); }
     }
 
-    private static Turn parse(String protocol, JSONObject body) throws Exception {
+    private static Turn parse(String protocol, JSONObject body, boolean preserveReply) throws Exception {
         if (nonNull(body, "error")) throw failure(ResponsesAnalysisStream.Failure.Kind.INCOMPLETE);
         List<Call> calls = new ArrayList<>();
         StringBuilder text = new StringBuilder();
@@ -162,8 +162,12 @@ final class ManualAiToolProtocol {
                 if (!part.optBoolean("thought") && part.opt("text") instanceof String) append(text, part.getString("text"));
             }
         }
-        if (calls.isEmpty() && text.toString().trim().isEmpty()) throw failure(ResponsesAnalysisStream.Failure.Kind.EMPTY);
-        return new Turn(text.toString().trim(), message, output, calls);
+        String reply = text.toString();
+        if (!preserveReply) reply = reply.trim();
+        if (calls.isEmpty() && (preserveReply ? !ChatCompletionClient.hasNonBlankReply(reply) : reply.isEmpty())) {
+            throw failure(ResponsesAnalysisStream.Failure.Kind.EMPTY);
+        }
+        return new Turn(reply, message, output, calls);
     }
 
     private static void add(List<Call> calls, String id, String name, JSONObject args) throws Exception {
@@ -212,14 +216,15 @@ final class ManualAiToolProtocol {
         }
     }
 
-    static Turn stream(String protocol, InputStream source, ResponsesAnalysisStream.IoGuard guard,
+    static Turn stream(String protocol, InputStream source, boolean preserveReply, ResponsesAnalysisStream.IoGuard guard,
                        ResponsesAnalysisStream.PartialText partial) throws IOException {
-        return new Decoder(protocol, source, guard, partial).read();
+        return new Decoder(protocol, source, preserveReply, guard, partial).read();
     }
 
     private static final class Decoder {
         final String protocol;
         final InputStream source;
+        final boolean preserveReply;
         final ResponsesAnalysisStream.IoGuard guard;
         final ResponsesAnalysisStream.PartialText partial;
         final StringBuilder data = new StringBuilder(), text = new StringBuilder();
@@ -233,8 +238,9 @@ final class ManualAiToolProtocol {
         int frames;
         Turn result;
 
-        Decoder(String protocol, InputStream source, ResponsesAnalysisStream.IoGuard guard, ResponsesAnalysisStream.PartialText partial) {
-            this.protocol = protocol; this.source = source; this.guard = guard; this.partial = partial;
+        Decoder(String protocol, InputStream source, boolean preserveReply, ResponsesAnalysisStream.IoGuard guard,
+                ResponsesAnalysisStream.PartialText partial) {
+            this.protocol = protocol; this.source = source; this.preserveReply = preserveReply; this.guard = guard; this.partial = partial;
         }
 
         Turn read() throws IOException {
@@ -344,7 +350,7 @@ final class ManualAiToolProtocol {
             if (!declared.isEmpty() && !declared.equals(type)) throw failure(ResponsesAnalysisStream.Failure.Kind.FORMAT);
             if ("response.output_text.delta".equals(type)) append(text, string(event, "delta"));
             else if ("response.completed".equals(type)) {
-                result = parse(protocol, event.getJSONObject("response")); text.setLength(0); append(text, result.text);
+                result = parse(protocol, event.getJSONObject("response"), preserveReply); text.setLength(0); append(text, result.text);
                 finished = terminal = true;
             } else if ("response.failed".equals(type) || "response.incomplete".equals(type) || "error".equals(type)) throw failure(ResponsesAnalysisStream.Failure.Kind.INCOMPLETE);
         }
@@ -424,7 +430,7 @@ final class ManualAiToolProtocol {
                         envelope = new JSONObject().put("candidates", new JSONArray().put(new JSONObject().put("finishReason", reason)
                                 .put("content", new JSONObject().put("role", "model").put("parts", geminiParts))));
                     }
-                    result = parse(protocol, envelope);
+                    result = parse(protocol, envelope, preserveReply);
                 }
                 return result;
             } catch (ResponsesAnalysisStream.Failure failure) { throw failure; }

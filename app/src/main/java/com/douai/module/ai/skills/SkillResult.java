@@ -2,6 +2,7 @@ package com.douai.module.ai.skills;
 
 import com.douai.module.feature.ChatImage;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -47,6 +48,19 @@ public interface SkillResult {
     record Video(UUID requestId) implements SkillResult {
         public Video { Objects.requireNonNull(requestId); }
         @Override public Type type() { return Type.VIDEO; }
+    }
+
+    /** Validated source JSON shown as a local conversation artifact. */
+    record Declaration(String json) implements SkillResult {
+        public Declaration {
+            SkillStore.validateAuthoredDraft(json);
+            if (!StandardCharsets.UTF_8.newEncoder().canEncode(json)) {
+                throw new IllegalArgumentException("技能定义包含无效字符");
+            }
+        }
+
+        @Override public Type type() { return Type.TEXT; }
+        @Override public String toString() { return "SkillResult.Declaration"; }
     }
 
 }

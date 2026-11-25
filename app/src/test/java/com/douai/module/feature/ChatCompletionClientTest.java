@@ -63,6 +63,44 @@ public final class ChatCompletionClientTest {
         }
     }
 
+    @Test public void jsonRepliesKeepTheirBoundaryTextOnlyInManualChatEvenWithoutSavedHistory() throws Exception {
+        String raw = "\n\n \t```json\r\n{\"描述\":\"样例\"}\r\n```\n \t";
+        for (String protocol : AiModelConfig.PROTOCOLS) {
+            for (boolean requestedStream : new boolean[]{false, true}) try (MockWebServer server = new MockWebServer()) {
+                server.start();
+                AiModelSettings profile = settings(config(server, protocol, true).put("contextRounds", 0)
+                        .put("responseMode", requestedStream ? "streaming" : "non_streaming"));
+                TestChatMemory memory = new TestChatMemory(org.robolectric.RuntimeEnvironment.getApplication(), profile.selected());
+                ChatCompletionClient manual = new ChatCompletionClient(memory, null);
+                String envelope = protocolJsonReply(protocol, raw, requestedStream);
+                server.enqueue(json(envelope));
+                server.enqueue(json(envelope));
+                server.enqueue(json(protocolJsonReply(protocol, "\n\t\u3000\u00a0 ", requestedStream)));
+
+                assertEquals(protocol, raw, manual.reply("test-chat", "ping", profile));
+                assertTrue(manual.savedTurns().isEmpty());
+                assertEquals(protocol, raw.trim(), new ChatCompletionClient().reply("automation", "ping", profile));
+                ChatCompletionClient.ReplyFailure blank = assertThrows(ChatCompletionClient.ReplyFailure.class,
+                        () -> manual.reply("test-chat", "blank result", profile));
+                assertEquals(protocol, ChatCompletionClient.ReplyFailure.Kind.EMPTY, blank.kind());
+                assertEquals(3, server.getRequestCount());
+            }
+        }
+    }
+
+    private static String protocolJsonReply(String protocol, String text, boolean nestedResponses) throws Exception {
+        String value = JSONObject.quote(text);
+        return switch (protocol) {
+            case AiModelConfig.CHAT -> "{\"choices\":[{\"message\":{\"content\":" + value + "}}]}";
+            case AiModelConfig.RESPONSES -> nestedResponses
+                    ? "{\"output_text\":\" \\t\",\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":" + value + "}]}]}"
+                    : "{\"output_text\":" + value + "}";
+            case AiModelConfig.ANTHROPIC -> "{\"content\":[{\"type\":\"text\",\"text\":" + value + "}]}";
+            case AiModelConfig.GEMINI -> "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":" + value + "}]}}]}";
+            default -> throw new AssertionError(protocol);
+        };
+    }
+
     @Test public void lateJsonResponseCannotCommitHistoryAfterTimeoutOrCancel() throws Exception {
         for (boolean cancel : new boolean[]{false, true}) {
             ExecutorService worker = Executors.newFixedThreadPool(2);

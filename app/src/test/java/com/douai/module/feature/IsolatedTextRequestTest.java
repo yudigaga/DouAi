@@ -39,6 +39,14 @@ public final class IsolatedTextRequestTest {
     private static final String HEADER_KEY = "fixture-gateway-secret";
     private static final String HTTPS = "https://model.example.test";
 
+    @Test public void isolatedReplyKeepsItsBoundariesOnlyWhenTheCallerOptsIn() throws Exception {
+        String raw = "\n  {\"value\":1}\r\n\t ";
+        String body = new JSONObject().put("output_text", raw).toString();
+        AiModelSettings profile = settings(AiModelConfig.RESPONSES, HTTPS);
+        assertEquals(raw.trim(), execute(new Fixture(body).request(), profile, INPUT));
+        assertEquals(raw, execute(new Fixture(body).request(true), profile, INPUT));
+    }
+
     @Test public void allProtocolsSendOnlyTheSelectedProfileAndOneTextTurn() throws Exception {
         String[][] formats = {
                 {AiModelConfig.CHAT, "/chat/completions", "Authorization", "Bearer " + KEY,
@@ -219,11 +227,17 @@ public final class IsolatedTextRequestTest {
         Fixture(String response) { this.response = response.getBytes(StandardCharsets.UTF_8); }
 
         ChatCompletionClient.IsolatedTextRequest request() {
-            return new ChatCompletionClient.IsolatedTextRequest(url -> {
-                opens.incrementAndGet();
-                connection = new RecordingConnection(url, response, responsePending, holdResponse ? responseGate : null);
-                return connection;
-            });
+            return new ChatCompletionClient.IsolatedTextRequest(this::open);
+        }
+
+        ChatCompletionClient.IsolatedTextRequest request(boolean preserveReply) {
+            return new ChatCompletionClient.IsolatedTextRequest(this::open, preserveReply);
+        }
+
+        private HttpURLConnection open(URL url) {
+            opens.incrementAndGet();
+            connection = new RecordingConnection(url, response, responsePending, holdResponse ? responseGate : null);
+            return connection;
         }
     }
 

@@ -9,6 +9,8 @@ import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -36,6 +38,7 @@ public final class TestChatMemory {
     private static final int MAX_DIRECTORY_BYTES = 48 * 1024 * 1024;
     private static final int MAX_ARTIFACT_PAYLOAD = 48 * 1024;
     private static final int MAX_ARTIFACT_BYTES = 1024 * 1024;
+    private static final String DECLARATION_ARTIFACT = "skill_json";
     private static final ConcurrentHashMap<String, State> STATES = new ConcurrentHashMap<>();
     private static final Object IO_LOCK = new Object();
     private final File file;
@@ -103,12 +106,24 @@ public final class TestChatMemory {
                         if (artifacts && kind == DISPLAY_TURN) {
                             String type = text(input, 12);
                             if (!type.isEmpty()) {
-                                String payload = text(input, MAX_ARTIFACT_PAYLOAD);
+                                int size = input.readInt();
+                                int limit = DECLARATION_ARTIFACT.equals(type) ? MAX_MIXED_FILE_BYTES : MAX_ARTIFACT_PAYLOAD;
+                                if (size < 0 || size > limit) throw new IOException("History artifact size");
                                 // v3 included retired local video fixtures. Consume their record without restoring it.
-                                if (SkillResult.Type.VIDEO.wireName().equals(type)) continue;
-                                artifactBytes += utf8Length(payload);
-                                if (artifactBytes > MAX_ARTIFACT_BYTES) throw new IOException("History artifact size");
-                                if (includeDisplay) artifact = readArtifact(type, payload);
+                                if (SkillResult.Type.VIDEO.wireName().equals(type)) {
+                                    skipArtifactBytes(input, size);
+                                    continue;
+                                }
+                                boolean withinBudget = size <= MAX_ARTIFACT_PAYLOAD
+                                        && artifactBytes + size <= MAX_ARTIFACT_BYTES;
+                                if (withinBudget) artifactBytes += size;
+                                if (includeDisplay && withinBudget) {
+                                    byte[] payload = new byte[size];
+                                    input.readFully(payload);
+                                    artifact = readArtifact(type, payload);
+                                } else {
+                                    skipArtifactBytes(input, size);
+                                }
                             }
                         }
                         if (kind == MODEL_TURN) result.add(new Turn(prompt, document, attachments, answer));
@@ -183,8 +198,7 @@ public final class TestChatMemory {
                         if (saved.displayOnly) text(output, saved.settingsSkillName == null ? "" : saved.settingsSkillName);
                         writeImages(output, saved.displayOnly ? saved.assistantImages : saved.images);
                         if (artifacts && saved.displayOnly) {
-                            text(output, saved.artifact == null ? "" : saved.artifact instanceof SkillResult.Video
-                                    ? "video_job" : saved.artifact.type().wireName());
+                            text(output, artifactType(saved.artifact));
                             if (saved.artifact != null) text(output, artifactPayload(saved.artifact));
                         }
                     }
@@ -247,7 +261,23 @@ public final class TestChatMemory {
         return Collections.unmodifiableList(retained);
     }
 
-    private static SkillResult readArtifact(String type, String payload) {
+    private static void skipArtifactBytes(DataInputStream input, int size) throws IOException {
+        byte[] scratch = new byte[Math.min(size, 8192)];
+        for (int remaining = size; remaining > 0;) {
+            int chunk = Math.min(remaining, scratch.length);
+            input.readFully(scratch, 0, chunk);
+            remaining -= chunk;
+        }
+    }
+
+    private static SkillResult readArtifact(String type, byte[] bytes) {
+        if (DECLARATION_ARTIFACT.equals(type)) {
+            try {
+                String raw = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
+                return new SkillResult.Declaration(raw);
+            } catch (CharacterCodingException | IllegalArgumentException invalid) { return null; }
+        }
+        String payload = new String(bytes, StandardCharsets.UTF_8);
         if ("video_job".equals(type)) {
             try {
                 UUID id = UUID.fromString(payload);
@@ -262,9 +292,17 @@ public final class TestChatMemory {
     }
 
     private static String artifactPayload(SkillResult artifact) {
+        if (artifact instanceof SkillResult.Declaration declaration) return declaration.json();
         if (artifact instanceof SkillResult.Table table) return table.table().toJson();
         if (artifact instanceof SkillResult.Video video) return video.requestId().toString();
         throw new IllegalArgumentException("Unsupported history artifact");
+    }
+
+    private static String artifactType(SkillResult artifact) {
+        if (artifact == null) return "";
+        if (artifact instanceof SkillResult.Declaration) return DECLARATION_ARTIFACT;
+        if (artifact instanceof SkillResult.Video) return "video_job";
+        return artifact.type().wireName();
     }
 
     private static int utf8Length(String text) { return text.getBytes(StandardCharsets.UTF_8).length; }

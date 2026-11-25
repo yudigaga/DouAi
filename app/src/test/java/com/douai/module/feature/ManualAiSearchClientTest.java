@@ -93,6 +93,38 @@ public final class ManualAiSearchClientTest {
         }
     }
 
+    @Test public void chatSearchKeepsRawJsonAndStreamRepliesWhileNullMemoryStillTrims() throws Exception {
+        String protocol = AiModelConfig.RESPONSES;
+        String raw = "\n  ```json\r\n{\"说明\":\"样例\"}\r\n```\n\t ";
+        for (boolean streaming : new boolean[]{false, true}) try (MockWebServer server = new MockWebServer()) {
+            AiModelSettings profile = settings(server, protocol, streaming);
+            TestChatMemory memory = new TestChatMemory(temporary.newFolder(), profile.selected());
+            ChatCompletionClient chat = new ChatCompletionClient(memory, null);
+            AtomicInteger searches = new AtomicInteger();
+            List<String> partials = new ArrayList<>();
+            server.enqueue(searchAnswer(protocol, raw, streaming));
+            server.enqueue(searchAnswer(protocol, raw, streaming));
+            server.enqueue(searchAnswer(protocol, "  \n\t\u3000\u00a0 ", streaming));
+
+            assertEquals(raw, reply(chat, profile, search(searches), partials::add));
+            assertEquals(raw, partials.get(partials.size() - 1));
+            assertEquals(raw, memory.read().get(0).answer);
+            assertEquals(raw.trim(), reply(new ChatCompletionClient(), profile, search(searches), ignored -> { }));
+            var blank = assertThrows(ChatCompletionClient.ReplyFailure.class,
+                    () -> reply(chat, profile, search(searches), ignored -> { }));
+            assertEquals(ChatCompletionClient.ReplyFailure.Kind.EMPTY, blank.kind());
+            assertEquals(1, memory.read().size());
+            assertEquals(0, searches.get());
+            assertEquals(3, server.getRequestCount());
+        }
+    }
+
+    private static MockResponse searchAnswer(String protocol, String text, boolean streaming) throws Exception {
+        JSONObject completed = answer(protocol, text);
+        return streaming ? sse(frame(new JSONObject().put("type", "response.output_text.delta").put("delta", text))
+                + frame(new JSONObject().put("type", "response.completed").put("response", completed))) : json(completed);
+    }
+
     @Test public void toolsFromAUserRoleNeverReachTheHostInAnyProtocol() throws Exception {
         for (String protocol : AiModelConfig.PROTOCOLS) try (MockWebServer server = new MockWebServer()) {
             JSONObject invalid = tool(protocol, "one", "PRIVATE_QUERY");

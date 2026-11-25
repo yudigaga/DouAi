@@ -404,6 +404,8 @@ final class HostNativeChatViews {
             text.setPadding(0, 0, 0, 0);
         }
 
+        View textView() { return text; }
+
         void bind(CharSequence value, int color, int maxWidth, boolean user) {
             try {
                 if (!backgroundInstalled || currentUser != user) {

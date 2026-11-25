@@ -51,6 +51,8 @@ public final class SkillStore {
             "^(?:请\\s*)?(?:帮我\\s*)?(?:解释|介绍|总结|查询|整理|写一篇|告诉我|如何|不需要|不要|无需).*");
     private static final Pattern REQUESTED_NAME = Pattern.compile(
             "(?:名为|命名为|叫做)\\s*(?:[「“\"]([\\p{L}\\p{N}_-]{1,24})[」”\"]|([\\p{L}\\p{N}_-]{1,24})(?=\\s|[，。]|$))");
+    private static final Pattern VIDEO_JSON_FENCE = Pattern.compile(
+            "\\A[ \\t\\r\\n]*+```(?:json)?[ \\t]*+\\r?\\n(.+?)\\r?\\n```[ \\t\\r\\n]*+\\z", Pattern.DOTALL);
     private static final String NEEDS_IMAGE_SERVICE = "缺少已授权的图片服务";
     private static final String NEEDS_OPERATION = "需要可校验的执行方式，目前支持文本摘要、模拟订单和图片";
     private static final String NEEDS_REPLACEMENT = "离线校验通过，等待确认启用同名新版";
@@ -529,7 +531,12 @@ public final class SkillStore {
     private static Draft attachVideoDeclaration(JSONObject definition, String raw) {
         JSONObject proposed;
         try {
-            proposed = SkillAuthoring.readObject(raw, DRAFT_LIMIT);
+            String json = raw;
+            if (raw != null && raw.length() <= DRAFT_LIMIT) {
+                Matcher fence = VIDEO_JSON_FENCE.matcher(raw);
+                if (fence.matches()) json = fence.group(1);
+            }
+            proposed = SkillAuthoring.readObject(json, DRAFT_LIMIT);
         } catch (IllegalArgumentException invalid) {
             throw invalidVideoDeclaration();
         }

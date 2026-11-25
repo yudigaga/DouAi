@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.ai.skills.SkillResult;
+import com.douai.module.ai.skills.SkillTable;
 import com.douai.module.config.AiModelConfig;
 
 import org.json.JSONObject;
@@ -11,10 +13,13 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 import java.io.DataOutputStream;
+import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.*;
@@ -104,6 +109,109 @@ public final class TestChatMemoryDisplayTest {
         assertFalse(disabled.append(disabled.epoch(), shown));
         assertTrue(disabled.readTranscript().isEmpty());
         assertTrue(new TestChatMemory(directory, profile).readTranscript().isEmpty());
+    }
+
+    @Test public void authoredDeclarationKeepsExactRawJsonAcrossWritesAndOnlyEntersTheVisibleTranscript() throws Exception {
+        File directory = temporary.newFolder();
+        AiModelConfig profile = profile(6);
+        TestChatMemory memory = new TestChatMemory(directory, profile);
+        String raw = " \r\n" + declarationJson().replace("\n", "\r\n") + "\t";
+        var declaration = new SkillResult.Declaration(raw);
+        var table = new SkillResult.Table(SkillTable.parse("{\"columns\":[\"任务\"],\"rows\":[[\"示例\"]]}"));
+        var video = new SkillResult.Video(UUID.randomUUID());
+        assertEquals(SkillResult.Type.TEXT, declaration.type());
+        record(memory, ordinary("普通先前问题", "普通先前回答"));
+        record(memory, TestChatMemory.Turn.displayedSkill("/技能 试写", "草拟完成", List.of(), null, declaration));
+        record(memory, TestChatMemory.Turn.displayedSkill("/表格 内容", "", List.of(), null, table));
+        record(memory, TestChatMemory.Turn.displayedSkill("/视频 内容", "", List.of(), null, video));
+        record(memory, ordinary("普通新问题", "普通新回答"));
+
+        TestChatMemory reopened = new TestChatMemory(directory, profile);
+        assertEquals(List.of("普通先前问题", "普通新问题"), prompts(reopened.read()));
+        List<TestChatMemory.Turn> transcript = reopened.readTranscript();
+        assertEquals(List.of("普通先前问题", "/技能 试写", "/表格 内容", "/视频 内容", "普通新问题"), prompts(transcript));
+        assertEquals(raw, ((SkillResult.Declaration) transcript.get(1).artifact).json());
+        assertEquals("草拟完成", transcript.get(1).answer);
+        assertTrue(transcript.get(1).displayOnly);
+        assertEquals(table, transcript.get(2).artifact);
+        assertEquals(video, transcript.get(3).artifact);
+        try (DataInputStream input = new DataInputStream(Files.newInputStream(historyFile(directory, memory).toPath()))) {
+            assertEquals(3, input.readInt());
+        }
+    }
+
+    @Test public void invalidPersistedDeclarationsAreNotCopyableAndDoNotEraseSurroundingHistory() throws Exception {
+        File directory = temporary.newFolder();
+        AiModelConfig profile = profile(10);
+        TestChatMemory memory = new TestChatMemory(directory, profile);
+        byte[] malformedUtf8 = declarationJson().replace("保留原有用途", "\uFFFD").getBytes(StandardCharsets.UTF_8);
+        for (int index = 0; index < malformedUtf8.length; index++) {
+            if (malformedUtf8[index] == (byte) 0xef) {
+                malformedUtf8[index] = (byte) 0xff;
+                break;
+            }
+        }
+        String bearingKey = declarationJson().replace("保留原有用途", "Bearer synthetic-fixture-key");
+        assertThrows(IllegalArgumentException.class, () -> new SkillResult.Declaration(bearingKey));
+        assertThrows(IllegalArgumentException.class,
+                () -> new SkillResult.Declaration(declarationJson().replace("保留原有用途", "\uD800")));
+        try (DataOutputStream output = new DataOutputStream(new FileOutputStream(historyFile(directory, memory)))) {
+            output.writeInt(3);
+            output.writeInt(7);
+            writeModel(output, "之前");
+            writeDeclaration(output, "结构损坏", "{\"schemaVersion\":4}".getBytes(StandardCharsets.UTF_8));
+            writeDeclaration(output, "含凭据", bearingKey.getBytes(StandardCharsets.UTF_8));
+            writeDeclaration(output, "编码错误", malformedUtf8);
+            writeDeclaration(output, "超出限制", new byte[48 * 1024 + 1]);
+            writeDeclaration(output, "可恢复", declarationJson().getBytes(StandardCharsets.UTF_8));
+            writeModel(output, "之后");
+        }
+
+        List<String> expectedDisplay = List.of("之前", "结构损坏", "含凭据", "编码错误", "超出限制", "可恢复", "之后");
+        TestChatMemory reopened = new TestChatMemory(directory, profile);
+        assertEquals(List.of("之前", "之后"), prompts(reopened.read()));
+        List<TestChatMemory.Turn> rows = reopened.readTranscript();
+        assertEquals(expectedDisplay, prompts(rows));
+        for (int index = 1; index <= 4; index++) {
+            assertNull(rows.get(index).artifact);
+            assertEquals("本地显示内容", rows.get(index).answer);
+        }
+        assertEquals(declarationJson(), ((SkillResult.Declaration) rows.get(5).artifact).json());
+        record(reopened, ordinary("再问", "再答"));
+        assertEquals(List.of("之前", "之后", "再问"), prompts(reopened.read()));
+        assertEquals(8, reopened.readTranscript().size());
+    }
+
+    private static String declarationJson() {
+        return """
+                {"schemaVersion":4,"name":"写作草稿","description":"完善原稿 👋","documentation":"保留原有用途",
+                 "instructions":"改善表达","capabilityId":"text_model","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"}}
+                """;
+    }
+
+    private static File historyFile(File directory, TestChatMemory memory) {
+        return new File(directory, memory.conversationKey() + ".bin");
+    }
+
+    private static void writeModel(DataOutputStream output, String prompt) throws Exception {
+        output.writeByte(0);
+        writeString(output, prompt);
+        writeString(output, "");
+        writeString(output, "普通回答");
+        output.writeInt(0);
+    }
+
+    private static void writeDeclaration(DataOutputStream output, String prompt, byte[] payload) throws Exception {
+        output.writeByte(1);
+        writeString(output, prompt);
+        writeString(output, "本地显示内容");
+        writeString(output, "");
+        output.writeInt(0);
+        writeString(output, "skill_json");
+        output.writeInt(payload.length);
+        output.write(payload);
     }
 
     private static void writeLegacy(File file) throws Exception {

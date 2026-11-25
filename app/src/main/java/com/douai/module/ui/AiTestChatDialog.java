@@ -5,6 +5,8 @@ import com.douai.module.diagnostics.DouAiLog;
 import android.app.Dialog;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
@@ -18,6 +20,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.os.Handler;
 import android.os.Build;
 import android.os.Looper;
+import android.os.PersistableBundle;
 import android.text.Editable;
 import android.text.InputFilter;
 import android.text.InputType;
@@ -40,6 +43,10 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.core.view.ViewCompat;
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat;
 
 import com.douai.module.ai.mcp.McpClient;
 import com.douai.module.ai.mcp.McpRegistry;
@@ -253,7 +260,7 @@ final class AiTestChatDialog extends Dialog {
                     return client().reply(messageContact ? "message-contact" : "model-test", message, images, snapshot);
                 }
                 @Override public String skillModel(String system, String input) throws Exception {
-                    ChatCompletionClient.IsolatedTextRequest isolated = new ChatCompletionClient.IsolatedTextRequest();
+                    ChatCompletionClient.IsolatedTextRequest isolated = new ChatCompletionClient.IsolatedTextRequest(true);
                     activeSkillRequest = isolated;
                     try {
                         return isolated.execute(snapshot, config.id, system, input,
@@ -541,7 +548,7 @@ final class AiTestChatDialog extends Dialog {
         send.setTag("ai.chat.send");
         send.setOnClickListener(ignored -> {
             if (busy) stopRequest();
-            else sendMessage(input.getText().toString().trim(), new ArrayList<>(draftImages),
+            else sendMessage(input.getText().toString(), new ArrayList<>(draftImages),
                     new ArrayList<>(draftDocuments), null);
         });
         if (nativeViews == null) composer.addView(send, square());
@@ -790,9 +797,10 @@ final class AiTestChatDialog extends Dialog {
 
     private void sendMessage(String prompt, List<ChatImage> images, List<Document> documents, ChatMessage retryAnswer,
                              SkillStore.CustomCall approvedService, SkillSelection.Choice choice, boolean selectionDone) {
+        String commandText = prompt.trim();
         List<PendingAttachment> selected = new ArrayList<>(retryAnswer == null ? draftPending : retryAnswer.retryPending);
         if (disposed || busy
-                || (prompt.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) {
+                || (commandText.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) {
             DouAiLog.event("ai_chat", "eligibility", disposed ? "closed" : busy ? "busy" : "empty_input", ""); return;
         }
         final AiSkills.Invocation skill;
@@ -803,8 +811,8 @@ final class AiTestChatDialog extends Dialog {
         SkillSelection.Choice resolved = choice;
         try {
             SkillAuthoring.Action requested = skillStore != null && retryAnswer == null
-                    ? SkillAuthoring.match(prompt, previousDraft != null) : null;
-            boolean creationCommand = skillEntry != null && retryAnswer == null && SkillAuthoring.isCreationCommand(prompt);
+                    ? SkillAuthoring.match(commandText, previousDraft != null) : null;
+            boolean creationCommand = skillEntry != null && retryAnswer == null && SkillAuthoring.isCreationCommand(commandText);
             boolean canAuthor = (creationCommand || requested != null) && skillStore != null && skillStore.enabled();
             if (creationCommand && (!canAuthor || requested == null || requested.request().isEmpty())) {
                 state.setText(!canAuthor ? "请先启用 AI Skills"
@@ -815,15 +823,15 @@ final class AiTestChatDialog extends Dialog {
             }
             authoring = canAuthor ? requested : null;
             AiSkills.Invocation slash = authoring != null || skillEntry == null || retryAnswer != null
-                    ? null : AiSkills.match(skillEntry, prompt, skillStore, subAgent.enabled());
-            boolean named = SkillSelection.couldBeNamed(prompt);
+                    ? null : AiSkills.match(skillEntry, commandText, skillStore, subAgent.enabled());
+            boolean named = SkillSelection.couldBeNamed(commandText);
             if (!selectionDone && approvedService == null && resolved == null && authoring == null && slash == null
                     && retryAnswer == null && skillEntry != null && skillStore != null
                     && images.isEmpty() && documents.isEmpty() && selected.isEmpty()
-                    && (named || SkillSelection.looksLikeTask(prompt)) && skillStore.enabled()) {
+                    && (named || SkillSelection.looksLikeTask(commandText)) && skillStore.enabled()) {
                 List<SkillSelection.Candidate> catalog = skillStore.selectionCatalog();
                 if (named) {
-                    SkillSelection.Named local = SkillSelection.named(prompt, catalog, skillStore.unavailableSelectionNames());
+                    SkillSelection.Named local = SkillSelection.named(commandText, catalog, skillStore.unavailableSelectionNames());
                     if (local.kind() == SkillSelection.NamedKind.SELECTED) {
                         resolved = local.choice();
                     } else if (local.kind() != SkillSelection.NamedKind.NONE) {
@@ -837,7 +845,7 @@ final class AiTestChatDialog extends Dialog {
                     }
                 }
                 if (resolved == null) {
-                    SkillSelection.Request selection = SkillSelection.request(prompt, catalog);
+                    SkillSelection.Request selection = SkillSelection.request(commandText, catalog);
                     if (selection != null) {
                         startSkillSelection(prompt, selection);
                         return;
@@ -910,10 +918,11 @@ final class AiTestChatDialog extends Dialog {
         }
         answer.text = authoring != null ? authoringProgress(authoring) : skill != null ? "正在运行技能…"
                 : selected.isEmpty() ? "正在回复…" : "正在读取附件…";
+        answer.copyText = null;
         if (answer.videos != null) { answer.videos.close(); answer.videos = null; }
         answer.retry = false;
         messageRows.notifyDataSetChanged();
-        if (prompt.equals(input.getText().toString().trim())) input.setText("");
+        if (prompt.equals(input.getText().toString())) input.setText("");
         if (draftImages.equals(images)) draftImages.clear();
         if (draftDocuments.equals(documents)) draftDocuments.clear();
         draftPending.removeAll(selected);
@@ -1247,6 +1256,7 @@ final class AiTestChatDialog extends Dialog {
         if (turn.authoring != null && !turn.stopRequested && failure == null) {
             try {
                 reply = completeSkillAuthoring(turn, draft);
+                artifact = declarationArtifact(draft);
             } catch (Exception cannotComplete) {
                 failure = cannotComplete;
             }
@@ -1273,6 +1283,11 @@ final class AiTestChatDialog extends Dialog {
 
     private boolean isCurrentTurn(RequestTurn turn) {
         return !disposed && pending == turn && turn.ticket == generation;
+    }
+
+    private static SkillResult.Declaration declarationArtifact(SkillStore.DraftPreview draft) {
+        try { return new SkillResult.Declaration(draft.definition()); }
+        catch (IllegalArgumentException invalid) { return null; }
     }
 
     private enum HistorySave { NOT_REQUESTED, DISABLED, SAVED, UNCONFIRMED }
@@ -1318,6 +1333,7 @@ final class AiTestChatDialog extends Dialog {
         ChatMessage answer = turn.answer;
         if (failure == null && (!turn.manualSkill() || !turn.stopRequested)) {
             answer.text = reply;
+            answer.copyText = turn.authoring == null ? reply : null;
             answer.color = TEXT;
             answer.artifact = artifact;
             if (artifact instanceof SkillResult.Video) videoScope = turn.videoScope;
@@ -1351,6 +1367,7 @@ final class AiTestChatDialog extends Dialog {
                     ? "附件读取失败：" + failureDetail(failure) : errorMessage(failure);
             if (!turn.reading && !turn.latestPartial.isEmpty()) {
                 answer.text = turn.latestPartial + "\n\n（" + answer.text + "，回复未完成）";
+                answer.copyText = turn.latestPartial;
             }
             answer.color = turn.stopRequested ? MUTED : ERROR;
             state.setText(turn.stopRequested ? "已停止" : turn.reading ? "附件读取失败" : "发送失败");
@@ -1552,6 +1569,7 @@ final class AiTestChatDialog extends Dialog {
     private void clearConversation() {
         if (disposed) return;
         if (customReviewDialog != null) customReviewDialog.dismiss();
+        if (localMenu != null) localMenu.dismiss();
         closeImagePreview();
         skillVideoCards.clear();
         videoScope = null;
@@ -1765,6 +1783,57 @@ final class AiTestChatDialog extends Dialog {
                             else clearConversation();
                         }).setNegativeButton("取消", null).create();
         localMenu.show();
+    }
+
+    private boolean showMessageActions(ChatMessage message) {
+        if (disposed || !transcript.contains(message)) return false;
+        boolean hasMessage = copyableMessageText(message.copyText);
+        String declaration = message.artifact instanceof SkillResult.Declaration data ? data.json() : null;
+        if (!hasMessage && declaration == null) return false;
+        List<String> choices = new ArrayList<>();
+        if (hasMessage) choices.add("复制消息");
+        if (declaration != null) choices.add("复制技能声明");
+        String original = message.copyText;
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("消息操作")
+                .setItems(choices.toArray(new String[0]), (menu, selected) -> {
+                    if (disposed || localMenu != menu || !transcript.contains(message)) return;
+                    if (hasMessage && selected == 0) copyMessageText("DouAi 消息", original);
+                    else copyMessageText("DouAi 技能声明", declaration);
+                }).setNegativeButton("取消", null).create();
+        localMenu.show();
+        return true;
+    }
+
+    private static boolean copyableMessageText(String text) {
+        return text != null && TextUtils.getTrimmedLength(text) != 0;
+    }
+
+    private void copyMessageText(String label, String content) {
+        if (!copyableMessageText(content)) return;
+        try {
+            ClipboardManager clipboard = getContext().getSystemService(ClipboardManager.class);
+            if (clipboard == null) throw new IllegalStateException("Clipboard unavailable");
+            ClipData clip = ClipData.newPlainText(label, content);
+            PersistableBundle extras = new PersistableBundle();
+            extras.putBoolean("android.content.extra.IS_SENSITIVE", true);
+            clip.getDescription().setExtras(extras);
+            clipboard.setPrimaryClip(clip);
+            Toast.makeText(getContext(), "已复制", Toast.LENGTH_SHORT).show();
+        } catch (RuntimeException unavailable) {
+            Toast.makeText(getContext(), "无法访问剪贴板", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private static void bindMessageActions(View view, View.OnLongClickListener action) {
+        view.setOnLongClickListener(action);
+        view.setLongClickable(action != null);
+        if (action == null) {
+            ViewCompat.removeAccessibilityAction(view, AccessibilityActionCompat.ACTION_LONG_CLICK.getId());
+        } else {
+            ViewCompat.replaceAccessibilityAction(view, AccessibilityActionCompat.ACTION_LONG_CLICK,
+                    "消息操作", (target, args) -> target.performLongClick());
+        }
     }
 
     private void showLocalTools() {
@@ -2218,6 +2287,7 @@ final class AiTestChatDialog extends Dialog {
         final boolean user;
         final List<ChatImage> images;
         String text;
+        String copyText;
         final List<String> documentLabels = new ArrayList<>();
         int color = TEXT;
         boolean retry;
@@ -2233,6 +2303,7 @@ final class AiTestChatDialog extends Dialog {
         ChatMessage(String role, String text, boolean user, List<ChatImage> images) {
             this.role = role;
             this.text = text;
+            copyText = user ? text : null;
             this.user = user;
             this.images = new ArrayList<>(images);
         }
@@ -2308,7 +2379,6 @@ final class AiTestChatDialog extends Dialog {
             role.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
             bubble.addView(role, wrap());
             body = label("", 15, TEXT);
-            body.setTextIsSelectable(true);
             body.setPadding(0, dp(4), 0, 0);
             if (nativeViews == null) {
                 nativeBubble = null;
@@ -2359,6 +2429,9 @@ final class AiTestChatDialog extends Dialog {
             body.setTextColor(message.color);
             body.setVisibility(!message.user && (!message.images.isEmpty() || message.artifact != null) && TextUtils.isEmpty(message.text)
                     ? GONE : VISIBLE);
+            boolean hasMessageText = copyableMessageText(message.copyText);
+            View.OnLongClickListener actions = hasMessageText
+                    || message.artifact instanceof SkillResult.Declaration ? ignored -> showMessageActions(message) : null;
             if (nativeBubble != null) {
                 nativeBubble.view.setTag(message.user ? "ai.chat.user" : "ai.chat.answer");
                 int rowWidth = messages.getWidth() > 0 ? messages.getWidth()
@@ -2371,6 +2444,11 @@ final class AiTestChatDialog extends Dialog {
                         nativeViews.messageTextMaxWidth(Math.max(1, available)), message.user);
                 nativeBubble.view.setVisibility(TextUtils.isEmpty(message.text) ? GONE : VISIBLE);
                 document.setTextColor(nativeViews.input.getCurrentHintTextColor());
+                bindMessageActions(nativeBubble.view, actions);
+                bindMessageActions(nativeBubble.textView(), actions);
+            } else {
+                if (body.isTextSelectable() != hasMessageText) body.setTextIsSelectable(hasMessageText);
+                bindMessageActions(body, actions);
             }
             document.setVisibility(message.documentLabels.isEmpty() ? GONE : VISIBLE);
             document.setText(message.documentLabels.isEmpty() ? ""
@@ -2493,6 +2571,7 @@ final class AiTestChatDialog extends Dialog {
                     ChatMessage answer = addMessage(assistantName, turn.answer, false, turn.assistantImages);
                     answer.settingsSkillName = turn.settingsSkillName;
                     answer.artifact = turn.artifact;
+                    if (!turn.displayOnly || SkillAuthoring.match(turn.prompt, true) == null) answer.copyText = turn.answer;
                 }
                 messageRows.notifyDataSetChanged();
                 watchVideoCards();

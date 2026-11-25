@@ -57,6 +57,7 @@ public final class ChatCompletionClient {
     private ActiveRequest activeRequest;
     private long historyEpoch;
     private final TestChatMemory memory;
+    private final boolean preserveReply;
     private final Consumer<String> diagnostics;
     private final ConnectionFactory connections;
 
@@ -86,10 +87,16 @@ public final class ChatCompletionClient {
         private final AtomicBoolean started = new AtomicBoolean();
         private final AtomicBoolean cancelledBeforeStart = new AtomicBoolean();
 
-        public IsolatedTextRequest() { this(ChatCompletionClient::openConnection); }
+        public IsolatedTextRequest() { this(false); }
 
-        IsolatedTextRequest(ConnectionFactory connections) {
-            client = new ChatCompletionClient(null, null, HistoryImageBudget.SHARED, connections);
+        public IsolatedTextRequest(boolean preserveReply) {
+            this(ChatCompletionClient::openConnection, preserveReply);
+        }
+
+        IsolatedTextRequest(ConnectionFactory connections) { this(connections, false); }
+
+        IsolatedTextRequest(ConnectionFactory connections, boolean preserveReply) {
+            client = new ChatCompletionClient(null, null, HistoryImageBudget.SHARED, connections, preserveReply);
         }
 
         /** Uses an application-owned instruction and the parent's absolute System.nanoTime() deadline. */
@@ -210,12 +217,13 @@ public final class ChatCompletionClient {
     }
 
     ChatCompletionClient(TestChatMemory memory, Consumer<String> diagnostics, HistoryImageBudget historyImageBudget) {
-        this(memory, diagnostics, historyImageBudget, ChatCompletionClient::openConnection);
+        this(memory, diagnostics, historyImageBudget, ChatCompletionClient::openConnection, false);
     }
 
     private ChatCompletionClient(TestChatMemory memory, Consumer<String> diagnostics, HistoryImageBudget historyImageBudget,
-                                 ConnectionFactory connections) {
+                                 ConnectionFactory connections, boolean preserveReply) {
         this.memory = memory;
+        this.preserveReply = memory != null || preserveReply;
         this.diagnostics = diagnostics == null ? ignored -> { } : diagnostics;
         this.historyImageBudget = java.util.Objects.requireNonNull(historyImageBudget);
         this.connections = java.util.Objects.requireNonNull(connections);
@@ -565,10 +573,10 @@ public final class ChatCompletionClient {
             };
             String type = connection.getContentType();
             if (config.streaming() && type != null && type.toLowerCase(java.util.Locale.ROOT).contains("text/event-stream")) {
-                return ManualAiToolProtocol.stream(config.protocol, guarded, () -> deadline.beforeIo(request, connection),
+                return ManualAiToolProtocol.stream(config.protocol, guarded, preserveReply, () -> deadline.beforeIo(request, connection),
                         text -> publishPartial(request, deadline, text));
             }
-            return ManualAiToolProtocol.json(config.protocol, readBounded(guarded, MAX_RESPONSE_BYTES));
+            return ManualAiToolProtocol.json(config.protocol, readBounded(guarded, MAX_RESPONSE_BYTES), preserveReply);
         } catch (ResponsesAnalysisStream.Failure failure) { throw manualFailure(failure); }
         finally {
             releaseAsync(request, true);
@@ -834,7 +842,9 @@ public final class ChatCompletionClient {
                 catch (ReplyFailure failure) { throw failure; }
                 catch (Exception invalid) { throw new ReplyFailure(ReplyFailure.Kind.FORMAT, status, -1); }
             }
-            if (result.isEmpty()) throw new ReplyFailure(ReplyFailure.Kind.EMPTY, status, 0);
+            if (preserveReply ? !hasNonBlankReply(result) : result.isEmpty()) {
+                throw new ReplyFailure(ReplyFailure.Kind.EMPTY, status, 0);
+            }
             if (result.length() > maximumReplyChars) throw new ReplyFailure(ReplyFailure.Kind.OVERLONG, status, result.length());
             publishPartial(request, deadline, result);
             synchronized (requestLock) {
@@ -1251,15 +1261,14 @@ public final class ChatCompletionClient {
         return message.put(gemini ? "parts" : "content", parts);
     }
 
-    private static String parseReply(String protocol, String json) throws Exception {
+    private String parseReply(String protocol, String json) throws Exception {
         JSONObject response = new JSONObject(json);
-        switch (protocol) {
-            case AiModelConfig.CHAT:
-                return response.getJSONArray("choices").getJSONObject(0)
-                        .getJSONObject("message").getString("content").trim();
-            case AiModelConfig.RESPONSES:
-                String direct = response.optString("output_text", "").trim();
-                if (!direct.isEmpty()) return direct;
+        String text = switch (protocol) {
+            case AiModelConfig.CHAT -> response.getJSONArray("choices").getJSONObject(0)
+                    .getJSONObject("message").getString("content");
+            case AiModelConfig.RESPONSES -> {
+                String direct = response.optString("output_text", "");
+                if (preserveReply ? hasNonBlankReply(direct) : !direct.trim().isEmpty()) yield direct;
                 StringBuilder output = new StringBuilder();
                 JSONArray items = response.optJSONArray("output");
                 if (items != null) for (int i = 0; i < items.length(); i++) {
@@ -1271,16 +1280,18 @@ public final class ChatCompletionClient {
                                 || "text".equals(block.optString("type")))) output.append(block.optString("text"));
                     }
                 }
-                return output.toString().trim();
-            case AiModelConfig.ANTHROPIC:
+                yield output.toString();
+            }
+            case AiModelConfig.ANTHROPIC -> {
                 JSONArray content = response.getJSONArray("content");
-                StringBuilder text = new StringBuilder();
+                StringBuilder output = new StringBuilder();
                 for (int i = 0; i < content.length(); i++) {
                     JSONObject block = content.optJSONObject(i);
-                    if (block != null && "text".equals(block.optString("type"))) text.append(block.optString("text"));
+                    if (block != null && "text".equals(block.optString("type"))) output.append(block.optString("text"));
                 }
-                return text.toString().trim();
-            case AiModelConfig.GEMINI:
+                yield output.toString();
+            }
+            case AiModelConfig.GEMINI -> {
                 JSONArray parts = response.getJSONArray("candidates").getJSONObject(0).getJSONObject("content")
                         .getJSONArray("parts");
                 StringBuilder answer = new StringBuilder();
@@ -1289,9 +1300,15 @@ public final class ChatCompletionClient {
                     if (part != null && !part.optBoolean("thought", false) && part.opt("text") instanceof String)
                         answer.append(part.getString("text"));
                 }
-                return answer.toString().trim();
-            default: throw new IllegalArgumentException("不支持的接口协议");
-        }
+                yield answer.toString();
+            }
+            default -> throw new IllegalArgumentException("不支持的接口协议");
+        };
+        return preserveReply ? text : text.trim();
+    }
+
+    static boolean hasNonBlankReply(String text) {
+        return text.codePoints().anyMatch(c -> c > ' ' && !Character.isWhitespace(c) && !Character.isSpaceChar(c));
     }
 
     /** A relay may answer a streaming request with JSON on that same connection, never a second POST. */
