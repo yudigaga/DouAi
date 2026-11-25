@@ -20,7 +20,8 @@ import java.util.stream.Collectors;
 /** Versioned declaration for one application-managed Skill capability. */
 public record SkillManifest(String name, String displayName, String description, String documentation, String instructions,
                             SkillCapabilityRegistry.Capability capability, List<ConfigField> configFields,
-                            int maxInput, String trialInput, String definition) {
+                            int maxInput, String trialInput, SkillResult.Type outputType,
+                            SkillHttpDeclaration http, String definition) {
     public static final int SCHEMA_VERSION = 4;
     private static final int MAX_FIELDS = 6;
     private static final int MAX_SETTINGS_JSON = 900;
@@ -86,7 +87,7 @@ public record SkillManifest(String name, String displayName, String description,
     public static SkillManifest parse(String json) {
         try {
             JSONObject data = SkillAuthoring.readObject(json, 8192);
-            keys(data, Set.of("displayName"), "schemaVersion", "name", "description", "documentation", "instructions",
+            keys(data, Set.of("displayName", "http"), "schemaVersion", "name", "description", "documentation", "instructions",
                     "capabilityId", "configFields", "inputs", "outputType", "trial");
             if (!Integer.valueOf(SCHEMA_VERSION).equals(data.get("schemaVersion"))) throw invalid();
             String name = checkedText(data.get("name"), 24, false);
@@ -97,7 +98,14 @@ public record SkillManifest(String name, String displayName, String description,
             String instruction = checkedText(data.get("instructions"), 1600, true);
             SkillCapabilityRegistry.Capability capability = SkillCapabilityRegistry.require(
                     checkedText(data.get("capabilityId"), 32, false));
-            if (!capability.outputType().wireName().equals(data.get("outputType"))) throw invalid();
+            SkillResult.Type output = SkillResult.Type.fromWire(checkedText(data.get("outputType"), 12, false));
+            boolean declaredHttp = data.has("http");
+            boolean service = capability == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE
+                    || capability == SkillCapabilityRegistry.Capability.VIDEO_TASK;
+            if (declaredHttp && !service) throw invalid();
+            if (output != capability.outputType() && !(declaredHttp
+                    && capability == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE
+                    && (output == SkillResult.Type.TABLE || output == SkillResult.Type.IMAGE))) throw invalid();
 
             JSONArray inputs = data.getJSONArray("inputs");
             if (inputs.length() != 1) throw invalid();
@@ -109,12 +117,12 @@ public record SkillManifest(String name, String displayName, String description,
 
             JSONObject trial = data.getJSONObject("trial");
             keys(trial, Set.of(), "input", "expectedType");
-            if (!capability.outputType().wireName().equals(trial.get("expectedType"))) throw invalid();
+            if (!output.wireName().equals(trial.get("expectedType"))) throw invalid();
             String trialInput = checkedText(trial.get("input"), limit, true);
 
             JSONArray configs = data.getJSONArray("configFields");
             if (configs.length() > MAX_FIELDS
-                    || !capability.usesModel() && configs.length() != 0) throw invalid();
+                    || !capability.usesModel() && !declaredHttp && configs.length() != 0) throw invalid();
             List<ConfigField> fields = new ArrayList<>();
             Set<String> ids = new HashSet<>();
             for (int i = 0; i < configs.length(); i++) {
@@ -122,12 +130,19 @@ public record SkillManifest(String name, String displayName, String description,
                 if (!ids.add(field.key())) throw invalid();
                 fields.add(field);
             }
+            SkillHttpDeclaration http = declaredHttp ? SkillHttpDeclaration.parse(data.getJSONObject("http"), output, fields) : null;
             return new SkillManifest(name, displayName, description, documentation, instruction, capability, List.copyOf(fields),
-                    limit, trialInput, data.toString());
+                    limit, trialInput, output, http, data.toString());
         } catch (JSONException malformed) {
             throw invalid();
         }
     }
+
+    public boolean usesHttp() {
+        return capability == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE || http != null;
+    }
+
+    public boolean hasConfigurableFields() { return capability.usesModel() || http != null; }
 
     private static ConfigField field(JSONObject field) throws JSONException {
         String key = checkedText(field.get("key"), 32, false);

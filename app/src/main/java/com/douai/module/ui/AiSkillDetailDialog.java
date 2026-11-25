@@ -30,6 +30,7 @@ import com.douai.module.ai.skills.SkillImageProviderAddress;
 import com.douai.module.ai.skills.SkillManifest;
 import com.douai.module.ai.skills.SkillCapabilityRegistry;
 import com.douai.module.ai.skills.SkillCustomService;
+import com.douai.module.ai.skills.SkillHttpDeclaration;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -276,49 +277,72 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (manifest == null || !manifest.capability().usesModel() || manifest.configFields().isEmpty()) return;
         section("配置字段", "skills.detail.config");
         text(body, "配置值将提供给执行模型，仅填写非敏感内容", "skills.detail.config.guidance");
-        Map<String, Supplier<String>> values = new LinkedHashMap<>();
-        for (SkillManifest.ConfigField field : manifest.configFields()) {
-            String key = field.key();
-            Object value = detail.manifestValues().get(key);
-            values.put(key, manifestInput(field, value));
-        }
+        Map<String, Supplier<String>> values = manifestInputs(detail);
         button(body, "保存配置", "skills.detail.config.save", () -> {
-            Map<String, String> entered = new LinkedHashMap<>();
-            values.forEach((key, value) -> entered.put(key, value.get()));
-            saveManifestConfiguration(detail, entered);
+            saveManifestConfiguration(detail, enteredValues(values));
         });
     }
 
+    private Map<String, Supplier<String>> manifestInputs(SkillStore.Detail detail) {
+        Map<String, Supplier<String>> values = new LinkedHashMap<>();
+        for (SkillManifest.ConfigField field : detail.manifest().configFields()) {
+            values.put(field.key(), manifestInput(field, detail.manifestValues().get(field.key())));
+        }
+        return values;
+    }
+
+    private static Map<String, String> enteredValues(Map<String, Supplier<String>> fields) {
+        Map<String, String> values = new LinkedHashMap<>();
+        fields.forEach((key, field) -> values.put(key, field.get()));
+        return values;
+    }
+
     private void customConfiguration(SkillStore.Detail detail) {
-        if (detail.manifest() == null
-                || detail.manifest().capability() != SkillCapabilityRegistry.Capability.CUSTOM_SERVICE) return;
+        if (detail.manifest() == null || !detail.manifest().usesHttp()) return;
+        SkillHttpDeclaration declaration = detail.manifest().http();
         SkillStore.CustomConfiguration current = detail.customConfiguration();
-        section("HTTPS 服务", "skills.detail.custom");
-        text(body, "请求 POST JSON，发送字段 " + SkillCustomService.REQUEST_FIELD
-                        + "，读取响应字段 " + SkillCustomService.RESPONSE_FIELD + "。",
+        section(declaration == null ? "HTTPS 服务" : declaration.label(), "skills.detail.custom");
+        String request = declaration == null ? SkillCustomService.REQUEST_FIELD : String.join("、", declaration.request().keySet());
+        String response = declaration == null ? SkillCustomService.RESPONSE_FIELD : declaration.responseField();
+        text(body, "请求 POST JSON，发送字段 " + request + "，读取响应字段 " + response + "。",
                 "skills.detail.custom.contract");
+        if (declaration != null && declaration.video() != null) {
+            SkillHttpDeclaration.Video video = declaration.video();
+            text(body, "查询 GET " + video.statusPath() + "\n取消 " + video.cancelMethod() + " " + video.cancelPath()
+                            + "\n下载 GET " + video.downloadPath(), "skills.detail.custom.video_routes");
+        }
         EditText endpoint = input(body, "公网 HTTPS 完整接口地址", "skills.detail.custom.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
         if (current != null) endpoint.setText(current.endpoint());
+        else if (declaration != null && !declaration.suggestedEndpoint().isEmpty()) {
+            text(body, "草案建议地址，核对后保存。", "skills.detail.custom.endpoint_suggestion");
+            endpoint.setText(declaration.suggestedEndpoint());
+        }
         boolean hasCredential = current != null && current.hasCredential();
         String hint = hasCredential ? "更换服务密钥（地址相同且留空时保留）" : "服务密钥（可选）";
         EditText bearer = input(body, hint, "skills.detail.custom.credential",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 2048, true);
+        Map<String, Supplier<String>> values = manifestInputs(detail);
         button(body, "保存服务配置", "skills.detail.custom.save", () ->
-                saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false));
+                saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false, enteredValues(values)));
         if (hasCredential) {
             button(body, "移除此技能密钥", "skills.detail.custom.remove_credential", () -> review("移除服务密钥",
-                    "确认后生成待启用配置。", "移除密钥", () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true)));
+                    "确认后生成待启用配置。", "移除密钥", () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true, null)));
         }
     }
 
-    private void saveCustomConfiguration(SkillStore.Detail detail, String endpoint, EditText bearer, boolean clear) {
+    private void saveCustomConfiguration(SkillStore.Detail detail, String endpoint, EditText bearer, boolean clear,
+                                         Map<String, String> values) {
         try {
-            SkillStore.Detail saved = store.configureCustomService(detail, endpoint, clear ? "" : fieldValue(bearer), clear);
+            SkillStore.Detail saved = store.configureCustomService(detail, endpoint, clear ? "" : fieldValue(bearer), clear, values);
             bearer.setText("");
-            render(saved, saved.pending() ? "服务配置已保存，确认启用新版后生效" : "服务配置已保存，可在聊天中确认调用");
+            String status = saved.canReplace() ? "服务配置已保存，确认启用新版后生效"
+                    : saved.pending() ? "草稿已保存，请补齐设置" : "服务配置已保存，可在聊天中确认调用";
+            render(saved, status);
             if (onChanged != null) onChanged.run();
         } catch (SkillCustomService.Failure invalid) {
+            status.setText(invalid.getMessage());
+        } catch (SkillManifest.Invalid invalid) {
             status.setText(invalid.getMessage());
         } catch (IllegalArgumentException invalid) {
             status.setText("请输入公网 HTTPS 完整接口地址，地址中请勿包含凭据、查询参数或片段");

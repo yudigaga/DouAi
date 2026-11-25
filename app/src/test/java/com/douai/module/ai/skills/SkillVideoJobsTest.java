@@ -1,0 +1,218 @@
+package com.douai.module.ai.skills;
+
+import android.content.Context;
+
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static org.junit.Assert.*;
+
+@RunWith(RobolectricTestRunner.class)
+@Config(manifest = Config.NONE, sdk = 35)
+public class SkillVideoJobsTest {
+    private static final String ENDPOINT = "https://video.example.com:9443/v1/submit";
+    private static final String KEY = "synthetic-fixture-not-a-real-credential";
+    private static final byte[] POST = bytes("{\"prompt\":\"synthetic-private-user-input\"}");
+    private static final SkillVideoJobs.Scope WORK = new SkillVideoJobs.Scope(AiSkills.Entry.WORK, "a".repeat(64));
+    private static final SkillVideoJobs.Scope CONTACT = new SkillVideoJobs.Scope(AiSkills.Entry.CONTACT, "a".repeat(64));
+    @Rule public TemporaryFolder temporary = new TemporaryFolder();
+    private final AtomicLong clock = new AtomicLong(1_000);
+
+    public static SkillVideoJobs chatFixture(Context context, AtomicInteger submits) {
+        return new SkillVideoJobs(new File(context.getFilesDir(), "douai_real_video_jobs"), System::currentTimeMillis,
+                (method, media, uri, bearer, body, deadline, admission) -> {
+                    admission.check();
+                    assertEquals("", bearer);
+                    if (method == SkillHttpsTransport.Method.POST) {
+                        assertFalse(media);
+                        assertEquals("https://video-api.example.com/v1/jobs", uri);
+                        var mapped = SkillAuthoring.readObject(new String(body, StandardCharsets.UTF_8), 500);
+                        assertEquals("海上日出", mapped.optString("prompt"));
+                        assertEquals(4, mapped.optInt("seconds"));
+                        submits.incrementAndGet();
+                        return json(202, "{\"job_id\":\"job_fixture\"}");
+                    }
+                    assertEquals(SkillHttpsTransport.Method.GET, method);
+                    assertEquals("https://video-api.example.com/v1/jobs/job_fixture", uri);
+                    return json(200, "{\"id\":\"job_fixture\",\"status\":\"working\"}");
+                });
+    }
+
+    @Test public void persistsIntentBeforeUncertainSubmitAndNeverResubmitsTheSameLocalId() throws Exception {
+        File directory = temporary.newFolder();
+        List<SkillHttpsTransport.Method> sent = new ArrayList<>();
+        UUID local = UUID.randomUUID();
+        SkillVideoJobs jobs = new SkillVideoJobs(directory, clock::get, (method, media, url, bearer, body, deadline, gate) -> {
+            gate.check();
+            sent.add(method);
+            assertEquals(ENDPOINT, url);
+            assertEquals(KEY, bearer);
+            assertArrayEquals(POST, body);
+            assertEquals(SkillVideoJobs.State.SUBMIT_UNKNOWN,
+                    new SkillVideoJobs(directory, clock::get, null).list(WORK).get(0).state());
+            throw new SkillHttpsTransport.Failure(SkillHttpsTransport.Kind.DEADLINE, true);
+        });
+        var access = access(binding(), () -> {});
+        var unknown = jobs.submit(WORK, jobs.generation(WORK), local, access, POST, Long.MAX_VALUE);
+        assertEquals(SkillVideoJobs.State.SUBMIT_UNKNOWN, unknown.state());
+        var reopened = new SkillVideoJobs(directory, clock::get, null);
+        assertEquals(unknown, reopened.submit(WORK, reopened.generation(WORK), local, access, POST, Long.MAX_VALUE));
+        assertEquals(unknown, reopened.refresh(WORK, local, access, Long.MAX_VALUE));
+        assertEquals(List.of(SkillHttpsTransport.Method.POST), sent);
+        assertTrue(reopened.list(CONTACT).isEmpty());
+        for (File file : directory.listFiles((parent, name) -> name.endsWith(".bin"))) {
+            String data = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+            assertFalse(data.contains(KEY));
+            assertFalse(data.contains(ENDPOINT));
+            assertFalse(data.contains("synthetic-private-user-input"));
+        }
+    }
+
+    @Test public void resumesOriginalRemoteIdAndRejectsChangedBindingOrMismatchedReply() throws Exception {
+        File directory = temporary.newFolder();
+        List<String> sent = new ArrayList<>();
+        var binding = binding();
+        var access = access(binding, () -> {});
+        UUID local = UUID.randomUUID();
+        var jobs = new SkillVideoJobs(directory, clock::get, (method, media, url, bearer, body, deadline, gate) -> {
+            gate.check();
+            assertEquals(KEY, bearer);
+            sent.add(method.name() + " " + url);
+            return switch (sent.size()) {
+                case 1 -> json(202, "{\"job_id\":\"task_1\"}");
+                case 2 -> json(200, "{\"id\":\"other_task\",\"state\":\"done\"}");
+                case 3 -> json(200, "{\"id\":\"task_1\",\"state\":\"done\",\"url\":\"https://other.example/unsafe\"}");
+                case 4 -> new SkillHttpsTransport.Response(200, "video/mp4", structuralMp4());
+                default -> throw new AssertionError("unexpected network");
+            };
+        });
+        assertEquals(SkillVideoJobs.State.QUEUED,
+                jobs.submit(WORK, jobs.generation(WORK), local, access, POST, Long.MAX_VALUE).state());
+        var changed = new SkillVideoJobs.Binding(binding.skillId(), binding.revisionId(), UUID.randomUUID().toString(),
+                binding.declaration(), ENDPOINT);
+        assertThrows(SkillVideoJobs.Failure.class,
+                () -> jobs.refresh(WORK, local, access(changed, () -> {}), Long.MAX_VALUE));
+        assertThrows(SkillVideoJobs.Failure.class, () -> jobs.refresh(WORK, local, access, Long.MAX_VALUE));
+        assertNull(jobs.playableFile(WORK, local));
+        assertEquals(2, sent.size());
+        clock.addAndGet(60_000);
+        assertEquals(SkillVideoJobs.State.COMPLETED, jobs.refresh(WORK, local, access, Long.MAX_VALUE).state());
+        jobs.markLinked(WORK, local);
+        var reopened = new SkillVideoJobs(directory, clock::get, null);
+        assertTrue(reopened.list(WORK).get(0).linked());
+        assertNull(reopened.playableFile(CONTACT, local));
+        assertArrayEquals(structuralMp4(), Files.readAllBytes(reopened.playableFile(WORK, local).toPath()));
+        assertEquals(List.of("POST " + ENDPOINT, "GET https://video.example.com:9443/jobs/task_1",
+                "GET https://video.example.com:9443/jobs/task_1",
+                "GET https://video.example.com:9443/jobs/task_1/content"), sent);
+    }
+
+    @Test public void cancellationSendsOnceUsesTheOriginalIdAndOnlyThenPolls() throws Exception {
+        List<SkillHttpsTransport.Method> sent = new ArrayList<>();
+        var jobs = new SkillVideoJobs(temporary.newFolder(), clock::get, (method, media, url, bearer, body, deadline, gate) -> {
+            gate.check();
+            sent.add(method);
+            if (method == SkillHttpsTransport.Method.POST) return json(202, "{\"job_id\":\"task_2\"}");
+            if (method == SkillHttpsTransport.Method.DELETE) {
+                assertTrue(url.endsWith("/jobs/task_2/cancel"));
+                throw new SkillHttpsTransport.Failure(SkillHttpsTransport.Kind.CANCELLED, true);
+            }
+            assertTrue(url.endsWith("/jobs/task_2"));
+            return json(200, "{\"id\":\"task_2\",\"state\":\"cancelled\"}");
+        });
+        var access = access(binding(), () -> {});
+        UUID local = UUID.randomUUID();
+        jobs.submit(WORK, jobs.generation(WORK), local, access, POST, Long.MAX_VALUE);
+        assertEquals(SkillVideoJobs.State.CANCEL_PENDING, jobs.cancel(WORK, local, access, Long.MAX_VALUE).state());
+        assertEquals(SkillVideoJobs.State.CANCEL_PENDING, jobs.cancel(WORK, local, access, Long.MAX_VALUE).state());
+        clock.addAndGet(60_000);
+        assertEquals(SkillVideoJobs.State.CANCELLED, jobs.refresh(WORK, local, access, Long.MAX_VALUE).state());
+        assertEquals(List.of(SkillHttpsTransport.Method.POST, SkillHttpsTransport.Method.DELETE,
+                SkillHttpsTransport.Method.GET), sent);
+    }
+
+    @Test public void clearedScopeRejectsQueuedAdmissionAndDoesNotConflateOtherHistory() throws Exception {
+        var jobs = new SkillVideoJobs(temporary.newFolder(), clock::get,
+                (method, media, url, bearer, body, deadline, gate) -> json(202, "{\"job_id\":\"demo\"}"));
+        var access = access(binding(), () -> {});
+        UUID local = UUID.randomUUID();
+        long previous = jobs.generation(WORK);
+        jobs.submit(WORK, previous, local, access, POST, Long.MAX_VALUE);
+        jobs.submit(CONTACT, jobs.generation(CONTACT), local, access, POST, Long.MAX_VALUE);
+        jobs.clear(WORK);
+        assertThrows(SkillVideoJobs.Failure.class, () -> jobs.submit(WORK, previous, local, access, POST, Long.MAX_VALUE));
+        assertTrue(jobs.list(WORK).isEmpty());
+        assertEquals(1, jobs.list(CONTACT).size());
+    }
+
+    @Test public void validatesMp4StructureAndRejectsExternalDataReference() throws Exception {
+        assertTrue(SkillVideoJobs.validMp4(structuralMp4()));
+        assertFalse(SkillVideoJobs.validMp4(box("ftyp", bytes("isom0000"))));
+        assertFalse(SkillVideoJobs.validMp4(bytes("<html>provider error</html>")));
+        assertFalse(SkillVideoJobs.validMp4(structuralMp4(new byte[]{0, 0, 0, 0})));
+    }
+
+    private static SkillVideoJobs.Binding binding() {
+        var declaration = SkillHttpDeclaration.parse("""
+                {"version":1,"label":"视频服务","request":{"prompt":"argument"},"response":"job_id",
+                 "video":{"statusPath":"/jobs/{id}","cancelPath":"/jobs/{id}/cancel","cancelMethod":"DELETE",
+                 "downloadPath":"/jobs/{id}/content","idField":"id","stateField":"state",
+                 "states":{"queued":"queued","running":"running","done":"completed","error":"failed",
+                           "cancelled":"cancelled"}}}
+                """, SkillResult.Type.VIDEO, List.of());
+        return new SkillVideoJobs.Binding(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(), declaration, ENDPOINT);
+    }
+
+    private static SkillVideoJobs.Access access(SkillVideoJobs.Binding binding, SkillVideoJobs.Admission admission) {
+        return new SkillVideoJobs.Access(binding, KEY, admission);
+    }
+
+    private static SkillHttpsTransport.Response json(int status, String data) {
+        return new SkillHttpsTransport.Response(status, "application/json", bytes(data));
+    }
+
+    private static byte[] structuralMp4() throws IOException { return structuralMp4(new byte[]{0, 0, 0, 1}); }
+
+    private static byte[] structuralMp4(byte[] referenceFlags) throws IOException {
+        byte[] references = box("dref", new byte[]{0, 0, 0, 0, 0, 0, 0, 1}, box("url ", referenceFlags));
+        byte[] info = box("minf", box("dinf", references));
+        byte[] handler = box("hdlr", new byte[8], bytes("vide"));
+        return concat(box("ftyp", bytes("isom0000isom")),
+                box("moov", box("trak", box("mdia", handler, info))), box("mdat", new byte[]{0, 0, 0, 1}));
+    }
+
+    private static byte[] box(String type, byte[]... payloads) throws IOException {
+        var bytes = new ByteArrayOutputStream();
+        var output = new DataOutputStream(bytes);
+        byte[] payload = concat(payloads);
+        output.writeInt(payload.length + 8);
+        output.write(bytes(type));
+        output.write(payload);
+        return bytes.toByteArray();
+    }
+
+    private static byte[] concat(byte[]... chunks) throws IOException {
+        var buffer = new ByteArrayOutputStream();
+        for (byte[] chunk : chunks) buffer.write(chunk);
+        return buffer.toByteArray();
+    }
+
+    private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.UTF_8); }
+}

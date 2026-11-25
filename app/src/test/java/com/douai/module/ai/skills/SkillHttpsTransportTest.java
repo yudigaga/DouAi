@@ -3,6 +3,7 @@ package com.douai.module.ai.skills;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -231,6 +232,56 @@ public class SkillHttpsTransportTest {
         }
     }
 
+    @Test public void videoMethodsKeepTlsAdmissionAndBoundedIdentityResponses() throws Exception {
+        try (TlsFixture fixture = tlsFixture()) {
+            fixture.server.enqueue(new MockResponse().setHeader("Content-Type", "application/json")
+                    .setBody("{\"status\":\"queued\"}"));
+            fixture.server.enqueue(new MockResponse().setResponseCode(302)
+                    .setHeader("Location", "https://other.test/private"));
+            fixture.server.enqueue(new MockResponse().setHeader("Content-Type", "video/mp4")
+                    .setBody("0123456789"));
+            fixture.server.enqueue(new MockResponse().setHeader("Content-Type", "video/mp4")
+                    .setHeader("Content-Encoding", "gzip").setBody("ignored"));
+            var status = fixture.exchange(SkillHttpsTransport.Method.GET, false, 64);
+            assertEquals("application/json", status.contentType());
+            var cancellation = fixture.exchange(SkillHttpsTransport.Method.DELETE, false, 64);
+            assertEquals(302, cancellation.status());
+            assertFailure(SkillHttpsTransport.Kind.RESPONSE_LIMIT, true,
+                    () -> fixture.exchange(SkillHttpsTransport.Method.GET, true, 5));
+            assertEquals("", fixture.exchange(SkillHttpsTransport.Method.GET, true, 64).contentType());
+            assertEquals(4, fixture.server.getRequestCount());
+            for (String method : new String[]{"GET", "DELETE", "GET", "GET"}) {
+                var request = fixture.server.takeRequest(2, TimeUnit.SECONDS);
+                assertNotNull(request);
+                assertEquals(method, request.getMethod());
+                assertEquals("Bearer " + BEARER, request.getHeader("Authorization"));
+                assertEquals("identity", request.getHeader("Accept-Encoding"));
+            }
+        }
+    }
+
+    @Test public void reviewedPostAcceptsLegacyMediaAndScopesTheLongImageBearer() throws Exception {
+        try (TlsFixture fixture = tlsFixture()) {
+            fixture.server.enqueue(new MockResponse().setHeader("Content-Type", "image/png").setBody("raster"));
+            fixture.server.enqueue(new MockResponse().setHeader("Content-Type", "text/plain; charset=utf-8")
+                    .setBody("plain"));
+            fixture.server.enqueue(new MockResponse().setHeader("Content-Type", "application/provider+json")
+                    .setBody("{\"text\":\"json\"}"));
+            String imageBearer = "i".repeat(4000);
+            assertEquals("image/png", fixture.reviewedPost(imageBearer, true, true).contentType());
+            assertEquals("text/plain", fixture.reviewedPost(BEARER, false, false).contentType());
+            assertEquals("application/json", fixture.reviewedPost(BEARER, false, false).contentType());
+            assertFailure(SkillHttpsTransport.Kind.REQUEST, false,
+                    () -> fixture.reviewedPost(imageBearer, false, false));
+            assertEquals(3, fixture.server.getRequestCount());
+            var image = fixture.server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(image);
+            assertEquals("POST", image.getMethod());
+            assertEquals("Bearer " + imageBearer, image.getHeader("Authorization"));
+            assertTrue(image.getHeader("Accept").contains("image/png"));
+        }
+    }
+
     private static void assertFailure(SkillHttpsTransport.Kind kind, boolean mayHaveSent,
                                       org.junit.function.ThrowingRunnable operation) {
         SkillHttpsTransport.Failure failure = assertThrows(SkillHttpsTransport.Failure.class, operation);
@@ -250,6 +301,18 @@ public class SkillHttpsTransportTest {
                                           Dns dns, Predicate<InetAddress> addresses) throws IOException {
             return SkillHttpsTransport.post(url(host), bearer, JSON, deadline(), limit, gate, dns, addresses,
                     context.getSocketFactory(), trust);
+        }
+
+        SkillHttpsTransport.Response exchange(SkillHttpsTransport.Method method, boolean media, int limit)
+                throws IOException {
+            return SkillHttpsTransport.exchange(method, media, url(HOST), BEARER, null,
+                    deadline(), limit, () -> {}, host -> List.of(LOOPBACK), LOOPBACK::equals,
+                    context.getSocketFactory(), trust);
+        }
+
+        SkillHttpsTransport.Response reviewedPost(String bearer, boolean image, boolean imageBearer) throws IOException {
+            return SkillHttpsTransport.postReviewed(url(HOST), bearer, JSON, deadline(), 64, image, imageBearer,
+                    () -> {}, host -> List.of(LOOPBACK), LOOPBACK::equals, context.getSocketFactory(), trust);
         }
 
         @Override public void close() throws IOException { server.close(); }

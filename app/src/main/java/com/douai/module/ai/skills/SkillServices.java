@@ -34,6 +34,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -91,6 +93,9 @@ public final class SkillServices {
     }
 
     record Response(int status, String mediaType, byte[] body) {}
+    record ReviewedPayload(String body, String proof) {
+        @Override public String toString() { return "SkillServices.ReviewedPayload"; }
+    }
     private record Registration(Service service, String ciphertext, int maximumCost) {}
     private interface Edit { void apply(LinkedHashMap<String, Registration> registrations) throws Failure; }
 
@@ -364,6 +369,21 @@ public final class SkillServices {
     }
 
     public SkillResult executeResult(Service expected, String argument) throws Failure {
+        return executeResult(expected, argument, null, null);
+    }
+
+    SkillResult executeReviewed(Service expected, String argument, SkillHttpsTransport.Admission storeAdmission) throws Failure {
+        return executeReviewed(expected, argument, null, storeAdmission);
+    }
+
+    SkillResult executeReviewed(Service expected, String argument, String proof,
+                                SkillHttpsTransport.Admission storeAdmission) throws Failure {
+        if (storeAdmission == null) throw staleApproval();
+        return executeResult(expected, argument, proof, storeAdmission);
+    }
+
+    private SkillResult executeResult(Service expected, String argument, String proof,
+                                      SkillHttpsTransport.Admission storeAdmission) throws Failure {
         if (argument == null || argument.trim().isEmpty() || argument.length() > MAX_ARGUMENT) {
             throw problem(Code.INVALID_INPUT, "服务输入应为 1–4000 个字符");
         }
@@ -375,14 +395,11 @@ public final class SkillServices {
         Registration grant;
         String token;
         boolean expectsImage = expected != null && expected.outputType() == SkillResult.Type.IMAGE;
+        boolean reviewed = storeAdmission != null;
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(expectsImage ? 60 : 15);
         synchronized (REGISTRY_LOCK) {
-            grant = requireMatching(read(), expected);
-            if (grant.maximumCost() < grant.service().costUnits()) {
-                throw problem(Code.CONFIRMATION_REQUIRED, "请先确认服务地址、权限与费用上限");
-            }
-            requireComplete(grant);
-            requireImageOperation(grant.service());
+            grant = requireAuthorized(read(), expected);
+            if (proof != null && !proof.equals(approvalProof(grant))) throw staleApproval();
             token = decrypt(grant);
             if (AiCredentialVault.containsImageCredential(argument, token)) {
                 throw problem(Code.INVALID_INPUT, "服务输入中不能包含已登记的凭据");
@@ -395,7 +412,8 @@ public final class SkillServices {
         boolean paid = grant.service().costUnits() > 0;
         Response reply;
         try {
-            reply = transport.post(grant.service().endpoint(), token, request, deadlineNanos, grant.service().outputType());
+            reply = reviewed ? postReviewed(grant, token, request, deadlineNanos, storeAdmission)
+                    : transport.post(grant.service().endpoint(), token, request, deadlineNanos, grant.service().outputType());
         } catch (AiExtensionHttp.Failure failure) {
             if (paid && failure.mayHaveSent) throw unknown();
             if (failure.kind == AiExtensionHttp.Kind.CANCELLED) throw problem(Code.CANCELLED, "请求已停止");
@@ -409,13 +427,85 @@ public final class SkillServices {
             throw problem(Code.UNAVAILABLE, "服务暂时无法完成请求");
         }
         if (reply.status() < 200 || reply.status() >= 300) {
-            if (paid && (reply.status() == 408 || reply.status() >= 500)) throw unknown();
+            if (reviewed && !definiteRefusal(reply.status()) || paid && (reply.status() == 408 || reply.status() >= 500)) {
+                throw unknown();
+            }
             if (reply.status() == 401 || reply.status() == 403) {
                 throw problem(Code.CREDENTIAL_REQUIRED, "服务拒绝认证，请核对凭据与权限");
             }
             throw problem(Code.REJECTED, "服务拒绝本次请求");
         }
-        return expectsImage ? resultImageWithDiagnostics(reply, token) : new SkillResult.Text(resultText(reply, token));
+        try {
+            return expectsImage ? resultImageWithDiagnostics(reply, token) : new SkillResult.Text(resultText(reply, token));
+        } catch (Failure invalid) {
+            if (reviewed) throw unknown();
+            throw invalid;
+        }
+    }
+
+    ReviewedPayload previewReviewed(Service service, String argument) throws Failure {
+        synchronized (REGISTRY_LOCK) {
+            Registration grant = requireAuthorized(read(), service);
+            if (AiCredentialVault.containsImageCredential(argument, decrypt(grant))) {
+                throw problem(Code.INVALID_INPUT, "服务输入中不能包含已登记的凭据");
+            }
+            return new ReviewedPayload(requestBody(grant.service(), argument), approvalProof(grant));
+        }
+    }
+
+    private static Registration requireAuthorized(Map<String, Registration> entries, Service service) throws Failure {
+        Registration grant = requireMatching(entries, service);
+        if (grant.maximumCost() < grant.service().costUnits()) {
+            throw problem(Code.CONFIRMATION_REQUIRED, "请先确认服务地址、权限与费用上限");
+        }
+        requireComplete(grant);
+        requireImageOperation(grant.service());
+        return grant;
+    }
+
+    private static String approvalProof(Registration grant) {
+        try {
+            byte[] value = (grant.maximumCost() + "\n" + grant.ciphertext()).getBytes(StandardCharsets.UTF_8);
+            return Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(value));
+        } catch (NoSuchAlgorithmException unavailable) {
+            throw new IllegalStateException("系统无法校验服务授权");
+        }
+    }
+
+    private Response postReviewed(Registration grant, String token, String request, long deadline,
+                                  SkillHttpsTransport.Admission storeAdmission) throws Failure {
+        Service service = grant.service();
+        boolean image = service.outputType() == SkillResult.Type.IMAGE;
+        try {
+            SkillHttpsTransport.Response reply = SkillHttpsTransport.postReviewed(service.endpoint(), token,
+                    request.getBytes(StandardCharsets.UTF_8), deadline, image ? MAX_IMAGE_WIRE_BYTES : MAX_WIRE_BYTES,
+                    image, scopedOpenAi(service), () -> {
+                        storeAdmission.check();
+                        synchronized (REGISTRY_LOCK) {
+                            Registration active = requireAuthorized(read(), service);
+                            if (active.maximumCost() != grant.maximumCost()
+                                    || !active.ciphertext().equals(grant.ciphertext())) throw staleApproval();
+                        }
+                    });
+            return new Response(reply.status(), reply.contentType(), reply.body());
+        } catch (SkillHttpsTransport.Failure failure) {
+            if (failure.mayHaveSent()) throw unknown();
+            throw switch (failure.kind()) {
+                case ADMISSION -> staleApproval();
+                case CANCELLED -> problem(Code.CANCELLED, "请求已停止");
+                case ENDPOINT, ADDRESS -> problem(Code.UNAVAILABLE, "服务地址或实际连接未通过公网 HTTPS 校验");
+                default -> problem(Code.UNAVAILABLE, "服务暂时无法完成请求");
+            };
+        }
+    }
+
+    private static Failure staleApproval() {
+        return problem(Code.CONFIRMATION_REQUIRED, "技能配置、服务授权或凭据已发生变化，请重新确认");
+    }
+
+    private static boolean definiteRefusal(int status) {
+        return status == 400 || status == 401 || status == 403 || status == 404 || status == 405
+                || status == 413 || status == 415 || status == 422;
     }
 
     private static String requestBody(Service service, String argument) throws Failure {

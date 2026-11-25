@@ -47,12 +47,14 @@ import okhttp3.ResponseBody;
 import okio.BufferedSink;
 import okio.BufferedSource;
 
-/** One fixed-origin JSON POST. Callers own authorization and response interpretation. */
+/** One guarded HTTPS request. Callers own authorization and response interpretation. */
 final class SkillHttpsTransport {
     private static final int MAX_REQUEST_BYTES = 64 * 1024;
-    private static final int MAX_RESPONSE_BYTES = 256 * 1024;
+    private static final int MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
+    static final int MAX_VIDEO_BYTES = 16 * 1024 * 1024;
     private static final int MAX_RESOLVED = 32;
     private static final long MAX_CALL_NANOS = TimeUnit.SECONDS.toNanos(30);
+    private static final long MAX_IMAGE_CALL_NANOS = TimeUnit.SECONDS.toNanos(60);
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
 
     // The platform DNS resolver can block despite interruption. Do not queue or grow unbounded.
@@ -76,6 +78,8 @@ final class SkillHttpsTransport {
             .build();
 
     enum Kind { ENDPOINT, REQUEST, ADDRESS, DEADLINE, CANCELLED, ADMISSION, TRANSPORT, RESPONSE_LIMIT }
+    enum Method { POST, GET, DELETE }
+    private enum Format { JSON, MP4, IMAGE_RESULT, TEXT_RESULT }
     private enum Dispatch { READY, SENT, CLOSED }
 
     static final class Failure extends IOException {
@@ -83,7 +87,7 @@ final class SkillHttpsTransport {
         private final boolean mayHaveSent;
 
         Failure(Kind kind, boolean mayHaveSent) {
-            super("HTTPS POST " + kind.name());
+            super("HTTPS " + kind.name());
             this.kind = kind;
             this.mayHaveSent = mayHaveSent;
         }
@@ -112,23 +116,82 @@ final class SkillHttpsTransport {
     static Response post(String exactEndpoint, String bearer, byte[] utf8Json, long deadlineNanos,
                          int maxResponseBytes, Admission admission, Dns resolver, Predicate<InetAddress> policy,
                          SSLSocketFactory fixtureTls, X509TrustManager fixtureTrust) throws Failure {
+        return exchange(Method.POST, false, exactEndpoint, bearer, utf8Json, deadlineNanos, maxResponseBytes,
+                admission, resolver, policy, fixtureTls, fixtureTrust);
+    }
+
+    static Response get(String exactEndpoint, String bearer, long deadlineNanos, int maxResponseBytes,
+                        Admission admission) throws Failure {
+        return exchange(Method.GET, false, exactEndpoint, bearer, null, deadlineNanos, maxResponseBytes,
+                admission, Dns.SYSTEM, SkillHttpsTransport::isPublicAddress, null, null);
+    }
+
+    static Response delete(String exactEndpoint, String bearer, long deadlineNanos, int maxResponseBytes,
+                           Admission admission) throws Failure {
+        return exchange(Method.DELETE, false, exactEndpoint, bearer, null, deadlineNanos, maxResponseBytes,
+                admission, Dns.SYSTEM, SkillHttpsTransport::isPublicAddress, null, null);
+    }
+
+    static Response download(String exactEndpoint, String bearer, long deadlineNanos, int maxResponseBytes,
+                             Admission admission) throws Failure {
+        return exchange(Method.GET, true, exactEndpoint, bearer, null, deadlineNanos, maxResponseBytes,
+                admission, Dns.SYSTEM, SkillHttpsTransport::isPublicAddress, null, null);
+    }
+
+    static Response exchange(Method method, boolean media, String exactEndpoint, String bearer, byte[] utf8Json,
+                             long deadlineNanos, int maxResponseBytes, Admission admission, Dns resolver,
+                             Predicate<InetAddress> policy, SSLSocketFactory fixtureTls, X509TrustManager fixtureTrust)
+            throws Failure {
+        return exchange(method, media ? Format.MP4 : Format.JSON, false, exactEndpoint, bearer, utf8Json,
+                deadlineNanos, maxResponseBytes, admission, resolver, policy, fixtureTls, fixtureTrust);
+    }
+
+    static Response postReviewed(String exactEndpoint, String bearer, byte[] utf8Json, long deadlineNanos,
+                                 int maxResponseBytes, boolean image, boolean imageBearer, Admission admission)
+            throws Failure {
+        return postReviewed(exactEndpoint, bearer, utf8Json, deadlineNanos, maxResponseBytes, image, imageBearer,
+                admission, Dns.SYSTEM, SkillHttpsTransport::isPublicAddress, null, null);
+    }
+
+    static Response postReviewed(String exactEndpoint, String bearer, byte[] utf8Json, long deadlineNanos,
+                                 int maxResponseBytes, boolean image, boolean imageBearer, Admission admission,
+                                 Dns resolver, Predicate<InetAddress> policy, SSLSocketFactory fixtureTls,
+                                 X509TrustManager fixtureTrust) throws Failure {
+        if (imageBearer && !image) throw new Failure(Kind.REQUEST, false);
+        return exchange(Method.POST, image ? Format.IMAGE_RESULT : Format.TEXT_RESULT, imageBearer, exactEndpoint,
+                bearer, utf8Json, deadlineNanos, maxResponseBytes, admission, resolver, policy, fixtureTls, fixtureTrust);
+    }
+
+    private static Response exchange(Method method, Format format, boolean imageBearer, String exactEndpoint,
+                                     String bearer, byte[] utf8Json, long deadlineNanos, int maxResponseBytes,
+                                     Admission admission, Dns resolver, Predicate<InetAddress> policy,
+                                     SSLSocketFactory fixtureTls, X509TrustManager fixtureTrust) throws Failure {
         Endpoint target = endpoint(exactEndpoint);
         HttpUrl url = target.url();
-        if (bearer == null || !bearer.isEmpty() && !AiCredentialVault.validBearer(bearer)
-                || utf8Json == null || utf8Json.length == 0 || utf8Json.length > MAX_REQUEST_BYTES
-                || maxResponseBytes <= 0 || maxResponseBytes > MAX_RESPONSE_BYTES || admission == null
+        if (bearer == null || !bearer.isEmpty() && !(imageBearer
+                ? AiCredentialVault.validImageBearer(bearer) : AiCredentialVault.validBearer(bearer))
+                || method == null || format == Format.MP4 && method != Method.GET || method != Method.POST && utf8Json != null
+                || method == Method.POST && (utf8Json == null || utf8Json.length == 0 || utf8Json.length > MAX_REQUEST_BYTES)
+                || maxResponseBytes <= 0 || maxResponseBytes > (format == Format.MP4 ? MAX_VIDEO_BYTES : MAX_RESPONSE_BYTES)
+                || admission == null
                 || AiCredentialVault.imageEndpointContainsCredential(url.toString(), bearer)) {
             throw new Failure(Kind.REQUEST, false);
         }
         if (Thread.currentThread().isInterrupted()) throw new Failure(Kind.CANCELLED, false);
         long now = System.nanoTime();
-        long allowance = Math.min(deadlineNanos - now, MAX_CALL_NANOS);
+        long allowance = Math.min(deadlineNanos - now, format == Format.IMAGE_RESULT ? MAX_IMAGE_CALL_NANOS : MAX_CALL_NANOS);
         if (allowance <= 0) throw new Failure(Kind.DEADLINE, false);
         long deadline = now + allowance;
         List<InetAddress> vetted = resolve(target, resolver, policy, deadline);
 
-        Request.Builder builder = new Request.Builder().url(url).post(oneShotJson(utf8Json.clone()))
-                .header("Accept", "application/json")
+        Request.Builder builder = new Request.Builder().url(url)
+                .method(method.name(), method == Method.POST ? oneShotJson(utf8Json.clone()) : null)
+                .header("Accept", switch (format) {
+                    case MP4 -> "video/mp4";
+                    case IMAGE_RESULT -> "image/png, image/jpeg, image/webp, image/gif, application/json";
+                    case TEXT_RESULT -> "application/json, text/plain";
+                    case JSON -> "application/json";
+                })
                 .header("Accept-Encoding", "identity")
                 .header("Connection", "close");
         if (!bearer.isEmpty()) builder.header("Authorization", "Bearer " + bearer);
@@ -154,7 +217,7 @@ final class SkillHttpsTransport {
             @Override public void onResponse(Call ignored, okhttp3.Response response) {
                 Response result;
                 try (okhttp3.Response received = response) {
-                    result = read(received, maxResponseBytes);
+                    result = read(received, maxResponseBytes, format);
                 } catch (IOException | RuntimeException failure) {
                     pending.completeExceptionally(safeFailure(failure, dispatch));
                     return;
@@ -274,7 +337,7 @@ final class SkillHttpsTransport {
         InetAddress peer = socket == null ? null : socket.getInetAddress();
         if (connection == null || connection.handshake() == null || connection.route().proxy().type() != Proxy.Type.DIRECT
                 || peer == null || socket.getPort() != original.url().port() || !vetted.contains(peer)
-                || !policy.test(peer) || !request.url().equals(original.url()) || !request.method().equals("POST")) {
+                || !policy.test(peer) || !request.url().equals(original.url()) || !request.method().equals(original.method())) {
             throw new Failure(Kind.ADDRESS, false);
         }
         try {
@@ -299,11 +362,18 @@ final class SkillHttpsTransport {
         };
     }
 
-    private static Response read(okhttp3.Response response, int limit) throws IOException {
+    private static Response read(okhttp3.Response response, int limit, Format format) throws IOException {
         int status = response.code();
         if (!response.isSuccessful()) return new Response(status, "", new byte[0]);
         List<String> typeHeaders = response.headers().values("Content-Type");
-        String contentType = typeHeaders.size() == 1 ? jsonType(typeHeaders.get(0)) : "";
+        String contentType = typeHeaders.size() == 1 ? responseType(typeHeaders.get(0), format) : "";
+        if (format != Format.JSON) {
+            List<String> encodings = response.headers().values("Content-Encoding");
+            if (status == 206 || format == Format.MP4 && status != 200 || contentType.isEmpty()
+                    || !encodings.isEmpty() && (encodings.size() != 1 || !encodings.get(0).equalsIgnoreCase("identity"))) {
+                return new Response(status, "", new byte[0]);
+            }
+        }
         ResponseBody body = response.body();
         if (body == null) return new Response(status, contentType, new byte[0]);
         BufferedSource source = body.source();
@@ -313,10 +383,14 @@ final class SkillHttpsTransport {
         return new Response(status, contentType, source.readByteArray());
     }
 
-    private static String jsonType(String header) {
+    private static String responseType(String header, Format format) {
         if (header.length() > 256) return "";
         int parameters = header.indexOf(';');
         String bare = (parameters < 0 ? header : header.substring(0, parameters)).trim().toLowerCase(Locale.ROOT);
+        if (format == Format.MP4) return bare.equals("video/mp4") ? bare : "";
+        if (format == Format.TEXT_RESULT && bare.equals("text/plain")) return bare;
+        if (format == Format.IMAGE_RESULT && (bare.equals("image/png") || bare.equals("image/jpeg")
+                || bare.equals("image/webp") || bare.equals("image/gif"))) return bare;
         return bare.equals("application/json") || bare.matches("application/[a-z0-9._-]+\\+json")
                 ? "application/json" : "";
     }

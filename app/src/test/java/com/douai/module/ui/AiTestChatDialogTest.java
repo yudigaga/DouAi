@@ -30,8 +30,11 @@ import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillCustomServiceTest;
 import com.douai.module.ai.skills.SkillResult;
+import com.douai.module.ai.skills.SkillSelection;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.ai.skills.SkillVideoJobs;
+import com.douai.module.ai.skills.SkillVideoJobsTest;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.feature.ChatImage;
 import com.douai.module.feature.ChatImageLoader;
@@ -820,6 +823,111 @@ public final class AiTestChatDialogTest {
         return services;
     }
 
+    @Test public void namedWorkSkillSkipsRoutingAndContactCanSelectTheSameInstalledSkill() throws Exception {
+        SkillStore store = SkillStore.forContext(activity);
+        store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(textSkillDraft("保留事实，使用分点格式。")));
+        FakeSession work = new FakeSession();
+        work.skillReplies.add("第一期已上线。");
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, store);
+        submit("请用周报润色处理：第一期上线");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals("第一期已上线。", lastAnswer());
+        assertEquals(List.of(SkillAuthoring.TEXT_INSTRUCTION), work.skillInstructions);
+        assertEquals("第一期上线", new JSONObject(work.skillInputs.get(0)).getString("argument"));
+
+        FakeSession contact = new FakeSession();
+        contact.skillReplies.add("{\"name\":\"周报润色\",\"argument\":\"第二期上线\"}");
+        contact.skillReplies.add("第二期已上线。");
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT, store);
+        String natural = "帮我整理：第二期上线";
+        submit(natural);
+        assertEquals(0, messageCount());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(2, messageCount());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(natural, bubble(0, "ai.chat.user"));
+        assertEquals("第二期已上线。", lastAnswer());
+        assertEquals(List.of(SkillSelection.INSTRUCTION, SkillAuthoring.TEXT_INSTRUCTION), contact.skillInstructions);
+        assertEquals(natural, new JSONObject(contact.skillInputs.get(0)).getString("task"));
+        assertEquals("第二期上线", new JSONObject(contact.skillInputs.get(1)).getString("argument"));
+        assertTrue(contact.prompts.isEmpty());
+    }
+
+    @Test public void aRoutedSkillRemovedWhileSelectionWasQueuedNeverRunsOrFallsBackToChat() throws Exception {
+        SkillStore store = SkillStore.forContext(activity);
+        store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(textSkillDraft("保留事实，使用分点格式。")));
+        FakeSession work = new FakeSession();
+        work.skillReplies.add("{\"name\":\"周报润色\",\"argument\":\"一期上线\"}");
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, store);
+        String natural = "帮我整理：一期上线";
+        submit(natural);
+        store.delete(store.detail("周报润色").deleteTarget());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, messageCount());
+        assertEquals(natural, input.getText().toString());
+        assertTrue(text("ai.chat.state").getText().toString().contains("技能已变化"));
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(work.prompts.isEmpty());
+    }
+
+    @Test public void aModelSelectedExternalSkillWaitsForConsentWithoutDuplicatingTheUserTurn() throws Exception {
+        String name = "接口整理";
+        String endpoint = "https://skill-api.example.com/v1/process";
+        AtomicInteger calls = new AtomicInteger();
+        SkillStore store = SkillCustomServiceTest.chatFixture(activity, calls);
+        store.saveAuthoredDraft(SkillStore.validateAuthoredDraft("""
+                {"schemaVersion":4,"name":"接口整理","description":"整理本次输入","documentation":"输入待整理文本。",
+                 "instructions":"整理本次输入","capabilityId":"custom_service","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"}}
+                """));
+        store.configureCustomService(store.detail(name), endpoint, "");
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        String plan = "{\"name\":\"接口整理\",\"argument\":\"样例\"}";
+        work.skillReplies.add(plan);
+        work.skillReplies.add(plan);
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, store);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        String natural = "帮我整理这个样例";
+        submit(natural);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        AlertDialog firstReview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals(0, calls.get());
+        assertEquals(0, messageCount());
+        assertFalse(work.skillInputs.get(0).contains(endpoint));
+        assertTrue(firstReview.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, messageCount());
+        assertTrue(work.transcriptMemory.readTranscript().isEmpty());
+
+        submit(natural);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        AlertDialog secondReview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNotSame(firstReview, secondReview);
+        assertEquals(0, calls.get());
+        assertTrue(secondReview.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, calls.get());
+        assertEquals(2, messageCount());
+        assertEquals(natural, bubble(0, "ai.chat.user"));
+        assertEquals("测试端点结果", lastAnswer());
+        assertEquals(1, work.transcriptMemory.readTranscript().size());
+        assertEquals(List.of(SkillSelection.INSTRUCTION, SkillSelection.INSTRUCTION), work.skillInstructions);
+        assertTrue(work.prompts.isEmpty());
+    }
+
     @Test public void customServiceSettingsRequireConfirmationForEachChatRequest() throws Exception {
         String name = "接口整理";
         String command = "/接口整理 样例";
@@ -954,6 +1062,80 @@ public final class AiTestChatDialogTest {
         assertFalse(new File(activity.getFilesDir(), "douai_skill_video_tasks").exists());
         assertEquals(1, work.transcriptMemory.readTranscript().size());
         assertNull(work.transcriptMemory.readTranscript().get(0).artifact);
+    }
+
+    @Test public void declaredVideoRoutesRequireConfiguredFieldsAndConsentBeforeAnyJob() throws Exception {
+        FakeSession contact = new FakeSession();
+        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        contact.skillReplies.add("""
+                {"schemaVersion":4,"name":"视频创作","description":"合成原创视频","documentation":"填写画面提示",
+                 "instructions":"用提供的契约提交视频","capabilityId":"video_task",
+                 "configFields":[{"key":"seconds","label":"时长","type":"integer","required":true,"min":1,"max":10}],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"video","trial":{"input":"示例","expectedType":"video"},
+                 "http":{"version":1,"label":"视频接口","suggestedEndpoint":"https://video-api.example.com/v1/jobs",
+                 "request":{"prompt":"argument","seconds":"config.seconds"},"response":"job_id",
+                 "video":{"statusPath":"/v1/jobs/{id}","cancelPath":"/v1/jobs/{id}/cancel","cancelMethod":"POST",
+                 "downloadPath":"/v1/jobs/{id}/content","idField":"id","stateField":"status",
+                 "states":{"waiting":"queued","working":"running","done":"completed","error":"failed","stop":"cancelled"}}}}
+                """);
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("帮我创建一个生成视频技能：用 https://video-api.example.com/v1/jobs 并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertNull(store.detail("视频创作").customConfiguration());
+        AlertDialog settings = openChatSkillSettings("视频创作");
+        EditText seconds = settings.getWindow().getDecorView().findViewWithTag("skills.detail.config.seconds");
+        assertNotNull(seconds);
+        seconds.setText("4");
+        assertTrue(settings.getWindow().getDecorView().findViewWithTag("skills.detail.custom.save").performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(store.detail("视频创作").pending());
+        settings.dismiss();
+        submit("请调用「视频创作」：海上日出");
+        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
+        org.robolectric.shadows.ShadowAlertDialog shadow = org.robolectric.shadow.api.Shadow.extract(review);
+        String disclosure = String.valueOf(shadow.getMessage());
+        assertTrue(disclosure.contains("POST https://video-api.example.com/v1/jobs"));
+        assertTrue(disclosure.contains("\"seconds\":4"));
+        assertTrue(disclosure.contains("按同一任务 ID 查询"));
+        assertTrue(review.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals(1, contact.transcriptMemory.readTranscript().size());
+        SkillVideoJobs.Scope scope = new SkillVideoJobs.Scope(AiSkills.Entry.CONTACT, contact.transcriptMemory.conversationKey());
+        assertTrue(jobs.list(scope).isEmpty());
+        assertEquals(0, submits.get());
+
+        submit("请调用「视频创作」：海上日出");
+        AlertDialog confirmed = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(confirmed.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        SkillResult.Video saved = (SkillResult.Video) contact.transcriptMemory.readTranscript().get(1).artifact;
+        assertEquals(saved.requestId(), jobs.list(scope).get(0).localId());
+        assertEquals(1, submits.get());
+
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(saved, restored.transcriptMemory.readTranscript().get(1).artifact);
+        assertNotNull(messageRow(3).findViewWithTag("ai.chat.skill.video.card"));
+        assertEquals(1, jobs.list(scope).size());
+        assertEquals(1, submits.get());
+        assertTrue(restored.skillInputs.isEmpty());
     }
 
     @Test public void oldVideoArtifactIsSkippedWhileTextTableAndImageAreRestored() throws Exception {
@@ -2273,6 +2455,11 @@ public final class AiTestChatDialogTest {
 
     private void reopen(FakeSession saved, AiTestChatDialog.ThumbnailLoader thumbnails, AiSkills.Entry skills,
                         SkillStore store) throws Exception {
+        reopen(saved, thumbnails, skills, store, null);
+    }
+
+    private void reopen(FakeSession saved, AiTestChatDialog.ThumbnailLoader thumbnails, AiSkills.Entry skills,
+                        SkillStore store, SkillVideoJobs videoJobs) throws Exception {
         dialog.dismiss();
         worker.shutdownNow();
         historyWorker.shutdownNow();
@@ -2284,7 +2471,8 @@ public final class AiTestChatDialogTest {
             if (sessions.isEmpty()) throw new AssertionError("Unexpected session creation");
             return sessions.get(0);
         };
-        dialog = new AiTestChatDialog(activity, restoreConfiguration(), factory, worker, historyWorker, false, thumbnails);
+        dialog = videoJobs == null ? new AiTestChatDialog(activity, restoreConfiguration(), factory, worker, historyWorker, false, thumbnails)
+                : new AiTestChatDialog(activity, restoreConfiguration(), factory, worker, historyWorker, thumbnails, videoJobs);
         if (store != null) dialog.enableSkills(skills, null, store);
         else if (skills != null) dialog.enableSkills(skills);
         dialog.show();

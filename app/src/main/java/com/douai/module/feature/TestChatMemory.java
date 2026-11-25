@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Bounded private test-chat history. Epochs prevent an older request from undoing Clear. */
@@ -60,6 +61,8 @@ public final class TestChatMemory {
     public long epoch() { synchronized (IO_LOCK) { return state.epoch; } }
 
     public boolean historyEnabled() { return rounds > 0; }
+
+    public String conversationKey() { return file.getName().substring(0, 64); }
 
     /** Ordinary model context, excluding all local-only Skill turns. */
     public List<Turn> read() { return readStored(false); }
@@ -155,6 +158,9 @@ public final class TestChatMemory {
         synchronized (IO_LOCK) {
             if (rounds == 0 || expectedEpoch != state.epoch) return false;
             List<Turn> turns = new ArrayList<>(readTranscript());
+            if (turn.artifact instanceof SkillResult.Video && turns.stream().anyMatch(saved -> turn.artifact.equals(saved.artifact))) {
+                return true;
+            }
             turns.add(turn);
             turns = bounded(turns);
             if (turn.displayOnly && !turns.contains(turn)) return false;
@@ -177,7 +183,8 @@ public final class TestChatMemory {
                         if (saved.displayOnly) text(output, saved.settingsSkillName == null ? "" : saved.settingsSkillName);
                         writeImages(output, saved.displayOnly ? saved.assistantImages : saved.images);
                         if (artifacts && saved.displayOnly) {
-                            text(output, saved.artifact == null ? "" : saved.artifact.type().wireName());
+                            text(output, saved.artifact == null ? "" : saved.artifact instanceof SkillResult.Video
+                                    ? "video_job" : saved.artifact.type().wireName());
                             if (saved.artifact != null) text(output, artifactPayload(saved.artifact));
                         }
                     }
@@ -241,6 +248,12 @@ public final class TestChatMemory {
     }
 
     private static SkillResult readArtifact(String type, String payload) {
+        if ("video_job".equals(type)) {
+            try {
+                UUID id = UUID.fromString(payload);
+                if (id.toString().equals(payload)) return new SkillResult.Video(id);
+            } catch (IllegalArgumentException invalid) { return null; }
+        }
         if (SkillResult.Type.TABLE.wireName().equals(type)) {
             try { return new SkillResult.Table(SkillTable.parse(payload)); }
             catch (IllegalArgumentException invalid) { return null; }
@@ -250,6 +263,7 @@ public final class TestChatMemory {
 
     private static String artifactPayload(SkillResult artifact) {
         if (artifact instanceof SkillResult.Table table) return table.table().toJson();
+        if (artifact instanceof SkillResult.Video video) return video.requestId().toString();
         throw new IllegalArgumentException("Unsupported history artifact");
     }
 

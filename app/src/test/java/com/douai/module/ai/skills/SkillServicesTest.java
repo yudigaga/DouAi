@@ -93,6 +93,34 @@ public final class SkillServicesTest {
         assertEquals(List.of(ORDERS.endpoint()), fixture.transport.endpoints);
     }
 
+    @Test public void reviewedExecutionRejectsPrivateAddressWithoutUsingLegacyTransport() throws Exception {
+        Fixture fixture = new Fixture();
+        var privateService = new SkillServices.Service("private", "测试接口", "https://127.0.0.1/api", 0);
+        fixture.services.register(privateService, TOKEN_A);
+        fixture.services.authorize(privateService, 0);
+        var review = fixture.services.previewReviewed(privateService, "输入");
+        var rejection = failure(() -> fixture.services.executeReviewed(privateService, "输入", review.proof(),
+                () -> fail("Do not admit a private target")));
+        assertEquals(SkillServices.Code.UNAVAILABLE, rejection.code());
+        assertTrue(fixture.transport.endpoints.isEmpty());
+    }
+
+    @Test public void rotatingAndReauthorizingTheSameAddressInvalidatesOldReviewProof() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.services.register(ORDERS, TOKEN_A);
+        fixture.services.authorize(ORDERS, 2);
+        var original = fixture.services.previewReviewed(ORDERS, "DA-1001");
+        fixture.services.register(ORDERS, TOKEN_B);
+        fixture.services.authorize(ORDERS, 2);
+        var current = fixture.services.previewReviewed(ORDERS, "DA-1001");
+        assertEquals(original.body(), current.body());
+        assertNotEquals(original.proof(), current.proof());
+        var stale = failure(() -> fixture.services.executeReviewed(ORDERS, "DA-1001", original.proof(),
+                () -> fail("Do not admit an old approval")));
+        assertEquals(SkillServices.Code.CONFIRMATION_REQUIRED, stale.code());
+        assertTrue(fixture.transport.endpoints.isEmpty());
+    }
+
     @Test public void echoedCredentialNeverBecomesASkillResultOrAnExceptionDetail() throws Exception {
         Fixture fixture = new Fixture();
         fixture.services.register(ORDERS, TOKEN_A);

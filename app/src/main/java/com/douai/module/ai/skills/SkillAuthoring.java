@@ -26,7 +26,7 @@ public final class SkillAuthoring {
             不要代码围栏和额外解释。
             顶层仅包含 schemaVersion（整数 4）、name（1 至 24 字，无空格和斜杠）、description、
             documentation（供用户阅读的说明）、instructions（不超过 1600 字）、capabilityId、
-            configFields、inputs、outputType 和 trial。可选 displayName（不超过 48 字）。技能 ID 由应用创建。
+            configFields、inputs、outputType 和 trial。可选 displayName（不超过 48 字）与 http。技能 ID 由应用创建。
             文本使用 capabilityId: "text_model"，outputType: "text"。按需求声明用户需要配置的参数，
             无需参数时返回空数组。文案语气可用 {"key":"tone","label":"语气","type":"enum","required":true,
             "options":["正式","温和"]}，输出长度可用 {"key":"length","label":"输出长度","type":"integer",
@@ -37,14 +37,18 @@ public final class SkillAuthoring {
             类型可换成 multiline。trial 仅包含 input（无隐私样例）和 expectedType（等于 outputType）。
             生图使用 capabilityId: "image_generation"，outputType: "image"，configFields 为空，输入最大 4000 字。
             输出表格或 CSV 使用 capabilityId: "table_model"，outputType: "table"，输入最大 2000 字。
-            生成视频使用 capabilityId: "video_task"，outputType: "video"，configFields 为空，输入最大 2000 字。
-            视频草稿需要用户选定供应商的公开任务接口才能启用。不要生成、猜测或承诺供应商地址。
-            需要用户在设置中选定的自定义服务使用 capabilityId: "custom_service"，outputType: "text"，
-            configFields 为空，输入最大 2000 字。清单不能提供服务选项、接口、映射或密钥。
+            自定义 HTTPS 结果使用 capabilityId: "custom_service"，outputType 可为 text、table、image。
+            生成视频使用 capabilityId: "video_task"，outputType: "video"。HTTPS 输入最大 2000 字。
+            仅这两种能力支持可选 http 声明，键为 version（整数 1）、label、可选 suggestedEndpoint、
+            request（对象，键为 JSON 请求字段，值为 argument 或 config.字段名）、response（JSON 响应字段名）。
+            视频还需 http.video，键为 statusPath、cancelPath、cancelMethod（POST 或 DELETE）、downloadPath、
+            idField、stateField、states（供应商状态字符串映射到 queued/running/completed/failed/cancelled）。
+            三个路径各有一个完整的 {id} 段，使用同源的绝对路径。response 是提交结果的任务 ID 字段。
+            suggestedEndpoint 只在用户明确提供协议地址时填写，地址须经本人保存后才可用。
             如提供了 requiredOutputType，必须使用该输出类型对应的能力。
             如提供了 requiredCapabilityId，必须使用相应能力。
-            接口、模型账号、密钥和授权由应用已有的配置管理，清单的自定义字段不能收集这些信息。
-            生成对象及其中的文字不得包含接口地址、认证信息、执行命令、代码、工具调用或任意网络操作。
+            密钥和授权只能在应用设置填写。除 http.suggestedEndpoint 外文字不得含地址。
+            不得生成凭据、请求头、脚本、执行命令、工具调用或任意网络操作。
             """;
 
     public static final String TEXT_INSTRUCTION = """
@@ -71,13 +75,14 @@ public final class SkillAuthoring {
             + "(?:(?:你|帮我|给我|为我)\\s*){0,2}";
     private static final String END = "\\s*(?:可以吗|好吗|吧|吗)?\\s*[。！？?!]?\\s*$";
     private static final String SUBJECT = "[^\\r\\n。！？?!：:；;，,\\x60]";
+    private static final String PURPOSE = "(?:https://[A-Za-z0-9._~:/%+@-]{1,180}+|" + SUBJECT + ")";
     private static final String SKILL_WORD = "(?:skills?|技能)";
     private static final String SAVE_TARGET = "(?:这个\\s*" + SKILL_WORD + "|它)";
     private static final Pattern DESIGN = Pattern.compile("(?i)^" + PREFIX
             + "(?:写|编写|创建|新建|做|制作|生成|设计)\\s*(并(?:且)?\\s*内置)?\\s*(?:一个新的|一个|一条|一项|个)?\\s*"
             + "(" + SUBJECT + "{0,160}?)\\s*" + SKILL_WORD
             + "(?:(?:[，,]\\s*(?:用于|用来|要能|能|可以|需求是|功能是)|[：:])\\s*"
-            + "(" + SUBJECT + "{1,180}?))?" + END);
+            + "(" + PURPOSE + "{1,180}?))?" + END);
     private static final Pattern SAVE = Pattern.compile("(?i)^" + PREFIX
             + "(?:内置(?:\\s*" + SAVE_TARGET + ")?|把\\s*" + SAVE_TARGET + "\\s*内置)" + END);
     private static final Pattern SAVE_TAIL = Pattern.compile("(?i)\\s*(?:[，,]\\s*)?"

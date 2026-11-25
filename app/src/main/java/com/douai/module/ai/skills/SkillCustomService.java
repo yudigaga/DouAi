@@ -1,19 +1,21 @@
 package com.douai.module.ai.skills;
 
 import com.douai.module.ai.AiCredentialVault;
+import com.douai.module.feature.ChatImage;
+import com.douai.module.feature.ChatImageLoader;
 
 import org.json.JSONObject;
 
 import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -63,6 +65,8 @@ public final class SkillCustomService {
     private static final int MAX_INPUT_CHARS = 2000;
     private static final int MAX_TEXT_CHARS = 4000;
     private static final int MAX_REPLY_BYTES = 24_576;
+    private static final int MAX_TABLE_REPLY_BYTES = 64 * 1024;
+    private static final int MAX_IMAGE_REPLY_BYTES = 6 * 1024 * 1024;
     private static final int MAX_MAPPED_JSON_NODES = 4;
     private static final long REVIEW_NANOS = TimeUnit.MINUTES.toNanos(2);
     private static final long MAX_CALL_NANOS = TimeUnit.SECONDS.toNanos(30);
@@ -91,22 +95,27 @@ public final class SkillCustomService {
         private final Binding binding;
         private final String argument;
         private final byte[] body;
+        private final SkillHttpDeclaration declaration;
         private final String digest;
         private final long expiresAt;
         private final AtomicReference<State> state = new AtomicReference<>(State.PREVIEWED);
 
-        private Preview(SkillCustomService owner, Binding binding, String argument, byte[] body, String digest,
+        private Preview(SkillCustomService owner, Binding binding, String argument, byte[] body,
+                        SkillHttpDeclaration declaration, String digest,
                         long expiresAt) {
             this.owner = owner;
             this.binding = binding;
             this.argument = argument;
             this.body = body;
+            this.declaration = declaration;
             this.digest = digest;
             this.expiresAt = expiresAt;
         }
 
         public String endpoint() { return binding.endpoint(); }
         public String argument() { return argument; }
+        public String payload() { return new String(body, StandardCharsets.UTF_8); }
+        public SkillHttpDeclaration declaration() { return declaration; }
         public String digest() { return digest; }
         public String skillId() { return binding.skillId(); }
         public String revision() { return binding.revision(); }
@@ -122,7 +131,7 @@ public final class SkillCustomService {
     @FunctionalInterface interface WriteAdmission { void check() throws IOException; }
 
     @FunctionalInterface interface Transport {
-        Reply exchange(String endpoint, String bearer, byte[] body, long deadlineNanos, WriteAdmission admission)
+        Reply exchange(String endpoint, String bearer, byte[] body, long deadlineNanos, int responseLimit, WriteAdmission admission)
                 throws IOException;
     }
     record Reply(int status, String contentType, byte[] body) {}
@@ -207,15 +216,28 @@ public final class SkillCustomService {
     }
 
     public Preview preview(Binding binding, String argument) throws Failure {
+        return preview(binding, argument, null, Map.of());
+    }
+
+    Preview preview(Binding binding, String argument, SkillHttpDeclaration declaration, Map<String, Object> config)
+            throws Failure {
         if (binding == null || argument == null || argument.length() > MAX_INPUT_CHARS || argument.trim().isEmpty()
                 || !validText(argument)) {
             throw new Failure(Code.INVALID_INPUT);
         }
         try { SkillAuthoring.rejectCredential(argument); }
         catch (IllegalArgumentException sensitive) { throw new Failure(Code.INVALID_INPUT); }
-        rejectCredentialInInput(argument, credential(binding));
-        byte[] body = json(REQUEST_FIELD, argument);
-        return new Preview(this, binding, argument, body, digest(binding, body), clock.getAsLong() + REVIEW_NANOS);
+        String bearer = credential(binding);
+        rejectCredentialInInput(argument, bearer);
+        if (declaration != null) for (Object value : config.values()) {
+            rejectCredentialInInput(String.valueOf(value), bearer);
+        }
+        byte[] body;
+        try { body = declaration == null ? json(REQUEST_FIELD, argument) : declaration.requestBody(argument, config); }
+        catch (IllegalArgumentException invalid) { throw new Failure(Code.INVALID_INPUT); }
+        rejectCredentialInInput(new String(body, StandardCharsets.UTF_8), bearer);
+        return new Preview(this, binding, argument, body, declaration, digest(binding, body, declaration),
+                clock.getAsLong() + REVIEW_NANOS);
     }
 
     public Approval approve(Preview preview) throws Failure {
@@ -241,6 +263,31 @@ public final class SkillCustomService {
     /** The caller supplies the current binding and rechecks it at transport admission. */
     public SkillResult.Text execute(Approval approval, Binding current, long deadlineNanos, Admission admission)
             throws Failure {
+        return (SkillResult.Text) executeResult(approval, current, deadlineNanos, admission);
+    }
+
+    SkillResult executeResult(Approval approval, Binding current, long deadline, Admission admission) throws Failure {
+        try { return executeBound(approval, current, deadline, admission, this::exchange); }
+        catch (Failure failure) { throw failure; }
+        catch (Exception unavailable) { throw new Failure(Code.TRANSPORT); }
+    }
+
+    @FunctionalInterface interface VideoSubmit {
+        SkillResult submit(String bearer, byte[] approvedJson, long deadline, WriteAdmission admission) throws Exception;
+    }
+
+    SkillResult executeVideo(Approval approval, Binding current, long deadline, Admission admission, VideoSubmit submit)
+            throws Exception {
+        return executeBound(approval, current, deadline, admission, (preview, bearer, limit, currentCheck) ->
+                submit.submit(bearer, preview.body.clone(), limit, () -> admit(preview, limit, currentCheck)));
+    }
+
+    @FunctionalInterface private interface BoundExecution {
+        SkillResult run(Preview preview, String bearer, long deadline, Admission current) throws Exception;
+    }
+
+    private SkillResult executeBound(Approval approval, Binding current, long deadlineNanos, Admission admission,
+                                     BoundExecution operation) throws Exception {
         Preview preview = approval == null ? null : approval.preview;
         if (preview == null || preview.owner != this || !preview.state.compareAndSet(State.APPROVED, State.CONNECTING)) {
             throw new Failure(Code.APPROVAL_REQUIRED);
@@ -253,22 +300,23 @@ public final class SkillCustomService {
             long deadline = start + Math.min(deadlineNanos - start, MAX_CALL_NANOS);
             String bearer = credential(current);
             rejectCredentialInInput(preview.argument, bearer);
+            rejectCredentialInInput(preview.payload(), bearer);
             checkDeadline(deadline, false);
             if (preview.state.get() != State.CONNECTING) throw new Failure(Code.CANCELLED);
             if (!rate.acquire(clock.getAsLong())) throw new Failure(Code.RATE_LIMITED);
-            return exchange(preview, current.endpoint(), bearer, deadline, admission);
+            return operation.run(preview, bearer, deadline, admission);
         } finally {
             preview.state.set(State.CLOSED);
         }
     }
 
-    private SkillResult.Text exchange(Preview preview, String endpoint, String bearer, long deadline,
-                                      Admission current) throws Failure {
+    private SkillResult exchange(Preview preview, String bearer, long deadline, Admission current) throws Failure {
         AtomicReference<Failure> denied = new AtomicReference<>();
         AtomicBoolean admitted = new AtomicBoolean();
         Reply result;
         try {
-            result = transport.exchange(endpoint, bearer, preview.body.clone(), deadline, () -> {
+            result = transport.exchange(preview.endpoint(), bearer, preview.body.clone(), deadline,
+                    responseLimit(preview.declaration), () -> {
                 try {
                     admit(preview, deadline, current);
                     admitted.set(true);
@@ -285,7 +333,7 @@ public final class SkillCustomService {
         if (denied.get() != null) throw denied.get();
         if (!admitted.get()) throw new Failure(Code.TRANSPORT);
         checkDeadline(deadline, true);
-        SkillResult.Text decoded = decode(result, bearer);
+        SkillResult decoded = decode(result, bearer, preview.declaration);
         checkDeadline(deadline, true);
         return decoded;
     }
@@ -307,7 +355,7 @@ public final class SkillCustomService {
         if (!preview.state.compareAndSet(State.CONNECTING, State.CLOSED)) throw new Failure(Code.CANCELLED);
     }
 
-    private String credential(Binding binding) throws Failure {
+    String credential(Binding binding) throws Failure {
         if (binding.encryptedBearer().isEmpty()) return "";
         try {
             String bearer = credentials.open(AiCredentialVault.Scope.SKILL_SERVICE,
@@ -331,23 +379,46 @@ public final class SkillCustomService {
                 && value.codePoints().noneMatch(c -> Character.isISOControl(c) && c != '\t' && c != '\r' && c != '\n');
     }
 
-    private static SkillResult.Text decode(Reply result, String bearer) throws Failure {
+    private static int responseLimit(SkillHttpDeclaration declaration) {
+        if (declaration == null) return MAX_REPLY_BYTES;
+        return switch (declaration.outputType()) {
+            case TABLE -> MAX_TABLE_REPLY_BYTES;
+            case IMAGE -> MAX_IMAGE_REPLY_BYTES;
+            default -> MAX_REPLY_BYTES;
+        };
+    }
+
+    private static SkillResult decode(Reply result, String bearer, SkillHttpDeclaration declaration) throws Failure {
         if (result == null || result.status() < 200 || result.status() > 599) throw new Failure(Code.BAD_RESPONSE);
         if (result.status() == 408 || result.status() >= 500) throw new Failure(Code.UNKNOWN_RESULT);
         if (result.status() >= 300) throw new Failure(Code.REMOTE_REFUSED);
-        if (!jsonType(result.contentType()) || result.body() == null || result.body().length > MAX_REPLY_BYTES) {
+        int limit = responseLimit(declaration);
+        if (!jsonType(result.contentType()) || result.body() == null || result.body().length > limit) {
             throw new Failure(Code.BAD_RESPONSE);
         }
         try {
             String raw = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(result.body())).toString();
-            JSONObject object = SkillAuthoring.readObject(raw, MAX_REPLY_BYTES, MAX_MAPPED_JSON_NODES);
-            if (object.length() != 1 || !(object.opt(RESPONSE_FIELD) instanceof String text)
-                    || text.length() > MAX_TEXT_CHARS || text.trim().isEmpty() || !validText(text)
+            JSONObject object = SkillAuthoring.readObject(raw, limit, declaration == null ? MAX_MAPPED_JSON_NODES : 1_500);
+            Object value = object.opt(declaration == null ? RESPONSE_FIELD : declaration.responseField());
+            if (declaration == null && object.length() != 1 || value == null || value == JSONObject.NULL
+                    || !bearer.isEmpty() && value.toString().contains(bearer)) throw new Failure(Code.BAD_RESPONSE);
+            if (declaration != null && declaration.outputType() == SkillResult.Type.TABLE && value instanceof JSONObject table) {
+                return new SkillResult.Table(SkillTable.parse(table.toString()));
+            }
+            if (declaration != null && declaration.outputType() == SkillResult.Type.IMAGE && value instanceof String image) {
+                byte[] data = Base64.getDecoder().decode(image);
+                if (data.length > ChatImage.MAX_BYTES) throw new Failure(Code.BAD_RESPONSE);
+                return new SkillResult.Image(ChatImageLoader.decode(data));
+            }
+            if (declaration != null && declaration.outputType() != SkillResult.Type.TEXT
+                    || !(value instanceof String text) || text.length() > MAX_TEXT_CHARS || text.trim().isEmpty() || !validText(text)
                     || !bearer.isEmpty() && text.contains(bearer)) {
                 throw new Failure(Code.BAD_RESPONSE);
             }
             return new SkillResult.Text(text);
-        } catch (IllegalArgumentException | CharacterCodingException invalid) {
+        } catch (Failure failure) {
+            throw failure;
+        } catch (Exception invalid) {
             throw new Failure(Code.BAD_RESPONSE);
         }
     }
@@ -364,11 +435,11 @@ public final class SkillCustomService {
         if (deadline - clock.getAsLong() <= 0) throw new Failure(dispatched ? Code.UNKNOWN_RESULT : Code.DEADLINE);
     }
 
-    private static Reply post(String endpoint, String bearer, byte[] body, long deadline, WriteAdmission admission)
+    private static Reply post(String endpoint, String bearer, byte[] body, long deadline, int responseLimit, WriteAdmission admission)
             throws Failure {
         try {
             SkillHttpsTransport.Response response = SkillHttpsTransport.post(endpoint, bearer, body, deadline,
-                    MAX_REPLY_BYTES, admission::check);
+                    responseLimit, admission::check);
             return new Reply(response.status(), response.contentType(), response.body());
         } catch (SkillHttpsTransport.Failure failure) {
             if (failure.mayHaveSent()) throw new Failure(Code.UNKNOWN_RESULT);
@@ -387,11 +458,12 @@ public final class SkillCustomService {
         return ("{" + JSONObject.quote(key) + ":" + JSONObject.quote(value) + "}").getBytes(StandardCharsets.UTF_8);
     }
 
-    private static String digest(Binding binding, byte[] body) {
+    private static String digest(Binding binding, byte[] body, SkillHttpDeclaration declaration) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             String metadata = "custom-https-v1\n" + binding.skillId() + "\n" + binding.revision() + "\n"
-                    + binding.endpoint() + "\nPOST\n" + REQUEST_FIELD + "\n" + RESPONSE_FIELD + "\n";
+                    + binding.endpoint() + "\nPOST\n" + (declaration == null ? REQUEST_FIELD + "\n" + RESPONSE_FIELD
+                    : declaration.toJson().toString()) + "\n";
             digest.update(metadata.getBytes(StandardCharsets.UTF_8));
             return Base64.getUrlEncoder().withoutPadding().encodeToString(digest.digest(body));
         } catch (NoSuchAlgorithmException unavailable) {

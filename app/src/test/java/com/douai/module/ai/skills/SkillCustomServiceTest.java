@@ -13,8 +13,10 @@ import org.robolectric.annotation.Config;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -39,7 +41,7 @@ public class SkillCustomServiceTest {
 
     public static SkillStore chatFixture(Context context, AtomicInteger calls) {
         SkillCustomService service = new SkillCustomService(AiCredentialVault.forDevice(),
-                (endpoint, bearer, body, deadline, admission) -> {
+                (endpoint, bearer, body, deadline, responseLimit, admission) -> {
                     assertEquals("https://skill-api.example.com/v1/process", endpoint);
                     assertEquals("", bearer);
                     assertEquals("{\"input\":\"样例\"}", new String(body, StandardCharsets.UTF_8));
@@ -51,10 +53,63 @@ public class SkillCustomServiceTest {
         return new SkillStore(directory, SkillServices.forContext(context), null, service);
     }
 
+    @Test public void declaredSettingsProduceTheExactReviewedTypedRequest() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        String endpoint = "https://skill-api.example.com/v1/process";
+        SkillCustomService service = new SkillCustomService(vault, (address, bearer, body, deadline, limit, preflight) -> {
+            assertEquals(endpoint, address);
+            assertEquals("", bearer);
+            preflight.check();
+            calls.incrementAndGet();
+            JSONObject request = SkillAuthoring.readObject(new String(body, StandardCharsets.UTF_8), 500);
+            assertEquals("原稿", request.optString("source"));
+            assertEquals(4, request.optInt("limit"));
+            return json(200, "{\"result\":{\"columns\":[\"条目\"],\"rows\":[[\"内容\"]]}}");
+        }, System::nanoTime);
+        Context context = org.robolectric.RuntimeEnvironment.getApplication();
+        File root = Files.createTempDirectory(context.getCacheDir().toPath(), "skill-map-").toFile();
+        SkillStore store = new SkillStore(root, SkillServices.forContext(context), null, service);
+        SkillStore.DraftPreview proposal = SkillStore.validateAuthoredDraft("""
+                {"schemaVersion":4,"name":"结构整理","description":"将资料整理为结构化表格","documentation":"输入原稿",
+                 "instructions":"结构化整理","capabilityId":"custom_service",
+                 "configFields":[{"key":"count","label":"最多行数","type":"integer","required":true,"min":1,"max":10}],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"table","trial":{"input":"示例","expectedType":"table"},
+                 "http":{"version":1,"label":"结构服务","suggestedEndpoint":"https://example.org/draft",
+                 "request":{"source":"argument","limit":"config.count"},"response":"result"}}
+                """);
+        assertNotNull(store.saveAuthoredDraft(proposal).pending());
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertNull(store.detail("结构整理").customConfiguration());
+        SkillStore.Detail partial = store.configureCustomService(store.detail("结构整理"), endpoint, "");
+        assertTrue(partial.pending());
+        assertTrue(partial.fields().stream().anyMatch(field -> field.id().equals("count") && field.state() == SkillStore.FieldState.MISSING));
+        SkillStore.Detail enabled = store.configureCustomService(partial, endpoint, "", false, Map.of("count", "4"));
+        assertFalse(enabled.pending());
+        assertEquals(List.of("最多行数"), store.selectionCatalog().get(0).parameterLabels());
+        AiSkills.Invocation call = AiSkills.match(AiSkills.Entry.CONTACT, "/结构整理 原稿", store);
+        assertTrue(call.command().requiresReview());
+        SkillStore.CustomReview review = store.previewCustomService(call);
+        assertEquals(endpoint, review.endpoint());
+        assertEquals(4, new JSONObject(review.payload()).getInt("limit"));
+        assertEquals(0, calls.get());
+        SkillStore.CustomCall old = store.approveCustomService(review);
+        store.setSkillEnabled("结构整理", false);
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertThrows(IllegalStateException.class, () -> store.executeCustomService(call, old, deadline(), null));
+        store.setSkillEnabled("结构整理", true);
+        assertThrows(Exception.class, () -> store.executeCustomService(call, old, deadline(), null));
+        assertEquals(0, calls.get());
+        SkillStore.CustomCall approved = store.approveCustomService(store.previewCustomService(call));
+        SkillResult.Table result = (SkillResult.Table) store.executeCustomService(call, approved, deadline(), null);
+        assertEquals(List.of(List.of("内容")), result.table().rows());
+        assertEquals(1, calls.get());
+    }
+
     @Test public void reviewedInputAndExactMappingAreDispatchedOnlyOnce() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         AtomicReference<String> sent = new AtomicReference<>();
-        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, admission) -> {
+        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, responseLimit, admission) -> {
             admission.check();
             calls.incrementAndGet();
             assertEquals(ENDPOINT, endpoint);
@@ -141,7 +196,7 @@ public class SkillCustomServiceTest {
     @Test public void cancelledExpiredAndMissingApprovalDoNotDispatch() throws Exception {
         AtomicLong now = new AtomicLong(1);
         AtomicInteger calls = new AtomicInteger();
-        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, admission) -> {
+        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, responseLimit, admission) -> {
             admission.check();
             calls.incrementAndGet();
             return json(200, "{\"text\":\"ok\"}");
@@ -165,7 +220,7 @@ public class SkillCustomServiceTest {
         AtomicInteger calls = new AtomicInteger();
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, admission) -> {
+        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, responseLimit, admission) -> {
             admission.check();
             calls.incrementAndGet();
             entered.countDown();
@@ -197,7 +252,7 @@ public class SkillCustomServiceTest {
 
     @Test public void rejectsCredentialEchoAndAmbiguousFailureWithoutRetry() throws Exception {
         AtomicInteger calls = new AtomicInteger();
-        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, admission) -> {
+        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, responseLimit, admission) -> {
             admission.check();
             if (calls.incrementAndGet() == 1) return json(200, "{\"text\":\"echo " + TOKEN + "\"}");
             throw new IOException("diagnostic from remote exposing " + TOKEN);
@@ -234,7 +289,7 @@ public class SkillCustomServiceTest {
                 json(200, "{\"text\":\"first\",\"text\":\"second\"}"),
                 json(200, "{\"text\":\"\\ud800\"}")));
         AtomicInteger calls = new AtomicInteger();
-        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, admission) -> {
+        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, responseLimit, admission) -> {
             admission.check();
             calls.incrementAndGet();
             return replies.removeFirst();
@@ -280,7 +335,7 @@ public class SkillCustomServiceTest {
         service.verifyEndpointOmitsCredential(binding, OTHER_ENDPOINT);
 
         SkillCustomService lostKey = new SkillCustomService(new AiCredentialVault(() -> { throw new IOException(); }),
-                (endpoint, bearer, body, deadline, admission) -> {
+                (endpoint, bearer, body, deadline, responseLimit, admission) -> {
                     throw new AssertionError("Review and clear must not open a connection");
                 }, System::nanoTime);
         lostKey.verifyEndpointOmitsCredential(binding, ENDPOINT);
@@ -292,7 +347,7 @@ public class SkillCustomServiceTest {
         AtomicLong now = new AtomicLong(1);
         AtomicInteger connections = new AtomicInteger();
         AtomicInteger sends = new AtomicInteger();
-        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, admission) -> {
+        SkillCustomService service = new SkillCustomService(vault, (endpoint, bearer, body, deadline, responseLimit, admission) -> {
             if (connections.incrementAndGet() == 2) now.addAndGet(TimeUnit.MINUTES.toNanos(3));
             admission.check();
             sends.incrementAndGet();
@@ -316,7 +371,7 @@ public class SkillCustomServiceTest {
     @Test public void sharedRateGateBlocksBeforeTransportAndDoesNotRestoreAnApproval() throws Exception {
         AtomicLong now = new AtomicLong(1);
         AtomicInteger connections = new AtomicInteger();
-        SkillCustomService.Transport transport = (endpoint, bearer, body, deadline, admission) -> {
+        SkillCustomService.Transport transport = (endpoint, bearer, body, deadline, responseLimit, admission) -> {
             connections.incrementAndGet();
             admission.check();
             return json(200, "{\"text\":\"ok\"}");
@@ -344,7 +399,7 @@ public class SkillCustomServiceTest {
     }
 
     private SkillCustomService counter(AtomicInteger calls) {
-        return new SkillCustomService(vault, (endpoint, bearer, body, deadline, admission) -> {
+        return new SkillCustomService(vault, (endpoint, bearer, body, deadline, responseLimit, admission) -> {
             admission.check();
             calls.incrementAndGet();
             return json(200, "{\"text\":\"ok\"}");
