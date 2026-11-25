@@ -6,20 +6,21 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Matrix;
+import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
-import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.douai.module.feature.ChatImage;
@@ -47,26 +48,14 @@ final class AiChatImagePreview extends Dialog {
         setCanceledOnTouchOutside(false);
 
         Context context = getContext();
-        LinearLayout content = new LinearLayout(context);
+        FrameLayout content = new FrameLayout(context);
         content.setTag("ai.chat.image_preview");
-        content.setOrientation(LinearLayout.VERTICAL);
         content.setBackgroundColor(Color.BLACK);
-
-        Button close = new Button(context);
-        close.setTag("ai.chat.image_preview_close");
-        close.setText("关闭");
-        close.setOnClickListener(ignored -> dismiss());
-        LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        closeParams.gravity = Gravity.END;
-        content.addView(close, closeParams);
-
-        FrameLayout viewport = new FrameLayout(context);
-        content.addView(viewport, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         picture = new ZoomImageView(context);
         picture.setTag("ai.chat.image_preview_image");
-        picture.setContentDescription("图片预览，双击放大或缩小");
-        viewport.addView(picture, new FrameLayout.LayoutParams(
+        picture.setContentDescription("图片预览，双指缩放，双击放大或缩小，单击空白关闭");
+        picture.setOnClickListener(ignored -> dismiss());
+        content.addView(picture, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         status = new TextView(context);
@@ -74,7 +63,7 @@ final class AiChatImagePreview extends Dialog {
         status.setText("正在读取图片…");
         status.setTextColor(Color.WHITE);
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        viewport.addView(status, new FrameLayout.LayoutParams(
+        content.addView(status, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
         setContentView(content);
         Window window = getWindow();
@@ -123,31 +112,57 @@ final class AiChatImagePreview extends Dialog {
 
     private static final class ZoomImageView extends ImageView {
         private static final float ENLARGEMENT = 2.5f;
+        private static final float MAX_ZOOM = 4f;
         private final Matrix transform = new Matrix();
+        private final RectF imageBounds = new RectF();
         private final GestureDetector gestures;
+        private final ScaleGestureDetector scaleGestures;
+        private final int touchSlopSquared;
         private float fitScale;
         private float zoom = 1f;
         private float left;
         private float top;
+        private float downX;
+        private float downY;
+        private boolean downInBlank;
+        private boolean moved;
+        private boolean multiTouch;
+        private long blankTapTime = -1;
 
         ZoomImageView(Context context) {
             super(context);
             setScaleType(ScaleType.MATRIX);
+            int touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+            touchSlopSquared = touchSlop * touchSlop;
             gestures = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
                 @Override public boolean onDown(MotionEvent event) { return true; }
 
-                @Override public boolean onDoubleTap(MotionEvent event) {
-                    if (zoom > 1f) fit();
-                    else {
-                        zoom = ENLARGEMENT;
-                        left = event.getX() - (event.getX() - left) * zoom;
-                        top = event.getY() - (event.getY() - top) * zoom;
-                        updateTransform();
+                @Override public boolean onSingleTapUp(MotionEvent event) {
+                    if (downInBlank && !moved && !imageContains(event.getX(), event.getY())) {
+                        blankTapTime = event.getDownTime();
+                    }
+                    return true;
+                }
+
+                @Override public boolean onSingleTapConfirmed(MotionEvent event) {
+                    if (multiTouch || blankTapTime != event.getDownTime()) return false;
+                    blankTapTime = -1;
+                    return performClick();
+                }
+
+                @Override public boolean onDoubleTap(MotionEvent event) { return true; }
+
+                @Override public boolean onDoubleTapEvent(MotionEvent event) {
+                    // The second tap can turn into a pinch. Wait for its single-finger release.
+                    if (event.getActionMasked() == MotionEvent.ACTION_UP && !moved && canScale()) {
+                        if (zoom > 1f) fit();
+                        else zoomAround(ENLARGEMENT, downX, downY, downX, downY);
                     }
                     return true;
                 }
 
                 @Override public boolean onScroll(MotionEvent start, MotionEvent end, float dx, float dy) {
+                    moved = true;
                     if (zoom == 1f) return false;
                     left -= dx;
                     top -= dy;
@@ -155,6 +170,30 @@ final class AiChatImagePreview extends Dialog {
                     return true;
                 }
             });
+            scaleGestures = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                private float previousX;
+                private float previousY;
+
+                @Override public boolean onScaleBegin(ScaleGestureDetector detector) {
+                    if (!canScale()) return false;
+                    previousX = detector.getFocusX();
+                    previousY = detector.getFocusY();
+                    return true;
+                }
+
+                @Override public boolean onScale(ScaleGestureDetector detector) {
+                    float factor = detector.getScaleFactor();
+                    if (!Float.isFinite(factor) || factor <= 0f) return false;
+                    float focusX = detector.getFocusX();
+                    float focusY = detector.getFocusY();
+                    zoomAround(Math.max(1f, Math.min(MAX_ZOOM, zoom * factor)), previousX, previousY, focusX, focusY);
+                    previousX = focusX;
+                    previousY = focusY;
+                    return true;
+                }
+            });
+            scaleGestures.setQuickScaleEnabled(false);
+            scaleGestures.setStylusScaleEnabled(false);
         }
 
         @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
@@ -163,7 +202,48 @@ final class AiChatImagePreview extends Dialog {
         }
 
         @Override public boolean onTouchEvent(MotionEvent event) {
-            return getDrawable() != null && gestures.onTouchEvent(event);
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                multiTouch = false;
+                moved = false;
+                blankTapTime = -1;
+                downX = event.getX();
+                downY = event.getY();
+                downInBlank = !imageContains(downX, downY);
+            } else if (!multiTouch && event.getPointerCount() > 1) {
+                multiTouch = true;
+                blankTapTime = -1;
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                try { gestures.onTouchEvent(cancel); }
+                finally { cancel.recycle(); }
+            } else if (!multiTouch && (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP)) {
+                float dx = event.getX() - downX;
+                float dy = event.getY() - downY;
+                moved |= dx * dx + dy * dy > touchSlopSquared;
+            } else if (action == MotionEvent.ACTION_CANCEL) {
+                blankTapTime = -1;
+            }
+            scaleGestures.onTouchEvent(event);
+            if (!multiTouch) gestures.onTouchEvent(event);
+            return true;
+        }
+
+        private boolean canScale() { return getDrawable() != null && fitScale > 0f; }
+
+        private boolean imageContains(float x, float y) {
+            if (!canScale()) return false;
+            imageBounds.set(getDrawable().getBounds());
+            getImageMatrix().mapRect(imageBounds);
+            return imageBounds.contains(x - getPaddingLeft(), y - getPaddingTop());
+        }
+
+        private void zoomAround(float next, float previousX, float previousY, float focusX, float focusY) {
+            float ratio = next / zoom;
+            left = focusX - (previousX - left) * ratio;
+            top = focusY - (previousY - top) * ratio;
+            zoom = next;
+            updateTransform();
         }
 
         void fit() {

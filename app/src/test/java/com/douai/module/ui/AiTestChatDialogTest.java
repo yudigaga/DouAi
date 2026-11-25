@@ -399,8 +399,10 @@ public final class AiTestChatDialogTest {
         ShadowLooper.idleMainLooper();
         assertTrue(originalThumbnail.getDrawable() instanceof BitmapDrawable);
         Dialog firstPreview = openGeneratedImagePreview(originalThumbnail);
-        assertDoubleTapZoom(previewContent(firstPreview).findViewWithTag("ai.chat.image_preview_image"));
-        assertTrue(previewContent(firstPreview).findViewWithTag("ai.chat.image_preview_close").performClick());
+        ImageView originalPicture = previewContent(firstPreview).findViewWithTag("ai.chat.image_preview_image");
+        assertDoubleTapZoom(originalPicture);
+        ShadowLooper.idleMainLooper(400, TimeUnit.MILLISECONDS);
+        tapAndSettle(originalPicture, 180f, 16f);
         assertFalse(firstPreview.isShowing());
         assertTrue(first.prompts.isEmpty());
         assertTrue(first.skillInputs.isEmpty());
@@ -422,6 +424,74 @@ public final class AiTestChatDialogTest {
         assertTrue(restored.prompts.isEmpty());
         assertTrue(restored.skillInputs.isEmpty());
         assertEquals(1, restored.transcriptMemory.readTranscript().size());
+    }
+
+    @Test public void previewBlankTapClosesButImageTapAndPinchReleaseKeepItOpen() throws Exception {
+        FakeSession model = openMockImageHistory();
+        submit("/生图 白猫");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        ImageView thumbnail = messageRow(1).findViewWithTag("ai.chat.image");
+        assertNotNull(thumbnail);
+        Dialog preview = openGeneratedImagePreview(thumbnail);
+        View content = previewContent(preview);
+        assertNull("Preview closes from blank space instead of a close button",
+                content.findViewWithTag("ai.chat.image_preview_close"));
+
+        ImageView picture = content.findViewWithTag("ai.chat.image_preview_image");
+        layoutImageViewport(picture);
+        float fitted = imageScale(picture);
+        tapAndSettle(picture, 180f, 240f);
+        assertTrue("An ordinary tap on the image must not close the preview", preview.isShowing());
+
+        tap(picture, SystemClock.uptimeMillis(), 101f, 240f);
+        ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS);
+        Pinch spreading = new Pinch(picture, 141f, 80f);
+        assertEquals("A second contact starting a pinch must not toggle double-tap zoom",
+                fitted, imageScale(picture), 0.01f);
+        spreading.move(141f, 190f);
+        spreading.move(141f, 232f);
+        assertTrue("The Android detector must recognize the spreading fingers", imageScale(picture) > fitted);
+        Matrix inverse = new Matrix();
+        assertTrue(picture.getImageMatrix().invert(inverse));
+        float[] focalPoint = {141f, 240f};
+        inverse.mapPoints(focalPoint);
+        spreading.move(173f, 285f);
+        picture.getImageMatrix().mapPoints(focalPoint);
+        assertEquals("The same point on the bitmap follows a moving pinch focus", 173f, focalPoint[0], 0.5f);
+        spreading.liftInBlankSpace();
+        ShadowLooper.idleMainLooper(400, TimeUnit.MILLISECONDS);
+        float enlarged = imageScale(picture);
+        assertTrue("Spreading the fingers must enlarge the image", enlarged > fitted);
+        assertTrue("Lifting the last finger after enlargement must not close the preview", preview.isShowing());
+
+        // At fit, the 320 × 192 fixture begins at y=132. Enlargement now covers y=112.
+        tapAndSettle(picture, 180f, 112f);
+        assertTrue("Hit testing must follow the enlarged image bounds", preview.isShowing());
+
+        Pinch shrinking = new Pinch(picture, 180f, 320f);
+        shrinking.move(180f, 270f);
+        shrinking.move(180f, 220f);
+        shrinking.move(180f, 180f);
+        shrinking.liftInBlankSpace();
+        ShadowLooper.idleMainLooper(400, TimeUnit.MILLISECONDS);
+        assertTrue("Bringing the fingers together must reduce the image", imageScale(picture) < enlarged);
+        assertTrue(imageScale(picture) >= fitted);
+        assertTrue("Lifting a finger in the blank area after a pinch must not close the preview", preview.isShowing());
+
+        long drag = SystemClock.uptimeMillis();
+        dispatchPointers(picture, drag, drag, MotionEvent.ACTION_DOWN, 180f, 240f);
+        dispatchPointers(picture, drag, drag + 20, MotionEvent.ACTION_MOVE, 180f, 16f);
+        dispatchPointers(picture, drag, drag + 40, MotionEvent.ACTION_UP, 180f, 16f);
+        ShadowLooper.idleMainLooper(400, TimeUnit.MILLISECONDS);
+        assertTrue("A drag ending in the blank area must not close the preview", preview.isShowing());
+
+        tapAndSettle(picture, 180f, 16f);
+        assertFalse("A fresh tap in the blank area must close the preview", preview.isShowing());
+        assertTrue(model.prompts.isEmpty());
+        assertTrue(model.skillInputs.isEmpty());
     }
 
     @Test public void damagedSavedImageShowsALocalReadErrorWithoutReplay() throws Exception {
@@ -447,9 +517,10 @@ public final class AiTestChatDialogTest {
         assertNotNull(status);
         assertEquals("图片无法读取", status.getText().toString());
         ImageView invalid = content.findViewWithTag("ai.chat.image_preview_image");
-        assertTrue(invalid == null || invalid.getDrawable() == null);
-        assertTrue(content.findViewWithTag("ai.chat.image_preview_close").performClick());
-        ShadowLooper.idleMainLooper();
+        assertNotNull(invalid);
+        assertNull(invalid.getDrawable());
+        layoutImageViewport(invalid);
+        tapAndSettle(invalid, 180f, 16f);
         assertFalse(preview.isShowing());
         assertEquals(prompt, bubble(0, "ai.chat.user"));
         assertEquals(1, restored.transcriptMemory.readTranscript().size());
@@ -472,7 +543,7 @@ public final class AiTestChatDialogTest {
         ImageView oldImage = oldContent.findViewWithTag("ai.chat.image_preview_image");
         assertNotNull(oldImage);
         worker.runNext();
-        assertTrue(oldContent.findViewWithTag("ai.chat.image_preview_close").performClick());
+        first.onBackPressed();
         assertFalse(first.isShowing());
         Dialog next = tapGeneratedThumbnail(thumbnail);
         assertNotSame(first, next);
@@ -519,9 +590,7 @@ public final class AiTestChatDialogTest {
     }
 
     private static void assertDoubleTapZoom(ImageView picture) {
-        picture.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(480, View.MeasureSpec.EXACTLY));
-        picture.layout(0, 0, 360, 480);
+        layoutImageViewport(picture);
         float fitted = imageScale(picture);
         assertTrue(fitted > 0f);
         long first = SystemClock.uptimeMillis();
@@ -535,6 +604,12 @@ public final class AiTestChatDialogTest {
         assertEquals(fitted, imageScale(picture), 0.01f);
     }
 
+    private static void layoutImageViewport(ImageView picture) {
+        picture.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(480, View.MeasureSpec.EXACTLY));
+        picture.layout(0, 0, 360, 480);
+    }
+
     private static float imageScale(ImageView picture) {
         float[] values = new float[9];
         picture.getImageMatrix().getValues(values);
@@ -542,8 +617,17 @@ public final class AiTestChatDialogTest {
     }
 
     private static void tap(ImageView picture, long time) {
-        MotionEvent down = MotionEvent.obtain(time, time, MotionEvent.ACTION_DOWN, 180f, 240f, 0);
-        MotionEvent up = MotionEvent.obtain(time, time + 10, MotionEvent.ACTION_UP, 180f, 240f, 0);
+        tap(picture, time, 180f, 240f);
+    }
+
+    private static void tapAndSettle(ImageView picture, float x, float y) {
+        tap(picture, SystemClock.uptimeMillis(), x, y);
+        ShadowLooper.idleMainLooper(400, TimeUnit.MILLISECONDS);
+    }
+
+    private static void tap(ImageView picture, long time, float x, float y) {
+        MotionEvent down = MotionEvent.obtain(time, time, MotionEvent.ACTION_DOWN, x, y, 0);
+        MotionEvent up = MotionEvent.obtain(time, time + 10, MotionEvent.ACTION_UP, x, y, 0);
         try {
             picture.dispatchTouchEvent(down);
             picture.dispatchTouchEvent(up);
@@ -551,6 +635,59 @@ public final class AiTestChatDialogTest {
             down.recycle();
             up.recycle();
         }
+    }
+
+    private static final class Pinch {
+        private final ImageView picture;
+        private final long down = SystemClock.uptimeMillis();
+        private long time = down;
+        private float focus;
+        private float span;
+
+        Pinch(ImageView picture, float focus, float span) {
+            this.picture = picture;
+            this.focus = focus;
+            this.span = span;
+            dispatchPointers(picture, down, time, MotionEvent.ACTION_DOWN, focus - span / 2, 240f);
+            pair(MotionEvent.ACTION_POINTER_DOWN | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT));
+        }
+
+        void move(float focus, float span) {
+            this.focus = focus;
+            this.span = span;
+            pair(MotionEvent.ACTION_MOVE);
+        }
+
+        void liftInBlankSpace() {
+            pair(MotionEvent.ACTION_POINTER_UP | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT));
+            dispatchPointers(picture, down, time += 16, MotionEvent.ACTION_MOVE, 180f, 16f);
+            dispatchPointers(picture, down, time + 16, MotionEvent.ACTION_UP, 180f, 16f);
+        }
+
+        private void pair(int action) {
+            float half = span / 2;
+            dispatchPointers(picture, down, time += 16, action, focus - half, 240f, focus + half, 240f);
+        }
+    }
+
+    private static void dispatchPointers(ImageView picture, long down, long time, int action, float... points) {
+        int count = points.length / 2;
+        MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[count];
+        MotionEvent.PointerCoords[] coordinates = new MotionEvent.PointerCoords[count];
+        for (int i = 0; i < count; i++) {
+            properties[i] = new MotionEvent.PointerProperties();
+            properties[i].id = i;
+            properties[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
+            coordinates[i] = new MotionEvent.PointerCoords();
+            coordinates[i].x = points[i * 2];
+            coordinates[i].y = points[i * 2 + 1];
+            coordinates[i].pressure = 1f;
+            coordinates[i].size = 1f;
+        }
+        MotionEvent event = MotionEvent.obtain(down, time, action, count, properties, coordinates,
+                0, 0, 1f, 1f, 0, 0, android.view.InputDevice.SOURCE_TOUCHSCREEN, 0);
+        try { picture.dispatchTouchEvent(event); }
+        finally { event.recycle(); }
     }
 
     @Test public void failedHistoryWriteKeepsTheOriginalImageInThisConversationWithoutRetry() throws Exception {
