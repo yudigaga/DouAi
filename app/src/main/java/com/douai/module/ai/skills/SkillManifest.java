@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /** Versioned declaration for one application-managed Skill capability. */
 public record SkillManifest(String name, String displayName, String description, String documentation, String instructions,
@@ -246,8 +247,9 @@ public record SkillManifest(String name, String displayName, String description,
     }
 
     public List<String> missing(Map<String, Object> values) {
-        return configFields.stream().filter(field -> field.required() && !values.containsKey(field.key()))
-                .map(ConfigField::key).toList();
+        List<String> missing = configFields.stream().filter(field -> field.required() && !values.containsKey(field.key()))
+                .map(ConfigField::key).collect(Collectors.toList());
+        return Collections.unmodifiableList(missing);
     }
 
     private static int integer(Object value, int min, int max) {
