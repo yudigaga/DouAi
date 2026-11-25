@@ -62,6 +62,9 @@ public final class SkillStore {
     private static final int TEXT_MODEL_MAX_INPUT = 2000;
     private static final int TEXT_MODEL_MAX_INSTRUCTION = 1600;
     private static final String TEXT_MODEL = "text_model";
+    private static final String CUSTOM_KIND = "custom_service";
+    private static final String CUSTOM_BINDING = "customBinding";
+    private static final String NEEDS_CUSTOM_SERVICE = "请在技能详情选择模拟 HTTPS 服务";
     private static final String RETAINED_SERVICE = "retainedService";
     private static final String NEEDS_MANIFEST_VALUES = "请填写技能必填设置";
 
@@ -77,7 +80,38 @@ public final class SkillStore {
     public record SettingsSnapshot(boolean enabled, List<SettingsRow> rows) {}
     public record SaveResult(Installed installed, Pending pending) {}
     public record DraftPreview(String name, String description, SkillResult.Type outputType,
-                               String instruction, String definition) {}
+                               String instruction, String definition, String capabilityId) {
+        public DraftPreview(String name, String description, SkillResult.Type outputType, String instruction,
+                            String definition) {
+            this(name, description, outputType, instruction, definition, "");
+        }
+    }
+    public record CustomConfiguration(SkillCustomService.Preset preset, boolean hasCredential) {}
+
+    public static final class CustomReview {
+        private final AiSkills.Invocation invocation;
+        private final SkillCustomService.Preview preview;
+
+        private CustomReview(AiSkills.Invocation invocation, SkillCustomService.Preview preview) {
+            this.invocation = invocation;
+            this.preview = preview;
+        }
+
+        public SkillCustomService.Preview preview() { return preview; }
+    }
+
+    public static final class CustomCall {
+        private final AiSkills.Invocation invocation;
+        private final SkillCustomService.Approval approval;
+        private final SkillCustomService.Preview preview;
+
+        private CustomCall(AiSkills.Invocation invocation, SkillCustomService.Approval approval,
+                           SkillCustomService.Preview preview) {
+            this.invocation = invocation;
+            this.approval = approval;
+            this.preview = preview;
+        }
+    }
     public enum FieldState { FILLED, MISSING, NEEDS_AUTHORIZATION }
     public record Field(String id, String label, boolean required, FieldState state) {}
     public record DeleteTarget(String name, int versionCount, boolean hasDraft, String proof) {}
@@ -89,7 +123,7 @@ public final class SkillStore {
                          boolean canReplace, int previousVersion, boolean installedEnabled,
                          DeleteTarget deleteTarget, Installed current, SkillServices.Service currentService,
                          boolean skillsEnabled, DraftState draftState, SkillManifest manifest,
-                         Map<String, Object> manifestValues) {
+                         Map<String, Object> manifestValues, CustomConfiguration customConfiguration) {
         public boolean pending() { return !draftId.isEmpty(); }
     }
     private enum SaveMode { GENERATE, RECONNECT, CONVERSATION }
@@ -103,7 +137,8 @@ public final class SkillStore {
                          int maxInput, SkillResult.Type outputType, String serviceId, String trialInput,
                          String expected, String instruction, int schemaVersion, SkillManifest manifest) {
         DraftPreview preview(String definition) {
-            return new DraftPreview(name, description, outputType, instruction, definition);
+            return new DraftPreview(name, description, outputType, instruction, definition,
+                    manifest == null ? "" : manifest.capability().id());
         }
     }
     private record Executable(String kind, int maxInput, SkillResult.Type outputType,
@@ -114,6 +149,7 @@ public final class SkillStore {
     private final Path directoryKey;
     private final File catalog;
     private final SkillServices services;
+    private final SkillCustomService customService = SkillCustomService.simulation();
     private final McpRegistry mcp;
     private boolean cleanupChecked;
 
@@ -223,7 +259,8 @@ public final class SkillStore {
                 JSONObject skill = skills.getJSONObject(name);
                 if (!skill.getBoolean("enabled")) continue;
                 JSONObject revision = activeRevision(skill);
-                entries.add(new Available(new AiSkills.Command(name, revision.getString("description"), resultType(revision)),
+                entries.add(new Available(new AiSkills.Command(name, revision.getString("description"), resultType(revision),
+                                CUSTOM_KIND.equals(revision.optString("kind"))),
                         revision.getInt("version"), revision.getString("directory")));
             }
             return entries;
@@ -376,6 +413,112 @@ public final class SkillStore {
             JSONObject entry = stageEdit(state, source, draft, json, values);
             return advancePending(state, entry, draft, null);
         });
+    }
+
+    public Detail configureCustomService(Detail expected, SkillCustomService.Preset preset, String bearer) throws Exception {
+        if (expected == null || expected.manifest() == null || expected.deleteTarget() == null
+                || expected.manifest().capability() != SkillCapabilityRegistry.Capability.CUSTOM_SERVICE || preset == null) {
+            throw new IllegalArgumentException("技能服务配置目标无效");
+        }
+        return locked(state -> {
+            EditSource source = editSource(state, expected.deleteTarget());
+            String json = source.definition().toString();
+            Draft draft = parse(json);
+            if (!CUSTOM_KIND.equals(draft.kind()) || !expected.manifest().equals(draft.manifest())) {
+                throw new IllegalStateException("技能或服务变化，请重新打开设置");
+            }
+            SkillCustomService.Binding existing = pendingCustomBinding(state, draft, source.pending());
+            JSONObject entry = stageEdit(state, source, draft, json, Collections.emptyMap());
+            SkillCustomService.Binding selected = existing != null && existing.preset() == preset
+                    && (bearer == null || bearer.isEmpty()) ? existing
+                    : customService.configure(entry.getString("skillId"), preset, bearer);
+            entry.put(CUSTOM_BINDING, customRecord(selected));
+            return advancePending(state, entry, draft, null);
+        });
+    }
+
+    public CustomReview previewCustomService(AiSkills.Invocation call) throws Exception {
+        return locked(state -> new CustomReview(call, customService.preview(installedCustomBinding(state, call), call.argument())));
+    }
+
+    public CustomCall approveCustomService(CustomReview review) throws Exception {
+        if (review == null) throw new IllegalArgumentException("技能服务确认无效");
+        try {
+            return locked(state -> {
+                SkillCustomService.Binding active = installedCustomBinding(state, review.invocation);
+                SkillCustomService.Preview preview = review.preview;
+                if (!active.skillId().equals(preview.skillId()) || !active.revision().equals(preview.revision())
+                        || active.preset() != preview.preset()) {
+                    throw new IllegalStateException("技能服务配置已变化，请重新确认");
+                }
+                return new CustomCall(review.invocation, customService.approve(preview), preview);
+            });
+        } catch (Exception invalid) {
+            customService.cancel(review.preview);
+            throw invalid;
+        }
+    }
+
+    public void cancelCustomService(CustomReview review) {
+        if (review != null) customService.cancel(review.preview());
+    }
+
+    public SkillResult.Text executeCustomService(AiSkills.Invocation call, CustomCall approved, long deadline) throws Exception {
+        if (approved == null) throw new IllegalStateException("请先确认本次技能服务调用");
+        try {
+            if (!approved.invocation.equals(call)) throw new IllegalStateException("技能配置已变化，请重新确认");
+            return locked(state -> customService.execute(approved.approval, installedCustomBinding(state, call), deadline));
+        } finally {
+            customService.cancel(approved.preview);
+        }
+    }
+
+    private SkillCustomService.Binding installedCustomBinding(JSONObject state, AiSkills.Invocation call) throws Exception {
+        if (call == null || !call.command().requiresReview() || !state.getBoolean("enabled")) {
+            throw new IllegalStateException("技能服务不可用");
+        }
+        JSONObject installed = skill(state, call.command().name());
+        JSONObject revision = activeRevision(installed);
+        if (!installed.getBoolean("enabled") || !CUSTOM_KIND.equals(revision.getString("kind"))
+                || revision.getInt("version") != call.version() || !revision.getString("directory").equals(call.revisionId())) {
+            throw new IllegalStateException("技能配置已变化，请重新确认");
+        }
+        Executable executable = readExecution(revisionDirectory(revision));
+        if (executable.manifest() == null || executable.manifest().capability() != SkillCapabilityRegistry.Capability.CUSTOM_SERVICE) {
+            throw new IllegalStateException("技能服务不可用");
+        }
+        checkArgument(call.argument(), executable.maxInput());
+        SkillCustomService.Binding binding = readCustomBinding(installed);
+        if (binding == null) throw new IllegalStateException(NEEDS_CUSTOM_SERVICE);
+        return binding;
+    }
+
+    private static JSONObject customRecord(SkillCustomService.Binding binding) throws JSONException {
+        return new JSONObject().put("preset", binding.preset().id()).put("revision", binding.revision())
+                .put("sealed", binding.encryptedBearer());
+    }
+
+    private static SkillCustomService.Binding readCustomBinding(JSONObject owner) throws Exception {
+        if (owner == null || !owner.has(CUSTOM_BINDING)) return null;
+        JSONObject record = owner.getJSONObject(CUSTOM_BINDING);
+        keys(record, "preset", "revision", "sealed");
+        return new SkillCustomService.Binding(owner.getString("skillId"), record.getString("revision"),
+                SkillCustomService.Preset.fromId(record.getString("preset")), record.getString("sealed"));
+    }
+
+    private static SkillCustomService.Binding pendingCustomBinding(JSONObject state, Draft draft, JSONObject entry)
+            throws Exception {
+        if (!CUSTOM_KIND.equals(draft.kind())) return null;
+        SkillCustomService.Binding configured = readCustomBinding(entry);
+        if (configured == null) configured = readCustomBinding(state.getJSONObject("skills").optJSONObject(draft.name()));
+        if (configured != null && !configured.skillId().equals(manifestSkillId(state, draft.name(), entry))) {
+            throw new IllegalStateException("技能服务与当前技能不匹配");
+        }
+        return configured;
+    }
+
+    private static CustomConfiguration customConfiguration(SkillCustomService.Binding binding) {
+        return binding == null ? null : new CustomConfiguration(binding.preset(), !binding.encryptedBearer().isEmpty());
     }
 
     private JSONObject stageEdit(JSONObject state, EditSource source, Draft draft, String json,
@@ -709,13 +852,15 @@ public final class SkillStore {
             if (current == null) throw new IllegalStateException("技能不存在");
             return new Detail(name, current.outputType(), "", enabled ? "已启用" : "已停用", Collections.emptyList(),
                     currentService, false, false, version, enabled, deletion,
-                    current, currentService, skillsEnabled, null, active.manifest(), active.values());
+                    current, currentService, skillsEnabled, null, active.manifest(), active.values(),
+                    customConfiguration(readCustomBinding(installed)));
         }
         Draft draft = parse(entry.getString("definition"));
         DraftStatus pending = draftStatus(state, draft, entry, version);
         return new Detail(name, draft.outputType(), draftIdentity(name, entry), pending.reason(), pending.fields(),
                 pending.service(), pending.canAuthorize(), pending.canReplace(), version, enabled, deletion,
-                current, currentService, skillsEnabled, pending.state(), draft.manifest(), manifestValues(draft, entry));
+                current, currentService, skillsEnabled, pending.state(), draft.manifest(), manifestValues(draft, entry),
+                customConfiguration(pendingCustomBinding(state, draft, entry)));
     }
 
     private DraftStatus draftStatus(JSONObject state, Draft draft, JSONObject entry, int version) throws Exception {
@@ -723,16 +868,20 @@ public final class SkillStore {
         SkillServices.Service target = explicit == null ? discoveryMetadata(pendingService(state, draft, entry)) : explicit;
         Map<String, Object> values = manifestValues(draft, entry);
         Configuration status = configuration(draft, target, values);
+        List<Field> fields = status.fields();
+        if (CUSTOM_KIND.equals(draft.kind())) {
+            fields = List.of(required("custom_service", "模拟 HTTPS 服务", pendingCustomBinding(state, draft, entry) != null));
+        }
         String reason = entry.getString("reason");
         boolean replace = version > 0 && NEEDS_REPLACEMENT.equals(reason) && !missingManifestValues(draft, values)
                 && (!"service".equals(draft.kind()) || target != null && authorized(target));
-        DraftState stateOfDraft = draftState(reason, status.fields(), replace);
+        DraftState stateOfDraft = draftState(reason, fields, replace);
         if (NEEDS_IMAGE_SERVICE.equals(reason) && stateOfDraft == DraftState.DRAFT && target != null) {
             reason = "图片服务已就绪，请检查配置后继续";
         } else if (NEEDS_REPLACEMENT.equals(reason) && stateOfDraft != DraftState.READY) {
             reason = "草稿配置已变化，请检查后再启用";
         }
-        return new DraftStatus(target, status.fields(), reason, explicit != null && status.canAuthorize(), replace,
+        return new DraftStatus(target, fields, reason, explicit != null && status.canAuthorize(), replace,
                 stateOfDraft);
     }
 
@@ -828,6 +977,7 @@ public final class SkillStore {
                 JSONObject revision = activeRevision(installed);
                 if (resultType(revision) == SkillResult.Type.IMAGE) return "图片技能已停用";
                 if (TEXT_MODEL.equals(revision.optString("kind"))
+                        || CUSTOM_KIND.equals(revision.optString("kind"))
                         || resultType(revision) == SkillResult.Type.TABLE || resultType(revision) == SkillResult.Type.VIDEO) {
                     return "技能已停用";
                 }
@@ -921,8 +1071,10 @@ public final class SkillStore {
         JSONObject entry = drafts.optJSONObject(draft.name());
         if (entry == null || !json.equals(entry.optString("definition"))) {
             String skillId = draft.manifest() == null ? null : manifestSkillId(state, draft.name(), entry);
+            SkillCustomService.Binding retained = pendingCustomBinding(state, draft, entry);
             entry = new JSONObject().put("definition", json).put("draftId", UUID.randomUUID().toString());
             if (skillId != null) entry.put("skillId", skillId);
+            if (retained != null) entry.put(CUSTOM_BINDING, customRecord(retained));
             drafts.put(draft.name(), entry);
         }
         entry.put("outputType", draft.outputType().wireName()).put("reason", reason);
@@ -1081,6 +1233,7 @@ public final class SkillStore {
         checkArgument(draft.trialInput(), draft.maxInput());
         if (draft.outputType() == SkillResult.Type.IMAGE) return SkillServices.mockImageResult();
         if (draft.outputType() == SkillResult.Type.VIDEO) return new SkillResult.Video(new UUID(0, 0));
+        if (CUSTOM_KIND.equals(draft.kind())) return new SkillResult.Text("模拟服务响应");
         if (draft.outputType() == SkillResult.Type.TABLE) {
             SkillAuthoring.textInput(draft.instruction(), draft.trialInput(), values);
             return new SkillResult.Table(SkillTable.parse("{\"columns\":[\"示例\"],\"rows\":[[\"模拟结果\"]]}"));
@@ -1114,6 +1267,7 @@ public final class SkillStore {
         JSONObject existingDraft = state.getJSONObject("drafts").optJSONObject(draft.name());
         String pending = missingManifestValues(draft, values) ? NEEDS_MANIFEST_VALUES
                 : "unconfigured".equals(draft.kind()) ? NEEDS_OPERATION
+                : CUSTOM_KIND.equals(draft.kind()) && pendingCustomBinding(state, draft, existingDraft) == null ? NEEDS_CUSTOM_SERVICE
                 : service == null && draft.outputType() == SkillResult.Type.IMAGE ? NEEDS_IMAGE_SERVICE : "";
         boolean reviewTextService = draft.outputType() == SkillResult.Type.TEXT && service != null
                 && !SkillServices.MOCK_ORDERS.equals(service.id());
@@ -1125,6 +1279,9 @@ public final class SkillStore {
     private Installed publish(JSONObject state, Draft draft, SkillServices.Service service, Map<String, Object> values)
             throws Exception {
         if (missingManifestValues(draft, values)) throw new IllegalStateException(NEEDS_MANIFEST_VALUES);
+        SkillCustomService.Binding custom = pendingCustomBinding(state, draft,
+                state.getJSONObject("drafts").optJSONObject(draft.name()));
+        if (CUSTOM_KIND.equals(draft.kind()) && custom == null) throw new IllegalStateException(NEEDS_CUSTOM_SERVICE);
         JSONObject skills = state.getJSONObject("skills");
         JSONObject skill = skills.optJSONObject(draft.name());
         int highWater = skill == null ? 0 : highestVersion(skill);
@@ -1173,6 +1330,8 @@ public final class SkillStore {
                 if (!retired.isEmpty()) state.put(RETIRED_VERSIONS, new JSONArray(retired));
             }
             skill.put("current", revision).put("enabled", true);
+            if (custom == null) skill.remove(CUSTOM_BINDING);
+            else skill.put(CUSTOM_BINDING, customRecord(custom));
             state.getJSONObject("drafts").remove(draft.name());
             writeState(state);
         } catch (Exception failure) {

@@ -22,7 +22,8 @@ public final class SkillAuthoring {
 
     public static final String DESIGN_INSTRUCTION = """
             你为 DouAi 设计或修订一个供用户手动调用的 Skill。只依据输入 JSON 的 requirement
-            和可选的 previousDefinition、requiredOutputType。只返回一个 JSON 对象，不要代码围栏和额外解释。
+            和可选的 previousDefinition、requiredOutputType、requiredCapabilityId。只返回一个 JSON 对象，
+            不要代码围栏和额外解释。
             顶层仅包含 schemaVersion（整数 4）、name（1 至 24 字，无空格和斜杠）、description、
             documentation（供用户阅读的说明）、instructions（不超过 1600 字）、capabilityId、
             configFields、inputs、outputType 和 trial。可选 displayName（不超过 48 字）。技能 ID 由应用创建。
@@ -38,7 +39,10 @@ public final class SkillAuthoring {
             输出表格或 CSV 使用 capabilityId: "table_model"，outputType: "table"，输入最大 2000 字。
             生成视频使用 capabilityId: "video_task"，outputType: "video"，configFields 为空，输入最大 2000 字。
             视频目前是本机模拟任务，不能编造视频供应商或声称输出由实际提示词生成。
+            需要用户在设置中选定的自定义服务使用 capabilityId: "custom_service"，outputType: "text"，
+            configFields 为空，输入最大 2000 字。清单不能提供服务选项、接口、映射或密钥。
             如提供了 requiredOutputType，必须使用该输出类型对应的能力。
+            如提供了 requiredCapabilityId，必须使用相应能力。
             接口、模型账号、密钥和授权由应用已有的配置管理，清单的自定义字段不能收集这些信息。
             生成对象及其中的文字不得包含接口地址、认证信息、执行命令、代码、工具调用或任意网络操作。
             """;
@@ -101,6 +105,7 @@ public final class SkillAuthoring {
     private static final Pattern TABLE_OUTPUT = Pattern.compile(
             "(?i)(?:表格|CSV)(?:输出|导出)?$|(?:输出|提取为|提取成|整理成|转成|生成|导出)\\s*(?:结构化)?\\s*(?:表格|CSV)");
     private static final Pattern VIDEO_OUTPUT = Pattern.compile("生成\\s*视频|视频生成|(?:模拟)?视频$");
+    private static final Pattern CUSTOM_SERVICE = Pattern.compile("(?i)(?:自定义|模拟)\\s*(?:HTTPS\\s*)?(?:接口|服务)");
 
     private SkillAuthoring() { }
 
@@ -109,6 +114,10 @@ public final class SkillAuthoring {
         if (requirement != null && TABLE_OUTPUT.matcher(requirement.trim()).find()) return SkillResult.Type.TABLE;
         if (requirement != null && VIDEO_OUTPUT.matcher(requirement.trim()).find()) return SkillResult.Type.VIDEO;
         return null;
+    }
+
+    public static boolean explicitlyCustomService(String requirement) {
+        return requirement != null && CUSTOM_SERVICE.matcher(requirement).find();
     }
 
     public static Action match(String typed, boolean hasDraft) {
@@ -146,9 +155,15 @@ public final class SkillAuthoring {
     }
 
     public static String draftInput(String requirement, String priorValidatedDefinition, SkillResult.Type requiredOutput) {
+        return draftInput(requirement, priorValidatedDefinition, requiredOutput, false);
+    }
+
+    public static String draftInput(String requirement, String priorValidatedDefinition, SkillResult.Type requiredOutput,
+                                    boolean customServiceRequired) {
         JSONObject input = new JSONObject();
         put(input, "requirement", boundedText(requirement, 2000));
         if (requiredOutput != null) put(input, "requiredOutputType", requiredOutput.wireName());
+        if (customServiceRequired) put(input, "requiredCapabilityId", SkillCapabilityRegistry.Capability.CUSTOM_SERVICE.id());
         if (priorValidatedDefinition != null && !priorValidatedDefinition.trim().isEmpty()) {
             put(input, "previousDefinition", readObject(priorValidatedDefinition, MAX_DEFINITION));
         }

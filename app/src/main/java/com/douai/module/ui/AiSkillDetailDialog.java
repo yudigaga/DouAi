@@ -28,6 +28,8 @@ import com.douai.module.ai.AiCredentialVault;
 import com.douai.module.ai.skills.SkillImageModelCatalog;
 import com.douai.module.ai.skills.SkillImageProviderAddress;
 import com.douai.module.ai.skills.SkillManifest;
+import com.douai.module.ai.skills.SkillCapabilityRegistry;
+import com.douai.module.ai.skills.SkillCustomService;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -171,6 +173,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
             }
         }
         manifestConfiguration(detail);
+        customConfiguration(detail);
         if (detail.pending()) pendingActions(detail, showImageConfiguration);
         SkillStore.DeleteTarget deleteTarget = detail.deleteTarget();
         if (deleteTarget != null) {
@@ -280,6 +283,37 @@ final class AiSkillDetailDialog implements AutoCloseable {
             Map<String, String> entered = new LinkedHashMap<>();
             values.forEach((key, value) -> entered.put(key, value.get()));
             saveManifestConfiguration(detail, entered);
+        });
+    }
+
+    private void customConfiguration(SkillStore.Detail detail) {
+        if (detail.manifest() == null
+                || detail.manifest().capability() != SkillCapabilityRegistry.Capability.CUSTOM_SERVICE) return;
+        SkillStore.CustomConfiguration current = detail.customConfiguration();
+        SkillCustomService.Preset preset = current == null ? SkillCustomService.Preset.MOCK_TEXT : current.preset();
+        section("技能服务", "skills.detail.custom");
+        text(body, preset.label() + " · " + preset.costUnits() + " 费用单位\nPOST " + preset.endpoint()
+                        + "\n发送字段 " + preset.requestField() + " · 读取字段 " + preset.responseField(),
+                "skills.detail.custom.preset");
+        if (current != null) {
+            text(body, current.hasCredential() ? "已绑定 · 模拟凭据已保存" : "已绑定 · 无模拟凭据",
+                    "skills.detail.custom.binding");
+        }
+        String hint = current != null && current.hasCredential()
+                ? "更换模拟凭据（留空保留）" : "模拟凭据（可选）";
+        EditText bearer = input(body, hint, "skills.detail.custom.credential",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 2048, true);
+        button(body, current == null ? "绑定此模拟服务" : "保存服务配置", "skills.detail.custom.save", () -> {
+            try {
+                SkillStore.Detail saved = store.configureCustomService(detail, preset, fieldValue(bearer));
+                bearer.setText("");
+                render(saved, saved.pending() ? "服务配置已保存，确认启用新版后生效" : "模拟服务已绑定");
+                if (onChanged != null) onChanged.run();
+            } catch (SkillCustomService.Failure invalid) {
+                status.setText(invalid.getMessage());
+            } catch (Exception unavailable) {
+                status.setText("无法保存服务配置，请重新打开技能详情");
+            }
         });
     }
 

@@ -28,6 +28,7 @@ import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.SkillAuthoring;
+import com.douai.module.ai.skills.SkillCustomService;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
@@ -815,6 +816,93 @@ public final class AiTestChatDialogTest {
         services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
         SkillStore.forContext(activity).installGenerated(SkillStore.mockDraft("生图"));
         return services;
+    }
+
+    @Test public void customServiceSettingsRequireConfirmationForEachChatRequest() throws Exception {
+        String name = "接口整理";
+        String command = "/接口整理 样例";
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        work.skillReplies.add("""
+                {"schemaVersion":4,"name":"接口整理","description":"使用已配置的模拟服务整理样例","documentation":"输入需要整理的文本。",
+                 "instructions":"整理本次输入","capabilityId":"custom_service","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"}}
+                """);
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("帮我创建一个自定义服务技能并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        SkillStore store = SkillStore.forContext(activity);
+        assertEquals(List.of(name), store.pending().stream().map(SkillStore.Pending::name).toList());
+        assertEquals(1, work.transcriptMemory.readTranscript().size());
+        AlertDialog settings = openChatSkillSettings(name);
+        View save = settings.getWindow().getDecorView().findViewWithTag("skills.detail.custom.save");
+        assertNotNull(save);
+        assertTrue(save.performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(store.detail(name).pending());
+        settings.dismiss();
+
+        int messagesBefore = messageCount();
+        submit(command);
+        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
+        org.robolectric.shadows.ShadowAlertDialog shadow = org.robolectric.shadow.api.Shadow.extract(review);
+        assertEquals("确认本次技能服务调用", String.valueOf(shadow.getTitle()));
+        String disclosure = String.valueOf(shadow.getMessage());
+        assertTrue(disclosure.contains("https://skill-mock.invalid/v1/text"));
+        assertTrue(disclosure.contains("POST"));
+        assertTrue(disclosure.contains("input"));
+        assertTrue(disclosure.contains("样例"));
+        assertTrue(disclosure.contains("模拟"));
+        assertTrue(disclosure.contains("0") || disclosure.contains("无费用"));
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals(messagesBefore, messageCount());
+        assertTrue(review.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals(messagesBefore, messageCount());
+        assertEquals(1, work.transcriptMemory.readTranscript().size());
+
+        submit(command);
+        AlertDialog staleReview = (AlertDialog) ShadowDialog.getLatestDialog();
+        SkillStore.Detail replacement = store.configureCustomService(store.detail(name),
+                SkillCustomService.Preset.MOCK_TEXT, "");
+        assertTrue(replacement.canReplace());
+        store.activateReplacement(replacement);
+        assertTrue(staleReview.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertEquals(messagesBefore, messageCount());
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals(1, work.transcriptMemory.readTranscript().size());
+
+        submit(command);
+        AlertDialog nextReview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNotSame(review, nextReview);
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals("确认调用", nextReview.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertTrue(nextReview.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, worker.tasks.size());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals("模拟服务：样例", lastAnswer());
+        assertEquals(messagesBefore + 2, messageCount());
+        List<TestChatMemory.Turn> saved = work.transcriptMemory.readTranscript();
+        assertEquals(2, saved.size());
+        assertEquals(command, saved.get(1).prompt);
+        assertEquals("模拟服务：样例", saved.get(1).answer);
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION), work.skillInstructions);
+        assertTrue(work.prompts.isEmpty());
     }
 
     @Test public void videoSkillResumesTheSameOperationAndCancelsWithinItsConversation() throws Exception {

@@ -26,7 +26,11 @@ public final class AiSkills {
         }
     }
 
-    public record Command(String name, String description, SkillResult.Type outputType) {
+    public record Command(String name, String description, SkillResult.Type outputType, boolean requiresReview) {
+        public Command(String name, String description, SkillResult.Type outputType) {
+            this(name, description, outputType, false);
+        }
+
         public Command(String name, String description) {
             this(name, description, SkillResult.Type.TEXT);
         }

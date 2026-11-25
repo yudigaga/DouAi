@@ -4,6 +4,7 @@ import com.douai.module.diagnostics.DouAiLog;
 
 import android.app.Dialog;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
@@ -45,6 +46,8 @@ import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.AiSubAgents;
 import com.douai.module.ai.skills.SkillAuthoring;
+import com.douai.module.ai.skills.SkillCapabilityRegistry;
+import com.douai.module.ai.skills.SkillCustomService;
 import com.douai.module.ai.skills.SkillManifest;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
@@ -172,6 +175,7 @@ final class AiTestChatDialog extends Dialog {
     private Dialog memoryDialog;
     private Dialog localMenu;
     private Dialog skillDetails;
+    private AlertDialog customReviewDialog;
     private AiChatImagePreview imagePreview;
     private AiSkillVideoPreview videoPreview;
     private SkillVideoTasks.Scope videoScope;
@@ -772,6 +776,11 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void sendMessage(String prompt, List<ChatImage> images, List<Document> documents, ChatMessage retryAnswer) {
+        sendMessage(prompt, images, documents, retryAnswer, null);
+    }
+
+    private void sendMessage(String prompt, List<ChatImage> images, List<Document> documents, ChatMessage retryAnswer,
+                             SkillStore.CustomCall approvedService) {
         List<PendingAttachment> selected = new ArrayList<>(retryAnswer == null ? draftPending : retryAnswer.retryPending);
         if (disposed || busy
                 || (prompt.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) {
@@ -814,16 +823,25 @@ final class AiTestChatDialog extends Dialog {
             }
         }
         SkillResult.Type requiredOutput = authoring == null ? null : SkillAuthoring.explicitOutput(authoring.request());
+        boolean customRequired = authoring != null && SkillAuthoring.explicitlyCustomService(authoring.request());
         final String authoringInput;
         try {
             if (authoring != null || skill != null) SkillAuthoring.rejectCredential(prompt);
             String prior = authoring != null && authoring.mode() == SkillAuthoring.Mode.REVISE && previousDraft != null
                     ? previousDraft.definition() : null;
             authoringInput = authoring == null || authoring.mode() == SkillAuthoring.Mode.SAVE
-                    ? null : SkillAuthoring.draftInput(authoring.request(), prior, requiredOutput);
+                    ? null : SkillAuthoring.draftInput(authoring.request(), prior, requiredOutput, customRequired);
         } catch (IllegalArgumentException invalid) {
             state.setText("技能需求包含不支持的内容或超过长度");
             updateSend();
+            return;
+        }
+        if (skill != null && skill.command().requiresReview() && approvedService == null) {
+            showCustomServiceReview(skill, prompt);
+            return;
+        }
+        if (approvedService != null && (skill == null || !skill.command().requiresReview())) {
+            state.setText("技能配置已变化，请重新确认");
             return;
         }
         cancelRestore();
@@ -906,6 +924,9 @@ final class AiTestChatDialog extends Dialog {
                         if (requiredOutput != null && validated.outputType() != requiredOutput) {
                             throw new OutputMismatch(requiredOutput, validated.outputType());
                         }
+                        if (customRequired && !SkillCapabilityRegistry.Capability.CUSTOM_SERVICE.id().equals(validated.capabilityId())) {
+                            throw new ServiceCapabilityMismatch();
+                        }
                         authored = validated;
                     }
                     turn.checkStopped();
@@ -917,6 +938,9 @@ final class AiTestChatDialog extends Dialog {
                         }
                         reply = AiSubAgents.run(AiModelSettings.read(selectedSettings), subAgent,
                                 turn.skill.argument(), delegationDeadline);
+                    } else if (turn.skill.command().requiresReview()) {
+                        reply = activeSkillStore.executeCustomService(turn.skill, approvedService,
+                                System.nanoTime() + TimeUnit.SECONDS.toNanos(30)).text();
                     } else {
                         SkillResult result = AiSkills.executeResult(turn.skill, activeSkillStore, new AiSkills.TextExecutor() {
                             @Override public String run(String instruction, String input) throws Exception {
@@ -1115,6 +1139,10 @@ final class AiTestChatDialog extends Dialog {
                 && skillDraft != null && skillDraft.outputType() != mismatch.expected) {
             skillDraft = null;
         }
+        if (!turn.stopRequested && failure instanceof ServiceCapabilityMismatch && skillDraft != null
+                && !SkillCapabilityRegistry.Capability.CUSTOM_SERVICE.id().equals(skillDraft.capabilityId())) {
+            skillDraft = null;
+        }
         HistorySave history = HistorySave.NOT_REQUESTED;
         if (turn.manualSkill() && !turn.stopRequested && failure == null) {
             if (turn.transcriptMemory != null && turn.transcriptMemory.historyEnabled()) {
@@ -1283,6 +1311,53 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private static final class VideoHistoryRequired extends IllegalStateException { }
+    private static final class ServiceCapabilityMismatch extends IllegalArgumentException { }
+
+    private void showCustomServiceReview(AiSkills.Invocation invocation, String prompt) {
+        if (customReviewDialog != null) return;
+        SkillStore store = skillStore;
+        SkillStore.CustomReview review;
+        try { review = store.previewCustomService(invocation); }
+        catch (SkillCustomService.Failure invalid) {
+            state.setText(invalid.getMessage());
+            return;
+        } catch (Exception unavailable) {
+            state.setText("无法核对技能服务配置，请打开技能详情");
+            return;
+        }
+
+        SkillCustomService.Preview call = review.preview();
+        SkillCustomService.Preset preset = call.preset();
+        String message = preset.label() + " · " + preset.costUnits() + " 费用单位\nPOST " + preset.endpoint()
+                + "\n传输字段 " + preset.requestField() + "\n\n" + call.argument();
+        AlertDialog child = new MiuixDialogBuilder(getContext(), useMiuix)
+                .setTitle("确认本次技能服务调用").setMessage(message)
+                .setNegativeButton("取消", null).setPositiveButton("确认调用", null).create();
+        customReviewDialog = child;
+        boolean[] approved = {false};
+        child.setOnDismissListener(ignored -> {
+            if (!approved[0]) store.cancelCustomService(review);
+            if (customReviewDialog == child) customReviewDialog = null;
+        });
+        try {
+            child.show();
+            child.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+                try {
+                    SkillStore.CustomCall confirmation = store.approveCustomService(review);
+                    approved[0] = true;
+                    child.dismiss();
+                    sendMessage(prompt, Collections.emptyList(), Collections.emptyList(), null, confirmation);
+                } catch (Exception stale) {
+                    child.dismiss();
+                    state.setText("本次确认已失效，请重新核对后调用");
+                }
+            });
+        } catch (RuntimeException unavailable) {
+            store.cancelCustomService(review);
+            customReviewDialog = null;
+            state.setText("无法打开技能服务确认");
+        }
+    }
 
     private static SkillVideoTasks.Scope videoScope(AiSkills.Entry entry, TestChatMemory memory) {
         return entry == null || memory == null ? null : new SkillVideoTasks.Scope(entry, memory.conversationKey());
@@ -1411,6 +1486,7 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private static String authoringFailure(SkillAuthoring.Action action, Exception failure) {
+        if (failure instanceof ServiceCapabilityMismatch) return "请求需要受控服务能力，本次草案未保存";
         if (failure instanceof OutputMismatch mismatch) {
             String name = mismatch.expected == SkillResult.Type.IMAGE ? "生图" : mismatch.expected.label();
             return name + "技能需要" + mismatch.expected.label() + "输出，模型返回了" + mismatch.actual.label() + "，本次草案未保存。";
@@ -1429,7 +1505,8 @@ final class AiTestChatDialog extends Dialog {
         if (stopped) return "已停止";
         if (failure instanceof VideoHistoryRequired) return "模拟视频任务需要启用本地对话历史";
         if (failure instanceof SkillServices.Failure || failure instanceof McpClient.Failure
-                || failure instanceof McpRegistry.Failure || failure instanceof AiSubAgents.Failure) {
+                || failure instanceof McpRegistry.Failure || failure instanceof AiSubAgents.Failure
+                || failure instanceof SkillCustomService.Failure) {
             return failure.getMessage();
         }
         if (failure instanceof java.net.SocketTimeoutException) return "技能请求超时，请先核实请求状态";
@@ -1453,6 +1530,7 @@ final class AiTestChatDialog extends Dialog {
 
     private void clearConversation() {
         if (disposed) return;
+        if (customReviewDialog != null) customReviewDialog.dismiss();
         closeImagePreview();
         resetVideoUi();
         if (pending != null) pending.discardHistory = true;
@@ -1516,6 +1594,7 @@ final class AiTestChatDialog extends Dialog {
     private void dispose() {
         if (disposed) return;
         disposed = true;
+        if (customReviewDialog != null) customReviewDialog.dismiss();
         closeImagePreview();
         resetVideoUi();
         closeSkillDeletionObserver();

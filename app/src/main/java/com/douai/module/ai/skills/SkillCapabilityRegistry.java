@@ -11,6 +11,7 @@ public final class SkillCapabilityRegistry {
         TEXT_MODEL("text_model", "text_model", SkillResult.Type.TEXT, 2000),
         TABLE_MODEL("table_model", "table_model", SkillResult.Type.TABLE, 2000),
         VIDEO_TASK("video_task", "video_task", SkillResult.Type.VIDEO, 2000),
+        CUSTOM_SERVICE("custom_service", "custom_service", SkillResult.Type.TEXT, 2000),
         IMAGE_GENERATION("image_generation", "service", SkillResult.Type.IMAGE, 4000);
 
         private final String id;
@@ -63,6 +64,8 @@ public final class SkillCapabilityRegistry {
                                String instruction, String input, Map<String, Object> values,
                                AiSkills.TextExecutor executor, AiSkills.VideoExecutor video) throws Exception {
         switch (capability) {
+            case CUSTOM_SERVICE:
+                throw new IllegalStateException("请先确认本次技能服务调用");
             case VIDEO_TASK:
                 if (video == null) throw new IllegalStateException("视频任务缺少会话环境");
                 return video.submit(input);
