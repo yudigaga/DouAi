@@ -55,7 +55,6 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     private final Button generate;
     private final Button simulate;
     private final LinearLayout skillRows;
-    private final LinearLayout serviceRows;
     private ChatCompletionClient.IsolatedTextRequest generation;
     private Future<?> generationTask;
     private boolean busy;
@@ -90,6 +89,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         content.addView(skillRows, matchWrap());
 
         section(content, "生成或更新技能");
+        button(content, "共享接口设置", "skills.generate.shared_services", this::showSharedServices);
         requirements = input(content, "描述想要的技能，例如生图", "skills.requirements",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE, 4000, false);
         generate = button(content, "选择模型生成", "skills.generate.model", this::chooseModel);
@@ -97,12 +97,8 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         status = text(content, "", "skills.status");
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
 
-        section(content, "技能服务");
-        serviceRows = column();
-        content.addView(serviceRows, matchWrap());
-        button(content, "登记或更新服务", "skills.service.register", this::showServiceEditor);
-        try { refresh(); }
-        catch (SkillServices.Failure | RuntimeException failure) { status.setText("暂时无法读取技能设置"); }
+        try { refreshSkillRows(); }
+        catch (RuntimeException failure) { status.setText("暂时无法读取技能设置"); }
 
         dialog = builder("AI Skills").setView(scroll(content)).setNegativeButton("关闭", null).create();
     }
@@ -238,28 +234,6 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         requirements.setEnabled(!busy);
     }
 
-    private void refresh() throws SkillServices.Failure {
-        refreshSkillRows();
-        serviceRows.removeAllViews();
-        for (SkillServices.Service service : services.list()) {
-            String tag = "skills.service." + service.id();
-            if (SkillServices.MOCK_ORDERS.equals(service.id())) {
-                text(serviceRows, service.label() + "（本地模拟）", tag);
-                continue;
-            }
-            boolean authorized = services.isAuthorized(service);
-            boolean localImage = SkillServices.MOCK_IMAGE.equals(service.id());
-            text(serviceRows, service.label() + " · " + outputLabel(service.outputType()) + "\n"
-                    + (localImage ? "本地模拟" : service.id() + " · " + service.endpoint()), tag);
-            if (localImage && authorized) {
-                button(serviceRows, "撤销模拟服务授权", tag + ".revoke", () -> revoke(service));
-            } else {
-                button(serviceRows, authorized ? "已授权" : "授权此服务", tag + ".authorize",
-                        () -> authorize(service)).setEnabled(!authorized);
-            }
-        }
-    }
-
     private void refreshSkillRows() {
         SkillStore.SettingsSnapshot snapshot = store.settingsSnapshot();
         skillRows.removeAllViews();
@@ -312,8 +286,8 @@ final class AiSkillSettingsDialog implements AutoCloseable {
 
     private void refreshAfterChange(String message) {
         status.setText(message);
-        try { refresh(); }
-        catch (SkillServices.Failure | RuntimeException failure) {
+        try { refreshSkillRows(); }
+        catch (RuntimeException failure) {
             status.setText("已保存，请重新打开设置查看最新状态");
         }
     }
@@ -326,8 +300,54 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         presenter.accept(page.dialog(), page::close);
     }
 
-    private void showServiceEditor() {
+    private record SharedServicesPage(AlertDialog dialog, LinearLayout rows, TextView status) { }
+
+    private void showSharedServices() {
         if (!active()) return;
+        LinearLayout content = form();
+        LinearLayout rows = column();
+        TextView feedback = text(content, "", "skills.service.status");
+        feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        content.addView(rows, matchWrap());
+        AlertDialog child = builder("共享接口设置").setView(scroll(content)).setNegativeButton("关闭", null).create();
+        SharedServicesPage page = new SharedServicesPage(child, rows, feedback);
+        button(content, "登记或更新共享接口", "skills.service.register", () -> showServiceEditor(page));
+        refreshSharedServices(page);
+        presenter.accept(child, null);
+    }
+
+    private void refreshSharedServices(SharedServicesPage page) {
+        page.rows().removeAllViews();
+        try {
+            for (SkillServices.Service service : services.list()) {
+                if (SkillServices.MOCK_ORDERS.equals(service.id())) continue;
+                String tag = "skills.service." + service.id();
+                boolean authorized = services.isAuthorized(service);
+                boolean localImage = SkillServices.MOCK_IMAGE.equals(service.id());
+                text(page.rows(), service.label() + " · " + outputLabel(service.outputType()) + "\n"
+                        + (localImage ? "本地模拟" : service.id() + " · " + service.endpoint()), tag);
+                if (localImage && authorized) {
+                    button(page.rows(), "撤销模拟服务授权", tag + ".revoke", () -> revoke(page, service));
+                } else {
+                    button(page.rows(), authorized ? "已授权" : "授权此服务", tag + ".authorize",
+                            () -> authorize(page, service)).setEnabled(!authorized);
+                }
+            }
+        } catch (SkillServices.Failure unavailable) {
+            page.status().setText("暂时无法读取共享接口");
+        }
+    }
+
+    private boolean sharedActive(SharedServicesPage page) { return active() && page.dialog().isShowing(); }
+
+    private void sharedChanged(SharedServicesPage page, String message) {
+        page.status().setText(message);
+        refreshSharedServices(page);
+        refreshAfterChange("");
+    }
+
+    private void showServiceEditor(SharedServicesPage page) {
+        if (!sharedActive(page)) return;
         LinearLayout fields = form();
         EditText id = input(fields, "服务标识", "skills.service.id", InputType.TYPE_CLASS_TEXT, 64, false);
         EditText label = input(fields, "显示名称", "skills.service.label", InputType.TYPE_CLASS_TEXT, 80, false);
@@ -352,12 +372,12 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         TextView error = text(fields, "", "skills.service.error");
         error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
 
-        AlertDialog editor = builder("登记或更新服务").setView(scroll(fields))
+        AlertDialog editor = builder("登记或更新共享接口").setView(scroll(fields))
                 .setPositiveButton("保存", null).setNegativeButton("取消", null).create();
         presenter.accept(editor, () -> token.setText(""));
         if (!editor.isShowing()) return;
         editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
-            if (!active() || !editor.isShowing()) return;
+            if (!sharedActive(page) || !editor.isShowing()) return;
             try {
                 int units = Integer.parseInt(cost.getText().toString().trim());
                 SkillServices.Service service = new SkillServices.Service(id.getText().toString().trim(),
@@ -371,35 +391,35 @@ final class AiSkillSettingsDialog implements AutoCloseable {
             }
             token.setText("");
             editor.dismiss();
-            refreshAfterChange("服务已登记，请核对目标后授权");
+            sharedChanged(page, "服务已登记，请核对目标后授权");
         });
     }
 
-    private void authorize(SkillServices.Service service) {
-        if (!active()) return;
+    private void authorize(SharedServicesPage page, SkillServices.Service service) {
+        if (!sharedActive(page)) return;
         presenter.accept(builder("授权技能服务")
                 .setMessage(target(service.id(), service.label(), service.endpoint(), service.costUnits(), service.outputType()))
                 .setNegativeButton("取消", null)
                 .setPositiveButton("确认授权", (child, which) -> {
-                    if (!active()) return;
+                    if (!sharedActive(page)) return;
                     try {
                         services.authorize(service, service.costUnits());
                     } catch (Exception failure) {
-                        status.setText("授权失败，请重新核对服务配置");
+                        page.status().setText("授权失败，请重新核对服务配置");
                         return;
                     }
-                    refreshAfterChange("服务已授权");
+                    sharedChanged(page, "服务已授权");
                 }).create(), null);
     }
 
-    private void revoke(SkillServices.Service service) {
-        if (!active()) return;
+    private void revoke(SharedServicesPage page, SkillServices.Service service) {
+        if (!sharedActive(page)) return;
         try { services.revoke(service); }
         catch (SkillServices.Failure failure) {
-            status.setText("撤销授权失败");
+            page.status().setText("撤销授权失败");
             return;
         }
-        refreshAfterChange("已撤销模拟服务授权");
+        sharedChanged(page, "已撤销模拟服务授权");
     }
 
     private static String target(String id, String label, String endpoint, int units, SkillResult.Type type) {

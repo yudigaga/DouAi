@@ -12,6 +12,7 @@ import android.widget.TextView;
 import com.douai.module.ai.mcp.McpClient;
 import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.SkillServices;
+import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.FeatureSettings;
@@ -169,13 +170,23 @@ public final class ModuleSettingsActionSeparationTest {
         assertPresent(manager, "skills.enabled");
         assertPresent(manager, "skills.requirements");
         assertTrue(manager.findViewWithTag("skills.generate.mock").isEnabled());
-        assertNotNull(manager.findViewWithTag("skills.service.mock-orders"));
+        assertPresent(manager, "skills.generate.shared_services");
+        assertNull(manager.findViewWithTag("skills.service.register"));
+        assertNull(manager.findViewWithTag("skills.service.mock-orders"));
+        assertNull(manager.findViewWithTag("skills.service." + SkillServices.MOCK_IMAGE + ".authorize"));
     }
 
-    @Test public void registeringAServiceRequiresSeparateConfirmationOfItsEndpointAndBudget() throws Exception {
+    @Test public void sharedServiceChildRequiresSeparateConfirmationOfItsEndpointAndBudget() throws Exception {
         assertTrue(option(open("EXTENSION"), "AI Skills").performClick());
-        View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
-        assertTrue(manager.findViewWithTag("skills.service.register").performClick());
+        AlertDialog manager = (AlertDialog) ShadowDialog.getLatestDialog();
+        View managerRoot = manager.getWindow().getDecorView();
+        assertNull(managerRoot.findViewWithTag("skills.service.register"));
+        assertTrue(managerRoot.findViewWithTag("skills.generate.shared_services").performClick());
+        AlertDialog shared = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNotSame(manager, shared);
+        View sharedRoot = shared.getWindow().getDecorView();
+        assertNull(sharedRoot.findViewWithTag("skills.service.mock-orders"));
+        assertTrue(sharedRoot.findViewWithTag("skills.service.register").performClick());
         AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
         View form = editor.getWindow().getDecorView();
         String endpoint = "https://orders.example.test/query";
@@ -192,7 +203,8 @@ public final class ModuleSettingsActionSeparationTest {
         SkillServices.Service registered = services.list().stream()
                 .filter(service -> service.id().equals("fixture-orders")).findFirst().orElseThrow();
         assertFalse(services.isAuthorized(registered));
-        assertTrue(manager.findViewWithTag("skills.service.fixture-orders.authorize").performClick());
+        assertNull(managerRoot.findViewWithTag("skills.service.fixture-orders.authorize"));
+        assertTrue(sharedRoot.findViewWithTag("skills.service.fixture-orders.authorize").performClick());
         AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
         TextView message = confirmation.findViewById(android.R.id.message);
         assertNotNull(message);
@@ -201,6 +213,51 @@ public final class ModuleSettingsActionSeparationTest {
         assertTrue(confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
         ShadowLooper.idleMainLooper();
         assertTrue(services.isAuthorized(registered));
+    }
+
+    @Test public void skillsRowOpensItsOwnImageConfigurationAndCanAuthorizeAScopedMock() throws Exception {
+        String name = "封面草稿";
+        SkillStore skills = SkillStore.forContext(activity);
+        String draft = new JSONObject(SkillStore.mockDraft("生图")).put("name", name).toString();
+        assertNotNull(skills.saveGenerated(draft, null).pending());
+
+        assertTrue(option(open("EXTENSION"), "AI Skills").performClick());
+        View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertNull(manager.findViewWithTag("skills.service.register"));
+        assertTrue(manager.findViewWithTag("skills.row." + name).performClick());
+        AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
+        View form = detail.getWindow().getDecorView();
+        TextView skillName = form.findViewWithTag("skills.detail.name");
+        assertEquals("/" + name, skillName.getText().toString());
+        assertPresent(form, "skills.detail.endpoint");
+        assertPresent(form, "skills.detail.fetch_models");
+        EditText key = form.findViewWithTag("skills.detail.key");
+        assertTrue(key.getTransformationMethod() instanceof PasswordTransformationMethod);
+        assertEquals(0, key.length());
+        assertNull(form.findViewWithTag("skills.service.register"));
+
+        ((Spinner) form.findViewWithTag("skills.detail.adapter")).setSelection(1);
+        ShadowLooper.idleMainLooper();
+        assertTrue(form.findViewWithTag("skills.detail.save").performClick());
+        SkillStore.Detail saved = skills.detail(name);
+        SkillServices services = SkillServices.forContext(activity);
+        assertTrue(saved.pending());
+        assertEquals(name, saved.service().skillName());
+        assertEquals(SkillServices.Adapter.MOCK_IMAGE, saved.service().adapter());
+        assertFalse(services.isAuthorized(saved.service()));
+        assertTrue(form.findViewWithTag("skills.detail.authorize").performClick());
+        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
+        TextView message = review.findViewById(android.R.id.message);
+        assertTrue(message.getText().toString().contains("本地模拟"));
+        assertTrue(review.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+
+        SkillStore.Detail enabled = skills.detail(name);
+        assertFalse(enabled.pending());
+        assertEquals(saved.service(), enabled.currentService());
+        assertTrue(enabled.current().enabled());
+        assertTrue(services.isAuthorized(enabled.currentService()));
+        assertFalse(services.isAuthorized(services.find(SkillServices.MOCK_IMAGE)));
     }
 
     @Test public void mcpSettingsSaveAnInertEndpointUntilItsProtocolAndAddressAreApproved() throws Exception {

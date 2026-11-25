@@ -72,6 +72,24 @@ public final class AiSkillSettingsDialogTest {
         if (activity != null) activity.finish();
     }
 
+    @Test public void skillsPageLoadsWithoutTheBottomServiceSectionOrActions() throws Exception {
+        SkillServices.Service existing = new SkillServices.Service("fixture-existing", "存量图片服务",
+                "https://images.example.test/generate", 0, SkillResult.Type.IMAGE);
+        services.register(existing, "");
+        reopenManager();
+
+        assertTrue(manager.dialog().isShowing());
+        assertNotNull(view("skills.generate.model"));
+        assertNotNull(view("skills.status"));
+        View root = manager.dialog().getWindow().getDecorView();
+        assertFalse(visibleText(root).contains("技能服务"));
+        assertNull(root.findViewWithTag("skills.service.register"));
+        assertNull(root.findViewWithTag("skills.service.fixture-existing"));
+        assertNull(root.findViewWithTag("skills.service." + SkillServices.MOCK_IMAGE + ".authorize"));
+        assertNotNull(root.findViewWithTag("skills.generate.shared_services"));
+        assertEquals(existing, services.find(existing.id()));
+    }
+
     @Test public void oneWordImageRequirementStaysPendingUntilExplicitConnectAfterAuthorization() throws Exception {
         enterAndGenerate("生图", "skills.generate.model");
         assertEquals(1, store.pending().size());
@@ -80,11 +98,13 @@ public final class AiSkillSettingsDialogTest {
         String name = store.pending().get(0).name();
         assertTrue(visibleText(view(skillRow(name))).contains("草稿 · 图片 · 待配置"));
 
-        assertTrue(view("skills.service." + SkillServices.MOCK_IMAGE + ".authorize").performClick());
+        AlertDialog shared = openSharedServices();
+        assertTrue(dialogView(shared, "skills.service." + SkillServices.MOCK_IMAGE + ".authorize").performClick());
         AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
         assertTrue(((TextView) review.findViewById(android.R.id.message)).getText().toString().contains("本地模拟"));
         confirm(review);
         assertTrue(store.list().isEmpty());
+        shared.dismiss();
 
         reopenManager();
         assertTrue(store.list().isEmpty());
@@ -129,8 +149,9 @@ public final class AiSkillSettingsDialogTest {
         detail.dismiss();
     }
 
-    @Test public void choosingImageServiceRegistersWithoutGrantingAuthorization() throws Exception {
-        assertTrue(view("skills.service.register").performClick());
+    @Test public void registeringAnImageServiceInTheSharedChildDoesNotGrantAuthorization() throws Exception {
+        AlertDialog shared = openSharedServices();
+        assertTrue(dialogView(shared, "skills.service.register").performClick());
         AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
         View form = editor.getWindow().getDecorView();
         ((Spinner) form.findViewWithTag("skills.service.output")).setSelection(1);
@@ -143,7 +164,34 @@ public final class AiSkillSettingsDialogTest {
         SkillServices.Service service = services.find("fixture-image");
         assertEquals(SkillResult.Type.IMAGE, service.outputType());
         assertFalse(services.isAuthorized(service));
-        assertTrue(((TextView) view("skills.service.fixture-image")).getText().toString().contains("图片"));
+        assertTrue(visibleText(dialogView(shared, "skills.service.fixture-image")).contains("图片"));
+        assertNull(dialogView(manager.dialog(), "skills.service.fixture-image"));
+        shared.dismiss();
+    }
+
+    @Test public void sharedMockRevocationAndReauthorizationKeepOtherSharedGrants() throws Exception {
+        SkillServices.Service existing = new SkillServices.Service("fixture-orders", "共享订单接口",
+                "https://orders.example.test/query", 1);
+        services.register(existing, "");
+        services.authorize(existing, 1);
+        SkillServices.Service mock = services.find(SkillServices.MOCK_IMAGE);
+        services.authorize(mock, 0);
+
+        AlertDialog shared = openSharedServices();
+        assertNull(dialogView(shared, "skills.service." + SkillServices.MOCK_ORDERS));
+        String mockTag = "skills.service." + SkillServices.MOCK_IMAGE;
+        assertTrue(dialogView(shared, mockTag + ".revoke").performClick());
+        assertFalse(services.isAuthorized(mock));
+        assertTrue(services.isAuthorized(existing));
+        assertTrue(dialogView(shared, mockTag + ".authorize").performClick());
+        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(message(review).contains("本地模拟"));
+        confirm(review);
+        assertTrue(services.isAuthorized(mock));
+        assertTrue(services.isAuthorized(existing));
+        assertEquals(existing, services.find(existing.id()));
+        assertNull(dialogView(manager.dialog(), mockTag + ".revoke"));
+        shared.dismiss();
     }
 
     @Test public void pendingListOpensTheExactSkillConfiguration() {
@@ -481,6 +529,14 @@ public final class AiSkillSettingsDialogTest {
         assertNull(decor.findViewWithTag("skills.detail.rollback"));
         assertFalse(visibleText(decor).contains("版本与恢复"));
         assertFalse(visibleText(decor).contains("回退上一版本"));
+    }
+
+    private AlertDialog openSharedServices() {
+        assertTrue(view("skills.generate.shared_services").performClick());
+        AlertDialog shared = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(visibleText(shared.getWindow().getDecorView()).contains("共享接口设置"));
+        assertNotNull(dialogView(shared, "skills.service.register"));
+        return shared;
     }
 
     private static EditText editField(AlertDialog editor, String field) {
