@@ -308,7 +308,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         return label + "\n输出 " + outputLabel(type) + "\n" + destination + "\n每次调用最多 " + units + " 费用单位";
     }
 
-    private static String outputLabel(SkillResult.Type type) { return type == SkillResult.Type.IMAGE ? "图片" : "文本"; }
+    private static String outputLabel(SkillResult.Type type) { return type.label(); }
 
     private AlertDialog.Builder builder(String title) { return new MiuixDialogBuilder(context, miuix).setTitle(title); }
 

@@ -639,7 +639,8 @@ public final class SkillServices {
     private static void validate(Service service) throws Failure {
         if (service == null || service.id() == null || !ID.matcher(service.id()).matches()
                 || MOCK_ORDERS.equals(service.id()) || MOCK_IMAGE.equals(service.id())
-                || service.outputType() == null || service.label() == null || service.label().trim().isEmpty()
+                || (service.outputType() != SkillResult.Type.TEXT && service.outputType() != SkillResult.Type.IMAGE)
+                || service.label() == null || service.label().trim().isEmpty()
                 || service.label().length() > 80 || service.label().chars().anyMatch(Character::isISOControl)
                 || service.adapter() != Adapter.GENERIC || !"".equals(service.modelName()) || !"".equals(service.skillName())
                 || !"".equals(service.modelsEndpoint())

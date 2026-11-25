@@ -15,6 +15,7 @@ import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.WindowInsets;
 import android.widget.EditText;
@@ -27,6 +28,7 @@ import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.SkillAuthoring;
+import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.AiModelConfig;
@@ -810,6 +812,71 @@ public final class AiTestChatDialogTest {
         services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
         SkillStore.forContext(activity).installGenerated(SkillStore.mockDraft("生图"));
         return services;
+    }
+
+    @Test public void tableSkillSavesBeforeShowingPreviewAndRestoresWithoutReplay() throws Exception {
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        work.skillReplies.add("""
+                {"schemaVersion":4,"name":"值班表","description":"提取排班","documentation":"输入排班安排",
+                 "instructions":"提取值班人员","capabilityId":"table_model","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"table","trial":{"input":"示例","expectedType":"table"}}
+                """);
+        work.skillReplies.add("""
+                {"columns":["日期","值班员"],"rows":[["周一","小周"],["周二","小林"],["周三","小李"],
+                 ["周四","小袁"],["周五","小米"],["周六","小许"],["周日","小方"]]}
+                """);
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("帮我创建一个输出表格技能并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals("table", new JSONObject(work.skillInputs.get(0)).getString("requiredOutputType"));
+
+        submit("/值班表 本周值班安排");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, work.transcriptMemory.readTranscript().size());
+        assertNull(messageRow(3).findViewWithTag("ai.chat.table.export"));
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(SkillAuthoring.TABLE_INSTRUCTION, work.skillInstructions.get(1));
+        assertTrue(work.transcriptMemory.read().isEmpty());
+        assertEquals(SkillResult.Type.TABLE, work.transcriptMemory.readTranscript().get(1).artifact.type());
+        assertNotNull(messageRow(3).findViewWithTag("ai.chat.table.export"));
+        ViewGroup preview = messageRow(3).findViewWithTag("ai.chat.table.preview");
+        assertEquals(7, ((ViewGroup) preview.getChildAt(0)).getChildCount());
+
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(messageRow(3).findViewWithTag("ai.chat.table.export"));
+        assertTrue(restored.skillInputs.isEmpty());
+
+        FakeSession contact = new FakeSession();
+        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        contact.skillReplies.add("{\"columns\":[\"日期\"],\"rows\":[[\"周五\"]]}");
+        contact.skillReplies.add("{\"columns\":[\"日期\"],\"rows\":[[]]}");
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/值班表 周五");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(messageRow(1).findViewWithTag("ai.chat.table.export"));
+        submit("/值班表 拒绝不等长行");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertNull(messageRow(3).findViewWithTag("ai.chat.table.export"));
+        assertEquals(1, contact.transcriptMemory.readTranscript().size());
     }
 
     @Test public void workManifestWaitsForRequiredConfigurationAndRunsFromContact() throws Exception {

@@ -1,6 +1,8 @@
 package com.douai.module.feature;
 
 import android.content.Context;
+import com.douai.module.ai.skills.SkillResult;
+import com.douai.module.ai.skills.SkillTable;
 import com.douai.module.config.AiModelConfig;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -23,6 +25,7 @@ public final class TestChatMemory {
     public static final int MAX_IMAGE_BYTES = 12 * 1024 * 1024;
     private static final int LEGACY_VERSION = 1;
     private static final int MIXED_VERSION = 2;
+    private static final int ARTIFACT_VERSION = 3;
     private static final int MODEL_TURN = 0;
     private static final int DISPLAY_TURN = 1;
     private static final int MAX_ROUNDS = 50;
@@ -30,6 +33,8 @@ public final class TestChatMemory {
     private static final int MAX_LEGACY_FILE_BYTES = 20 * 1024 * 1024;
     private static final int MAX_MIXED_FILE_BYTES = 32 * 1024 * 1024;
     private static final int MAX_DIRECTORY_BYTES = 48 * 1024 * 1024;
+    private static final int MAX_ARTIFACT_PAYLOAD = 48 * 1024;
+    private static final int MAX_ARTIFACT_BYTES = 1024 * 1024;
     private static final ConcurrentHashMap<String, State> STATES = new ConcurrentHashMap<>();
     private static final Object IO_LOCK = new Object();
     private final File file;
@@ -70,7 +75,8 @@ public final class TestChatMemory {
                 if (fileBytes > MAX_MIXED_FILE_BYTES) throw new IOException("History size");
                 try (DataInputStream input = new DataInputStream(new java.io.FileInputStream(file))) {
                     int version = input.readInt();
-                    boolean mixed = version == MIXED_VERSION;
+                    boolean artifacts = version == ARTIFACT_VERSION;
+                    boolean mixed = version == MIXED_VERSION || artifacts;
                     if (!mixed && version != LEGACY_VERSION) throw new IOException("History version");
                     if (!mixed && fileBytes > MAX_LEGACY_FILE_BYTES) throw new IOException("History size");
                     int count = input.readInt();
@@ -78,6 +84,7 @@ public final class TestChatMemory {
                     List<Turn> result = new ArrayList<>();
                     int[] bytesByKind = new int[2];
                     int[] turnsByKind = new int[2];
+                    int artifactBytes = 0;
                     for (int index = 0; index < count; index++) {
                         int kind = mixed ? input.readUnsignedByte() : MODEL_TURN;
                         if ((kind != MODEL_TURN && kind != DISPLAY_TURN) || ++turnsByKind[kind] > MAX_ROUNDS) {
@@ -89,8 +96,18 @@ public final class TestChatMemory {
                         String settings = kind == DISPLAY_TURN ? text(input, MAX_SETTINGS_NAME * 4) : null;
                         boolean keep = kind == MODEL_TURN || includeDisplay;
                         List<ChatImage> attachments = readImages(input, bytesByKind, kind, keep);
+                        SkillResult artifact = null;
+                        if (artifacts && kind == DISPLAY_TURN) {
+                            String type = text(input, 12);
+                            if (!type.isEmpty()) {
+                                String payload = text(input, MAX_ARTIFACT_PAYLOAD);
+                                artifactBytes += utf8Length(payload);
+                                if (artifactBytes > MAX_ARTIFACT_BYTES) throw new IOException("History artifact size");
+                                if (includeDisplay) artifact = readArtifact(type, payload);
+                            }
+                        }
                         if (kind == MODEL_TURN) result.add(new Turn(prompt, document, attachments, answer));
-                        else if (includeDisplay) result.add(Turn.displayedSkill(prompt, answer, attachments, settings));
+                        else if (includeDisplay) result.add(Turn.displayedSkill(prompt, answer, attachments, settings, artifact));
                     }
                     if (mixed && input.read() != -1) throw new IOException("History trailing bytes");
                     return bounded(result);
@@ -140,6 +157,7 @@ public final class TestChatMemory {
             turns = bounded(turns);
             if (turn.displayOnly && !turns.contains(turn)) return false;
             boolean mixed = turns.stream().anyMatch(saved -> saved.displayOnly);
+            boolean artifacts = turns.stream().anyMatch(saved -> saved.artifact != null);
             File directory = file.getParentFile();
             if (!directory.isDirectory() && !directory.mkdirs()) return false;
             File temporary = null;
@@ -147,7 +165,7 @@ public final class TestChatMemory {
                 temporary = File.createTempFile("memory-", ".tmp", directory);
                 try (FileOutputStream stream = new FileOutputStream(temporary);
                      DataOutputStream output = new DataOutputStream(stream)) {
-                    output.writeInt(mixed ? MIXED_VERSION : LEGACY_VERSION);
+                    output.writeInt(artifacts ? ARTIFACT_VERSION : mixed ? MIXED_VERSION : LEGACY_VERSION);
                     output.writeInt(turns.size());
                     for (Turn saved : turns) {
                         if (mixed) output.writeByte(saved.displayOnly ? DISPLAY_TURN : MODEL_TURN);
@@ -156,6 +174,10 @@ public final class TestChatMemory {
                         text(output, saved.answer);
                         if (saved.displayOnly) text(output, saved.settingsSkillName == null ? "" : saved.settingsSkillName);
                         writeImages(output, saved.displayOnly ? saved.assistantImages : saved.images);
+                        if (artifacts && saved.displayOnly) {
+                            text(output, saved.artifact == null ? "" : saved.artifact.type().wireName());
+                            if (saved.artifact != null) text(output, artifactPayload(saved.artifact));
+                        }
                     }
                     output.flush();
                     stream.getFD().sync();
@@ -192,6 +214,7 @@ public final class TestChatMemory {
         int[] bytesByKind = new int[2];
         int[] turnsByKind = new int[2];
         List<Turn> retained = new ArrayList<>();
+        int artifactBytes = 0;
         for (int index = turns.size() - 1; index >= 0 && retained.size() < rounds * 2; index--) {
             Turn turn = turns.get(index);
             int kind = turn.displayOnly ? DISPLAY_TURN : MODEL_TURN;
@@ -203,12 +226,32 @@ public final class TestChatMemory {
             if (bytesByKind[kind] + imageBytes > MAX_IMAGE_BYTES) continue;
             if (turn.prompt.length() > 4000 || turn.document.length() > 32768 || turn.answer.length() > 4000) continue;
             if (turn.settingsSkillName != null && turn.settingsSkillName.length() > MAX_SETTINGS_NAME) continue;
+            if (turn.artifact != null) {
+                int size = utf8Length(artifactPayload(turn.artifact));
+                if (size > MAX_ARTIFACT_PAYLOAD || artifactBytes + size > MAX_ARTIFACT_BYTES) continue;
+                artifactBytes += size;
+            }
             turnsByKind[kind]++;
             bytesByKind[kind] += imageBytes;
             retained.add(0, turn);
         }
         return Collections.unmodifiableList(retained);
     }
+
+    private static SkillResult readArtifact(String type, String payload) {
+        if (SkillResult.Type.TABLE.wireName().equals(type)) {
+            try { return new SkillResult.Table(SkillTable.parse(payload)); }
+            catch (IllegalArgumentException invalid) { return null; }
+        }
+        return null;
+    }
+
+    private static String artifactPayload(SkillResult artifact) {
+        if (artifact instanceof SkillResult.Table table) return table.table().toJson();
+        throw new IllegalArgumentException("Unsupported history artifact");
+    }
+
+    private static int utf8Length(String text) { return text.getBytes(StandardCharsets.UTF_8).length; }
 
     private void evictOtherFiles(File directory) {
         File[] files = directory.listFiles((parent, name) -> name.endsWith(".bin"));
@@ -263,18 +306,24 @@ public final class TestChatMemory {
         public final boolean displayOnly;
         public final List<ChatImage> assistantImages;
         public final String settingsSkillName;
+        public final SkillResult artifact;
 
         public Turn(String prompt, String document, List<ChatImage> images, String answer) {
-            this(prompt, document, images, answer, false, Collections.emptyList(), null);
+            this(prompt, document, images, answer, false, Collections.emptyList(), null, null);
         }
 
         public static Turn displayedSkill(String prompt, String answer, List<ChatImage> assistantImages,
                                           String settingsSkillName) {
-            return new Turn(prompt, "", Collections.emptyList(), answer, true, assistantImages, settingsSkillName);
+            return displayedSkill(prompt, answer, assistantImages, settingsSkillName, null);
+        }
+
+        public static Turn displayedSkill(String prompt, String answer, List<ChatImage> assistantImages,
+                                          String settingsSkillName, SkillResult artifact) {
+            return new Turn(prompt, "", Collections.emptyList(), answer, true, assistantImages, settingsSkillName, artifact);
         }
 
         private Turn(String prompt, String document, List<ChatImage> images, String answer, boolean displayOnly,
-                     List<ChatImage> assistantImages, String settingsSkillName) {
+                     List<ChatImage> assistantImages, String settingsSkillName, SkillResult artifact) {
             this.prompt = prompt;
             this.document = document;
             this.images = Collections.unmodifiableList(new ArrayList<>(images));
@@ -282,6 +331,7 @@ public final class TestChatMemory {
             this.displayOnly = displayOnly;
             this.assistantImages = Collections.unmodifiableList(new ArrayList<>(assistantImages));
             this.settingsSkillName = settingsSkillName == null || settingsSkillName.isEmpty() ? null : settingsSkillName;
+            this.artifact = artifact;
         }
     }
 }

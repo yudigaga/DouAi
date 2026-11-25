@@ -172,10 +172,12 @@ public final class AiSkills {
     }
 
     public static String execute(Invocation call, SkillStore store) throws Exception {
-        if (call.command().outputType() != SkillResult.Type.TEXT) throw new IllegalStateException("此技能返回图片");
+        if (call.command().outputType() != SkillResult.Type.TEXT) {
+            throw new IllegalStateException("此技能返回" + call.command().outputType().label());
+        }
         SkillResult result = executeResult(call, store);
         if (result instanceof SkillResult.Text text) return text.text();
-        throw new IllegalStateException("此技能返回图片");
+        throw new IllegalStateException("此技能返回" + result.type().label());
     }
 
     public static SkillResult executeResult(Invocation call, SkillStore store) throws Exception {

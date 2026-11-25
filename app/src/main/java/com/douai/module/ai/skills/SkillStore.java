@@ -360,7 +360,7 @@ public final class SkillStore {
 
     public Detail saveManifestValues(Detail expected, Map<String, String> entered) throws Exception {
         if (expected == null || expected.manifest() == null || expected.deleteTarget() == null
-                || expected.manifest().capability() != SkillCapabilityRegistry.Capability.TEXT_MODEL) {
+                || !expected.manifest().capability().usesModel()) {
             throw new IllegalArgumentException("技能配置目标无效");
         }
         return locked(state -> {
@@ -408,7 +408,8 @@ public final class SkillStore {
         if (pending != null) {
             String json = pending.getString("definition");
             Draft draft = parse(json);
-            boolean editable = TEXT_MODEL.equals(draft.kind());
+            boolean editable = draft.manifest() == null ? TEXT_MODEL.equals(draft.kind())
+                    : draft.manifest().capability().usesModel();
             return new EditSource(new EditTarget(expected, draft.description(), draft.documentation(),
                     editable ? draft.instruction() : "", editable, manifestFields(draft.manifest()),
                     draft.manifest() == null ? null : draft.manifest().displayName()),
@@ -421,7 +422,8 @@ public final class SkillStore {
         String documentation = readDocumentation(slot, name, revision.getInt("version"));
         JSONObject definition = executable.manifest() == null
                 ? editDefinition(name, description, documentation, executable) : executable.manifest().toJson();
-        boolean editable = TEXT_MODEL.equals(executable.kind());
+        boolean editable = executable.manifest() == null ? TEXT_MODEL.equals(executable.kind())
+                : executable.manifest().capability().usesModel();
         return new EditSource(new EditTarget(expected, description, documentation,
                 editable ? executable.instruction() : "", editable, manifestFields(executable.manifest()),
                 executable.manifest() == null ? null : executable.manifest().displayName()),
@@ -825,7 +827,9 @@ public final class SkillStore {
             if (installed != null && !installed.getBoolean("enabled")) {
                 JSONObject revision = activeRevision(installed);
                 if (resultType(revision) == SkillResult.Type.IMAGE) return "图片技能已停用";
-                if (TEXT_MODEL.equals(revision.optString("kind"))) return "技能已停用";
+                if (TEXT_MODEL.equals(revision.optString("kind")) || resultType(revision) == SkillResult.Type.TABLE) {
+                    return "技能已停用";
+                }
             }
             return null;
         });
@@ -1075,6 +1079,10 @@ public final class SkillStore {
     private static SkillResult trial(Draft draft, SkillServices.Service service, Map<String, Object> values) throws Exception {
         checkArgument(draft.trialInput(), draft.maxInput());
         if (draft.outputType() == SkillResult.Type.IMAGE) return SkillServices.mockImageResult();
+        if (draft.outputType() == SkillResult.Type.TABLE) {
+            SkillAuthoring.textInput(draft.instruction(), draft.trialInput(), values);
+            return new SkillResult.Table(SkillTable.parse("{\"columns\":[\"示例\"],\"rows\":[[\"模拟结果\"]]}"));
+        }
         if (TEXT_MODEL.equals(draft.kind())) {
             if (draft.manifest() != null) {
                 SkillAuthoring.textInput(draft.instruction(), draft.trialInput(), values);
@@ -1240,6 +1248,7 @@ public final class SkillStore {
         String kind = text(run.get("kind"), 16);
         SkillResult.Type output = schema == 1 ? SkillResult.Type.TEXT
                 : SkillResult.Type.fromWire(text(run.get("outputType"), 8));
+        if (output != SkillResult.Type.TEXT && output != SkillResult.Type.IMAGE) throw invalidDraft();
         String service = null;
         String instruction = "";
         if (schema == AUTHORED_SCHEMA) {
@@ -1452,6 +1461,7 @@ public final class SkillStore {
         if (schema != 1 && schema != 2 && schema != AUTHORED_SCHEMA) throw new IOException("技能版本不兼容");
         SkillResult.Type output = schema == 1 ? SkillResult.Type.TEXT
                 : SkillResult.Type.fromWire(definition.getString("outputType"));
+        if (output != SkillResult.Type.TEXT && output != SkillResult.Type.IMAGE) throw new IOException("技能版本不兼容");
         String kind = definition.getString("kind");
         int maxInput = definition.getInt("maxInput");
         if ("summary".equals(kind) && output == SkillResult.Type.TEXT) {

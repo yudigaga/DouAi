@@ -267,7 +267,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
 
     private void manifestConfiguration(SkillStore.Detail detail) {
         SkillManifest manifest = detail.manifest();
-        if (detail.outputType() != SkillResult.Type.TEXT || manifest == null || manifest.configFields().isEmpty()) return;
+        if (manifest == null || !manifest.capability().usesModel() || manifest.configFields().isEmpty()) return;
         section("配置字段", "skills.detail.config");
         text(body, "配置值将提供给执行模型，仅填写非敏感内容", "skills.detail.config.guidance");
         Map<String, Supplier<String>> values = new LinkedHashMap<>();
@@ -811,7 +811,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private static String outputLabel(SkillResult.Type output) {
-        return output == SkillResult.Type.IMAGE ? "图片输出" : "文本输出";
+        return output.label() + "输出";
     }
 
     private static String target(SkillServices.Service service) {

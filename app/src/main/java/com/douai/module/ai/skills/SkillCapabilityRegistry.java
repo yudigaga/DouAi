@@ -9,6 +9,7 @@ import java.util.Map;
 public final class SkillCapabilityRegistry {
     public enum Capability {
         TEXT_MODEL("text_model", "text_model", SkillResult.Type.TEXT, 2000),
+        TABLE_MODEL("table_model", "table_model", SkillResult.Type.TABLE, 2000),
         IMAGE_GENERATION("image_generation", "service", SkillResult.Type.IMAGE, 4000);
 
         private final String id;
@@ -27,6 +28,7 @@ public final class SkillCapabilityRegistry {
         public String kind() { return kind; }
         public SkillResult.Type outputType() { return outputType; }
         public int maxInput() { return maxInput; }
+        public boolean usesModel() { return this == TEXT_MODEL || this == TABLE_MODEL; }
     }
 
     private SkillCapabilityRegistry() { }
@@ -60,6 +62,10 @@ public final class SkillCapabilityRegistry {
                                String instruction, String input, Map<String, Object> values,
                                AiSkills.TextExecutor executor) throws Exception {
         switch (capability) {
+            case TABLE_MODEL:
+                if (executor == null) throw new IllegalStateException("此入口未选择文本模型");
+                SkillAuthoring.textInput(instruction, input, values);
+                return new SkillResult.Table(SkillTable.parse(executor.runConfigured(instruction, input, values)));
             case TEXT_MODEL:
                 if (executor == null) throw new IllegalStateException("此入口未选择文本模型");
                 SkillAuthoring.textInput(instruction, input, values);

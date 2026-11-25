@@ -6,6 +6,7 @@ import android.app.Dialog;
 import android.app.Activity;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Bitmap;
 import android.graphics.Typeface;
@@ -48,6 +49,7 @@ import com.douai.module.ai.skills.SkillManifest;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.ai.skills.SkillTable;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.SettingsStore;
@@ -60,6 +62,7 @@ import com.douai.module.feature.TestChatMemory;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixChatEditorSurface;
 
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -171,6 +174,7 @@ final class AiTestChatDialog extends Dialog {
     private Future<?> historyClear;
     private HostImagePicker picker;
     private HostMediaPicker mediaPicker;
+    private HostConfigFilePicker csvPicker;
     private Session session;
     private Future<?> request;
     private RequestTurn pending;
@@ -780,14 +784,14 @@ final class AiTestChatDialog extends Dialog {
                 return;
             }
         }
-        boolean imageRequired = authoring != null && SkillStore.requiresImage(authoring.request());
+        SkillResult.Type requiredOutput = authoring == null ? null : SkillAuthoring.explicitOutput(authoring.request());
         final String authoringInput;
         try {
             if (authoring != null || skill != null) SkillAuthoring.rejectCredential(prompt);
             String prior = authoring != null && authoring.mode() == SkillAuthoring.Mode.REVISE && previousDraft != null
                     ? previousDraft.definition() : null;
             authoringInput = authoring == null || authoring.mode() == SkillAuthoring.Mode.SAVE
-                    ? null : SkillAuthoring.draftInput(authoring.request(), prior, imageRequired);
+                    ? null : SkillAuthoring.draftInput(authoring.request(), prior, requiredOutput);
         } catch (IllegalArgumentException invalid) {
             state.setText("技能需求包含不支持的内容或超过长度");
             updateSend();
@@ -830,6 +834,7 @@ final class AiTestChatDialog extends Dialog {
         request = worker.submit(turn.trace.wrap(() -> {
             String reply = null;
             ChatImage generatedImage = null;
+            SkillResult artifact = null;
             SkillStore.DraftPreview authored = null;
             Exception error = null;
             try {
@@ -868,8 +873,8 @@ final class AiTestChatDialog extends Dialog {
                         String raw = askSkillModel(turn, active, SkillAuthoring.DESIGN_INSTRUCTION, authoringInput);
                         turn.checkStopped();
                         SkillStore.DraftPreview validated = SkillStore.validateAuthoredDraft(raw);
-                        if (imageRequired && validated.outputType() != SkillResult.Type.IMAGE) {
-                            throw new ImageOutputMismatch();
+                        if (requiredOutput != null && validated.outputType() != requiredOutput) {
+                            throw new OutputMismatch(requiredOutput, validated.outputType());
                         }
                         authored = validated;
                     }
@@ -890,7 +895,9 @@ final class AiTestChatDialog extends Dialog {
 
                             @Override public String runConfigured(String instruction, String input,
                                                                   Map<String, Object> settings) throws Exception {
-                                return askSkillModel(turn, active, SkillAuthoring.TEXT_INSTRUCTION,
+                                String system = turn.skill.command().outputType() == SkillResult.Type.TABLE
+                                        ? SkillAuthoring.TABLE_INSTRUCTION : SkillAuthoring.TEXT_INSTRUCTION;
+                                return askSkillModel(turn, active, system,
                                         SkillAuthoring.textInput(instruction, input, settings));
                             }
                         });
@@ -899,6 +906,9 @@ final class AiTestChatDialog extends Dialog {
                             reply = "";
                         } else if (result instanceof SkillResult.Text text) {
                             reply = text.text();
+                        } else if (result instanceof SkillResult.Table) {
+                            artifact = result;
+                            reply = "";
                         } else {
                             throw new IllegalStateException("技能返回了未知的结果类型");
                         }
@@ -926,9 +936,10 @@ final class AiTestChatDialog extends Dialog {
             catch (OutOfMemoryError failure) { error = new IllegalArgumentException("附件过大，无法读取"); }
             String result = reply;
             ChatImage image = generatedImage;
+            SkillResult localArtifact = artifact;
             SkillStore.DraftPreview draft = authored;
             Exception failure = error;
-            main.post(turn.trace.wrap(() -> finishRequest(turn, result, image, draft, failure)));
+            main.post(turn.trace.wrap(() -> finishRequest(turn, result, image, localArtifact, draft, failure)));
         }));
     }
 
@@ -1060,7 +1071,7 @@ final class AiTestChatDialog extends Dialog {
         evictUnusedThumbnails();
     }
 
-    private void finishRequest(RequestTurn turn, String reply, ChatImage generatedImage,
+    private void finishRequest(RequestTurn turn, String reply, ChatImage generatedImage, SkillResult artifact,
                                SkillStore.DraftPreview draft, Exception failure) {
         if (!isCurrentTurn(turn)) return;
         if (turn.authoring != null && !turn.stopRequested && failure == null) {
@@ -1070,21 +1081,20 @@ final class AiTestChatDialog extends Dialog {
                 failure = cannotComplete;
             }
         }
-        if (!turn.stopRequested && failure instanceof ImageOutputMismatch
-                && skillDraft != null && skillDraft.outputType() != SkillResult.Type.IMAGE) {
-            // An explicit image request must not leave an older text draft selected for saving.
+        if (!turn.stopRequested && failure instanceof OutputMismatch mismatch
+                && skillDraft != null && skillDraft.outputType() != mismatch.expected) {
             skillDraft = null;
         }
         HistorySave history = HistorySave.NOT_REQUESTED;
         if (turn.manualSkill() && !turn.stopRequested && failure == null) {
             if (turn.transcriptMemory != null && turn.transcriptMemory.historyEnabled()) {
-                saveSkillTranscript(turn, reply, generatedImage);
+                saveSkillTranscript(turn, reply, generatedImage, artifact);
                 return;
             }
             if (turn.transcriptUnavailable) history = HistorySave.UNCONFIRMED;
             else if (turn.transcriptMemory != null) history = HistorySave.DISABLED;
         }
-        showRequestResult(turn, reply, generatedImage, failure, history);
+        showRequestResult(turn, reply, generatedImage, artifact, failure, history);
     }
 
     private boolean isCurrentTurn(RequestTurn turn) {
@@ -1093,7 +1103,7 @@ final class AiTestChatDialog extends Dialog {
 
     private enum HistorySave { NOT_REQUESTED, DISABLED, SAVED, UNCONFIRMED }
 
-    private void showRequestResult(RequestTurn turn, String reply, ChatImage generatedImage,
+    private void showRequestResult(RequestTurn turn, String reply, ChatImage generatedImage, SkillResult artifact,
                                    Exception failure, HistorySave history) {
         if (!isCurrentTurn(turn)) return;
         busy = false;
@@ -1103,6 +1113,7 @@ final class AiTestChatDialog extends Dialog {
         if (failure == null && (!turn.manualSkill() || !turn.stopRequested)) {
             answer.text = reply;
             answer.color = TEXT;
+            answer.artifact = artifact;
             if (turn.manualSkill()) answer.settingsSkillName = turn.settingsSkillName;
             if (generatedImage != null) {
                 answer.images.add(generatedImage);
@@ -1152,7 +1163,7 @@ final class AiTestChatDialog extends Dialog {
                         + ";history=" + history.name());
     }
 
-    private void saveSkillTranscript(RequestTurn turn, String reply, ChatImage generatedImage) {
+    private void saveSkillTranscript(RequestTurn turn, String reply, ChatImage generatedImage, SkillResult artifact) {
         TestChatMemory memory = turn.transcriptMemory;
         turn.savingHistory = true;
         request = null;
@@ -1167,7 +1178,7 @@ final class AiTestChatDialog extends Dialog {
         try {
             TestChatMemory.Turn saved = TestChatMemory.Turn.displayedSkill(turn.prompt, savedAnswer,
                     generatedImage == null ? Collections.emptyList() : Collections.singletonList(generatedImage),
-                    turn.settingsSkillName);
+                    turn.settingsSkillName, artifact);
             historyWorker.execute(() -> {
                 if (turn.discardHistory) return;
                 HistorySave result;
@@ -1178,11 +1189,11 @@ final class AiTestChatDialog extends Dialog {
                 }
                 boolean written = result == HistorySave.SAVED;
                 DouAiLog.event("ai_chat", "skill_history_write", written ? "saved" : "not_saved", "scope=local_display");
-                main.post(turn.trace.wrap(() -> showRequestResult(turn, reply, generatedImage, null,
+                main.post(turn.trace.wrap(() -> showRequestResult(turn, reply, generatedImage, artifact, null,
                         written ? HistorySave.SAVED : HistorySave.UNCONFIRMED)));
             });
         } catch (RuntimeException unavailable) {
-            showRequestResult(turn, reply, generatedImage, null, HistorySave.UNCONFIRMED);
+            showRequestResult(turn, reply, generatedImage, artifact, null, HistorySave.UNCONFIRMED);
         }
     }
 
@@ -1190,7 +1201,7 @@ final class AiTestChatDialog extends Dialog {
         if (!skillStore.enabled()) throw new IllegalStateException("技能已停用");
         if (draft == null) throw new IllegalStateException("没有可用的技能草案");
         if (turn.authoring.mode() != SkillAuthoring.Mode.SAVE && !turn.authoring.saveAfter()) {
-            String output = draft.outputType() == SkillResult.Type.IMAGE ? "图片" : "文本";
+            String output = draft.outputType().label();
             String instruction = TextUtils.isEmpty(draft.instruction()) ? "" : "\n指令 " + draft.instruction();
             skillDraft = draft;
             return "技能草案 /" + draft.name() + " · " + output + " · 尚未保存\n"
@@ -1223,10 +1234,21 @@ final class AiTestChatDialog extends Dialog {
         return status.toString();
     }
 
-    private static final class ImageOutputMismatch extends IllegalArgumentException { }
+    private static final class OutputMismatch extends IllegalArgumentException {
+        private final SkillResult.Type expected;
+        private final SkillResult.Type actual;
+
+        OutputMismatch(SkillResult.Type expected, SkillResult.Type actual) {
+            this.expected = expected;
+            this.actual = actual;
+        }
+    }
 
     private static String authoringFailure(SkillAuthoring.Action action, Exception failure) {
-        if (failure instanceof ImageOutputMismatch) return "生图技能需要图片输出，模型返回了文本，本次草案未保存。";
+        if (failure instanceof OutputMismatch mismatch) {
+            String name = mismatch.expected == SkillResult.Type.IMAGE ? "生图" : mismatch.expected.label();
+            return name + "技能需要" + mismatch.expected.label() + "输出，模型返回了" + mismatch.actual.label() + "，本次草案未保存。";
+        }
         if (failure instanceof SkillManifest.Invalid invalid) return invalid.getMessage();
         if (failure instanceof java.net.SocketTimeoutException) return "技能请求超时，请稍后再试";
         if (action.mode() == SkillAuthoring.Mode.SAVE) return "保存技能失败，原草案仍保留";
@@ -1776,6 +1798,74 @@ final class AiTestChatDialog extends Dialog {
         picker = null;
         if (mediaPicker != null) mediaPicker.close();
         mediaPicker = null;
+        if (csvPicker != null) csvPicker.close();
+        csvPicker = null;
+    }
+
+    private void bindTable(LinearLayout container, SkillTable table) {
+        container.removeAllViews();
+        container.setVisibility(table == null ? View.GONE : View.VISIBLE);
+        if (table == null) return;
+        int columns = Math.min(6, table.columns().size());
+        int rows = Math.min(6, table.rows().size());
+        TextView summary = label(table.rows().size() + " 行 · " + table.columns().size() + " 列", 13, MUTED);
+        container.addView(summary, wrap());
+        HorizontalScrollView scroll = new HorizontalScrollView(getContext());
+        scroll.setTag("ai.chat.table.preview");
+        LinearLayout grid = new LinearLayout(getContext());
+        grid.setOrientation(LinearLayout.VERTICAL);
+        addTableRow(grid, table.columns(), columns, true);
+        for (int row = 0; row < rows; row++) addTableRow(grid, table.rows().get(row), columns, false);
+        scroll.addView(grid);
+        container.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        if (columns < table.columns().size() || rows < table.rows().size()) {
+            container.addView(label("导出 CSV 查看完整表格", 12, MUTED), wrap());
+        }
+        Button export = new Button(getContext());
+        export.setAllCaps(false);
+        export.setText("导出 CSV");
+        export.setTag("ai.chat.table.export");
+        export.setOnClickListener(ignored -> exportTable(table));
+        container.addView(export, wrap());
+    }
+
+    private void addTableRow(LinearLayout grid, List<String> values, int columns, boolean heading) {
+        LinearLayout row = new LinearLayout(getContext());
+        for (int column = 0; column < columns; column++) {
+            TextView cell = label(values.get(column), 13, TEXT);
+            cell.setMaxLines(2);
+            cell.setEllipsize(TextUtils.TruncateAt.END);
+            cell.setPadding(dp(6), dp(4), dp(6), dp(4));
+            if (heading) cell.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            row.addView(cell, new LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        grid.addView(row, wrap());
+    }
+
+    private void exportTable(SkillTable table) {
+        if (disposed || csvPicker != null) return;
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("text/csv").putExtra(Intent.EXTRA_TITLE, "DouAi.csv")
+                .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        csvPicker = HostConfigFilePicker.launch(ownerActivity(), intent, uri -> {
+            csvPicker = null;
+            if (disposed || uri == null || !"content".equals(uri.getScheme())) return;
+            historyWorker.execute(() -> {
+                boolean saved = false;
+                try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wt")) {
+                    if (output != null) {
+                        table.writeCsv(output);
+                        saved = true;
+                    }
+                } catch (Exception unavailable) { saved = false; }
+                boolean result = saved;
+                main.post(() -> {
+                    if (!disposed) state.setText(result ? "CSV 已导出" : "无法写入所选 CSV 文件");
+                });
+            });
+        });
+        if (csvPicker == null) state.setText("无法打开 CSV 文件选择器");
     }
 
     private Activity ownerActivity() {
@@ -1862,6 +1952,7 @@ final class AiTestChatDialog extends Dialog {
         ChatMessage sourceUser;
         String settingsSkillName;
         AiSearchVideoCards.Group videos;
+        SkillResult artifact;
 
         ChatMessage(String role, String text, boolean user, List<ChatImage> images) {
             this.role = role;
@@ -1906,6 +1997,7 @@ final class AiTestChatDialog extends Dialog {
         private final TextView document;
         private final LinearLayout images;
         private final LinearLayout videos;
+        private final LinearLayout table;
         private final ImageButton retry;
         private final Button settingsAction;
         private final HostNativeChatViews.TextBubble nativeBubble;
@@ -1959,6 +2051,10 @@ final class AiTestChatDialog extends Dialog {
             images.setOrientation(VERTICAL);
             images.setTag("ai.chat.message.images");
             bubble.addView(images, wrap());
+            table = new LinearLayout(context);
+            table.setOrientation(VERTICAL);
+            table.setTag("ai.chat.table");
+            bubble.addView(table, new LayoutParams(dp(240), ViewGroup.LayoutParams.WRAP_CONTENT));
             videos = new LinearLayout(context);
             videos.setOrientation(VERTICAL);
             videos.setTag("ai.chat.message.videos");
@@ -1980,7 +2076,7 @@ final class AiTestChatDialog extends Dialog {
             body.setTag(message.user ? "ai.chat.user" : "ai.chat.answer");
             body.setText(message.text);
             body.setTextColor(message.color);
-            body.setVisibility(!message.user && !message.images.isEmpty() && TextUtils.isEmpty(message.text)
+            body.setVisibility(!message.user && (!message.images.isEmpty() || message.artifact != null) && TextUtils.isEmpty(message.text)
                     ? GONE : VISIBLE);
             if (nativeBubble != null) {
                 nativeBubble.view.setTag(message.user ? "ai.chat.user" : "ai.chat.answer");
@@ -2012,6 +2108,8 @@ final class AiTestChatDialog extends Dialog {
             int reservedForVideos = messages.getPaddingLeft() + messages.getPaddingRight() + dp(48)
                     + (messageAvatar == null ? 0 : messageAvatar.getLayoutParams().width);
             videos.getLayoutParams().width = Math.min(dp(240), Math.max(dp(120), rowWidthForVideos - reservedForVideos));
+            table.getLayoutParams().width = videos.getLayoutParams().width;
+            bindTable(table, message.artifact instanceof SkillResult.Table result ? result.table() : null);
             searchVideoCards.bind(videos, message.user ? null : message.videos);
             retry.setVisibility(message.retry ? VISIBLE : GONE);
             retry.setOnClickListener(message.retry ? ignored -> sendMessage(message.retryPrompt,
@@ -2106,6 +2204,7 @@ final class AiTestChatDialog extends Dialog {
                     }
                     ChatMessage answer = addMessage(assistantName, turn.answer, false, turn.assistantImages);
                     answer.settingsSkillName = turn.settingsSkillName;
+                    answer.artifact = turn.artifact;
                 }
                 messageRows.notifyDataSetChanged();
                 scrollToBottom();
