@@ -804,7 +804,16 @@ final class AiTestChatDialog extends Dialog {
         try {
             SkillAuthoring.Action requested = skillStore != null && retryAnswer == null
                     ? SkillAuthoring.match(prompt, previousDraft != null) : null;
-            authoring = requested != null && skillStore.enabled() ? requested : null;
+            boolean creationCommand = skillEntry != null && retryAnswer == null && SkillAuthoring.isCreationCommand(prompt);
+            boolean canAuthor = (creationCommand || requested != null) && skillStore != null && skillStore.enabled();
+            if (creationCommand && (!canAuthor || requested == null || requested.request().isEmpty())) {
+                state.setText(!canAuthor ? "请先启用 AI Skills"
+                        : requested == null ? "请在 /技能 后填写不超过 400 字的单行需求"
+                        : "请在 /技能 后填写技能需求");
+                updateSend();
+                return;
+            }
+            authoring = canAuthor ? requested : null;
             AiSkills.Invocation slash = authoring != null || skillEntry == null || retryAnswer != null
                     ? null : AiSkills.match(skillEntry, prompt, skillStore, subAgent.enabled());
             boolean named = SkillSelection.couldBeNamed(prompt);

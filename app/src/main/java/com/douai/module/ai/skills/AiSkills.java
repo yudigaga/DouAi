@@ -14,6 +14,8 @@ import java.util.regex.Pattern;
 
 /** Directory and dispatcher for explicit commands in manual chats. */
 public final class AiSkills {
+    public static final String CREATION_COMMAND_NAME = "技能";
+
     public enum Entry { CONTACT, WORK }
 
     @FunctionalInterface
@@ -55,6 +57,7 @@ public final class AiSkills {
 
     private record Skill(Command command, EnumSet<Entry> entries, Action action) {}
 
+    private static final Command CREATE = new Command(CREATION_COMMAND_NAME, "创建技能 · 输入需求");
     private static final Command DELEGATE = new Command("委派", "交给已选子代理 · 纯文本任务");
 
     private static final String SPACE = "[\\s\\p{Z}]";
@@ -95,6 +98,7 @@ public final class AiSkills {
                 matches.add(skill.command());
             }
         }
+        if (CREATE.name().startsWith(prefix)) matches.add(CREATE);
         if (store != null) {
             for (SkillStore.Available skill : store.available()) {
                 if (skill.command().name().startsWith(prefix)) matches.add(skill.command());
@@ -125,6 +129,7 @@ public final class AiSkills {
         if (entry == null || input == null) return null;
         Matcher matcher = COMMAND.matcher(input);
         if (!matcher.matches() || (store != null && !store.enabled())) return null;
+        if (CREATION_COMMAND_NAME.equals(matcher.group(1))) return null;
         String argument = matcher.group(2);
         argument = argument == null ? "" : argument.replaceFirst(SPACE + "+$", "");
         if (DELEGATE.name().equals(matcher.group(1))) {
@@ -189,6 +194,7 @@ public final class AiSkills {
     }
 
     public static SkillResult executeResult(Invocation call, SkillStore store, TextExecutor textExecutor) throws Exception {
+        if (CREATION_COMMAND_NAME.equals(call.command().name())) throw new IllegalStateException("请通过 /技能 创建技能");
         if (store != null && !store.enabled()) throw new IllegalStateException("技能已停用");
         if (call.mcpBinding() != null) {
             if (store == null || store.mcp() == null) throw new IllegalStateException("MCP 绑定不可用");

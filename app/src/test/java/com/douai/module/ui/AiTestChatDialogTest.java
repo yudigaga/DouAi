@@ -1025,43 +1025,195 @@ public final class AiTestChatDialogTest {
     }
 
     @Test public void authoredVideoStaysPendingAndSlashCallDoesNotSendOrStartAJob() throws Exception {
-        FakeSession work = new FakeSession();
-        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
-        work.skillReplies.add("""
-                {"schemaVersion":4,"name":"电影片段","description":"根据提示生成视频","documentation":"输入视频提示",
-                 "instructions":"按提示生成视频","capabilityId":"video_task","configFields":[],
-                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
-                 "outputType":"video","trial":{"input":"示例","expectedType":"video"}}
-                """);
-        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        assertVideoAuthoringStaysPending(AiSkills.Entry.WORK);
+    }
+
+    @Test public void contactAuthorsTheSameVideoRequestWithoutSubmittingAJob() throws Exception {
+        assertVideoAuthoringStaysPending(AiSkills.Entry.CONTACT);
+    }
+
+    private static final String VIDEO_AUTHORING_REQUEST = "帮我写一个生成视频的 skill，要求自动轮询自动发送并内置";
+
+    private void assertVideoAuthoringStaysPending(AiSkills.Entry entry) throws Exception {
+        FakeSession session = new FakeSession();
+        session.transcriptMemory = entry == AiSkills.Entry.CONTACT
+                ? TestChatMemory.messageConversation(activity, restoreConfiguration())
+                : new TestChatMemory(activity, restoreConfiguration());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        session.skillReplies.add(videoDraftWithoutProvider());
+        reopen(session, ChatImageLoader::thumbnail, entry, null, jobs);
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
-        submit("帮我创建一个生成视频技能并内置");
+        submit(VIDEO_AUTHORING_REQUEST);
         worker.runNext();
         ShadowLooper.idleMainLooper();
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
 
         SkillStore store = SkillStore.forContext(activity);
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION), session.skillInstructions);
+        JSONObject request = new JSONObject(session.skillInputs.get(0));
+        assertEquals("video", request.getString("requiredOutputType"));
+        String requirement = request.getString("requirement");
+        assertTrue(requirement.contains("生成视频的"));
+        assertTrue(requirement.contains("自动轮询自动发送"));
+        assertEquals(List.of("电影片段"), store.pending().stream().map(SkillStore.Pending::name).toList());
+        assertTrue(store.list().isEmpty());
         SkillStore.Detail detail = store.detail("电影片段");
-        assertEquals("video", new JSONObject(work.skillInputs.get(0)).getString("requiredOutputType"));
         assertNotNull(detail);
         assertTrue(detail.pending());
         assertNull(detail.current());
+        assertNull(detail.manifest().http());
         assertEquals(SkillResult.Type.VIDEO, detail.outputType());
         assertTrue(lastAnswer().contains("待配置草稿 /电影片段"));
-        assertTrue(lastAnswer().contains("视频"));
+        assertTrue(lastAnswer().contains(SkillStore.NEEDS_VIDEO_PROVIDER));
         assertEquals(2, messageCount());
+        AlertDialog settings = openChatSkillSettings("电影片段");
+        TextView heading = settings.getWindow().getDecorView().findViewWithTag("skills.detail.name");
+        assertEquals("/电影片段", heading.getText().toString());
+        settings.dismiss();
 
         submit("/电影片段 一只白猫");
         assertTrue(worker.tasks.isEmpty());
-        assertTrue(work.prompts.isEmpty());
-        assertEquals(1, work.skillInputs.size());
+        assertTrue(session.prompts.isEmpty());
+        assertEquals(1, session.skillInputs.size());
         assertEquals(2, messageCount());
-        assertTrue(text("ai.chat.state").getText().toString().contains("视频"));
-        assertFalse(new File(activity.getFilesDir(), "douai_skill_video_tasks").exists());
-        assertEquals(1, work.transcriptMemory.readTranscript().size());
-        assertNull(work.transcriptMemory.readTranscript().get(0).artifact);
+        assertEquals(SkillStore.NEEDS_VIDEO_PROVIDER, text("ai.chat.state").getText().toString());
+        var scope = new SkillVideoJobs.Scope(entry, session.transcriptMemory.conversationKey());
+        assertTrue(jobs.list(scope).isEmpty());
+        assertEquals(0, submits.get());
+        var transcript = session.transcriptMemory.readTranscript();
+        assertEquals(1, transcript.size());
+        assertEquals(VIDEO_AUTHORING_REQUEST, transcript.get(0).prompt);
+        assertNull(transcript.get(0).artifact);
+    }
+
+    @Test public void workSlashSkillPreviewsAndRequiresAnExplicitInstall() throws Exception {
+        assertSlashSkillPreviewsAndRequiresAnExplicitInstall(AiSkills.Entry.WORK);
+    }
+
+    @Test public void contactSlashSkillPreviewsAndRequiresAnExplicitInstall() throws Exception {
+        assertSlashSkillPreviewsAndRequiresAnExplicitInstall(AiSkills.Entry.CONTACT);
+    }
+
+    private void assertSlashSkillPreviewsAndRequiresAnExplicitInstall(AiSkills.Entry entry) throws Exception {
+        FakeSession session = new FakeSession();
+        session.transcriptMemory = entry == AiSkills.Entry.CONTACT
+                ? TestChatMemory.messageConversation(activity, restoreConfiguration())
+                : new TestChatMemory(activity, restoreConfiguration());
+        session.skillReplies.add(videoDraftWithoutProvider());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(session, ChatImageLoader::thumbnail, entry, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit("/技能");
+        assertEquals("请在 /技能 后填写技能需求", text("ai.chat.state").getText().toString());
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(session.prompts.isEmpty());
+        assertTrue(session.skillInputs.isEmpty());
+        assertEquals(0, messageCount());
+
+        String requirement = "生成一个自动轮询、完成后自动发送的视频技能";
+        submit("/技能 " + requirement);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION), session.skillInstructions);
+        assertEquals(1, session.skillInputs.size());
+        JSONObject request = new JSONObject(session.skillInputs.get(0));
+        assertEquals(requirement, request.getString("requirement"));
+        assertEquals("video", request.getString("requiredOutputType"));
+        assertTrue(lastAnswer().contains("技能草案 /电影片段"));
+        assertTrue(lastAnswer().contains("尚未保存"));
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+        assertNull(findView("ai.chat.skill.settings.电影片段"));
+
+        submit("帮我内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("待配置草稿 /电影片段"));
+        assertTrue(lastAnswer().contains(SkillStore.NEEDS_VIDEO_PROVIDER));
+        assertEquals(List.of("电影片段"), store.pending().stream().map(SkillStore.Pending::name).toList());
+        assertTrue(store.list().isEmpty());
+        SkillStore.Detail detail = store.detail("电影片段");
+        assertTrue(detail.pending());
+        assertEquals(SkillResult.Type.VIDEO, detail.outputType());
+        assertNull(detail.manifest().http());
+        assertNotNull(findView("ai.chat.skill.settings.电影片段"));
+        assertEquals(1, session.skillInputs.size());
+        assertTrue(session.prompts.isEmpty());
+        assertEquals(0, submits.get());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(entry, session.transcriptMemory.conversationKey())).isEmpty());
+    }
+
+    @Test public void slashSkillPrefixKeepsNamedExecutionAndQuotedOrCodeInputSeparate() throws Exception {
+        SkillStore store = SkillStore.forContext(activity);
+        String definition = textSkillDraft("保留事实，使用分点格式。").replace("\"周报润色\"", "\"技能润色\"");
+        store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(definition));
+        FakeSession session = new FakeSession();
+        session.skillReplies.add("本周已完成第一阶段。");
+        session.answer = "/技能 生成视频技能";
+        reopen(session, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, store);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit("/技能润色 第一阶段完成");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals("本周已完成第一阶段。", lastAnswer());
+        assertEquals(List.of(SkillAuthoring.TEXT_INSTRUCTION), session.skillInstructions);
+        assertEquals("第一阶段完成", new JSONObject(session.skillInputs.get(0)).getString("argument"));
+
+        List<String> quoted = List.of("「/技能 生成视频技能」", "`/技能 生成视频技能`");
+        for (String prompt : quoted) {
+            submit(prompt);
+            worker.runNext();
+            ShadowLooper.idleMainLooper();
+            assertEquals(session.answer, lastAnswer());
+        }
+        assertEquals(quoted, session.prompts);
+        assertEquals(1, session.skillInputs.size());
+        assertTrue(store.pending().isEmpty());
+        assertEquals(List.of("技能润色"), store.list().stream().map(SkillStore.Installed::name).toList());
+    }
+
+    private static String videoDraftWithoutProvider() {
+        return """
+                {"schemaVersion":4,"name":"电影片段","description":"根据提示生成视频","documentation":"输入视频提示",
+                 "instructions":"按提示生成视频","capabilityId":"video_task","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"video","trial":{"input":"示例","expectedType":"video"}}
+                """;
+    }
+
+    @Test public void quotedCodeAndForwardedVideoRequestsAndOrdinaryRepliesNeverInstallSkills() throws Exception {
+        String request = "帮我写一个生成视频的 skill，要求自动轮询自动发送并内置";
+        FakeSession model = new FakeSession();
+        model.answer = request;
+        reopen(model, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        List<String> ordinary = List.of("自动发送是怎么回事", "「" + request + "」", "`" + request + "`", "朋友转发：" + request);
+        for (String message : ordinary) {
+            submit(message);
+            worker.runNext();
+            ShadowLooper.idleMainLooper();
+            assertEquals(request, lastAnswer());
+        }
+        assertEquals(ordinary, model.prompts);
+        assertTrue(model.skillInputs.isEmpty());
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
     }
 
     @Test public void declaredVideoRoutesRequireConfiguredFieldsAndConsentBeforeAnyJob() throws Exception {

@@ -26,6 +26,24 @@ import static org.junit.Assert.assertTrue;
 public class SkillStoreTest {
     @Rule public TemporaryFolder temp = new TemporaryFolder();
 
+    @Test public void authoringAndInstallationCannotClaimTheSlashCreationName() throws Exception {
+        SkillStore store = new SkillStore(temp.newFolder(), SkillServices.forContext(RuntimeEnvironment.getApplication()));
+        String legacy = new JSONObject(draft("待检查", "测试")).put("name", "技能").toString();
+        assertThrows(IllegalArgumentException.class, () -> store.installGenerated(legacy));
+        String manifest = """
+                {"schemaVersion":4,"name":"技能","description":"润色文字","documentation":"输入原稿",
+                 "instructions":"改善表达","capabilityId":"text_model","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"}}
+                """;
+        assertThrows(SkillManifest.Invalid.class, () -> SkillStore.validateAuthoredDraft(manifest));
+        assertTrue(store.list().isEmpty());
+        String neighboringName = new JSONObject(manifest).put("name", "技能润色").toString();
+        assertEquals("技能润色", store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(neighboringName)).installed().name());
+        assertNotNull(AiSkills.match(AiSkills.Entry.CONTACT, "/技能润色 示例", store));
+        assertNull(AiSkills.match(AiSkills.Entry.CONTACT, "/技能 示例", store));
+    }
+
     @Test public void onlyValidatedTrialPublishesAndReplacementKeepsOnlyTheCurrentDocuments() throws Exception {
         File root = temp.newFolder();
         SkillStore store = new SkillStore(root, SkillServices.forContext(RuntimeEnvironment.getApplication()));

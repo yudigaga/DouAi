@@ -6,6 +6,8 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
+import java.util.List;
+
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
@@ -33,6 +35,58 @@ public final class SkillAuthoringTest {
         }
         assertEquals(SkillAuthoring.Mode.SAVE, SkillAuthoring.match("帮我内置这个 skills", true).mode());
         assertEquals(SkillAuthoring.Mode.REVISE, SkillAuthoring.match("修改这个 skills：使用三个要点", true).mode());
+    }
+
+    @Test public void explicitVideoRequirementsPreservePollingAndDeliveryWhenInstalling() throws Exception {
+        String phone = "帮我写一个生成视频的 skill，要求自动轮询自动发送并内置";
+        SkillAuthoring.Action action = SkillAuthoring.match(phone, false);
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, "生成视频的 自动轮询自动发送", true), action);
+        SkillResult.Type output = SkillAuthoring.explicitOutput(action.request());
+        assertEquals(SkillResult.Type.VIDEO, output);
+        JSONObject request = new JSONObject(SkillAuthoring.draftInput(action.request(), null, output));
+        assertEquals("生成视频的 自动轮询自动发送", request.getString("requirement"));
+        assertEquals("video", request.getString("requiredOutputType"));
+
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, "生成视频的 自动轮询并回传", true),
+                SkillAuthoring.match("请创建一个生成视频的技能，要求：自动轮询并回传，然后内置", false));
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, "视频生成 自动轮询并返回本会话", true),
+                SkillAuthoring.match("帮我做一个视频生成 Skill, 需要自动轮询并返回本会话并内置。", false));
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, "视频生成 自动轮询和回传", false),
+                SkillAuthoring.match("帮我制作一个视频生成 Skill，要求是自动轮询和回传", false));
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, "视频生成 任务完成后回传到本会话", true),
+                SkillAuthoring.match("帮我制作一个视频生成 Skill， 请让任务完成后回传到本会话并内置", false));
+    }
+
+    @Test public void quotedReportedAndCodeRequirementsDoNotBecomeAuthoringActions() {
+        String phone = "帮我写一个生成视频的 skill，要求自动轮询自动发送并内置";
+        for (String text : new String[]{"「" + phone + "」", "我的同事转述：" + phone,
+                "`" + phone + "`", "```text\n" + phone + "\n```", "别人发来的消息\n" + phone,
+                "我在讨论生成视频的 Skill 是否需要自动轮询和自动发送。", "请解释“" + phone + "”是什么意思",
+                "帮我写一个生成视频的 skill，要求引用原文“自动轮询并内置"}) {
+            assertNull(text, SkillAuthoring.match(text, false));
+            assertNull(text, SkillAuthoring.match(text, true));
+        }
+        assertFalse(SkillAuthoring.match("帮我写一个视频生成技能，要求自动轮询但不要再内置", false).saveAfter());
+        assertTrue(SkillAuthoring.match("帮我写一个「视频生成」技能，要求回传本会话并内置", false).saveAfter());
+    }
+
+    @Test public void onlyExactSlashCreationTokenRoutesWholeRequirementsToDrafting() throws Exception {
+        String requirement = "生成一个自动轮询、完成后自动发送的视频技能";
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, "", false),
+                SkillAuthoring.match("/技能", true));
+        SkillAuthoring.Action explicit = SkillAuthoring.match("/技能 " + requirement, false);
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, requirement, false), explicit);
+        SkillResult.Type output = SkillAuthoring.explicitOutput(explicit.request());
+        assertEquals(SkillResult.Type.VIDEO, output);
+        JSONObject request = new JSONObject(SkillAuthoring.draftInput(explicit.request(), null, output));
+        assertEquals(requirement, request.getString("requirement"));
+        assertEquals("video", request.getString("requiredOutputType"));
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN, requirement, true),
+                SkillAuthoring.match("/技能　" + requirement + "并内置", false));
+        for (String other : List.of("/技能润色 原稿", "/技能：" + requirement, "「/技能 " + requirement + "」",
+                "`/技能 " + requirement + "`", "```\n/技能 " + requirement + "\n```", "同事发来 /技能 " + requirement)) {
+            assertNull(other, SkillAuthoring.match(other, true));
+        }
     }
 
     @Test public void revisionRequiresAnExistingDraftAndARequestToChangeIt() {
@@ -99,5 +153,8 @@ public final class SkillAuthoringTest {
         assertThrows(IllegalArgumentException.class, () -> SkillAuthoring.textInput("提炼", "Bearer " + token));
         assertThrows(IllegalArgumentException.class, () -> SkillAuthoring.readObject(
                 "{\"documentation\":\"API Key: \\u0066ixture-private-token\"}", 200));
+        IllegalArgumentException url = assertThrows(IllegalArgumentException.class, () -> SkillAuthoring.draftInput(
+                "生成视频，使用https://fixture-user:" + token + "@api.example.com/jobs", null));
+        assertFalse(url.toString().contains(token));
     }
 }

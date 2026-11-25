@@ -68,6 +68,7 @@ public final class SkillStore {
     private static final String CUSTOM_KIND = "custom_service";
     private static final String CUSTOM_BINDING = "customBinding";
     private static final String NEEDS_CUSTOM_SERVICE = "请在技能详情填写公网 HTTPS 接口地址";
+    private static final String RESERVED_CREATION_NAME = "/技能 是创建入口，请使用其他技能名称";
     public static final String NEEDS_VIDEO_PROVIDER = "请补充视频任务的提交、查询、取消和下载接口声明";
     private static final String RETAINED_SERVICE = "retainedService";
     private static final String NEEDS_MANIFEST_VALUES = "请填写技能必填设置";
@@ -273,6 +274,7 @@ public final class SkillStore {
             JSONObject skills = state.getJSONObject("skills");
             for (Iterator<String> names = skills.keys(); names.hasNext();) {
                 String name = names.next();
+                if (AiSkills.CREATION_COMMAND_NAME.equals(name)) continue;
                 JSONObject skill = skills.getJSONObject(name);
                 if (!skill.getBoolean("enabled")) continue;
                 JSONObject revision = activeRevision(skill);
@@ -293,6 +295,7 @@ public final class SkillStore {
             JSONObject active = state.getJSONObject("skills");
             for (Iterator<String> names = active.keys(); names.hasNext();) {
                 String name = names.next();
+                if (AiSkills.CREATION_COMMAND_NAME.equals(name)) continue;
                 JSONObject skill = active.getJSONObject(name);
                 JSONObject revision = activeRevision(skill);
                 if (!skill.getBoolean("enabled") || !configurationRequired(skill, revision).isEmpty()) continue;
@@ -323,6 +326,7 @@ public final class SkillStore {
             installed.keys().forEachRemaining(names::add);
             drafts.keys().forEachRemaining(names::add);
             names.removeAll(runnable);
+            names.remove(AiSkills.CREATION_COMMAND_NAME);
             Set<String> aliases = new LinkedHashSet<>(names);
             for (String name : names) {
                 JSONObject active = installed.optJSONObject(name);
@@ -340,6 +344,7 @@ public final class SkillStore {
     }
 
     public void setSkillEnabled(String name, boolean enabled) {
+        if (enabled) requireRegistrableName(name);
         read(state -> {
             JSONObject record = skill(state, name);
             if (enabled) {
@@ -666,7 +671,9 @@ public final class SkillStore {
         if (state.getBoolean("enabled")) {
             JSONObject skills = state.getJSONObject("skills");
             for (Iterator<String> names = skills.keys(); names.hasNext();) {
-                JSONObject record = skills.getJSONObject(names.next());
+                String name = names.next();
+                if (AiSkills.CREATION_COMMAND_NAME.equals(name)) continue;
+                JSONObject record = skills.getJSONObject(name);
                 if (!job.skillId().equals(record.optString("skillId")) || !record.getBoolean("enabled")) continue;
                 JSONObject revision = activeRevision(record);
                 if (resultType(revision) != SkillResult.Type.VIDEO || !job.revisionId().equals(revision.getString("directory"))) break;
@@ -686,6 +693,7 @@ public final class SkillStore {
         if (call == null || !call.command().requiresReview() || !state.getBoolean("enabled")) {
             throw new IllegalStateException("技能服务不可用");
         }
+        requireRegistrableName(call.command().name());
         JSONObject installed = skill(state, call.command().name());
         JSONObject revision = activeRevision(installed);
         if (!installed.getBoolean("enabled") || !configurationRequired(installed, revision).isEmpty()
@@ -747,6 +755,7 @@ public final class SkillStore {
 
     private JSONObject stageEdit(JSONObject state, EditSource source, Draft draft, String json,
                                  Map<String, Object> values) throws Exception {
+        requireRegistrableName(draft.name());
         JSONObject entry = source.pending();
         if (entry == null) {
             entry = new JSONObject();
@@ -845,7 +854,9 @@ public final class SkillStore {
     }
 
     public static DraftPreview validateAuthoredDraft(String raw) {
-        return parseAuthored(raw).preview(raw);
+        Draft draft = parseAuthored(raw);
+        requireRegistrableName(draft.name());
+        return draft.preview(raw);
     }
 
     public SaveResult saveAuthoredDraft(DraftPreview preview) throws Exception {
@@ -1090,6 +1101,9 @@ public final class SkillStore {
     }
 
     private DraftStatus draftStatus(JSONObject state, Draft draft, JSONObject entry, int version) throws Exception {
+        if (AiSkills.CREATION_COMMAND_NAME.equals(draft.name())) {
+            return new DraftStatus(null, Collections.emptyList(), RESERVED_CREATION_NAME, false, false, DraftState.DRAFT);
+        }
         SkillServices.Service explicit = configured(entry, draft.name());
         SkillServices.Service target = explicit == null ? discoveryMetadata(pendingService(state, draft, entry)) : explicit;
         Map<String, Object> values = manifestValues(draft, entry);
@@ -1186,6 +1200,7 @@ public final class SkillStore {
     }
 
     private static JSONObject requirePending(JSONObject state, String name, String draftId) throws Exception {
+        requireRegistrableName(name);
         JSONObject entry = state.getJSONObject("drafts").optJSONObject(name);
         if (entry == null || !draftIdentity(name, entry).equals(draftId)) {
             throw new IllegalStateException("待配置草稿已变化，请重新打开");
@@ -1201,6 +1216,7 @@ public final class SkillStore {
     }
 
     String unavailableReason(String name) {
+        if (AiSkills.CREATION_COMMAND_NAME.equals(name)) return RESERVED_CREATION_NAME;
         return read(state -> {
             JSONObject draft = state.getJSONObject("drafts").optJSONObject(name);
             if (draft != null) {
@@ -1229,6 +1245,7 @@ public final class SkillStore {
     }
     public Preview previewGenerated(String json) throws Exception {
         Draft draft = parse(json);
+        requireRegistrableName(draft.name());
         return locked(state -> preview(state, draft, pendingService(state, draft, matchingDraft(state, draft, json)),
                 proposedManifestValues(state, draft)));
     }
@@ -1266,6 +1283,7 @@ public final class SkillStore {
 
     private SaveResult saveGenerated(Draft draft, String json, Preview confirmation, SaveMode mode,
                                      String expectedDraftId) throws Exception {
+        requireRegistrableName(draft.name());
         return locked(state -> {
             if (mode == SaveMode.CONVERSATION && !state.getBoolean("enabled")) {
                 throw new IllegalStateException("Skills 已停用");
@@ -1382,6 +1400,7 @@ public final class SkillStore {
     }
     SkillResult executeResult(String name, int version, String revisionId, String argument, SkillResult.Type expectedType,
                               AiSkills.TextExecutor textExecutor) throws Exception {
+        requireRegistrableName(name);
         Executable definition = locked(state -> {
             JSONObject skill = skill(state, name);
             JSONObject revision = activeRevision(skill);
@@ -1526,6 +1545,7 @@ public final class SkillStore {
     }
     private Installed publish(JSONObject state, Draft draft, SkillServices.Service service, Map<String, Object> values)
             throws Exception {
+        requireRegistrableName(draft.name());
         if (missingManifestValues(draft, values)) throw new IllegalStateException(NEEDS_MANIFEST_VALUES);
         if (draft.outputType() == SkillResult.Type.VIDEO && !usesHttp(draft)) throw new IllegalStateException(NEEDS_VIDEO_PROVIDER);
         SkillCustomService.Binding custom = pendingCustomBinding(state, draft,
@@ -1646,6 +1666,10 @@ public final class SkillStore {
         return new IllegalArgumentException("生成的技能定义结构或参数无效");
     }
 
+    private static void requireRegistrableName(String name) {
+        if (AiSkills.CREATION_COMMAND_NAME.equals(name)) throw new SkillManifest.Invalid(RESERVED_CREATION_NAME);
+    }
+
     private static Draft declaration(JSONObject value, int schema) throws Exception {
         keys(value, "schemaVersion", "name", "description", "documentation", "execution", "trial");
         String name = text(value.get("name"), 24);
@@ -1763,7 +1787,8 @@ public final class SkillStore {
 
     private static Installed installed(String name, JSONObject skill) throws Exception {
         JSONObject revision = activeRevision(skill);
-        String missing = configurationRequired(skill, revision);
+        String missing = AiSkills.CREATION_COMMAND_NAME.equals(name) ? RESERVED_CREATION_NAME
+                : configurationRequired(skill, revision);
         return new Installed(name, revision.getInt("version"), skill.getBoolean("enabled") && missing.isEmpty(),
                 resultType(revision), revision.optString("serviceLabel", ""), missing);
     }

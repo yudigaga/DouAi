@@ -10,6 +10,7 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.io.StringReader;
 import java.math.BigDecimal;
+import java.util.ArrayDeque;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -27,6 +28,7 @@ public final class SkillAuthoring {
             顶层仅包含 schemaVersion（整数 4）、name（1 至 24 字，无空格和斜杠）、description、
             documentation（供用户阅读的说明）、instructions（不超过 1600 字）、capabilityId、
             configFields、inputs、outputType 和 trial。可选 displayName（不超过 48 字）与 http。技能 ID 由应用创建。
+            “技能”是创建入口的保留名称，name 必须使用另一个命令名。
             文本使用 capabilityId: "text_model"，outputType: "text"。按需求声明用户需要配置的参数，
             无需参数时返回空数组。文案语气可用 {"key":"tone","label":"语气","type":"enum","required":true,
             "options":["正式","温和"]}，输出长度可用 {"key":"length","label":"输出长度","type":"integer",
@@ -44,6 +46,9 @@ public final class SkillAuthoring {
             视频还需 http.video，键为 statusPath、cancelPath、cancelMethod（POST 或 DELETE）、downloadPath、
             idField、stateField、states（供应商状态字符串映射到 queued/running/completed/failed/cancelled）。
             三个路径各有一个完整的 {id} 段，使用同源的绝对路径。response 是提交结果的任务 ID 字段。
+            缺少明确的视频接口合同时省略 http，把技能留待配置。
+            自动轮询与下载限用户已确认提交的原任务 ID。未指定收件人时，自动发送或回传指在发起任务的
+            DouAi 会话显示结果。请求中的自动发送不能替代外部提交审核或授权给新收件人。
             suggestedEndpoint 只在用户明确提供协议地址时填写，地址须经本人保存后才可用。
             如提供了 requiredOutputType，必须使用该输出类型对应的能力。
             如提供了 requiredCapabilityId，必须使用相应能力。
@@ -77,17 +82,21 @@ public final class SkillAuthoring {
     private static final String SUBJECT = "[^\\r\\n。！？?!：:；;，,\\x60]";
     private static final String PURPOSE = "(?:https://[A-Za-z0-9._~:/%+@-]{1,180}+|" + SUBJECT + ")";
     private static final String SKILL_WORD = "(?:skills?|技能)";
+    private static final Pattern CREATION_COMMAND = Pattern.compile("^/" + AiSkills.CREATION_COMMAND_NAME + "(?=$|[\\s\\p{Z}])");
     private static final String SAVE_TARGET = "(?:这个\\s*" + SKILL_WORD + "|它)";
+    private static final String REQUIREMENT_MARKER = "(?:用于|用来|要能|能|可以|需求是|功能是|要求(?:是)?|需要|请让)";
     private static final Pattern DESIGN = Pattern.compile("(?i)^" + PREFIX
             + "(?:写|编写|创建|新建|做|制作|生成|设计)\\s*(并(?:且)?\\s*内置)?\\s*(?:一个新的|一个|一条|一项|个)?\\s*"
             + "(" + SUBJECT + "{0,160}?)\\s*" + SKILL_WORD
-            + "(?:(?:[，,]\\s*(?:用于|用来|要能|能|可以|需求是|功能是)|[：:])\\s*"
+            + "(?:(?:[，,]\\s*" + REQUIREMENT_MARKER + "\\s*[：:]?|[：:])\\s*"
             + "(" + PURPOSE + "{1,180}?))?" + END);
     private static final Pattern SAVE = Pattern.compile("(?i)^" + PREFIX
             + "(?:内置(?:\\s*" + SAVE_TARGET + ")?|把\\s*" + SAVE_TARGET + "\\s*内置)" + END);
     private static final Pattern SAVE_TAIL = Pattern.compile("(?i)\\s*(?:[，,]\\s*)?"
             + "(?:并(?:且)?\\s*(?:帮我\\s*)?内置|然后\\s*内置|再\\s*内置)"
             + "(?:\\s*" + SAVE_TARGET + ")?\\s*(?:吧)?\\s*[。！？?!]?\\s*$");
+    private static final Pattern NEGATES_SAVE_TAIL = Pattern.compile("(?:不要|不用|无需|不必|禁止|别|不)\\s*[，,]?\\s*$");
+    private static final Pattern URL_USER_INFO = Pattern.compile("(?i)https?://[^\\s/?#，。]+@");
     private static final String DRAFT_TARGET = "(?:(?:这个|这份|刚才的|当前的)\\s*)?(?:" + SKILL_WORD + "|草案|草稿|方案)";
     private static final String DRAFT_FIELD = "(?:名称|名字|说明|用途|参数|指令|提示词|语气|输出(?:格式)?)";
     private static final String CHANGE = "(?:改成|改为|调整为|修改为|换成|改名为|重命名为|增加|加上|补充|去掉|删掉|移除"
@@ -110,11 +119,14 @@ public final class SkillAuthoring {
     private static final Pattern TABLE_OUTPUT = Pattern.compile(
             "(?i)(?:表格|CSV)(?:输出|导出)?$|(?:输出|提取为|提取成|整理成|转成|生成|导出)\\s*(?:结构化)?\\s*(?:表格|CSV)");
     private static final Pattern VIDEO_OUTPUT = Pattern.compile("生成\\s*视频|视频生成|(?:模拟)?视频$");
+    private static final Pattern VIDEO_SKILL_OUTPUT = Pattern.compile("(?i)^(?:生成|制作|创建|设计|写|做)"
+            + "[^\\r\\n]{0,160}视频\\s*(?:的\\s*)?" + SKILL_WORD + "(?=\\s*(?:[。！？?!，,：:]|$))");
     private static final Pattern CUSTOM_SERVICE = Pattern.compile("(?i)自定义\\s*(?:HTTPS\\s*)?(?:接口|服务)");
 
     private SkillAuthoring() { }
 
     public static SkillResult.Type explicitOutput(String requirement) {
+        if (requirement != null && VIDEO_SKILL_OUTPUT.matcher(requirement.trim()).find()) return SkillResult.Type.VIDEO;
         if (SkillStore.requiresImage(requirement)) return SkillResult.Type.IMAGE;
         if (requirement != null && TABLE_OUTPUT.matcher(requirement.trim()).find()) return SkillResult.Type.TABLE;
         if (requirement != null && VIDEO_OUTPUT.matcher(requirement.trim()).find()) return SkillResult.Type.VIDEO;
@@ -125,14 +137,28 @@ public final class SkillAuthoring {
         return requirement != null && CUSTOM_SERVICE.matcher(requirement).find();
     }
 
+    public static boolean isCreationCommand(String text) {
+        return text != null && CREATION_COMMAND.matcher(text.trim()).lookingAt();
+    }
+
     public static Action match(String typed, boolean hasDraft) {
         if (typed == null || typed.length() > MAX_TYPED || typed.codePoints().anyMatch(Character::isISOControl)) return null;
         String sentence = typed.trim();
-        if (SAVE.matcher(sentence).matches()) return new Action(Mode.SAVE, "", false);
+        Matcher command = CREATION_COMMAND.matcher(sentence);
+        boolean explicitCommand = command.lookingAt();
+        if (!explicitCommand && SAVE.matcher(sentence).matches()) return new Action(Mode.SAVE, "", false);
 
-        Matcher tail = SAVE_TAIL.matcher(sentence);
+        String designText = explicitCommand ? stripLeadingCommandSpace(sentence.substring(command.end())) : sentence;
+        Matcher tail = SAVE_TAIL.matcher(designText);
         boolean saveAfter = tail.find();
-        String designText = saveAfter ? sentence.substring(0, tail.start()) : sentence;
+        if (saveAfter) {
+            String beforeTail = designText.substring(0, tail.start());
+            boolean unclosed = hasUnclosedQuote(beforeTail);
+            if (unclosed && !explicitCommand) return null;
+            saveAfter = !unclosed && !NEGATES_SAVE_TAIL.matcher(beforeTail).find();
+            if (saveAfter) designText = beforeTail;
+        }
+        if (explicitCommand) return new Action(Mode.DESIGN, designText.trim(), saveAfter && !designText.trim().isEmpty());
         Matcher design = DESIGN.matcher(designText);
         if (design.matches()) {
             String detail = design.group(2).trim();
@@ -145,6 +171,40 @@ public final class SkillAuthoring {
             return new Action(Mode.REVISE, sentence, false);
         }
         return null;
+    }
+
+    private static String stripLeadingCommandSpace(String requirement) {
+        int start = 0;
+        while (start < requirement.length() && (Character.isWhitespace(requirement.charAt(start))
+                || Character.isSpaceChar(requirement.charAt(start)))) start++;
+        return requirement.substring(start);
+    }
+
+    private static boolean hasUnclosedQuote(String text) {
+        ArrayDeque<Character> closers = new ArrayDeque<>();
+        for (int index = 0; index < text.length(); index++) {
+            char current = text.charAt(index);
+            if (current == '\'' && index > 0 && index + 1 < text.length()
+                    && asciiWordChar(text.charAt(index - 1)) && asciiWordChar(text.charAt(index + 1))) continue;
+            if (!closers.isEmpty() && current == closers.peek()) {
+                closers.pop();
+                continue;
+            }
+            char closing = switch (current) {
+                case '「' -> '」';
+                case '『' -> '』';
+                case '“' -> '”';
+                case '‘' -> '’';
+                case '"', '\'', 0x60 -> current;
+                default -> 0;
+            };
+            if (closing != 0) closers.push(closing);
+        }
+        return !closers.isEmpty();
+    }
+
+    private static boolean asciiWordChar(char character) {
+        return character < 128 && Character.isLetterOrDigit(character);
     }
 
     private static boolean question(String text) {
@@ -166,7 +226,11 @@ public final class SkillAuthoring {
     public static String draftInput(String requirement, String priorValidatedDefinition, SkillResult.Type requiredOutput,
                                     boolean customServiceRequired) {
         JSONObject input = new JSONObject();
-        put(input, "requirement", boundedText(requirement, 2000));
+        String safeRequirement = boundedText(requirement, 2000);
+        if (URL_USER_INFO.matcher(safeRequirement).find()) {
+            throw new IllegalArgumentException("接口地址不能包含账号或密钥");
+        }
+        put(input, "requirement", safeRequirement);
         if (requiredOutput != null) put(input, "requiredOutputType", requiredOutput.wireName());
         if (customServiceRequired) put(input, "requiredCapabilityId", SkillCapabilityRegistry.Capability.CUSTOM_SERVICE.id());
         if (priorValidatedDefinition != null && !priorValidatedDefinition.trim().isEmpty()) {
