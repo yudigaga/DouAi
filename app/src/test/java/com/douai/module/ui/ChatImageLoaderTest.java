@@ -39,6 +39,26 @@ public final class ChatImageLoaderTest {
         decoded.recycle();
     }
 
+    @Test public void localPreviewUsesSavedPixelsAtALargerButBoundedSize() {
+        ChatImage saved = new ChatImage("image/png", image(2500, 1200, Bitmap.CompressFormat.PNG));
+        String originalBytes = saved.base64Data;
+        Bitmap thumbnail = ChatImageLoader.thumbnail(saved);
+        Bitmap preview = ChatImageLoader.localPreview(saved);
+        assertNotNull(thumbnail);
+        assertNotNull(preview);
+        try {
+            assertTrue(preview.getWidth() > thumbnail.getWidth());
+            assertTrue(preview.getHeight() > thumbnail.getHeight());
+            assertTrue(preview.getWidth() <= 2048);
+            assertTrue(preview.getHeight() <= 2048);
+            assertEquals(originalBytes, saved.base64Data);
+            assertNull(ChatImageLoader.localPreview(null));
+        } finally {
+            thumbnail.recycle();
+            preview.recycle();
+        }
+    }
+
     @Test public void exifRotationIsAppliedBeforeSending() throws Exception {
         File file = File.createTempFile("douai-chat-image", ".jpg");
         try {

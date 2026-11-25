@@ -2,13 +2,18 @@ package com.douai.module.ui;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Matrix;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.WindowInsets;
@@ -376,6 +381,176 @@ public final class AiTestChatDialogTest {
         assertEquals(1, model.transcriptMemory.readTranscript().size());
         assertTrue(model.prompts.isEmpty());
         assertTrue(model.skillInputs.isEmpty());
+    }
+
+    @Test public void workImageOpensALocalPreviewBeforeAndAfterReopeningWithoutReplay() throws Exception {
+        FakeSession first = openMockImageHistory();
+        String prompt = "/生图 白猫";
+        submit(prompt);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, first.transcriptMemory.readTranscript().size());
+
+        ImageView originalThumbnail = messageRow(1).findViewWithTag("ai.chat.image");
+        assertNotNull(originalThumbnail);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(originalThumbnail.getDrawable() instanceof BitmapDrawable);
+        Dialog firstPreview = openGeneratedImagePreview(originalThumbnail);
+        assertDoubleTapZoom(previewContent(firstPreview).findViewWithTag("ai.chat.image_preview_image"));
+        assertTrue(previewContent(firstPreview).findViewWithTag("ai.chat.image_preview_close").performClick());
+        assertFalse(firstPreview.isShowing());
+        assertTrue(first.prompts.isEmpty());
+        assertTrue(first.skillInputs.isEmpty());
+        assertEquals(1, first.transcriptMemory.readTranscript().size());
+
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(2, messageCount());
+        assertEquals(prompt, bubble(0, "ai.chat.user"));
+        ImageView restoredThumbnail = messageRow(1).findViewWithTag("ai.chat.image");
+        assertNotNull(restoredThumbnail);
+        assertTrue(restoredThumbnail.getDrawable() instanceof BitmapDrawable);
+        Dialog restoredPreview = openGeneratedImagePreview(restoredThumbnail);
+        assertNotSame(firstPreview, restoredPreview);
+        restoredPreview.dismiss();
+        assertTrue(restored.prompts.isEmpty());
+        assertTrue(restored.skillInputs.isEmpty());
+        assertEquals(1, restored.transcriptMemory.readTranscript().size());
+    }
+
+    @Test public void damagedSavedImageShowsALocalReadErrorWithoutReplay() throws Exception {
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        String prompt = "/生图 损坏图片样本";
+        ChatImage broken = new ChatImage("image/png", new byte[]{1, 2, 3});
+        assertTrue(restored.transcriptMemory.append(restored.transcriptMemory.epoch(),
+                TestChatMemory.Turn.displayedSkill(prompt, "", List.of(broken), null)));
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(2, messageCount());
+        ImageView thumbnail = messageRow(1).findViewWithTag("ai.chat.image");
+        assertNotNull(thumbnail);
+        assertNull(thumbnail.getDrawable());
+
+        Dialog preview = tapGeneratedThumbnail(thumbnail);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        View content = previewContent(preview);
+        TextView status = content.findViewWithTag("ai.chat.image_preview_status");
+        assertNotNull(status);
+        assertEquals("图片无法读取", status.getText().toString());
+        ImageView invalid = content.findViewWithTag("ai.chat.image_preview_image");
+        assertTrue(invalid == null || invalid.getDrawable() == null);
+        assertTrue(content.findViewWithTag("ai.chat.image_preview_close").performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(preview.isShowing());
+        assertEquals(prompt, bubble(0, "ai.chat.user"));
+        assertEquals(1, restored.transcriptMemory.readTranscript().size());
+        assertTrue(restored.prompts.isEmpty());
+        assertTrue(restored.skillInputs.isEmpty());
+    }
+
+    @Test public void lateLocalDecodeCannotRenderIntoAClosedOrReplacedPreview() throws Exception {
+        FakeSession model = openMockImageHistory();
+        submit("/生图 白猫");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        ImageView thumbnail = messageRow(1).findViewWithTag("ai.chat.image");
+        assertNotNull(thumbnail);
+
+        Dialog first = tapGeneratedThumbnail(thumbnail);
+        View oldContent = previewContent(first);
+        ImageView oldImage = oldContent.findViewWithTag("ai.chat.image_preview_image");
+        assertNotNull(oldImage);
+        worker.runNext();
+        assertTrue(oldContent.findViewWithTag("ai.chat.image_preview_close").performClick());
+        assertFalse(first.isShowing());
+        Dialog next = tapGeneratedThumbnail(thumbnail);
+        assertNotSame(first, next);
+        ImageView currentImage = previewContent(next).findViewWithTag("ai.chat.image_preview_image");
+        assertNotNull(currentImage);
+        ShadowLooper.idleMainLooper();
+        assertNull(oldImage.getDrawable());
+        assertNull(currentImage.getDrawable());
+
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertTrue(currentImage.getDrawable() instanceof BitmapDrawable);
+        assertTrue(next.isShowing());
+        next.dismiss();
+        assertTrue(model.prompts.isEmpty());
+        assertTrue(model.skillInputs.isEmpty());
+        assertEquals(1, model.transcriptMemory.readTranscript().size());
+    }
+
+    private Dialog openGeneratedImagePreview(ImageView thumbnail) throws Exception {
+        Dialog preview = tapGeneratedThumbnail(thumbnail);
+        worker.runAllOnThread();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        ImageView image = previewContent(preview).findViewWithTag("ai.chat.image_preview_image");
+        assertNotNull(image);
+        assertTrue(image.getDrawable() instanceof BitmapDrawable);
+        assertTrue(((BitmapDrawable) image.getDrawable()).getBitmap().getWidth() > 0);
+        return preview;
+    }
+
+    private Dialog tapGeneratedThumbnail(ImageView thumbnail) {
+        assertTrue("Generated thumbnails must open the local read-only preview", thumbnail.performClick());
+        Dialog preview = ShadowDialog.getLatestDialog();
+        assertNotSame(dialog, preview);
+        assertTrue(preview.isShowing());
+        return preview;
+    }
+
+    private static View previewContent(Dialog preview) {
+        View content = preview.getWindow().getDecorView().findViewWithTag("ai.chat.image_preview");
+        assertNotNull(content);
+        return content;
+    }
+
+    private static void assertDoubleTapZoom(ImageView picture) {
+        picture.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(480, View.MeasureSpec.EXACTLY));
+        picture.layout(0, 0, 360, 480);
+        float fitted = imageScale(picture);
+        assertTrue(fitted > 0f);
+        long first = SystemClock.uptimeMillis();
+        tap(picture, first);
+        tap(picture, first + 100);
+        assertEquals(fitted * 2.5f, imageScale(picture), 0.01f);
+        ShadowLooper.idleMainLooper(500, TimeUnit.MILLISECONDS);
+        long second = SystemClock.uptimeMillis();
+        tap(picture, second);
+        tap(picture, second + 100);
+        assertEquals(fitted, imageScale(picture), 0.01f);
+    }
+
+    private static float imageScale(ImageView picture) {
+        float[] values = new float[9];
+        picture.getImageMatrix().getValues(values);
+        return values[Matrix.MSCALE_X];
+    }
+
+    private static void tap(ImageView picture, long time) {
+        MotionEvent down = MotionEvent.obtain(time, time, MotionEvent.ACTION_DOWN, 180f, 240f, 0);
+        MotionEvent up = MotionEvent.obtain(time, time + 10, MotionEvent.ACTION_UP, 180f, 240f, 0);
+        try {
+            picture.dispatchTouchEvent(down);
+            picture.dispatchTouchEvent(up);
+        } finally {
+            down.recycle();
+            up.recycle();
+        }
     }
 
     @Test public void failedHistoryWriteKeepsTheOriginalImageInThisConversationWithoutRetry() throws Exception {

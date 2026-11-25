@@ -159,6 +159,7 @@ final class AiTestChatDialog extends Dialog {
     private Dialog memoryDialog;
     private Dialog localMenu;
     private Dialog skillDetails;
+    private AiChatImagePreview imagePreview;
     private Runnable contactEditAction;
     private HostSpeechInput speechInput;
     private HostAccountAvatar accountAvatar;
@@ -1253,6 +1254,7 @@ final class AiTestChatDialog extends Dialog {
 
     private void clearConversation() {
         if (disposed) return;
+        closeImagePreview();
         if (pending != null) pending.discardHistory = true;
         cancelRequest();
         skillDraft = null;
@@ -1308,6 +1310,7 @@ final class AiTestChatDialog extends Dialog {
     private void dispose() {
         if (disposed) return;
         disposed = true;
+        closeImagePreview();
         closeSkillDeletionObserver();
         skillDraft = null;
         if (contactAvatar != null) contactAvatar.setImageDrawable(null);
@@ -1707,6 +1710,28 @@ final class AiTestChatDialog extends Dialog {
         return view;
     }
 
+    private void showImagePreview(ChatImage image) {
+        Activity owner = ownerActivity();
+        if (disposed || owner == null || owner.isFinishing() || owner.isDestroyed() || !retains(image)) return;
+        closeImagePreview();
+        try {
+            AiChatImagePreview child = new AiChatImagePreview(owner, image, worker);
+            imagePreview = child;
+            child.setOnDismissListener(ignored -> { if (imagePreview == child) imagePreview = null; });
+            child.show();
+        } catch (RuntimeException unavailable) {
+            closeImagePreview();
+            state.setText("无法打开图片预览");
+            updateSend();
+        }
+    }
+
+    private void closeImagePreview() {
+        AiChatImagePreview child = imagePreview;
+        imagePreview = null;
+        if (child != null) child.dismiss();
+    }
+
     private boolean retains(ChatImage image) {
         if (draftImages.contains(image)) return true;
         for (ChatMessage message : transcript) if (message.images.contains(image)) return true;
@@ -1966,7 +1991,10 @@ final class AiTestChatDialog extends Dialog {
             images.removeAllViews();
             for (ChatImage image : message.images) {
                 ImageView thumbnail = preview(image);
-                if (!message.user) thumbnail.setContentDescription("生成的图片");
+                if (!message.user) {
+                    thumbnail.setContentDescription("生成的图片");
+                    thumbnail.setOnClickListener(ignored -> showImagePreview(image));
+                }
                 images.addView(thumbnail, new LayoutParams(dp(128), dp(96)));
             }
             int rowWidthForVideos = messages.getWidth() > 0 ? messages.getWidth()

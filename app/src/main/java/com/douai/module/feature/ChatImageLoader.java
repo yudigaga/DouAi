@@ -130,4 +130,32 @@ public final class ChatImageLoader {
         options.inJustDecodeBounds = false;
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
     }
+
+    /** Decode the locally retained image for display, without changing the stored bytes. */
+    public static Bitmap localPreview(ChatImage image) {
+        if (image == null || Thread.currentThread().isInterrupted()) return null;
+        byte[] bytes = java.util.Base64.getDecoder().decode(image.base64Data);
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+        if (options.outWidth <= 0 || options.outHeight <= 0
+                || (long) options.outWidth * options.outHeight > 100_000_000L) return null;
+        int edge = Math.max(options.outWidth, options.outHeight);
+        int sample = 1;
+        while ((edge + sample - 1L) / sample > MAX_EDGE) sample *= 2;
+        long width = (options.outWidth + sample - 1L) / sample;
+        long height = (options.outHeight + sample - 1L) / sample;
+        try (MediaMemoryBudget.Reservation reservation = MediaMemoryBudget.tryAcquire(width * height * 4L)) {
+            if (reservation == null || Thread.currentThread().isInterrupted()) return null;
+            options.inJustDecodeBounds = false;
+            options.inSampleSize = sample;
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+            if (bitmap != null && Thread.currentThread().isInterrupted()) {
+                bitmap.recycle();
+                return null;
+            }
+            return bitmap;
+        }
+    }
 }

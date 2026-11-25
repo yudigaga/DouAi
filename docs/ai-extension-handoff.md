@@ -285,3 +285,17 @@ $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 $env:ANDROID_HOME = Join-Path $env:LOCALAPPDATA 'Android/Sdk'
 .\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests 'com.douai.module.ai.*' --tests '*AiSkillImageProviderTest' --tests '*AiSkillSettingsDialogTest' --tests '*AiModelEditorTest' --tests '*ChatCompletionClientTest' --tests '*MiuixEditorsInteractionTest'
 ```
+
+## 2026-11-25 聊天内本地大图 · 基于 `f99d5ae`
+
+用户反馈附件的 219 个 ZIP 条目通过 CRC 检查。只统计日志的固定标签，确认 AI 聊天使用的宿主版本为 41.0.0。源 APK 静态核对使用同版 410001 原包。
+
+- **可证实的本地能力**　40.6 已有反编译文件及 41.0 原包均包含小程序媒体选择器的 `PhotoView`。41.0 的 `classes50.dex` 显示它把 Drawable 交给标准图片控件，再刷新缩放矩阵。
+- **复用限制**　41.0 的手势分支还会调用带开关的宿主钩子，现有静态证据无法确认整条手势路径的副作用。已检查的图片预览 Activity 依赖内部小程序或 IM 编辑流程，缺少可以独立接收 DouAi 本地图片的已验证入口。
+- **使用方式**　在工作 AI 或 AI 联系人中使用本地模拟生图，待图片出现后点击缩略图。双击放大或复位，放大后可拖动，点「关闭」或按返回键退出。用同一入口和模型配置离线重开，再次点击同一图片。查看器从原有历史供给的图片数据后台解码，损坏数据提示「图片无法读取」。
+
+124 项离线回归通过，0 失败，0 跳过。包括工作 AI 点击与重开、双击缩放、损坏图片、过期解码回调，以及宿主原包静态合同。真机手势和宿主控件的独立运行仍待验证。 [测试日志](../build/ai-extension-local-image-preview-final.log)
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --offline --console=plain --tests '*AiTestChatDialogTest.workImageOpensALocalPreviewBeforeAndAfterReopeningWithoutReplay' --tests '*AiTestChatDialogTest.damagedSavedImageShowsALocalReadErrorWithoutReplay' --tests '*AiTestChatDialogTest.lateLocalDecodeCannotRenderIntoAClosedOrReplacedPreview' --tests '*ChatImageLoaderTest'
+```
