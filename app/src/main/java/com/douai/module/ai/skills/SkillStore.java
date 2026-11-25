@@ -827,7 +827,8 @@ public final class SkillStore {
             if (installed != null && !installed.getBoolean("enabled")) {
                 JSONObject revision = activeRevision(installed);
                 if (resultType(revision) == SkillResult.Type.IMAGE) return "图片技能已停用";
-                if (TEXT_MODEL.equals(revision.optString("kind")) || resultType(revision) == SkillResult.Type.TABLE) {
+                if (TEXT_MODEL.equals(revision.optString("kind"))
+                        || resultType(revision) == SkillResult.Type.TABLE || resultType(revision) == SkillResult.Type.VIDEO) {
                     return "技能已停用";
                 }
             }
@@ -986,7 +987,7 @@ public final class SkillStore {
         return old != null && json.equals(old.optString("definition")) ? old : null;
     }
     SkillResult executeResult(String name, int version, String revisionId, String argument, SkillResult.Type expectedType,
-                              AiSkills.TextExecutor textExecutor) throws Exception {
+                              AiSkills.TextExecutor textExecutor, AiSkills.VideoExecutor videoExecutor) throws Exception {
         Executable definition = locked(state -> {
             JSONObject skill = skill(state, name);
             JSONObject revision = activeRevision(skill);
@@ -1004,7 +1005,7 @@ public final class SkillStore {
                 throw new IllegalStateException(NEEDS_MANIFEST_VALUES);
             }
             result = SkillCapabilityRegistry.execute(definition.manifest().capability(), services, definition.service(),
-                    definition.instruction(), argument, definition.values(), textExecutor);
+                    definition.instruction(), argument, definition.values(), textExecutor, videoExecutor);
         } else if ("summary".equals(definition.kind())) {
             return new SkillResult.Text(AiSkills.summarize(argument));
         } else if (TEXT_MODEL.equals(definition.kind())) {
@@ -1012,7 +1013,7 @@ public final class SkillStore {
             return executeTextModel(definition.instruction(), argument, textExecutor);
         } else if (definition.outputType() == SkillResult.Type.IMAGE) {
             result = SkillCapabilityRegistry.execute(SkillCapabilityRegistry.Capability.IMAGE_GENERATION, services,
-                    definition.service(), "", argument, Collections.emptyMap(), textExecutor);
+                    definition.service(), "", argument, Collections.emptyMap(), textExecutor, null);
         } else {
             result = services.executeResult(definition.service(), argument);
         }
@@ -1079,6 +1080,7 @@ public final class SkillStore {
     private static SkillResult trial(Draft draft, SkillServices.Service service, Map<String, Object> values) throws Exception {
         checkArgument(draft.trialInput(), draft.maxInput());
         if (draft.outputType() == SkillResult.Type.IMAGE) return SkillServices.mockImageResult();
+        if (draft.outputType() == SkillResult.Type.VIDEO) return new SkillResult.Video(new UUID(0, 0));
         if (draft.outputType() == SkillResult.Type.TABLE) {
             SkillAuthoring.textInput(draft.instruction(), draft.trialInput(), values);
             return new SkillResult.Table(SkillTable.parse("{\"columns\":[\"示例\"],\"rows\":[[\"模拟结果\"]]}"));

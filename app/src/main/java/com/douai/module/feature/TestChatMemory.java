@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Bounded private test-chat history. Epochs prevent an older request from undoing Clear. */
@@ -60,6 +61,8 @@ public final class TestChatMemory {
     public long epoch() { synchronized (IO_LOCK) { return state.epoch; } }
 
     public boolean historyEnabled() { return rounds > 0; }
+
+    public String conversationKey() { return file.getName().substring(0, 64); }
 
     /** Ordinary model context, excluding all local-only Skill turns. */
     public List<Turn> read() { return readStored(false); }
@@ -153,6 +156,9 @@ public final class TestChatMemory {
         synchronized (IO_LOCK) {
             if (rounds == 0 || expectedEpoch != state.epoch) return false;
             List<Turn> turns = new ArrayList<>(readTranscript());
+            if (turn.artifact instanceof SkillResult.Video && turns.stream().anyMatch(saved -> turn.artifact.equals(saved.artifact))) {
+                return true;
+            }
             turns.add(turn);
             turns = bounded(turns);
             if (turn.displayOnly && !turns.contains(turn)) return false;
@@ -243,11 +249,18 @@ public final class TestChatMemory {
             try { return new SkillResult.Table(SkillTable.parse(payload)); }
             catch (IllegalArgumentException invalid) { return null; }
         }
+        if (SkillResult.Type.VIDEO.wireName().equals(type)) {
+            try {
+                UUID requestId = UUID.fromString(payload);
+                if (requestId.toString().equals(payload)) return new SkillResult.Video(requestId);
+            } catch (IllegalArgumentException invalid) { return null; }
+        }
         return null;
     }
 
     private static String artifactPayload(SkillResult artifact) {
         if (artifact instanceof SkillResult.Table table) return table.table().toJson();
+        if (artifact instanceof SkillResult.Video video) return video.requestId().toString();
         throw new IllegalArgumentException("Unsupported history artifact");
     }
 

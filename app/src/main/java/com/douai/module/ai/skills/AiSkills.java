@@ -45,6 +45,11 @@ public final class AiSkills {
         public boolean localBuiltIn() { return version == 0 && mcpBinding == null && !delegated; }
     }
 
+    @FunctionalInterface
+    public interface VideoExecutor {
+        SkillResult.Video submit(String argument) throws Exception;
+    }
+
     private interface Action {
         String run(String argument);
     }
@@ -185,6 +190,11 @@ public final class AiSkills {
     }
 
     public static SkillResult executeResult(Invocation call, SkillStore store, TextExecutor textExecutor) throws Exception {
+        return executeResult(call, store, textExecutor, null);
+    }
+
+    public static SkillResult executeResult(Invocation call, SkillStore store, TextExecutor textExecutor,
+                                            VideoExecutor videoExecutor) throws Exception {
         if (store != null && !store.enabled()) throw new IllegalStateException("技能已停用");
         if (call.mcpBinding() != null) {
             if (store == null || store.mcp() == null) throw new IllegalStateException("MCP 绑定不可用");
@@ -194,7 +204,7 @@ public final class AiSkills {
         if (call.localBuiltIn()) return new SkillResult.Text(execute(call));
         if (store == null) throw new IllegalStateException("技能不可用");
         return store.executeResult(call.command().name(), call.version(), call.revisionId(), call.argument(),
-                call.command().outputType(), textExecutor);
+                call.command().outputType(), textExecutor, videoExecutor);
     }
 
     public static String execute(Invocation call) {

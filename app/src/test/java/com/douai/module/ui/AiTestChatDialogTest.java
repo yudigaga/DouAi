@@ -31,6 +31,8 @@ import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.ai.skills.SkillVideoTasks;
+import com.douai.module.ai.skills.SkillVideoTasksTest;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.feature.ChatImage;
 import com.douai.module.feature.ChatImageLoader;
@@ -55,6 +57,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CountDownLatch;
@@ -812,6 +815,74 @@ public final class AiTestChatDialogTest {
         services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
         SkillStore.forContext(activity).installGenerated(SkillStore.mockDraft("生图"));
         return services;
+    }
+
+    @Test public void videoSkillResumesTheSameOperationAndCancelsWithinItsConversation() throws Exception {
+        AtomicLong clock = new AtomicLong(1_000);
+        File tasksDirectory = new File(activity.getFilesDir(), "test-video-tasks");
+        SkillVideoTasks tasks = SkillVideoTasksTest.chatFixture(tasksDirectory, clock::get);
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        work.skillReplies.add("""
+                {"schemaVersion":4,"name":"模拟视频","description":"运行本地模拟视频","documentation":"输入视频提示",
+                 "instructions":"提交模拟视频任务","capabilityId":"video_task","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"video","trial":{"input":"示例","expectedType":"video"}}
+                """);
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, tasks);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("帮我创建一个模拟视频技能并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals("video", new JSONObject(work.skillInputs.get(0)).getString("requiredOutputType"));
+
+        submit("/模拟视频 合成样例");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertNull(messageRow(3).findViewWithTag("ai.chat.video_task.cancel"));
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        SkillResult.Video video = (SkillResult.Video) work.transcriptMemory.readTranscript().get(1).artifact;
+        SkillVideoTasks.Scope workScope = new SkillVideoTasks.Scope(AiSkills.Entry.WORK, work.transcriptMemory.conversationKey());
+        SkillVideoTasks.Task first = tasks.refresh(workScope, video.requestId());
+        assertTrue(first.linked());
+        assertEquals(SkillVideoTasks.State.QUEUED, first.state());
+        assertNotNull(messageRow(3).findViewWithTag("ai.chat.video_task.cancel"));
+
+        clock.set(5_000);
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        SkillVideoTasks restartedTasks = SkillVideoTasksTest.chatFixture(tasksDirectory, clock::get);
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, restartedTasks);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(messageRow(3).findViewWithTag("ai.chat.video_task.play"));
+        assertEquals(first.operationId(), restartedTasks.refresh(workScope, video.requestId()).operationId());
+        assertEquals(1, restartedTasks.list(workScope).size());
+        assertTrue(restored.skillInputs.isEmpty());
+
+        FakeSession contact = new FakeSession();
+        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT, restartedTasks);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, messageCount());
+        submit("/模拟视频 取消样例");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        View cancel = messageRow(1).findViewWithTag("ai.chat.video_task.cancel");
+        assertNotNull(cancel);
+        cancel.performClick();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        TextView state = messageRow(1).findViewWithTag("ai.chat.video_task.state");
+        assertTrue(state.getText().toString().contains("已取消"));
+        assertTrue(contact.skillInputs.isEmpty());
     }
 
     @Test public void tableSkillSavesBeforeShowingPreviewAndRestoresWithoutReplay() throws Exception {
@@ -2062,6 +2133,11 @@ public final class AiTestChatDialogTest {
 
     private void reopen(FakeSession saved, AiTestChatDialog.ThumbnailLoader thumbnails, AiSkills.Entry skills)
             throws Exception {
+        reopen(saved, thumbnails, skills, null);
+    }
+
+    private void reopen(FakeSession saved, AiTestChatDialog.ThumbnailLoader thumbnails, AiSkills.Entry skills,
+                        SkillVideoTasks tasks) throws Exception {
         dialog.dismiss();
         worker.shutdownNow();
         historyWorker.shutdownNow();
@@ -2069,10 +2145,13 @@ public final class AiTestChatDialogTest {
         historyWorker = new ManualExecutor();
         sessions = new ArrayList<>();
         sessions.add(saved);
-        dialog = new AiTestChatDialog(activity, restoreConfiguration(), () -> {
+        AiTestChatDialog.SessionFactory factory = () -> {
             if (sessions.isEmpty()) throw new AssertionError("Unexpected session creation");
             return sessions.get(0);
-        }, worker, historyWorker, false, thumbnails);
+        };
+        dialog = tasks == null
+                ? new AiTestChatDialog(activity, restoreConfiguration(), factory, worker, historyWorker, false, thumbnails)
+                : new AiTestChatDialog(activity, restoreConfiguration(), factory, worker, historyWorker, thumbnails, tasks);
         if (skills != null) dialog.enableSkills(skills);
         dialog.show();
         root = dialog.getWindow().getDecorView().findViewWithTag("ai.chat");

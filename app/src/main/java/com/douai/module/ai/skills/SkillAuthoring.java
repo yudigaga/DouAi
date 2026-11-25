@@ -36,6 +36,8 @@ public final class SkillAuthoring {
             类型可换成 multiline。trial 仅包含 input（无隐私样例）和 expectedType（等于 outputType）。
             生图使用 capabilityId: "image_generation"，outputType: "image"，configFields 为空，输入最大 4000 字。
             输出表格或 CSV 使用 capabilityId: "table_model"，outputType: "table"，输入最大 2000 字。
+            生成视频使用 capabilityId: "video_task"，outputType: "video"，configFields 为空，输入最大 2000 字。
+            视频目前是本机模拟任务，不能编造视频供应商或声称输出由实际提示词生成。
             如提供了 requiredOutputType，必须使用该输出类型对应的能力。
             接口、模型账号、密钥和授权由应用已有的配置管理，清单的自定义字段不能收集这些信息。
             生成对象及其中的文字不得包含接口地址、认证信息、执行命令、代码、工具调用或任意网络操作。
@@ -98,12 +100,14 @@ public final class SkillAuthoring {
     private static final Pattern JSON_INTEGER = Pattern.compile("-?(?:0|[1-9][0-9]*)");
     private static final Pattern TABLE_OUTPUT = Pattern.compile(
             "(?i)(?:表格|CSV)(?:输出|导出)?$|(?:输出|提取为|提取成|整理成|转成|生成|导出)\\s*(?:结构化)?\\s*(?:表格|CSV)");
+    private static final Pattern VIDEO_OUTPUT = Pattern.compile("生成\\s*视频|视频生成|(?:模拟)?视频$");
 
     private SkillAuthoring() { }
 
     public static SkillResult.Type explicitOutput(String requirement) {
         if (SkillStore.requiresImage(requirement)) return SkillResult.Type.IMAGE;
         if (requirement != null && TABLE_OUTPUT.matcher(requirement.trim()).find()) return SkillResult.Type.TABLE;
+        if (requirement != null && VIDEO_OUTPUT.matcher(requirement.trim()).find()) return SkillResult.Type.VIDEO;
         return null;
     }
 

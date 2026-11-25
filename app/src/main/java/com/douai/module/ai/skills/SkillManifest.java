@@ -114,7 +114,7 @@ public record SkillManifest(String name, String displayName, String description,
 
             JSONArray configs = data.getJSONArray("configFields");
             if (configs.length() > MAX_FIELDS
-                    || capability == SkillCapabilityRegistry.Capability.IMAGE_GENERATION && configs.length() != 0) throw invalid();
+                    || !capability.usesModel() && configs.length() != 0) throw invalid();
             List<ConfigField> fields = new ArrayList<>();
             Set<String> ids = new HashSet<>();
             for (int i = 0; i < configs.length(); i++) {
