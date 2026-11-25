@@ -217,13 +217,32 @@ public final class NativeAiConversationTest {
         submit("/摘要 首句。第二句。第三句。");
         worker.runNext();
         ShadowLooper.idleMainLooper();
+        android.widget.TextView state = nativeViews.root.findViewWithTag("ai.chat.state");
+        assertEquals("正在保存历史…", state.getText().toString());
+        assertFalse(send.isEnabled());
+        assertTrue(first.transcriptMemory.readTranscript().isEmpty());
+        historyWorker.runAllOnThread();
+        assertEquals(1, first.transcriptMemory.readTranscript().size());
+        assertFalse(send.isEnabled());
+        ShadowLooper.idleMainLooper();
         assertEquals("首句。第二句。", renderedText(1));
         submit("/生图 白猫");
         worker.runNext();
         ShadowLooper.idleMainLooper();
+        assertEquals("正在保存历史…", state.getText().toString());
+        assertFalse(send.isEnabled());
+        assertEquals(1, first.transcriptMemory.readTranscript().size());
+        assertNull(row(3).findViewWithTag("ai.chat.image"));
+
         historyWorker.runAllOnThread();
+        List<TestChatMemory.Turn> saved = first.transcriptMemory.readTranscript();
+        assertEquals(2, saved.size());
+        assertEquals(1, saved.get(1).assistantImages.size());
+        assertNull(row(3).findViewWithTag("ai.chat.image"));
+        assertFalse(send.isEnabled());
         ShadowLooper.idleMainLooper();
         assertEquals(4, messageCount());
+        assertNotNull(row(3).findViewWithTag("ai.chat.image"));
         assertTrue(first.prompts.isEmpty());
 
         dialog.dismiss();

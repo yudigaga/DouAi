@@ -53,6 +53,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.Consumer;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.nio.file.Files;
 
 import static org.junit.Assert.*;
 
@@ -287,11 +289,15 @@ public final class AiTestChatDialogTest {
         submit(creation);
         worker.runNext();
         ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
         assertTrue(lastAnswer().contains("已创建技能 /周报润色"));
 
         first.skillReplies.add("一、已更新进度");
         submit(textCommand);
         worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
         assertEquals("一、已更新进度", lastAnswer());
 
@@ -331,6 +337,129 @@ public final class AiTestChatDialogTest {
         ShadowLooper.idleMainLooper();
         assertEquals(0, messageCount());
         assertTrue(reopened.transcriptMemory.readTranscript().isEmpty());
+    }
+
+    @Test public void generatedImageIsNotShownUntilItsHistoryTurnIsWritten() throws Exception {
+        FakeSession model = openMockImageHistory();
+
+        String prompt = "/生图 白猫";
+        submit(prompt);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(2, messageCount());
+        assertEquals(prompt, bubble(0, "ai.chat.user"));
+        assertTrue(model.transcriptMemory.readTranscript().isEmpty());
+        assertNull("An unwritten generated image must not be published", messageRow(1).findViewWithTag("ai.chat.image"));
+        assertEquals("正在保存历史…", text("ai.chat.state").getText().toString());
+        assertFalse(send.isEnabled());
+
+        historyWorker.runAllOnThread();
+        List<TestChatMemory.Turn> saved = model.transcriptMemory.readTranscript();
+        assertEquals(1, saved.size());
+        assertEquals(prompt, saved.get(0).prompt);
+        assertTrue(saved.get(0).displayOnly);
+        assertTrue(saved.get(0).images.isEmpty());
+        assertEquals(1, saved.get(0).assistantImages.size());
+        assertEquals("image/png", saved.get(0).assistantImages.get(0).mimeType);
+        assertTrue(saved.get(0).assistantImages.get(0).sizeBytes() > 0);
+        assertTrue(model.transcriptMemory.read().isEmpty());
+        assertNull(messageRow(1).findViewWithTag("ai.chat.image"));
+
+        ShadowLooper.idleMainLooper();
+        ImageView image = messageRow(1).findViewWithTag("ai.chat.image");
+        assertNotNull(image);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(image.getDrawable());
+        assertEquals("发送", send.getContentDescription());
+        assertEquals(1, model.transcriptMemory.readTranscript().size());
+        assertTrue(model.prompts.isEmpty());
+        assertTrue(model.skillInputs.isEmpty());
+    }
+
+    @Test public void failedHistoryWriteKeepsTheOriginalImageInThisConversationWithoutRetry() throws Exception {
+        File blockedDirectory = new File(activity.getFilesDir(), "douai_test_chat");
+        Files.writeString(blockedDirectory.toPath(), "This fixture blocks creating the history directory.");
+        FakeSession model = openMockImageHistory();
+        submit("/生图 海洋");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertNull(messageRow(1).findViewWithTag("ai.chat.image"));
+        assertFalse(send.isEnabled());
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(2, messageCount());
+        assertTrue(model.transcriptMemory.readTranscript().isEmpty());
+        ImageView image = messageRow(1).findViewWithTag("ai.chat.image");
+        assertNotNull(image);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(image.getDrawable());
+        String visibleFeedback = text("ai.chat.state").getText() + "\n" + bubble(1, "ai.chat.answer");
+        assertTrue(visibleFeedback.contains("技能已完成，但未能确认历史已保存。结果保留在当前会话。"));
+        View retry = messageRow(1).findViewWithTag("ai.chat.retry");
+        assertTrue(retry == null || retry.getVisibility() != View.VISIBLE);
+        assertEquals("发送", send.getContentDescription());
+        assertTrue(model.prompts.isEmpty());
+        assertTrue(model.skillInputs.isEmpty());
+    }
+
+    @Test public void clearFencesAnUnwrittenImageButAnOrdinaryClosePreservesTheNextFinishingWrite() throws Exception {
+        FakeSession model = openMockImageHistory();
+        submit("/生图 将被清空");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertNull(messageRow(1).findViewWithTag("ai.chat.image"));
+        assertTrue(root.findViewWithTag("ai.chat.clear").performClick());
+        assertEquals(0, messageCount());
+
+        historyWorker.runNext();
+        assertTrue(model.transcriptMemory.readTranscript().isEmpty());
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, messageCount());
+        assertTrue(model.transcriptMemory.readTranscript().isEmpty());
+
+        String kept = "/生图 关闭前生成";
+        submit(kept);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertNull(messageRow(1).findViewWithTag("ai.chat.image"));
+        assertTrue(model.transcriptMemory.readTranscript().isEmpty());
+        dialog.dismiss();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertFalse(dialog.isShowing());
+        assertEquals(1, model.transcriptMemory.readTranscript().size());
+        assertEquals(kept, model.transcriptMemory.readTranscript().get(0).prompt);
+
+        FakeSession reopened = new FakeSession();
+        reopened.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(reopened, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(2, messageCount());
+        assertEquals(kept, bubble(0, "ai.chat.user"));
+        ImageView image = messageRow(1).findViewWithTag("ai.chat.image");
+        assertNotNull(image);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(image.getDrawable());
+        assertTrue(reopened.prompts.isEmpty());
+        assertTrue(reopened.skillInputs.isEmpty());
+    }
+
+    private FakeSession openMockImageHistory() throws Exception {
+        installMockImageSkill();
+        FakeSession model = new FakeSession();
+        model.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(model, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        return model;
     }
 
     @Test public void anImageSkillRevokedWhileQueuedProducesNoImageOrRetry() throws Exception {

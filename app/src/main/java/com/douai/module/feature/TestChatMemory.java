@@ -54,6 +54,8 @@ public final class TestChatMemory {
 
     public long epoch() { synchronized (IO_LOCK) { return state.epoch; } }
 
+    public boolean historyEnabled() { return rounds > 0; }
+
     /** Ordinary model context, excluding all local-only Skill turns. */
     public List<Turn> read() { return readStored(false); }
 

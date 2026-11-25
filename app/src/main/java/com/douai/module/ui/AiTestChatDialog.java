@@ -112,6 +112,8 @@ final class AiTestChatDialog extends Dialog {
     private static final int MAX_VISIBLE_TURNS = 100;
     private static final int MAX_VISIBLE_IMAGE_BYTES = 16 * 1024 * 1024;
     private static final String DRAFT_CONTINUATION = "\n可以继续修改，或发送“帮我内置”保存。";
+    private static final String SAVING_HISTORY = "正在保存历史…";
+    private static final String HISTORY_UNCONFIRMED = "技能已完成，但未能确认历史已保存。结果保留在当前会话。";
     private static final ExecutorService HISTORY_IO = Executors.newSingleThreadExecutor(new ThreadFactory() {
         @Override public Thread newThread(Runnable task) {
             Thread thread = new Thread(task, "DouAi-chat-history");
@@ -843,6 +845,7 @@ final class AiTestChatDialog extends Dialog {
                             turn.transcriptMemory = memory;
                         }
                     } catch (RuntimeException unavailable) {
+                        turn.transcriptUnavailable = true;
                         turn.trace.stage("local_skill_history", "outcome=unavailable");
                     }
                 }
@@ -1049,8 +1052,7 @@ final class AiTestChatDialog extends Dialog {
 
     private void finishRequest(RequestTurn turn, String reply, ChatImage generatedImage,
                                SkillStore.DraftPreview draft, Exception failure) {
-        // A cancelled/closed conversation must not receive a late response.
-        if (disposed || turn.ticket != generation) return;
+        if (!isCurrentTurn(turn)) return;
         if (turn.authoring != null && !turn.stopRequested && failure == null) {
             try {
                 reply = completeSkillAuthoring(turn, draft);
@@ -1063,6 +1065,27 @@ final class AiTestChatDialog extends Dialog {
             // An explicit image request must not leave an older text draft selected for saving.
             skillDraft = null;
         }
+        HistorySave history = HistorySave.NOT_REQUESTED;
+        if (turn.manualSkill() && !turn.stopRequested && failure == null) {
+            if (turn.transcriptMemory != null && turn.transcriptMemory.historyEnabled()) {
+                saveSkillTranscript(turn, reply, generatedImage);
+                return;
+            }
+            if (turn.transcriptUnavailable) history = HistorySave.UNCONFIRMED;
+            else if (turn.transcriptMemory != null) history = HistorySave.DISABLED;
+        }
+        showRequestResult(turn, reply, generatedImage, failure, history);
+    }
+
+    private boolean isCurrentTurn(RequestTurn turn) {
+        return !disposed && pending == turn && turn.ticket == generation;
+    }
+
+    private enum HistorySave { NOT_REQUESTED, DISABLED, SAVED, UNCONFIRMED }
+
+    private void showRequestResult(RequestTurn turn, String reply, ChatImage generatedImage,
+                                   Exception failure, HistorySave history) {
+        if (!isCurrentTurn(turn)) return;
         busy = false;
         request = null;
         pending = null;
@@ -1070,6 +1093,7 @@ final class AiTestChatDialog extends Dialog {
         if (failure == null && (!turn.manualSkill() || !turn.stopRequested)) {
             answer.text = reply;
             answer.color = TEXT;
+            if (turn.manualSkill()) answer.settingsSkillName = turn.settingsSkillName;
             if (generatedImage != null) {
                 answer.images.add(generatedImage);
                 visibleImageBytes += generatedImage.sizeBytes();
@@ -1078,8 +1102,11 @@ final class AiTestChatDialog extends Dialog {
             if (!turn.manualSkill() && !turn.stopRequested) {
                 answer.videos = searchVideoCards.group(turn.searchResults, turn.searchBridge, turn.analytics);
             }
-            if (turn.manualSkill()) saveSkillTranscript(turn, answer);
-            state.setText("");
+            state.setText(switch (history) {
+                case UNCONFIRMED -> HISTORY_UNCONFIRMED;
+                case DISABLED -> "聊天历史已关闭，结果仅保留在当前会话。";
+                default -> "";
+            });
         } else if (turn.manualSkill()) {
             answer.text = turn.authoring != null && !turn.stopRequested ? authoringFailure(turn.authoring, failure)
                     : skillFailure(turn.stopRequested, failure);
@@ -1111,25 +1138,41 @@ final class AiTestChatDialog extends Dialog {
         turn.trace.finish(turn.stopRequested ? DouAiLog.Outcome.CANCELLED : failure == null ? DouAiLog.Outcome.SUCCESS
                         : failure instanceof java.net.SocketTimeoutException ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED,
                 turn.stopRequested ? "user_cancelled" : failure == null ? "response_rendered" : "request_failed",
-                "response_chars=" + (reply == null ? 0 : reply.length()) + ";view_notified=true;remote_delivery=not_applicable");
+                "response_chars=" + (reply == null ? 0 : reply.length()) + ";view_notified=true;remote_delivery=not_applicable"
+                        + ";history=" + history.name());
     }
 
-    private void saveSkillTranscript(RequestTurn turn, ChatMessage answer) {
+    private void saveSkillTranscript(RequestTurn turn, String reply, ChatImage generatedImage) {
         TestChatMemory memory = turn.transcriptMemory;
-        if (memory == null) return;
-        String savedAnswer = answer.text == null ? "" : answer.text;
+        turn.savingHistory = true;
+        request = null;
+        turn.answer.text = SAVING_HISTORY;
+        state.setText(SAVING_HISTORY);
+        messageRows.notifyDataSetChanged();
+        updateSend();
+        String savedAnswer = reply == null ? "" : reply;
         if (turn.authoring != null && savedAnswer.endsWith(DRAFT_CONTINUATION)) {
             savedAnswer = savedAnswer.substring(0, savedAnswer.length() - DRAFT_CONTINUATION.length());
         }
         try {
             TestChatMemory.Turn saved = TestChatMemory.Turn.displayedSkill(turn.prompt, savedAnswer,
-                    answer.images, answer.settingsSkillName);
+                    generatedImage == null ? Collections.emptyList() : Collections.singletonList(generatedImage),
+                    turn.settingsSkillName);
             historyWorker.execute(() -> {
-                boolean written = memory.append(turn.transcriptEpoch, saved);
+                if (turn.discardHistory) return;
+                HistorySave result;
+                try {
+                    result = memory.append(turn.transcriptEpoch, saved) ? HistorySave.SAVED : HistorySave.UNCONFIRMED;
+                } catch (RuntimeException | OutOfMemoryError unavailable) {
+                    result = HistorySave.UNCONFIRMED;
+                }
+                boolean written = result == HistorySave.SAVED;
                 DouAiLog.event("ai_chat", "skill_history_write", written ? "saved" : "not_saved", "scope=local_display");
+                main.post(turn.trace.wrap(() -> showRequestResult(turn, reply, generatedImage, null,
+                        written ? HistorySave.SAVED : HistorySave.UNCONFIRMED)));
             });
         } catch (RuntimeException unavailable) {
-            turn.trace.stage("local_skill_history", "outcome=unavailable");
+            showRequestResult(turn, reply, generatedImage, null, HistorySave.UNCONFIRMED);
         }
     }
 
@@ -1148,12 +1191,12 @@ final class AiTestChatDialog extends Dialog {
         skillDraft = null;
         SkillStore.Installed installed = result.installed();
         if (installed != null) {
-            turn.answer.settingsSkillName = installed.name();
+            turn.settingsSkillName = installed.name();
             return "已创建技能 /" + installed.name() + " · v" + installed.version()
                     + (installed.enabled() ? " · 已启用" : " · 已停用");
         }
         SkillStore.Pending pending = result.pending();
-        turn.answer.settingsSkillName = pending.name();
+        turn.settingsSkillName = pending.name();
         StringBuilder status = new StringBuilder("已保存待配置草稿 /")
                 .append(pending.name()).append('\n').append(pending.reason());
         // Status falls back to the completed save if reading current field details fails.
@@ -1194,7 +1237,7 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void stopRequest() {
-        if (!busy || pending.stopRequested) return;
+        if (!busy || pending.stopRequested || pending.savingHistory) return;
         boolean cancelSession;
         synchronized (pending) {
             pending.stopRequested = true;
@@ -1210,6 +1253,7 @@ final class AiTestChatDialog extends Dialog {
 
     private void clearConversation() {
         if (disposed) return;
+        if (pending != null) pending.discardHistory = true;
         cancelRequest();
         skillDraft = null;
         closePickers();
@@ -1243,8 +1287,10 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void cancelRequest() {
-        boolean cancelSession = pending == null || !pending.manualSkill() || pending.usingSkillModel;
-        if (pending != null) pending.trace.finish(DouAiLog.Outcome.CANCELLED, "conversation_closed_or_cleared", "provider_result=unknown");
+        boolean savingHistory = pending != null && pending.savingHistory;
+        boolean cancelSession = !savingHistory && (pending == null || !pending.manualSkill() || pending.usingSkillModel);
+        if (pending != null) pending.trace.finish(DouAiLog.Outcome.CANCELLED, "conversation_closed_or_cleared",
+                savingHistory ? "provider_result=completed" : "provider_result=unknown");
         ++generation;
         if (request != null) request.cancel(true);
         if (cancelSession) session.cancel();
@@ -1320,9 +1366,11 @@ final class AiTestChatDialog extends Dialog {
                 || !draftDocuments.isEmpty() || !draftPending.isEmpty();
         if (nativeViews == null) send.setImageResource(busy ? android.R.drawable.ic_menu_close_clear_cancel : android.R.drawable.ic_menu_send);
         else nativeViews.updateComposer(busy, hasContent);
-        send.setContentDescription(busy ? "停止请求" : "发送");
-        send.setTooltipText(busy ? "停止请求" : "发送");
-        send.setEnabled(!disposed && (busy ? !pending.stopRequested
+        boolean savingHistory = busy && pending.savingHistory;
+        String sendLabel = savingHistory ? "正在保存历史" : busy ? "停止请求" : "发送";
+        send.setContentDescription(sendLabel);
+        send.setTooltipText(sendLabel);
+        send.setEnabled(!disposed && (busy ? !savingHistory && !pending.stopRequested
                 : hasContent));
         send.setAlpha(send.isEnabled() ? 1f : 0.4f);
         attach.setEnabled(!disposed && !busy && draftPending.size() < 4
@@ -1736,6 +1784,10 @@ final class AiTestChatDialog extends Dialog {
         DouyinSearch searchBridge;
         TestChatMemory transcriptMemory;
         long transcriptEpoch;
+        boolean transcriptUnavailable;
+        boolean savingHistory;
+        volatile boolean discardHistory;
+        String settingsSkillName;
 
         RequestTurn(int ticket, String prompt, List<ChatImage> images, List<Document> documents,
                     List<PendingAttachment> attachments, ChatMessage answer, AiSkills.Invocation skill, SkillAuthoring.Action authoring,
