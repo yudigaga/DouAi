@@ -1216,6 +1216,97 @@ public final class AiTestChatDialogTest {
         assertTrue(store.list().isEmpty());
     }
 
+    @Test public void pendingVideoCanSaveADeclarationAndExplicitlyConfigureItFromChat() throws Exception {
+        FakeSession session = new FakeSession();
+        session.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        session.skillReplies.add(videoDraftWithoutProvider());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(session, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        for (String prompt : List.of("/技能 生成一个视频技能", "帮我内置")) {
+            submit(prompt);
+            worker.runNext();
+            ShadowLooper.idleMainLooper();
+            historyWorker.runAllOnThread();
+            ShadowLooper.idleMainLooper();
+        }
+
+        SkillStore store = SkillStore.forContext(activity);
+        SkillStore.Detail original = store.detail("电影片段");
+        assertTrue(original.pending());
+        assertNull(original.manifest().http());
+        AlertDialog settings = openChatSkillSettings("电影片段");
+        View body = settings.getWindow().getDecorView();
+        View openDeclaration = body.findViewWithTag("skills.detail.video_declaration.open");
+        assertNotNull("A video draft missing its declaration needs a way to supply it", openDeclaration);
+        assertTrue(openDeclaration.performClick());
+        AlertDialog declaration = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNotSame(settings, declaration);
+        EditText input = declaration.getWindow().getDecorView().findViewWithTag("skills.detail.video_declaration.input");
+        TextView error = declaration.getWindow().getDecorView().findViewWithTag("skills.detail.video_declaration.error");
+        assertNotNull(input);
+        assertNotNull(error);
+        View save = declaration.getButton(AlertDialog.BUTTON_POSITIVE);
+        assertEquals("保存声明", ((TextView) save).getText().toString());
+        input.setText("{\"http\":{},\"configFields\":[]}");
+        assertTrue(save.performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(declaration.isShowing());
+        assertFalse(error.getText().toString().isBlank());
+        SkillStore.Detail stillPending = store.detail("电影片段");
+        assertEquals(original.draftId(), stillPending.draftId());
+        assertNull(stillPending.manifest().http());
+        assertNull(stillPending.customConfiguration());
+
+        input.setText("""
+                {"http":{"version":1,"label":"视频接口","request":{"prompt":"argument","seconds":"config.seconds"},
+                 "response":"job_id","video":{"statusPath":"/v1/jobs/{id}","cancelPath":"/v1/jobs/{id}/cancel",
+                 "cancelMethod":"POST","downloadPath":"/v1/jobs/{id}/content","idField":"id","stateField":"status",
+                 "states":{"waiting":"queued","working":"running","done":"completed","error":"failed","stop":"cancelled"}}},
+                 "configFields":[{"key":"seconds","label":"时长","type":"integer","required":true,"min":1,"max":10}]}
+                """);
+        assertTrue(save.performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(declaration.isShowing());
+        SkillStore.Detail declared = store.detail("电影片段");
+        assertTrue(declared.pending());
+        assertNotNull(declared.manifest().http());
+        assertNull(declared.customConfiguration());
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertNull(body.findViewWithTag("skills.detail.video_declaration.open"));
+
+        String endpoint = "https://video-api.example.com/v1/jobs";
+        EditText endpointInput = body.findViewWithTag("skills.detail.custom.endpoint");
+        EditText bearer = body.findViewWithTag("skills.detail.custom.credential");
+        EditText seconds = body.findViewWithTag("skills.detail.config.seconds");
+        assertNotNull(endpointInput);
+        assertNotNull(bearer);
+        assertNotNull(seconds);
+        assertEquals("", bearer.getText().toString());
+        endpointInput.setText(endpoint);
+        seconds.setText("4");
+        assertTrue(body.findViewWithTag("skills.detail.custom.save").performClick());
+        ShadowLooper.idleMainLooper();
+        SkillStore.Detail configured = store.detail("电影片段");
+        assertFalse(configured.pending());
+        assertEquals(endpoint, configured.customConfiguration().endpoint());
+        assertEquals(4, ((Number) configured.manifestValues().get("seconds")).intValue());
+        settings.dismiss();
+        ShadowLooper.idleMainLooper();
+
+        AlertDialog reopened = openChatSkillSettings("电影片段");
+        View reopenedBody = reopened.getWindow().getDecorView();
+        assertEquals(endpoint, ((EditText) reopenedBody.findViewWithTag("skills.detail.custom.endpoint")).getText().toString());
+        assertEquals("4", ((EditText) reopenedBody.findViewWithTag("skills.detail.config.seconds")).getText().toString());
+        assertNull(reopenedBody.findViewWithTag("skills.detail.video_declaration.open"));
+        assertEquals(0, submits.get());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(AiSkills.Entry.WORK,
+                session.transcriptMemory.conversationKey())).isEmpty());
+        assertTrue(worker.tasks.isEmpty());
+    }
+
     @Test public void declaredVideoRoutesRequireConfiguredFieldsAndConsentBeforeAnyJob() throws Exception {
         FakeSession contact = new FakeSession();
         contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
@@ -1245,6 +1336,7 @@ public final class AiTestChatDialogTest {
         assertTrue(store.selectionCatalog().isEmpty());
         assertNull(store.detail("视频创作").customConfiguration());
         AlertDialog settings = openChatSkillSettings("视频创作");
+        assertNull(settings.getWindow().getDecorView().findViewWithTag("skills.detail.video_declaration.open"));
         EditText seconds = settings.getWindow().getDecorView().findViewWithTag("skills.detail.config.seconds");
         assertNotNull(seconds);
         seconds.setText("4");

@@ -501,6 +501,76 @@ public final class SkillStore {
         });
     }
 
+    public Detail saveVideoDeclaration(Detail expected, String raw) throws Exception {
+        if (expected == null || expected.deleteTarget() == null || expected.draftId() == null || !expected.pending()
+                || !Objects.equals(expected.name(), expected.deleteTarget().name()) || expected.manifest() == null
+                || expected.manifest().outputType() != SkillResult.Type.VIDEO || expected.manifest().http() != null) {
+            throw new IllegalArgumentException("请打开缺少接口声明的视频草稿");
+        }
+        return locked(state -> {
+            EditSource source = editSource(state, expected.deleteTarget());
+            if (source.pending() == null || !expected.draftId().equals(draftIdentity(expected.name(), source.pending()))
+                    || !source.values().equals(expected.manifestValues())) {
+                throw new IllegalStateException("视频草稿已变化，请重新打开");
+            }
+            Draft previous = parse(source.definition().toString());
+            if (!expected.manifest().equals(previous.manifest())) {
+                throw new IllegalStateException("视频草稿已变化，请重新打开");
+            }
+            JSONObject definition = source.definition();
+            Draft updated = attachVideoDeclaration(definition, raw);
+            Map<String, Object> values = updated.manifest().retainValues(previous.manifest(), source.values());
+            JSONObject entry = stageEdit(state, source, updated, definition.toString(), values);
+            entry.put(CUSTOM_BINDING, JSONObject.NULL);
+            return advancePending(state, entry, updated, null, true);
+        });
+    }
+
+    private static Draft attachVideoDeclaration(JSONObject definition, String raw) {
+        JSONObject proposed;
+        try {
+            proposed = SkillAuthoring.readObject(raw, DRAFT_LIMIT);
+        } catch (IllegalArgumentException invalid) {
+            throw invalidVideoDeclaration();
+        }
+        boolean fullManifest = proposed.has("schemaVersion");
+        boolean wrapped = fullManifest || proposed.has("http") || proposed.has("configFields");
+        JSONObject http = proposed;
+        JSONArray fields = null;
+        if (wrapped) {
+            requireVideoFields(proposed, "http", "configFields");
+            http = proposed.optJSONObject("http");
+            fields = proposed.optJSONArray("configFields");
+            if (http == null || fields == null || (!fullManifest && proposed.length() != 2)) {
+                throw invalidVideoDeclaration();
+            }
+        }
+        requireVideoFields(http, "version", "label", "request", "response", "video");
+        JSONObject video = http.optJSONObject("video");
+        if (video == null) throw invalidVideoDeclaration();
+        requireVideoFields(video, "statusPath", "cancelPath", "cancelMethod", "downloadPath", "idField", "stateField", "states");
+        try {
+            if (fullManifest && SkillManifest.parse(proposed.toString()).outputType() != SkillResult.Type.VIDEO) {
+                throw invalidVideoDeclaration();
+            }
+            definition.put("http", http);
+            if (fields != null) definition.put("configFields", fields);
+            return parse(definition.toString());
+        } catch (JSONException | IllegalArgumentException invalid) {
+            throw invalidVideoDeclaration();
+        }
+    }
+
+    private static void requireVideoFields(JSONObject object, String... keys) {
+        List<String> missing = new ArrayList<>();
+        for (String key : keys) if (!object.has(key)) missing.add(key);
+        if (!missing.isEmpty()) throw new SkillManifest.Invalid("视频接口声明缺少 " + String.join("、", missing));
+    }
+
+    private static SkillManifest.Invalid invalidVideoDeclaration() {
+        return new SkillManifest.Invalid("视频接口声明或配置字段无效");
+    }
+
     public Detail configureCustomService(Detail expected, String endpoint, String bearer) throws Exception {
         return configureCustomService(expected, endpoint, bearer, false);
     }

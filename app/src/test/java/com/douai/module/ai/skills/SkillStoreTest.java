@@ -26,6 +26,166 @@ import static org.junit.Assert.assertTrue;
 public class SkillStoreTest {
     @Rule public TemporaryFolder temp = new TemporaryFolder();
 
+    @Test public void videoDeclarationPromotesOnlyTheCurrentDraftToEndpointConfiguration() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        saveVideoDraft(store, videoDraft("镜头动画"));
+        SkillStore.Detail initial = store.detail("镜头动画");
+        assertEquals(SkillStore.NEEDS_VIDEO_PROVIDER, initial.reason());
+        assertNull(initial.manifest().http());
+
+        JSONObject http = videoHttp();
+        http.getJSONObject("request").put("duration", "config.duration");
+        JSONObject input = new JSONObject().put("http", http).put("configFields", new JSONArray().put(
+                new JSONObject().put("key", "duration").put("label", "时长").put("type", "integer")
+                        .put("required", true).put("min", 1).put("max", 15)));
+        SkillStore.Detail saved = store.saveVideoDeclaration(initial, input.toString());
+
+        assertTrue(saved.pending());
+        assertFalse(saved.canReplace());
+        assertFalse(initial.draftId().equals(saved.draftId()));
+        assertNull(saved.current());
+        assertNull(saved.customConfiguration());
+        assertEquals("镜头动画", saved.name());
+        assertEquals("视频工作台", saved.manifest().displayName());
+        assertEquals("按场景生成视频", saved.manifest().description());
+        assertEquals("填写画面描述", saved.manifest().documentation());
+        assertEquals("保留原始动作要求", saved.manifest().instructions());
+        assertEquals("海边", saved.manifest().trialInput());
+        assertEquals("config.duration", saved.manifest().http().request().get("duration"));
+        assertEquals("https://suggested.example.com/v1/submit", saved.manifest().http().suggestedEndpoint());
+        assertTrue(saved.fields().stream().anyMatch(field -> field.id().equals("duration")
+                && field.state() == SkillStore.FieldState.MISSING));
+        assertTrue(saved.reason().contains("公网 HTTPS"));
+        assertTrue(store.list().isEmpty());
+        assertThrows(AiSkills.CommandUnavailable.class,
+                () -> AiSkills.match(AiSkills.Entry.CONTACT, "/镜头动画 海边", store));
+        SkillStore.Detail reopened = videoStore(root).detail("镜头动画");
+        assertEquals(saved.deleteTarget(), reopened.deleteTarget());
+        assertNull(reopened.customConfiguration());
+        assertThrows(IllegalStateException.class, () -> store.saveVideoDeclaration(initial, videoHttp().toString()));
+    }
+
+    @Test public void videoDeclarationRejectsIncompleteUnsafeAndStaleInputWithoutWriting() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        JSONObject original = videoDraft("镜头动画");
+        saveVideoDraft(store, original);
+        SkillStore.Detail before = store.detail("镜头动画");
+        var catalog = new File(root, "catalog.json").toPath();
+        String untouched = Files.readString(catalog);
+        JSONObject incomplete = videoHttp();
+        incomplete.getJSONObject("video").remove("statusPath");
+        incomplete.getJSONObject("video").remove("idField");
+        var missing = assertThrows(IllegalArgumentException.class,
+                () -> store.saveVideoDeclaration(before, incomplete.toString()));
+        assertTrue(missing.getMessage().contains("statusPath"));
+        assertTrue(missing.getMessage().contains("idField"));
+        var missingHttp = assertThrows(IllegalArgumentException.class,
+                () -> store.saveVideoDeclaration(before, original.toString()));
+        assertTrue(missingHttp.getMessage().contains("http"));
+
+        String unsafe = "synthetic-should-not-echo";
+        JSONObject withHeader = videoHttp().put("headers", new JSONObject().put("Authorization", "Bearer " + unsafe));
+        JSONObject injected = new JSONObject().put("http", videoHttp()).put("configFields", new JSONArray())
+                .put("authorized", true);
+        JSONObject runtime = videoDraft("其他").put("http", videoHttp()).put("configValues", new JSONObject());
+        for (String input : java.util.List.of(withHeader.toString(), injected.toString(), runtime.toString(),
+                videoHttp().toString().replaceFirst("\\{", "{\"version\":1,"),
+                videoHttp().toString() + "{}", "x".repeat(16_001))) {
+            var invalid = assertThrows(IllegalArgumentException.class, () -> store.saveVideoDeclaration(before, input));
+            assertFalse(invalid.getMessage().contains(unsafe));
+        }
+        assertEquals(untouched, Files.readString(catalog));
+        saveVideoDraft(store, original.put("description", "更新的内容"));
+        SkillStore.Detail changed = store.detail("镜头动画");
+        assertThrows(IllegalStateException.class, () -> store.saveVideoDeclaration(before, videoHttp().toString()));
+        assertEquals(changed.deleteTarget(), store.detail("镜头动画").deleteTarget());
+        assertNull(store.detail("镜头动画").manifest().http());
+        assertNotNull(store.saveVideoDeclaration(changed, videoHttp().toString()).manifest().http());
+    }
+
+    @Test public void fullVideoManifestCannotReplaceTheDraftIdentityOrInheritTheActiveBinding() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        saveVideoDraft(store, videoDraft("镜头动画").put("http", videoHttp()));
+        String previousEndpoint = "https://saved.example.com/v1/submit";
+        SkillStore.Detail active = store.configureCustomService(store.detail("镜头动画"), previousEndpoint,
+                "synthetic-video-fixture");
+        assertEquals(1, active.current().version());
+        assertTrue(active.installedEnabled());
+        assertTrue(active.customConfiguration().hasCredential());
+        saveVideoDraft(store, videoDraft("镜头动画"));
+        SkillStore.Detail before = store.detail("镜头动画");
+
+        JSONObject copied = videoDraft("另一名称").put("displayName", "另一个标题").put("description", "不同的说明")
+                .put("documentation", "其他用法").put("instructions", "完全不同的指令").put("http", videoHttp());
+        copied.getJSONObject("trial").put("input", "其他样例");
+        SkillStore.Detail staged = store.saveVideoDeclaration(before, copied.toString());
+        assertTrue(staged.pending());
+        assertFalse(staged.canReplace());
+        assertEquals("镜头动画", staged.name());
+        assertEquals("视频工作台", staged.manifest().displayName());
+        assertEquals("按场景生成视频", staged.manifest().description());
+        assertEquals("填写画面描述", staged.manifest().documentation());
+        assertEquals("保留原始动作要求", staged.manifest().instructions());
+        assertEquals("海边", staged.manifest().trialInput());
+        assertEquals(active.current(), staged.current());
+        assertNull(staged.customConfiguration());
+        JSONObject catalog = new JSONObject(Files.readString(new File(root, "catalog.json").toPath()));
+        JSONObject pending = catalog.getJSONObject("drafts").getJSONObject("镜头动画");
+        assertTrue(pending.has("customBinding") && pending.isNull("customBinding"));
+        assertFalse(catalog.getJSONObject("drafts").has("另一名称"));
+        assertFalse(catalog.getJSONObject("skills").has("另一名称"));
+
+        AiSkills.Invocation prior = AiSkills.match(AiSkills.Entry.WORK, "/镜头动画 海边", store);
+        assertEquals(1, prior.version());
+        assertEquals(previousEndpoint, store.previewCustomService(prior).endpoint());
+        String nextEndpoint = "https://approved.example.com/v1/submit";
+        SkillStore.Detail replacement = store.configureCustomService(staged, nextEndpoint, "");
+        assertTrue(replacement.canReplace());
+        assertEquals(1, AiSkills.match(AiSkills.Entry.CONTACT, "/镜头动画 海边", store).version());
+        SkillStore.Detail published = store.activateReplacement(replacement);
+        assertEquals(2, published.current().version());
+        assertEquals(nextEndpoint, published.customConfiguration().endpoint());
+        assertFalse(published.customConfiguration().hasCredential());
+    }
+
+    private static SkillStore videoStore(File root) {
+        var vault = new com.douai.module.ai.AiCredentialVault(
+                () -> new javax.crypto.spec.SecretKeySpec(new byte[32], "AES"));
+        var services = new SkillServices(root, vault, (endpoint, bearer, body, deadline, output) -> {
+            throw new AssertionError("Declaration and local configuration must not use the network");
+        });
+        var customService = new SkillCustomService(vault, (endpoint, bearer, body, deadline, limit, admission) -> {
+            throw new AssertionError("Declaration and local configuration must not use the network");
+        }, System::nanoTime);
+        return new SkillStore(root, services, null, customService);
+    }
+
+    private static JSONObject videoDraft(String name) throws Exception {
+        return new JSONObject("""
+                {"schemaVersion":4,"name":"镜头动画","displayName":"视频工作台","description":"按场景生成视频",
+                 "documentation":"填写画面描述","instructions":"保留原始动作要求","capabilityId":"video_task",
+                 "configFields":[],"inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"video","trial":{"input":"海边","expectedType":"video"}}
+                """).put("name", name);
+    }
+
+    private static JSONObject videoHttp() throws Exception {
+        return new JSONObject("""
+                {"version":1,"label":"视频服务","suggestedEndpoint":"https://suggested.example.com/v1/submit",
+                 "request":{"prompt":"argument"},"response":"job_id",
+                 "video":{"statusPath":"/v1/jobs/{id}","cancelPath":"/v1/jobs/{id}/cancel","cancelMethod":"POST",
+                          "downloadPath":"/v1/jobs/{id}/content","idField":"id","stateField":"state",
+                          "states":{"success":"completed","running":"running","failure":"failed"}}}
+                """);
+    }
+
+    private static void saveVideoDraft(SkillStore store, JSONObject definition) throws Exception {
+        assertNotNull(store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(definition.toString())).pending());
+    }
+
     @Test public void authoringAndInstallationCannotClaimTheSlashCreationName() throws Exception {
         SkillStore store = new SkillStore(temp.newFolder(), SkillServices.forContext(RuntimeEnvironment.getApplication()));
         String legacy = new JSONObject(draft("待检查", "测试")).put("name", "技能").toString();

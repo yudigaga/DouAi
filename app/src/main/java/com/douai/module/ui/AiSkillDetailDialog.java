@@ -9,6 +9,7 @@ import android.text.Editable;
 import android.text.InputFilter;
 import android.text.InputType;
 import android.text.TextWatcher;
+import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -298,8 +299,15 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private void customConfiguration(SkillStore.Detail detail) {
-        if (detail.manifest() == null || !detail.manifest().usesHttp()) return;
-        SkillHttpDeclaration declaration = detail.manifest().http();
+        SkillManifest manifest = detail.manifest();
+        if (manifest == null) return;
+        if (!manifest.usesHttp()) {
+            if (detail.pending() && detail.outputType() == SkillResult.Type.VIDEO) {
+                button(body, "填写视频接口声明", "skills.detail.video_declaration.open", () -> showVideoDeclaration(detail));
+            }
+            return;
+        }
+        SkillHttpDeclaration declaration = manifest.http();
         SkillStore.CustomConfiguration current = detail.customConfiguration();
         section(declaration == null ? "HTTPS 服务" : declaration.label(), "skills.detail.custom");
         String request = declaration == null ? SkillCustomService.REQUEST_FIELD : String.join("、", declaration.request().keySet());
@@ -329,6 +337,49 @@ final class AiSkillDetailDialog implements AutoCloseable {
             button(body, "移除此技能密钥", "skills.detail.custom.remove_credential", () -> review("移除服务密钥",
                     "确认后生成待启用配置。", "移除密钥", () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true, null)));
         }
+    }
+
+    private void showVideoDeclaration(SkillStore.Detail detail) {
+        LinearLayout form = column();
+        int padding = dp(16);
+        form.setPadding(padding, 0, padding, padding);
+        text(form, "按服务商文档填写或粘贴接口声明 JSON，也可粘贴完整的视频 Skill JSON。密钥请在后续服务配置填写。",
+                "skills.detail.video_declaration.guidance");
+        int multiline = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        EditText input = input(form, "视频接口声明 JSON", "skills.detail.video_declaration.input", multiline, 16000, false);
+        input.setMinLines(5);
+        input.setGravity(Gravity.TOP | Gravity.START);
+        disableSecretStateTransfer(input);
+        View control = MiuixFormControls.viewFor(input);
+        if (control != input) disableSecretStateTransfer(control);
+        TextView error = text(form, "", "skills.detail.video_declaration.error");
+        error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        ScrollView scroll = new ScrollView(context);
+        scroll.addView(form);
+        AlertDialog editor = builder("填写视频接口声明").setView(scroll).setNegativeButton("取消", null)
+                .setPositiveButton("保存声明", null).create();
+        showChild(editor);
+        if (!editor.isShowing()) return;
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+            if (!active() || !editor.isShowing() || confirmation != editor) return;
+            SkillStore.Detail updated;
+            try {
+                updated = store.saveVideoDeclaration(detail, input.getText().toString());
+            } catch (SkillManifest.Invalid invalid) {
+                error.setText(invalid.getMessage());
+                return;
+            } catch (IllegalStateException stale) {
+                error.setText("草稿已变化，请重新打开技能配置后再试");
+                return;
+            } catch (Exception unavailable) {
+                error.setText("暂时无法保存视频接口声明");
+                return;
+            }
+            input.setText("");
+            editor.dismiss();
+            render(updated, "声明已保存，请填写服务配置");
+            if (onChanged != null) onChanged.run();
+        });
     }
 
     private void saveCustomConfiguration(SkillStore.Detail detail, String endpoint, EditText bearer, boolean clear,
