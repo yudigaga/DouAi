@@ -101,6 +101,33 @@ public final class SkillAuthoringTest {
         }
     }
 
+    @Test public void editorRoutesNaturalCommandsAndOnlyTakesAnExplicitBoundedPollingPreference() {
+        String change = "把轮询间隔调到 8 秒，失败时提示且不要重试";
+        assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.REVISE, change, false), SkillAuthoring.continuation(change));
+        assertEquals(8, SkillAuthoring.minimumPollSeconds(change));
+        assertEquals(12, SkillAuthoring.minimumPollSeconds("每隔12秒查询状态"));
+        assertEquals(0, SkillAuthoring.minimumPollSeconds("我只是解释轮询间隔为 8 秒"));
+        assertEquals(0, SkillAuthoring.minimumPollSeconds("失败时显示“轮询间隔为 8 秒”"));
+        assertEquals(0, SkillAuthoring.minimumPollSeconds("不要把轮询间隔设为 3 秒"));
+        assertThrows(IllegalArgumentException.class, () -> SkillAuthoring.minimumPollSeconds("轮询间隔改成 1 秒"));
+        assertThrows(IllegalArgumentException.class, () -> SkillAuthoring.minimumPollSeconds("轮询间隔改为 61 秒"));
+        assertThrows(IllegalArgumentException.class,
+                () -> SkillAuthoring.minimumPollSeconds("轮询间隔改为 8 秒，轮询间隔改为 9 秒"));
+        assertNull(SkillAuthoring.continuation("“" + change + "”"));
+        assertNull(SkillAuthoring.continuation("我今天遇到了个问题，想聊聊改规则的事。"));
+        assertTrue(SkillAuthoring.needsEditClarification("再改一下"));
+        assertEquals(SkillAuthoring.Mode.PREVIEW, SkillAuthoring.continuation("预览草稿").mode());
+        assertEquals(SkillAuthoring.Mode.CANCEL, SkillAuthoring.continuation("取消编写").mode());
+        assertFalse(SkillAuthoring.canUsePastedVideoMaterial("不要采用这个反例：\n提交: POST /jobs"));
+        assertFalse(SkillAuthoring.canUsePastedVideoMaterial("> ### 创建视频任务\n> | 接口 | POST /jobs"));
+        assertTrue(SkillAuthoring.canUsePastedVideoMaterial("接口资料：\n> ### 创建视频任务"));
+        SkillAuthoring.rejectEditorCredential("Authorization: Bearer $VIDEO_API_KEY");
+        assertThrows(IllegalArgumentException.class,
+                () -> SkillAuthoring.rejectEditorCredential("Authorization: Basic YWJjOmRlZg=="));
+        assertThrows(IllegalArgumentException.class,
+                () -> SkillAuthoring.rejectEditorCredential("Cookie: session=fixture-only"));
+    }
+
     @Test public void revisionRequiresAnExistingDraftAndARequestToChangeIt() {
         assertNull(SkillAuthoring.match("把它改成正式语气", false));
         assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.REVISE, "把它改成正式语气", false),

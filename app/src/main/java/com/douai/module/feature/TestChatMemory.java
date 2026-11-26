@@ -19,9 +19,13 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /** Bounded private test-chat history. Epochs prevent an older request from undoing Clear. */
 public final class TestChatMemory {
@@ -39,9 +43,18 @@ public final class TestChatMemory {
     private static final int MAX_ARTIFACT_PAYLOAD = 48 * 1024;
     private static final int MAX_ARTIFACT_BYTES = 1024 * 1024;
     private static final String DECLARATION_ARTIFACT = "skill_json";
+    private static final int SKILL_DRAFT_VERSION = 1;
+    private static final int MAX_DRAFT_TEXT_BYTES = 48 * 1024;
+    private static final int MAX_DRAFT_ID_BYTES = 36;
+    private static final int MAX_DRAFT_NAME_BYTES = MAX_SETTINGS_NAME * 4;
+    private static final int MAX_DRAFT_FILE_BYTES = 2 * MAX_DRAFT_TEXT_BYTES + MAX_DRAFT_ID_BYTES
+            + MAX_DRAFT_NAME_BYTES + 5 * Integer.BYTES;
+    private static final String SKILL_DRAFT_SUFFIX = ".skill-draft";
+    private static final Pattern DRAFT_NAME = Pattern.compile("[\\p{L}\\p{N}_-]{1,24}");
     private static final ConcurrentHashMap<String, State> STATES = new ConcurrentHashMap<>();
     private static final Object IO_LOCK = new Object();
     private final File file;
+    private final File skillDraftFile;
     private final State state;
     private final int rounds;
 
@@ -57,6 +70,7 @@ public final class TestChatMemory {
     TestChatMemory(File directory, AiModelConfig config) {
         rounds = Math.max(0, Math.min(MAX_ROUNDS, config.contextRounds));
         file = new File(directory, key(config) + ".bin");
+        skillDraftFile = skillDraftFile(file);
         state = STATES.computeIfAbsent(file.getAbsolutePath(), ignored -> new State());
         if (rounds == 0) clear();
     }
@@ -66,6 +80,82 @@ public final class TestChatMemory {
     public boolean historyEnabled() { return rounds > 0; }
 
     public String conversationKey() { return file.getName().substring(0, 64); }
+
+    /** Active local authoring state. Empty pending fields mean the preview has not been saved to the catalog. */
+    public record SkillDraft(String definition, String videoFacts, String pendingName, String pendingDraftId) {}
+
+    public SkillDraft readSkillDraft() {
+        synchronized (IO_LOCK) { return rounds == 0 ? null : readStoredSkillDraft(); }
+    }
+
+    /** Compare-and-set without appending a turn or adding the draft to model context. */
+    public boolean writeSkillDraft(long expectedEpoch, SkillDraft expected, SkillDraft next) {
+        synchronized (IO_LOCK) {
+            if (rounds == 0 || expectedEpoch != state.epoch || next != null && !validSkillDraft(next)) return false;
+            if (!Objects.equals(expected, readStoredSkillDraft())) return false;
+            if (next == null) return !skillDraftFile.exists() || skillDraftFile.delete();
+            if (next.equals(expected)) return true;
+            File directory = file.getParentFile();
+            if (!directory.isDirectory() && !directory.mkdirs() && !directory.isDirectory()) return false;
+            File temporary = null;
+            try {
+                temporary = File.createTempFile("skill-draft-", ".tmp", directory);
+                try (FileOutputStream stream = new FileOutputStream(temporary);
+                     DataOutputStream output = new DataOutputStream(stream)) {
+                    output.writeInt(SKILL_DRAFT_VERSION);
+                    text(output, next.definition());
+                    text(output, next.videoFacts());
+                    text(output, next.pendingName());
+                    text(output, next.pendingDraftId());
+                    output.flush();
+                    stream.getFD().sync();
+                }
+                Files.move(temporary.toPath(), skillDraftFile.toPath(), StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+                evictOtherFiles(directory);
+                return true;
+            } catch (IOException | RuntimeException failure) {
+                return false;
+            } finally { if (temporary != null) temporary.delete(); }
+        }
+    }
+
+    private SkillDraft readStoredSkillDraft() {
+        if (!skillDraftFile.isFile() || skillDraftFile.length() > MAX_DRAFT_FILE_BYTES) return null;
+        try (DataInputStream input = new DataInputStream(new java.io.FileInputStream(skillDraftFile))) {
+            if (input.readInt() != SKILL_DRAFT_VERSION) return null;
+            SkillDraft draft = new SkillDraft(draftText(input, MAX_DRAFT_TEXT_BYTES), draftText(input, MAX_DRAFT_TEXT_BYTES),
+                    draftText(input, MAX_DRAFT_NAME_BYTES), draftText(input, MAX_DRAFT_ID_BYTES));
+            return input.read() == -1 && validSkillDraft(draft) ? draft : null;
+        } catch (IOException | RuntimeException invalid) {
+            return null;
+        }
+    }
+
+    private static String draftText(DataInputStream input, int maxBytes) throws IOException {
+        int size = input.readInt();
+        if (size < 0 || size > maxBytes) throw new IOException("Skill draft size");
+        byte[] bytes = new byte[size];
+        input.readFully(bytes);
+        return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
+    }
+
+    private static boolean validSkillDraft(SkillDraft draft) {
+        if (!validDraftText(draft.definition(), MAX_DRAFT_TEXT_BYTES) || !validDraftText(draft.videoFacts(), MAX_DRAFT_TEXT_BYTES)
+                || !validDraftText(draft.pendingName(), MAX_DRAFT_NAME_BYTES)
+                || !validDraftText(draft.pendingDraftId(), MAX_DRAFT_ID_BYTES)) return false;
+        if (draft.pendingName().isEmpty()) return draft.pendingDraftId().isEmpty() && !draft.definition().isEmpty();
+        if (!DRAFT_NAME.matcher(draft.pendingName()).matches() || draft.pendingDraftId().length() != MAX_DRAFT_ID_BYTES) {
+            return false;
+        }
+        try { return UUID.fromString(draft.pendingDraftId()).toString().equals(draft.pendingDraftId()); }
+        catch (IllegalArgumentException invalid) { return false; }
+    }
+
+    private static boolean validDraftText(String value, int maxBytes) {
+        return value != null && value.length() <= maxBytes && StandardCharsets.UTF_8.newEncoder().canEncode(value)
+                && utf8Length(value) <= maxBytes;
+    }
 
     /** Ordinary model context, excluding all local-only Skill turns. */
     public List<Turn> read() { return readStored(false); }
@@ -230,7 +320,11 @@ public final class TestChatMemory {
     }
 
     public void clear() {
-        synchronized (IO_LOCK) { state.epoch++; file.delete(); }
+        synchronized (IO_LOCK) {
+            state.epoch++;
+            file.delete();
+            skillDraftFile.delete();
+        }
     }
 
     private List<Turn> bounded(List<Turn> turns) {
@@ -308,18 +402,36 @@ public final class TestChatMemory {
     private static int utf8Length(String text) { return text.getBytes(StandardCharsets.UTF_8).length; }
 
     private void evictOtherFiles(File directory) {
-        File[] files = directory.listFiles((parent, name) -> name.endsWith(".bin"));
+        File[] files = directory.listFiles((parent, name) -> name.endsWith(".bin") || name.endsWith(".bin" + SKILL_DRAFT_SUFFIX));
         if (files == null) return;
-        java.util.Arrays.sort(files, java.util.Comparator.comparingLong(File::lastModified));
+        Map<String, Long> scopes = new LinkedHashMap<>();
         long bytes = 0;
-        for (File candidate : files) bytes += candidate.length();
         for (File candidate : files) {
+            if (!candidate.isFile()) continue;
+            String name = candidate.getName();
+            if (name.endsWith(SKILL_DRAFT_SUFFIX)) name = name.substring(0, name.length() - SKILL_DRAFT_SUFFIX.length());
+            scopes.merge(name, candidate.lastModified(), Math::max);
+            bytes += candidate.length();
+        }
+        List<Map.Entry<String, Long>> oldest = new ArrayList<>(scopes.entrySet());
+        oldest.sort(Map.Entry.comparingByValue());
+        for (Map.Entry<String, Long> scope : oldest) {
             if (bytes <= MAX_DIRECTORY_BYTES) break;
+            File candidate = new File(directory, scope.getKey());
             if (candidate.equals(file)) continue;
             STATES.computeIfAbsent(candidate.getAbsolutePath(), ignored -> new State()).epoch++;
-            bytes -= candidate.length();
-            candidate.delete();
+            bytes -= remove(candidate);
+            bytes -= remove(skillDraftFile(candidate));
         }
+    }
+
+    private static File skillDraftFile(File transcript) {
+        return new File(transcript.getPath() + SKILL_DRAFT_SUFFIX);
+    }
+
+    private static long remove(File candidate) {
+        long bytes = candidate.length();
+        return candidate.delete() ? bytes : 0;
     }
 
     private static String key(AiModelConfig config) {

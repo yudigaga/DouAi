@@ -25,6 +25,7 @@ public final class SkillVideoFacts {
     private static final int MAX_RESPONSE_DEPTH = 4;
     private static final Pattern LINE = Pattern.compile("^\\s*(?:[-*+]|#{1,6})?\\s*([^:：]{1,48})[:：]\\s*(.*?)\\s*$");
     private static final Pattern FIELD = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,31}");
+    private static final Pattern CONTENT_TYPE_LINE = Pattern.compile("(?i)^Content-Type\\s*[:：]\\s*([^\\r\\n]+)$");
     private static final Pattern STATE = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,31}");
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9._~-]{1,64}");
     private static final Pattern SECRET = Pattern.compile("(?i)(?:^|[\\s{,?&;])[\"']?"
@@ -49,7 +50,9 @@ public final class SkillVideoFacts {
     private enum Fact {
         LABEL("label", ""),
         SUBMIT("submitEndpoint", "提交 POST 的公网 HTTPS 地址"),
+        SUBMIT_PATH("submitPath", "提交 POST 路径"),
         ENCODING("submitEncoding", "提交请求编码"),
+        MIN_POLL("minPollSeconds", ""),
         SUBMIT_ID("submitIdField", "提交响应任务 ID 字段"),
         STATUS("statusPath", "查询 GET 路径（含 {id}）"),
         STATUS_ID("statusIdField", "查询响应任务 ID 字段"),
@@ -84,6 +87,7 @@ public final class SkillVideoFacts {
     private static final List<FormSpec> FORM = List.of(
             new FormSpec(Fact.LABEL, "服务名称", FieldType.TEXT, false),
             new FormSpec(Fact.SUBMIT, Fact.SUBMIT.missing, FieldType.HTTPS_URL, true),
+            new FormSpec(Fact.SUBMIT_PATH, Fact.SUBMIT_PATH.missing, FieldType.TEXT, false),
             new FormSpec(Fact.ENCODING, Fact.ENCODING.missing, FieldType.TEXT, false),
             new FormSpec(null, PROMPT, "提示词字段", FieldType.JSON_FIELD, true),
             new FormSpec(Fact.SUBMIT_ID, Fact.SUBMIT_ID.missing, FieldType.JSON_PATH, true),
@@ -117,9 +121,19 @@ public final class SkillVideoFacts {
             if (!formValue(field).isEmpty()) sources.put(field.id(), source == null ? defaultSource : source);
             else if (source == Source.MANUAL) sources.put(field.id(), source);
         }
+        if (facts.containsKey(Fact.MIN_POLL)) {
+            Source source = provenance.get(Fact.MIN_POLL.key);
+            if (source != null && source != Source.MANUAL) throw invalid();
+            sources.put(Fact.MIN_POLL.key, Source.MANUAL);
+        }
         if (!sources.keySet().containsAll(provenance.keySet())) throw invalid();
         this.provenance = Collections.unmodifiableMap(sources);
         checkOrigins();
+        String endpoint = facts.get(Fact.SUBMIT);
+        String submitPath = facts.get(Fact.SUBMIT_PATH);
+        if (endpoint != null && submitPath != null && !submitPath.equals(URI.create(endpoint).getRawPath())) {
+            throw new IllegalArgumentException("提交接口地址与已填写的提交路径不同");
+        }
         String id = facts.get(Fact.STATUS_ID);
         String state = facts.get(Fact.STATE);
         if (id != null && state != null && (id.equals(state) || id.startsWith(state + ".")
@@ -136,6 +150,14 @@ public final class SkillVideoFacts {
     public static SkillVideoFacts parseReference(String notes) {
         if (notes == null || !SkillVideoReference.recognizable(notes.substring(0, Math.min(notes.length(), MAX_NOTES)))) {
             return empty();
+        }
+        return parseNotes(notes, true);
+    }
+
+    public static SkillVideoFacts parseSupplement(String notes) {
+        if (notes != null && notes.length() <= MAX_NOTES) {
+            Matcher header = CONTENT_TYPE_LINE.matcher(notes.trim().replaceFirst("^接口资料\\s*[:：]\\s*", ""));
+            if (header.matches()) notes = "提交请求编码: " + header.group(1);
         }
         return parseNotes(notes, true);
     }
@@ -195,7 +217,11 @@ public final class SkillVideoFacts {
             if (value.isEmpty()) continue;
             switch (label) {
                 case "名称", "服务名称", "label", "name" -> put(facts, Fact.LABEL, checked(Fact.LABEL, value));
-                case "提交", "提交接口", "提交地址", "submit" -> put(facts, Fact.SUBMIT, endpoint(operation(value, "POST")));
+                case "提交", "提交接口", "提交地址", "submit" -> {
+                    String address = operation(value, "POST");
+                    if (address.startsWith("/")) put(facts, Fact.SUBMIT_PATH, submitPath(address));
+                    else put(facts, Fact.SUBMIT, endpoint(address));
+                }
                 case "提交请求编码", "提交编码", "submitencoding" -> facts.merge(Fact.ENCODING,
                         encoding(value), SkillVideoFacts::mergeEncoding);
                 case "提示词字段", "提示词参数", "promptfield", "prompt" -> {
@@ -226,7 +252,8 @@ public final class SkillVideoFacts {
                 default -> { /* Only recognized, verified facts are retained. */ }
             }
         }
-        if ((requireEncoding || reference.documentedSubmit()) && facts.containsKey(Fact.SUBMIT)) {
+        if ((requireEncoding || reference.documentedSubmit() || facts.containsKey(Fact.SUBMIT_PATH))
+                && (facts.containsKey(Fact.SUBMIT) || facts.containsKey(Fact.SUBMIT_PATH))) {
             facts.putIfAbsent(Fact.ENCODING, UNKNOWN_ENCODING);
         }
         if (!conflictingPrompts && !promptExample.isEmpty() && !request.containsValue("argument")
@@ -248,7 +275,12 @@ public final class SkillVideoFacts {
         if (!Integer.valueOf(1).equals(object.opt("version"))) throw invalid();
         Map<Fact, String> facts = new EnumMap<>(Fact.class);
         for (Fact fact : Fact.values()) {
-            if (object.has(fact.key)) facts.put(fact, checked(fact, string(object.opt(fact.key))));
+            if (!object.has(fact.key)) continue;
+            Object value = object.opt(fact.key);
+            if (fact == Fact.MIN_POLL) {
+                if (!(value instanceof Integer seconds)) throw invalid();
+                facts.put(fact, checkedPollSeconds(seconds));
+            } else facts.put(fact, checked(fact, string(value)));
         }
         int expected = 1 + facts.size();
         Map<String, String> request = new LinkedHashMap<>();
@@ -303,6 +335,7 @@ public final class SkillVideoFacts {
             put(stored, Fact.SUBMIT.key, endpoint(configuredEndpoint));
         }
         put(stored, Fact.ENCODING.key, JSON_ENCODING);
+        if (video.minPollSeconds() != 0) put(stored, Fact.MIN_POLL.key, video.minPollSeconds());
         put(stored, Fact.SUBMIT_ID.key, http.responseField());
         put(stored, Fact.STATUS.key, video.statusPath());
         put(stored, Fact.STATUS_ID.key, video.idField());
@@ -322,7 +355,8 @@ public final class SkillVideoFacts {
     public JSONObject toJson() {
         JSONObject stored = new JSONObject();
         put(stored, "version", 1);
-        facts.forEach((key, value) -> put(stored, key.key, value));
+        facts.forEach((key, value) -> put(stored, key.key,
+                key == Fact.MIN_POLL ? Integer.valueOf(value) : value));
         if (!request.isEmpty()) put(stored, "request", new JSONObject(request));
         if (!states.isEmpty()) put(stored, "states", new JSONObject(states));
         if (!config.isEmpty()) put(stored, "configFields", configFields());
@@ -335,6 +369,19 @@ public final class SkillVideoFacts {
     }
 
     public static SkillVideoFacts fromForm(Map<String, String> values) { return empty().withForm(values); }
+
+    public SkillVideoFacts withMinimumPollSeconds(int seconds) {
+        String value = checkedPollSeconds(seconds);
+        if (value.equals(facts.get(Fact.MIN_POLL))) return this;
+        Map<Fact, String> changed = new EnumMap<>(Fact.class);
+        changed.putAll(facts);
+        changed.put(Fact.MIN_POLL, value);
+        return new SkillVideoFacts(changed, request, states, declarations, config, provenance, Source.MANUAL);
+    }
+
+    public int minimumPollSeconds() {
+        return Integer.parseInt(facts.getOrDefault(Fact.MIN_POLL, "0"));
+    }
 
     public SkillVideoFacts withForm(Map<String, String> changes) {
         if (changes == null || changes.isEmpty()) return this;
@@ -382,6 +429,7 @@ public final class SkillVideoFacts {
             boolean required = spec.required()
                     || spec.fact() == Fact.CANCEL && facts.containsKey(Fact.CANCEL_METHOD)
                     || spec.fact() == Fact.CANCEL_METHOD && facts.containsKey(Fact.CANCEL);
+            if (spec.fact() == Fact.SUBMIT && facts.containsKey(Fact.SUBMIT_PATH)) required = false;
             fields.add(new FormField(spec.id(), spec.label(), spec.type(), required, formValue(spec),
                     provenance.getOrDefault(spec.id(), Source.EMPTY)));
         }
@@ -412,12 +460,12 @@ public final class SkillVideoFacts {
     }
 
     private static Map<String, Source> readProvenance(JSONObject stored) {
-        if (stored == null || stored.length() > FORM.size()) throw invalid();
+        if (stored == null || stored.length() > FORM.size() + 1) throw invalid();
         Map<String, Source> used = new LinkedHashMap<>();
         try {
             for (Iterator<String> ids = stored.keys(); ids.hasNext();) {
                 String id = ids.next();
-                formSpec(id);
+                if (!Fact.MIN_POLL.key.equals(id)) formSpec(id);
                 Source source = Source.valueOf(string(stored.opt(id)));
                 if (source == Source.EMPTY) throw invalid();
                 used.put(id, source);
@@ -432,6 +480,7 @@ public final class SkillVideoFacts {
         String priorEndpoint = facts.get(Fact.SUBMIT);
         String nextEndpoint = newer.facts.get(Fact.SUBMIT);
         if (priorEndpoint != null && nextEndpoint != null && !priorEndpoint.equals(nextEndpoint)) return newer;
+        if (!supportsSubmissionEncoding()) return fillMissingFrom(newer);
         if (newer.isComplete()) return newer;
         return combine(newer, false);
     }
@@ -439,12 +488,47 @@ public final class SkillVideoFacts {
     /** Fills unset fields from extracted documentation or an approved Skill shape. */
     public SkillVideoFacts fillMissingFrom(SkillVideoFacts incoming) {
         if (incoming == null || incoming.isEmpty()) return this;
-        String current = facts.get(Fact.SUBMIT);
-        String offered = incoming.facts.get(Fact.SUBMIT);
-        if (current != null && offered != null && !current.equals(offered)) {
-            throw new IllegalArgumentException("提交地址与已填写的接口资料不同，请核对地址");
+        if (!compatibleSubmission(incoming)) {
+            throw new IllegalArgumentException("提交地址或路径与已填写的接口资料不同，请核对地址");
         }
         return combine(incoming, true);
+    }
+
+    private boolean compatibleSubmission(SkillVideoFacts incoming) {
+        String current = facts.get(Fact.SUBMIT);
+        String offered = incoming.facts.get(Fact.SUBMIT);
+        if (current != null && offered != null && !current.equals(offered)) return false;
+        String currentPath = current == null ? submitPath() : URI.create(current).getRawPath();
+        String offeredPath = offered == null ? incoming.submitPath() : URI.create(offered).getRawPath();
+        return currentPath.isEmpty() || offeredPath.isEmpty() || currentPath.equals(offeredPath);
+    }
+
+    boolean canEnrichSubmissionEncoding(SkillVideoFacts incoming) {
+        if (incoming == null || !UNKNOWN_ENCODING.equals(submitEncoding())
+                || provenance.get(Fact.ENCODING.key) == Source.MANUAL || incoming.submitEncoding().isEmpty()
+                || UNKNOWN_ENCODING.equals(incoming.submitEncoding()) || !compatibleSubmission(incoming)) return false;
+        for (Fact field : Fact.values()) {
+            if (field == Fact.LABEL || field == Fact.ENCODING || field == Fact.MIN_POLL
+                    || field == Fact.SUBMIT || field == Fact.SUBMIT_PATH) continue;
+            String before = facts.get(field);
+            String after = incoming.facts.get(field);
+            if (before != null && after != null && !before.equals(after)) {
+                boolean route = field == Fact.STATUS || field == Fact.CANCEL || field == Fact.DOWNLOAD;
+                if (!route || before.startsWith("https://") && after.startsWith("https://")
+                        || !path(before).equals(path(after))) return false;
+            }
+        }
+        for (Map.Entry<String, String> field : request.entrySet()) {
+            if (incoming.request.containsKey(field.getKey())
+                    && !field.getValue().equals(incoming.request.get(field.getKey()))) return false;
+        }
+        for (Map.Entry<String, String> state : states.entrySet()) {
+            if (incoming.states.containsKey(state.getKey())
+                    && !state.getValue().equals(incoming.states.get(state.getKey()))) return false;
+        }
+        String prompt = formValue(formSpec(PROMPT));
+        String nextPrompt = incoming.formValue(formSpec(PROMPT));
+        return prompt.isEmpty() || nextPrompt.isEmpty() || prompt.equals(nextPrompt);
     }
 
     private SkillVideoFacts combine(SkillVideoFacts newer, boolean fillOnly) {
@@ -453,9 +537,10 @@ public final class SkillVideoFacts {
         Map<String, Source> mergedSources = new LinkedHashMap<>(provenance);
         for (Map.Entry<Fact, String> item : newer.facts.entrySet()) {
             Fact field = item.getKey();
+            boolean enrichEncoding = field == Fact.ENCODING && canEnrichSubmissionEncoding(newer);
             if (fillOnly && (provenance.containsKey(field.key)
                     || field == Fact.RESULT_URL && facts.containsKey(Fact.DOWNLOAD)
-                    || field == Fact.DOWNLOAD && facts.containsKey(Fact.RESULT_URL))) continue;
+                    || field == Fact.DOWNLOAD && facts.containsKey(Fact.RESULT_URL)) && !enrichEncoding) continue;
             mergedFacts.put(field, item.getValue());
             mergedSources.put(field.key, newer.provenance.get(field.key));
         }
@@ -496,11 +581,41 @@ public final class SkillVideoFacts {
 
     public String submitEncoding() { return facts.getOrDefault(Fact.ENCODING, ""); }
 
-    public boolean supportsSubmissionEncoding() { return submitEncoding().isEmpty() || JSON_ENCODING.equals(submitEncoding()); }
+    public String submitPath() { return facts.getOrDefault(Fact.SUBMIT_PATH, ""); }
+
+    public boolean needsApiBase() { return !submitPath().isEmpty() && !facts.containsKey(Fact.SUBMIT); }
+
+    public String resolveApiBase(String base) {
+        if (!needsApiBase()) throw invalid();
+        String canonical = endpoint(base);
+        if (!"/".equals(URI.create(canonical).getRawPath())) {
+            throw new IllegalArgumentException("API 基础地址只包含 HTTPS 主机和可选端口");
+        }
+        String target = endpoint(authority(canonical) + submitPath());
+        checkRelativeEndpointOrigin(target);
+        return target;
+    }
+
+    public String apiBaseForEndpoint(String configured) {
+        if (!needsApiBase() || configured == null || configured.isEmpty()) return "";
+        try {
+            String base = authority(endpoint(configured));
+            return resolveApiBase(base).equals(configured) ? base : "";
+        } catch (IllegalArgumentException invalid) { return ""; }
+    }
+
+    void checkRelativeEndpointOrigin(String configured) {
+        if (needsApiBase()) checkRouteOrigins(authority(configured));
+    }
+
+    public boolean supportsSubmissionEncoding() {
+        return JSON_ENCODING.equals(submitEncoding()) || submitEncoding().isEmpty() && submitPath().isEmpty();
+    }
 
     public List<String> missing() {
         List<String> missing = new ArrayList<>();
         for (FormSpec spec : FORM) {
+            if (spec.fact() == Fact.SUBMIT && facts.containsKey(Fact.SUBMIT_PATH)) continue;
             if (spec.required() && spec.fact() != null && !facts.containsKey(spec.fact())) missing.add(spec.label());
         }
         if (!request.containsValue("argument")) missing.add("提示词字段");
@@ -540,10 +655,11 @@ public final class SkillVideoFacts {
         put(video, "idField", facts.get(Fact.STATUS_ID));
         put(video, "stateField", facts.get(Fact.STATE));
         put(video, "states", new JSONObject(states));
+        if (minimumPollSeconds() != 0) put(video, Fact.MIN_POLL.key, minimumPollSeconds());
         JSONObject declaration = new JSONObject();
         put(declaration, "version", SkillHttpDeclaration.VERSION);
         put(declaration, "label", facts.getOrDefault(Fact.LABEL, "视频服务"));
-        put(declaration, "suggestedEndpoint", facts.get(Fact.SUBMIT));
+        if (facts.containsKey(Fact.SUBMIT)) put(declaration, "suggestedEndpoint", facts.get(Fact.SUBMIT));
         put(declaration, "request", new JSONObject(request));
         put(declaration, "response", facts.get(Fact.SUBMIT_ID));
         put(declaration, "video", video);
@@ -552,7 +668,10 @@ public final class SkillVideoFacts {
 
     private void checkOrigins() {
         String endpoint = facts.get(Fact.SUBMIT);
-        String origin = endpoint == null ? null : authority(endpoint);
+        checkRouteOrigins(endpoint == null ? null : authority(endpoint));
+    }
+
+    private void checkRouteOrigins(String origin) {
         for (Fact operation : new Fact[]{Fact.STATUS, Fact.CANCEL, Fact.DOWNLOAD}) {
             String route = facts.get(operation);
             if (route == null || !route.startsWith("https://")) continue;
@@ -573,7 +692,9 @@ public final class SkillVideoFacts {
                 yield value;
             }
             case SUBMIT -> endpoint(value);
+            case SUBMIT_PATH -> submitPath(value);
             case ENCODING -> encoding(value);
+            case MIN_POLL -> throw invalid();
             case SUBMIT_ID, STATUS_ID, STATE, RESULT_URL -> responsePath(value);
             case STATUS, CANCEL, DOWNLOAD -> route(value);
             case CANCEL_METHOD -> {
@@ -581,6 +702,11 @@ public final class SkillVideoFacts {
                 yield value.toUpperCase(Locale.ROOT);
             }
         };
+    }
+
+    private static String checkedPollSeconds(int seconds) {
+        if (seconds < 3 || seconds > 60) throw new IllegalArgumentException("最短轮询间隔应为 3 到 60 秒");
+        return Integer.toString(seconds);
     }
 
     private static String operation(String value, String expectedMethod) {
@@ -680,6 +806,11 @@ public final class SkillVideoFacts {
 
     private static String path(String route) { return route.startsWith("/") ? route : route.substring(route.indexOf('/', 8)); }
 
+    private static String submitPath(String value) {
+        checkPath(value, false);
+        return value;
+    }
+
     private static String route(String value) {
         String origin = "";
         if (!value.startsWith("/")) {
@@ -689,7 +820,12 @@ public final class SkillVideoFacts {
             origin = authority(endpoint(value.substring(0, slash)));
             value = value.substring(slash);
         }
-        if (value.length() > 320 || value.startsWith("//")) throw invalid();
+        checkPath(value, true);
+        return origin + value;
+    }
+
+    private static void checkPath(String value, boolean taskTemplate) {
+        if (!value.startsWith("/") || value.length() > 320 || value.startsWith("//")) throw invalid();
         int placeholders = 0;
         String[] parts = value.substring(1).split("/", -1);
         for (int i = 0; i < parts.length; i++) {
@@ -698,8 +834,7 @@ public final class SkillVideoFacts {
             else if (!(part.isEmpty() && i == parts.length - 1)
                     && (!SEGMENT.matcher(part).matches() || part.equals(".") || part.equals(".."))) throw invalid();
         }
-        if (placeholders != 1) throw invalid();
-        return origin + value;
+        if (placeholders != (taskTemplate ? 1 : 0)) throw invalid();
     }
 
     private static String responsePath(String value) {

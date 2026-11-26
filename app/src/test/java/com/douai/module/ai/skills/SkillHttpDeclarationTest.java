@@ -122,6 +122,24 @@ public final class SkillHttpDeclarationTest {
         assertEquals("DELETE", SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of()).video().cancelMethod());
     }
 
+    @Test public void videoMinimumPollIntervalIsAnOptionalBoundedInteger() throws Exception {
+        SkillHttpDeclaration legacy = parse(VIDEO, SkillResult.Type.VIDEO);
+        assertEquals(0, legacy.video().minPollSeconds());
+        assertFalse(legacy.toJson().getJSONObject("video").has("minPollSeconds"));
+        for (int seconds : new int[]{3, 8, 60}) {
+            JSONObject raw = new JSONObject(VIDEO);
+            raw.getJSONObject("video").put("minPollSeconds", seconds);
+            SkillHttpDeclaration configured = parse(raw.toString(), SkillResult.Type.VIDEO);
+            assertEquals(seconds, configured.video().minPollSeconds());
+            assertEquals(seconds, configured.toJson().getJSONObject("video").getInt("minPollSeconds"));
+            assertEquals(configured, parse(configured.toJson().toString(), SkillResult.Type.VIDEO));
+        }
+        for (String encoded : List.of("0", "-1", "2", "61", "8.0", "8e0", "\"8\"", "null", "true")) {
+            String invalid = VIDEO.replace("\"states\":", "\"minPollSeconds\":" + encoded + ",\"states\":");
+            assertThrows(encoded, SkillHttpDeclaration.Invalid.class, () -> parse(invalid, SkillResult.Type.VIDEO));
+        }
+    }
+
     @Test public void videoResponsePathsReadOnlyExactStringLeavesInsideObjects() throws Exception {
         JSONObject raw = new JSONObject(VIDEO).put("response", "data.task.id");
         raw.getJSONObject("video").put("idField", "data.task.id").put("stateField", "data.task.lifecycle.state");

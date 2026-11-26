@@ -316,6 +316,9 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (!manifest.usesHttp()) return;
         SkillHttpDeclaration declaration = manifest.http();
         SkillStore.CustomConfiguration current = detail.customConfiguration();
+        SkillVideoFacts facts = polling ? detail.videoFacts() : null;
+        String savedBase = facts == null || current == null ? "" : facts.apiBaseForEndpoint(current.endpoint());
+        boolean useApiBase = facts != null && facts.needsApiBase() && (current == null || !savedBase.isEmpty());
         section(declaration == null ? "HTTPS 服务" : declaration.label(), "skills.detail.custom");
         String request = declaration == null ? SkillCustomService.REQUEST_FIELD : String.join("、", declaration.request().keySet());
         String response = declaration == null ? SkillCustomService.RESPONSE_FIELD : declaration.responseField();
@@ -328,9 +331,14 @@ final class AiSkillDetailDialog implements AutoCloseable {
             if (video.canCancel()) routes += "\n取消 " + video.cancelMethod() + " " + video.cancelPath();
             text(body, routes, "skills.detail.custom.video_routes");
         }
-        EditText endpoint = input(body, "公网 HTTPS 完整接口地址", "skills.detail.custom.endpoint",
+        if (useApiBase) {
+            text(body, "填写与任务接口同源的 HTTPS 主机和可选端口。提交路径 " + facts.submitPath(),
+                    "skills.detail.custom.api_base_hint");
+        }
+        EditText endpoint = input(body, useApiBase ? "公网 HTTPS API 基础地址" : "公网 HTTPS 完整接口地址",
+                "skills.detail.custom.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
-        if (current != null) endpoint.setText(current.endpoint());
+        if (current != null) endpoint.setText(useApiBase ? savedBase : current.endpoint());
         else if (declaration != null && !declaration.suggestedEndpoint().isEmpty()) {
             text(body, "草案建议地址，核对后保存。", "skills.detail.custom.endpoint_suggestion");
             endpoint.setText(declaration.suggestedEndpoint());
@@ -341,10 +349,15 @@ final class AiSkillDetailDialog implements AutoCloseable {
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 2048, true);
         Map<String, Supplier<String>> values = manifestInputs(detail);
         button(body, "保存服务配置", "skills.detail.custom.save", () ->
-                saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false, enteredValues(values)));
+                saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false, enteredValues(values), useApiBase));
+        if (useApiBase) {
+            button(body, "按完整接口地址保存", "skills.detail.custom.save_complete_endpoint", () ->
+                    saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false, enteredValues(values), false));
+        }
         if (hasCredential) {
             button(body, "移除此技能密钥", "skills.detail.custom.remove_credential", () -> review("移除服务密钥",
-                    "确认后生成待启用配置。", "移除密钥", () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true, null)));
+                    "确认后生成待启用配置。", "移除密钥",
+                    () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true, null, false)));
         }
     }
 
@@ -481,6 +494,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private static String videoFactHelp(SkillVideoFacts.FormField field) {
+        if ("submitPath".equals(field.id())) return "文档中的 POST 路径，以 / 开头。与完整提交地址任选一项。";
         if ("submitEncoding".equals(field.id())) return "按接口文档填写。当前执行器只支持 application/json。";
         if ("resultUrlField".equals(field.id())) return "查询响应中返回成片链接的字段，与下载路径任选一项。";
         if ("downloadPath".equals(field.id())) return "下载的 GET 路径，含独立的 {id}。查询已返回成片链接时可留空。";
@@ -496,9 +510,12 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private void saveCustomConfiguration(SkillStore.Detail detail, String endpoint, EditText bearer, boolean clear,
-                                         Map<String, String> values) {
+                                         Map<String, String> values, boolean useApiBase) {
         try {
-            SkillStore.Detail saved = store.configureCustomService(detail, endpoint, clear ? "" : fieldValue(bearer), clear, values);
+            String credential = clear ? "" : fieldValue(bearer);
+            SkillStore.Detail saved = useApiBase
+                    ? store.configureCustomServiceBase(detail, endpoint, credential, clear, values)
+                    : store.configureCustomService(detail, endpoint, credential, clear, values);
             bearer.setText("");
             String status = saved.canReplace() ? "服务配置已保存，确认启用新版后生效"
                     : saved.pending() ? "草稿已保存，请补齐设置" : "服务配置已保存，可在聊天中确认调用";
@@ -509,7 +526,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
         } catch (SkillManifest.Invalid invalid) {
             status.setText(invalid.getMessage());
         } catch (IllegalArgumentException invalid) {
-            status.setText("请输入公网 HTTPS 完整接口地址，地址中请勿包含凭据、查询参数或片段");
+            status.setText(useApiBase ? "请输入与接口资料同源的公网 HTTPS 主机和可选端口"
+                    : "请输入公网 HTTPS 完整接口地址，地址中请勿包含凭据、查询参数或片段");
         } catch (Exception unavailable) {
             status.setText("无法保存服务配置，请重新打开技能详情");
         }

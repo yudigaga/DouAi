@@ -507,6 +507,158 @@ public class SkillStoreTest {
         return detail.videoFacts().formFields().stream().filter(field -> id.equals(field.id())).findFirst().orElseThrow();
     }
 
+    @Test public void conversationVideoSaveRequiresExactPendingIdentityAndRetainsCompatibleConfiguration() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        SkillVideoFacts facts = SkillVideoFacts.parse("""
+                提交: POST https://video.example.com/v1/videos
+                提示词字段: prompt
+                提交响应ID: id
+                必填整数字段: duration 时长
+                查询: GET /v1/videos/{id}
+                查询响应ID: id
+                状态字段: state
+                状态映射: done=completed
+                下载: GET /v1/videos/{id}/content
+                """);
+        String name = "镜头动画";
+        String endpoint = "https://video.example.com/v1/videos";
+        SkillStore.DraftPreview initial = SkillStore.validateAuthoredDraft(videoDraft(name).toString());
+        assertNotNull(store.saveConversationDraft(initial, facts, null).pending());
+        SkillStore.Detail active = store.configureCustomService(store.detail(name), endpoint, "fixture-active-video-key",
+                false, java.util.Map.of("duration", "6"));
+        assertEquals(1, active.current().version());
+        var pending = store.saveConversationDraft(initial, facts, "").pending();
+        assertNotNull(pending);
+        SkillStore.Detail configured = store.configureCustomService(store.detail(name), endpoint, "fixture-pending-video-key",
+                false, java.util.Map.of("duration", "8"));
+        assertTrue(configured.canReplace());
+        JSONObject changed = videoDraft(name).put("description", "改写草稿说明");
+        var revised = SkillStore.validateAuthoredDraft(changed.toString());
+        var catalog = new File(root, "catalog.json").toPath();
+        String before = Files.readString(catalog);
+        assertThrows(IllegalStateException.class, () -> store.saveConversationDraft(revised, facts, null));
+        assertThrows(IllegalStateException.class, () -> store.saveConversationDraft(revised, facts, pending.draftId()));
+        assertEquals(before, Files.readString(catalog));
+
+        var result = store.saveConversationDraft(revised, null, configured.draftId());
+        assertNotNull(result.pending());
+        SkillStore.Detail ready = store.detail(name);
+        assertEquals("改写草稿说明", ready.manifest().description());
+        assertEquals(configured.customConfiguration(), ready.customConfiguration());
+        assertEquals(8, ready.manifestValues().get("duration"));
+        assertEquals(active.current(), ready.current());
+        assertThrows(IllegalStateException.class, () -> store.saveConversationDraft(revised, facts, configured.draftId()));
+
+        var scheduled = store.saveConversationDraft(revised, facts.withMinimumPollSeconds(15), ready.draftId());
+        assertNotNull(scheduled.pending());
+        SkillStore.Detail scheduledDetail = store.detail(name);
+        assertEquals(15, scheduledDetail.manifest().http().video().minPollSeconds());
+        assertEquals(15, scheduledDetail.videoFacts().minimumPollSeconds());
+        var rescheduled = store.saveConversationDraft(revised, facts.withMinimumPollSeconds(12), scheduledDetail.draftId());
+        assertNotNull(rescheduled.pending());
+        assertNotNull(store.saveConversationDraft(revised, null, rescheduled.pending().draftId()).pending());
+        SkillStore.Detail savedSchedule = store.detail(name);
+        assertEquals(12, savedSchedule.videoFacts().minimumPollSeconds());
+        assertEquals(ready.customConfiguration(), savedSchedule.customConfiguration());
+        assertEquals(8, savedSchedule.manifestValues().get("duration"));
+
+        SkillVideoFacts changedWire = facts.withForm(java.util.Map.of("statusPath", "/v2/videos/{id}"));
+        var revisedWire = store.saveConversationDraft(revised, changedWire, savedSchedule.draftId());
+        assertNotNull(revisedWire.pending());
+        SkillStore.Detail unbound = store.detail(name);
+        assertEquals("/v2/videos/{id}", unbound.manifest().http().video().statusPath());
+        assertNull(unbound.customConfiguration());
+        assertEquals(8, unbound.manifestValues().get("duration"));
+        assertEquals(12, unbound.videoFacts().minimumPollSeconds());
+        assertEquals(active.current(), unbound.current());
+    }
+
+    @Test public void relativeVideoApiBaseBindsOnlyTheValidatedFullSameOriginEndpoint() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        SkillVideoFacts facts = SkillVideoFacts.parse("""
+                提交: POST /v1/videos
+                提交请求编码: application/json
+                提示词字段: prompt
+                提交响应ID: id
+                查询: GET https://video.example.com:8443/v1/videos/{id}
+                查询响应ID: id
+                状态字段: state
+                状态映射: done=completed
+                下载: GET /v1/videos/{id}/content
+                """);
+        String name = "镜头动画";
+        var proposal = SkillStore.validateAuthoredDraft(videoDraft(name).toString());
+        assertNotNull(store.saveConversationDraft(proposal, facts, null).pending());
+        SkillStore.Detail pending = store.detail(name);
+        assertTrue(pending.reason().contains("API 基础地址"));
+        assertEquals("", pending.manifest().http().suggestedEndpoint());
+        assertNull(pending.customConfiguration());
+        assertThrows(IllegalArgumentException.class, () -> store.configureCustomServiceBase(
+                pending, "https://video.example.com", "fixture-relative-video-key", false, null));
+        assertThrows(IllegalArgumentException.class, () -> store.configureCustomService(
+                pending, "https://different.example.com:8443/v1/videos", ""));
+        assertEquals(pending.deleteTarget(), store.detail(name).deleteTarget());
+
+        String base = "https://video.example.com:8443";
+        SkillStore.Detail installed = store.configureCustomServiceBase(pending, base, "fixture-relative-video-key", false, null);
+        assertFalse(installed.pending());
+        assertEquals(base + "/v1/videos", installed.customConfiguration().endpoint());
+        assertTrue(installed.customConfiguration().hasCredential());
+        AiSkills.Invocation call = AiSkills.match(AiSkills.Entry.CONTACT, "/镜头动画 海边", store);
+        assertEquals(base + "/v1/videos", store.previewCustomService(call).endpoint());
+    }
+
+    @Test public void conversationTextSaveKeepsNewInstallationAndExplicitReplacement() throws Exception {
+        SkillStore store = videoStore(temp.newFolder());
+        JSONObject text = new JSONObject("""
+                {"schemaVersion":4,"name":"文案草稿","description":"润色文字","documentation":"输入原稿",
+                 "instructions":"改善表达","capabilityId":"text_model","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"}}
+                """);
+        SkillStore.DraftPreview initial = SkillStore.validateAuthoredDraft(text.toString());
+        assertEquals(1, store.saveConversationDraft(initial, null, null).installed().version());
+        var revised = SkillStore.validateAuthoredDraft(text.put("description", "保持格式").toString());
+        var selected = store.saveConversationDraft(revised, null, null).pending();
+        assertNotNull(selected);
+        assertThrows(IllegalStateException.class, () -> store.saveConversationDraft(revised, null, null));
+        var staged = store.saveConversationDraft(revised, null, selected.draftId()).pending();
+        assertNotNull(staged);
+        assertEquals(1, store.detail("文案草稿").current().version());
+    }
+
+    @Test public void selectedConversationDraftCanEnrichOnlyDocumentedUnknownEncoding() throws Exception {
+        SkillStore store = videoStore(temp.newFolder());
+        SkillVideoFacts incomplete = SkillVideoFacts.parseSupplement("""
+                提交: POST /v1/videos
+                提示词字段: prompt
+                提交响应ID: id
+                查询: GET /v1/videos/{id}
+                查询响应ID: id
+                状态字段: status
+                状态映射: done=completed
+                下载: GET /v1/videos/{id}/content
+                """);
+        var pending = SkillStore.validateAuthoredDraft(videoDraft("镜头动画").toString());
+        var blocked = store.saveConversationDraft(pending, incomplete, null).pending();
+        assertNull(store.detail("镜头动画").manifest().http());
+        SkillVideoFacts json = SkillVideoFacts.parseSupplement("Content-Type: application/json");
+        var enriched = store.saveConversationDraft(pending, json, blocked.draftId()).pending();
+        assertNotNull(enriched);
+        assertNotNull(store.detail("镜头动画").manifest().http());
+        assertNull(store.detail("镜头动画").customConfiguration());
+
+        var multipart = SkillStore.validateAuthoredDraft(videoDraft("表单动画").toString());
+        SkillVideoFacts form = incomplete.fillMissingFrom(SkillVideoFacts.parseSupplement("Content-Type: multipart/form-data"));
+        var unsupported = store.saveConversationDraft(multipart, form, null).pending();
+        assertThrows(IllegalArgumentException.class,
+                () -> store.saveConversationDraft(multipart, json, unsupported.draftId()));
+        assertNull(store.detail("表单动画").manifest().http());
+        assertEquals("multipart/form-data", store.detail("表单动画").videoFacts().submitEncoding());
+    }
+
     private static SkillStore videoStore(File root) {
         var vault = new com.douai.module.ai.AiCredentialVault(
                 () -> new javax.crypto.spec.SecretKeySpec(new byte[32], "AES"));

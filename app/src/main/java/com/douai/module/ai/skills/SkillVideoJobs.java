@@ -243,7 +243,9 @@ public final class SkillVideoJobs {
         try {
             String remoteId = binding.declaration().readSubmittedTaskId(json(response));
             if (AiCredentialVault.containsImageCredential(remoteId, access.bearer())) return intent.job();
-            return finish(scope, intent, State.QUEUED, remoteId, 0, "").job();
+            int minPollSeconds = binding.declaration().video().minPollSeconds();
+            long firstPoll = minPollSeconds == 0 ? 0 : clock.getAsLong() + TimeUnit.SECONDS.toMillis(minPollSeconds);
+            return finish(scope, intent, State.QUEUED, remoteId, firstPoll, "").job();
         } catch (IllegalArgumentException | Failure invalid) {
             if (invalid instanceof Failure failure && failure.code() != Code.RESPONSE) throw failure;
             return intent.job();
@@ -268,8 +270,8 @@ public final class SkillVideoJobs {
         });
         Entry claimed = claim.entry();
         if (!claim.execute()) return claimed == null ? null : claimed.job();
+        SkillHttpDeclaration.Video video = access.binding().declaration().video();
         try {
-            SkillHttpDeclaration.Video video = access.binding().declaration().video();
             String endpoint = access.binding().endpoint();
             if (claimed.job().state() == State.DOWNLOAD_READY) {
                 if (video.resultUrlField().isEmpty()) {
@@ -293,7 +295,7 @@ public final class SkillVideoJobs {
                 state = State.CANCEL_PENDING;
             }
             if (claimed.job().state() == State.DOWNLOAD_READY && (state == State.QUEUED || state == State.RUNNING)) {
-                return finish(scope, claimed, State.DOWNLOAD_READY, claimed.remoteId(), nextPoll(claimed), claimed.mediaHash()).job();
+                return finish(scope, claimed, State.DOWNLOAD_READY, claimed.remoteId(), nextPoll(claimed, video), claimed.mediaHash()).job();
             }
             if (state == State.DOWNLOAD_READY) {
                 String downloadUrl = video.completedDownloadEndpoint(status, endpoint, claimed.remoteId());
@@ -302,15 +304,15 @@ public final class SkillVideoJobs {
                 if (ready.ticket().equals(claimed.ticket())) return download(scope, ready, access, downloadUrl, deadlineNanos);
                 return ready.job();
             }
-            return finish(scope, claimed, state, claimed.remoteId(), nextPoll(claimed), "").job();
+            return finish(scope, claimed, state, claimed.remoteId(), nextPoll(claimed, video), "").job();
         } catch (Failure failure) {
-            releasePoll(scope, claimed);
+            releasePoll(scope, claimed, video);
             throw failure;
         } catch (IllegalArgumentException invalid) {
-            releasePoll(scope, claimed);
+            releasePoll(scope, claimed, video);
             throw new Failure(Code.RESPONSE);
         } catch (IOException unavailable) {
-            releasePoll(scope, claimed);
+            releasePoll(scope, claimed, video);
             throw new Failure(Code.TRANSPORT);
         }
     }
@@ -337,9 +339,9 @@ public final class SkillVideoJobs {
         });
         Entry pending = claim.entry();
         if (claim.previous() == null) return pending == null ? null : pending.job();
+        SkillHttpDeclaration.Video video = access.binding().declaration().video();
         boolean rejected = false;
         try {
-            SkillHttpDeclaration.Video video = access.binding().declaration().video();
             SkillHttpsTransport.Method method = SkillHttpsTransport.Method.valueOf(video.cancelMethod());
             SkillHttpsTransport.Response reply = call(scope, pending, access, method, false,
                     video.cancelEndpoint(access.binding().endpoint(), pending.remoteId()),
@@ -355,7 +357,7 @@ public final class SkillVideoJobs {
             // A remote task ID remains available; only status queries may follow.
         }
         Entry saved = finish(scope, pending, rejected ? claim.previous() : State.CANCEL_PENDING,
-                pending.remoteId(), nextPoll(pending), "");
+                pending.remoteId(), nextPoll(pending, video), "");
         if (rejected) throw new Failure(Code.CANCEL_REFUSED);
         return saved.job();
     }
@@ -404,6 +406,7 @@ public final class SkillVideoJobs {
     }
 
     private Job download(Scope scope, Entry ready, Access access, String downloadUrl, long deadlineNanos) throws Failure {
+        SkillHttpDeclaration.Video video = access.binding().declaration().video();
         try {
             Job existing = reconcileDownloaded(scope, ready, true);
             if (existing != null) return existing;
@@ -433,20 +436,20 @@ public final class SkillVideoJobs {
                 return complete.job();
             });
         } catch (Failure failure) {
-            releasePoll(scope, ready);
+            releasePoll(scope, ready, video);
             throw failure;
         } catch (IllegalArgumentException invalid) {
-            releasePoll(scope, ready);
+            releasePoll(scope, ready, video);
             throw new Failure(Code.RESPONSE);
         } catch (SkillHttpsTransport.Failure unavailable) {
             if (unavailable.kind() == SkillHttpsTransport.Kind.RESPONSE_LIMIT) {
                 finish(scope, ready, State.FAILED, ready.remoteId(), 0, "");
                 throw new Failure(Code.RESPONSE);
             }
-            releasePoll(scope, ready);
+            releasePoll(scope, ready, video);
             throw new Failure(Code.TRANSPORT);
         } catch (IOException unavailable) {
-            releasePoll(scope, ready);
+            releasePoll(scope, ready, video);
             throw new Failure(Code.TRANSPORT);
         }
     }
@@ -527,20 +530,24 @@ public final class SkillVideoJobs {
         });
     }
 
-    private void releasePoll(Scope scope, Entry expected) throws Failure {
+    private void releasePoll(Scope scope, Entry expected, SkillHttpDeclaration.Video video) throws Failure {
         locked(scope, (file, catalog) -> {
             Entry current = sameClaim(expected, catalog);
             if (current.ticket().equals(expected.ticket()) && current.job().state() == expected.job().state()) {
-                update(file, catalog, current.change(current.job().state(), current.remoteId(), nextPoll(current),
+                update(file, catalog, current.change(current.job().state(), current.remoteId(), nextPoll(current, video),
                         current.ticket(), current.mediaHash()));
             }
             return null;
         });
     }
 
-    private long nextPoll(Entry entry) {
+    private long nextPoll(Entry entry, SkillHttpDeclaration.Video video) {
         int attempts = entry.pollVisits();
-        return clock.getAsLong() + (attempts <= 6 ? 3_000 : attempts <= 30 ? 12_000 : 30_000);
+        long backoff = attempts <= 6 ? 3_000 : attempts <= 30 ? 12_000 : 30_000;
+        // A fixed download route retries the media directly, without making another status request.
+        boolean mediaOnly = entry.job().state() == State.DOWNLOAD_READY && video.resultUrlField().isEmpty();
+        long floor = mediaOnly ? 0 : TimeUnit.SECONDS.toMillis(video.minPollSeconds());
+        return clock.getAsLong() + Math.max(backoff, floor);
     }
 
     private static Entry sameClaim(Entry expected, Catalog catalog) throws Failure {

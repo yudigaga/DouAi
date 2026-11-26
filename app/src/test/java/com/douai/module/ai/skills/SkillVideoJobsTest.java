@@ -124,6 +124,80 @@ public class SkillVideoJobsTest {
                 "GET https://video.example.com:9443/jobs/task_1/content"), sent);
     }
 
+    @Test public void configuredPollingFloorSurvivesReopenAndNeverShortensAdaptiveBackoff() throws Exception {
+        File directory = temporary.newFolder();
+        AtomicInteger submits = new AtomicInteger();
+        List<Long> checks = new ArrayList<>();
+        SkillVideoJobs.Transport transport = (method, media, url, bearer, body, deadline, admission) -> {
+            admission.check();
+            assertFalse(media);
+            if (method == SkillHttpsTransport.Method.POST) {
+                assertEquals(ENDPOINT, url);
+                assertArrayEquals(POST, body);
+                submits.incrementAndGet();
+                return json(202, "{\"job_id\":\"same_task\"}");
+            }
+            assertEquals(SkillHttpsTransport.Method.GET, method);
+            assertEquals("https://video.example.com:9443/jobs/same_task", url);
+            assertNull(body);
+            checks.add(clock.get());
+            if (checks.size() == 2) throw new IOException("status fixture unavailable");
+            return json(200, "{\"id\":\"same_task\",\"state\":\"running\"}");
+        };
+        var access = access(pollBinding(8), () -> {});
+        UUID local = UUID.randomUUID();
+        var first = new SkillVideoJobs(directory, clock::get, transport);
+        assertEquals(SkillVideoJobs.State.QUEUED,
+                first.submit(WORK, first.generation(WORK), local, access, POST, Long.MAX_VALUE).state());
+        var reopened = new SkillVideoJobs(directory, clock::get, transport);
+        long[] due = {9_000, 17_000, 25_000, 33_000, 41_000, 49_000, 57_000, 69_000};
+        for (int index = 0; index < due.length; index++) {
+            clock.set(due[index] - 1);
+            assertEquals(local, reopened.refresh(WORK, local, access, Long.MAX_VALUE).localId());
+            assertEquals(index, checks.size());
+            clock.set(due[index]);
+            if (index == 1) {
+                var unavailable = assertThrows(SkillVideoJobs.Failure.class,
+                        () -> reopened.refresh(WORK, local, access, Long.MAX_VALUE));
+                assertEquals(SkillVideoJobs.Code.TRANSPORT, unavailable.code());
+            } else {
+                assertEquals(SkillVideoJobs.State.RUNNING, reopened.refresh(WORK, local, access, Long.MAX_VALUE).state());
+            }
+        }
+        assertEquals(List.of(9_000L, 17_000L, 25_000L, 33_000L, 41_000L, 49_000L, 57_000L, 69_000L), checks);
+        assertEquals(SkillVideoJobs.State.RUNNING,
+                reopened.submit(WORK, reopened.generation(WORK), local, access, POST, Long.MAX_VALUE).state());
+        assertEquals(1, submits.get());
+    }
+
+    @Test public void pollingFloorDoesNotSlowFixedPathDownloadRetries() throws Exception {
+        List<String> requests = new ArrayList<>();
+        var access = access(pollBinding(8), () -> {});
+        var jobs = new SkillVideoJobs(temporary.newFolder(), clock::get, (method, media, url, bearer, body, deadline, gate) -> {
+            gate.check();
+            requests.add(method + " " + url);
+            return switch (requests.size()) {
+                case 1 -> json(202, "{\"job_id\":\"download_task\"}");
+                case 2 -> json(200, "{\"id\":\"download_task\",\"state\":\"done\"}");
+                case 3 -> json(503, "{}");
+                case 4 -> new SkillHttpsTransport.Response(200, "video/mp4", structuralMp4());
+                default -> throw new AssertionError("Unexpected request");
+            };
+        });
+        UUID id = UUID.randomUUID();
+        jobs.submit(WORK, jobs.generation(WORK), id, access, POST, Long.MAX_VALUE);
+        clock.set(9_000);
+        assertThrows(SkillVideoJobs.Failure.class, () -> jobs.refresh(WORK, id, access, Long.MAX_VALUE));
+        assertEquals(3, requests.size());
+        clock.set(11_999);
+        assertEquals(SkillVideoJobs.State.DOWNLOAD_READY, jobs.refresh(WORK, id, access, Long.MAX_VALUE).state());
+        assertEquals(3, requests.size());
+        clock.set(12_000);
+        assertEquals(SkillVideoJobs.State.COMPLETED, jobs.refresh(WORK, id, access, Long.MAX_VALUE).state());
+        String status = "GET https://video.example.com:9443/jobs/download_task";
+        assertEquals(List.of("POST " + ENDPOINT, status, status + "/content", status + "/content"), requests);
+    }
+
     @Test public void nestedRepliesRequireTheDeclaredIdAndStateBeforeUsingTheOriginalDownloadRoute() throws Exception {
         List<String> sent = new ArrayList<>();
         var access = access(binding("data.task.id", "data.task.id", "data.task.lifecycle.state"), () -> {});
@@ -324,6 +398,14 @@ public class SkillVideoJobsTest {
 
     private static SkillVideoJobs.Binding binding() {
         return binding("job_id", "id", "state");
+    }
+
+    private static SkillVideoJobs.Binding pollBinding(int seconds) throws Exception {
+        var ordinary = binding();
+        JSONObject schema = ordinary.declaration().toJson();
+        schema.getJSONObject("video").put("minPollSeconds", seconds);
+        return new SkillVideoJobs.Binding(ordinary.skillId(), ordinary.revisionId(), ordinary.configRevision(),
+                SkillHttpDeclaration.parse(schema, SkillResult.Type.VIDEO, List.of()), ENDPOINT);
     }
 
     private static SkillVideoJobs.Binding resultUrlBinding() throws Exception {

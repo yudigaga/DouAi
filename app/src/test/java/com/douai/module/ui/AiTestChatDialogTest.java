@@ -1070,7 +1070,7 @@ public final class AiTestChatDialogTest {
         assertNull(detail.manifest().http());
         assertEquals(SkillResult.Type.VIDEO, detail.outputType());
         assertTrue(lastAnswer().contains("待配置草稿 /电影片段"));
-        assertTrue(lastAnswer().contains(SkillStore.NEEDS_VIDEO_PROVIDER));
+        assertTrue(lastAnswer().contains("请贴所用视频服务的 API 文档"));
         assertEquals(2, messageCount());
         AlertDialog settings = openChatSkillSettings("电影片段");
         TextView heading = settings.getWindow().getDecorView().findViewWithTag("skills.detail.name");
@@ -1098,6 +1098,267 @@ public final class AiTestChatDialogTest {
 
     @Test public void contactSlashSkillPreviewsAndRequiresAnExplicitInstall() throws Exception {
         assertSlashSkillPreviewsAndRequiresAnExplicitInstall(AiSkills.Entry.CONTACT);
+    }
+
+    @Test public void workOpenAiVideoRequestRevisesTheSamePendingDraft() throws Exception {
+        assertOpenAiVideoRequestRevisesTheSamePendingDraft(AiSkills.Entry.WORK);
+    }
+
+    @Test public void contactOpenAiVideoRequestRevisesTheSamePendingDraft() throws Exception {
+        assertOpenAiVideoRequestRevisesTheSamePendingDraft(AiSkills.Entry.CONTACT);
+    }
+
+    private void assertOpenAiVideoRequestRevisesTheSamePendingDraft(AiSkills.Entry entry) throws Exception {
+        FakeSession session = new FakeSession();
+        session.transcriptMemory = entry == AiSkills.Entry.CONTACT
+                ? TestChatMemory.messageConversation(activity, restoreConfiguration())
+                : new TestChatMemory(activity, restoreConfiguration());
+        String base = new JSONObject(videoDraftWithoutProvider()).put("name", "轮询视频").toString();
+        String revisedInstruction = "轮询间隔为 8 秒，失败时显示原因且不重试。";
+        session.skillReplies.add(base);
+        session.skillReplies.add(new JSONObject(base).put("instructions", revisedInstruction).toString());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(session, ChatImageLoader::thumbnail, entry, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        String prompt = "/技能 帮我写一个自动轮询自动发送的视频的 skill，利用 openai 模型，帮我把内容填写好，只留 api 和密钥给我填写，并内置";
+        submit(prompt);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION), session.skillInstructions);
+        JSONObject request = new JSONObject(session.skillInputs.get(0));
+        assertEquals("video", request.getString("requiredOutputType"));
+        String requirement = request.getString("requirement");
+        assertTrue(requirement.contains("自动轮询自动发送"));
+        assertTrue(requirement.contains("openai"));
+        assertTrue(requirement.contains("只留 api 和密钥给我填写"));
+        assertEquals(prompt, bubble(0, "ai.chat.user"));
+        SkillStore store = SkillStore.forContext(activity);
+        assertEquals(List.of("轮询视频"), store.pending().stream().map(SkillStore.Pending::name).toList());
+        assertTrue(store.list().isEmpty());
+        SkillStore.Detail saved = store.detail("轮询视频");
+        assertNull(saved.customConfiguration());
+
+        String followUp = "把轮询间隔调到 8 秒，失败时提示且不要重试";
+        submit(followUp);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals("The follow-up belongs to the open draft, not ordinary chat",
+                List.of(SkillAuthoring.DESIGN_INSTRUCTION, SkillAuthoring.DESIGN_INSTRUCTION), session.skillInstructions);
+        assertTrue(session.prompts.isEmpty());
+        JSONObject revision = new JSONObject(session.skillInputs.get(1));
+        assertEquals(followUp, revision.getString("requirement"));
+        assertEquals("video", revision.getString("requiredOutputType"));
+        assertEquals("轮询视频", revision.getJSONObject("previousDefinition").getString("name"));
+        assertEquals(new JSONObject(base).getString("instructions"),
+                revision.getJSONObject("previousDefinition").getString("instructions"));
+        assertTrue(lastAnswer().contains(revisedInstruction));
+        TextView editor = text("ai.chat.skill_editor");
+        assertTrue((editor == null ? lastAnswer() : editor.getText().toString()).contains("正在编写 /轮询视频"));
+        SkillStore.Detail unchanged = store.detail("轮询视频");
+        assertEquals(saved.draftId(), unchanged.draftId());
+        assertEquals(saved.manifest().instructions(), unchanged.manifest().instructions());
+        assertEquals(List.of("轮询视频"), store.pending().stream().map(SkillStore.Pending::name).toList());
+        assertTrue(store.list().isEmpty());
+        assertEquals(0, submits.get());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(entry, session.transcriptMemory.conversationKey())).isEmpty());
+
+        FakeSession resumed = new FakeSession();
+        resumed.transcriptMemory = entry == AiSkills.Entry.CONTACT
+                ? TestChatMemory.messageConversation(activity, restoreConfiguration())
+                : new TestChatMemory(activity, restoreConfiguration());
+        reopen(resumed, ChatImageLoader::thumbnail, entry, null, jobs);
+        submit("等待恢复的普通聊天");
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(text("ai.chat.state").getText().toString().contains("正在恢复对话和草稿"));
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        TextView resumedEditor = text("ai.chat.skill_editor");
+        assertTrue((resumedEditor == null ? lastAnswer() : resumedEditor.getText().toString())
+                .contains("正在编写 /轮询视频"));
+        assertTrue(resumed.skillInputs.isEmpty());
+        assertTrue(resumed.prompts.isEmpty());
+
+        String resumedInstruction = "轮询间隔为 9 秒，失败时显示原因且不重试。";
+        String resumedEdit = "把轮询间隔改到 9 秒，失败时提示且不要重试";
+        resumed.skillReplies.add(new JSONObject(base).put("instructions", resumedInstruction).toString());
+        submit(resumedEdit);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION), resumed.skillInstructions);
+        JSONObject resumedRequest = new JSONObject(resumed.skillInputs.get(0));
+        assertEquals(resumedEdit, resumedRequest.getString("requirement"));
+        assertEquals(revisedInstruction, resumedRequest.getJSONObject("previousDefinition").getString("instructions"));
+        assertTrue(resumed.prompts.isEmpty());
+
+        List<String> ordinary = List.of("“" + followUp + "”", "这是一条普通闲聊");
+        for (String ordinaryPrompt : ordinary) {
+            submit(ordinaryPrompt);
+            worker.runNext();
+            ShadowLooper.idleMainLooper();
+        }
+        assertEquals(ordinary, resumed.prompts);
+        assertEquals(1, resumed.skillInputs.size());
+        assertEquals(saved.draftId(), store.detail("轮询视频").draftId());
+
+        submit("预览草稿");
+        if (!worker.tasks.isEmpty()) worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        String preview = lastAnswer();
+        if (ShadowDialog.getLatestDialog() instanceof AlertDialog previewDialog && previewDialog.isShowing()) {
+            var shadow = org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(previewDialog);
+            preview += "\n" + shadow.getMessage();
+            previewDialog.dismiss();
+            ShadowLooper.idleMainLooper();
+        }
+        assertTrue(preview.contains(resumedInstruction));
+        assertEquals(saved.draftId(), store.detail("轮询视频").draftId());
+
+        boolean keepChanges = entry == AiSkills.Entry.WORK;
+        submit(keepChanges ? "保存技能" : "取消编写");
+        if (!worker.tasks.isEmpty()) worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        SkillStore.Detail finalDraft = store.detail("轮询视频");
+        assertTrue(finalDraft.pending());
+        if (keepChanges) {
+            assertEquals(resumedInstruction, finalDraft.manifest().instructions());
+            assertEquals(9, finalDraft.videoFacts().minimumPollSeconds());
+        } else {
+            assertEquals(saved.draftId(), finalDraft.draftId());
+            assertEquals(saved.manifest().instructions(), finalDraft.manifest().instructions());
+            TextView afterCancel = text("ai.chat.skill_editor");
+            assertTrue(afterCancel == null || afterCancel.getVisibility() != View.VISIBLE
+                    || !afterCancel.getText().toString().contains("正在编写"));
+        }
+        assertEquals(List.of("轮询视频"), store.pending().stream().map(SkillStore.Pending::name).toList());
+        assertTrue(store.list().isEmpty());
+        assertNull(finalDraft.customConfiguration());
+        assertEquals(ordinary, resumed.prompts);
+        assertEquals(1, resumed.skillInputs.size());
+        assertEquals(0, submits.get());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(entry, resumed.transcriptMemory.conversationKey())).isEmpty());
+    }
+
+    @Test public void activeVideoDraftUsesPastedRelativeJsonDocsAndOnlyNeedsApiBaseAndKey() throws Exception {
+        FakeSession session = new FakeSession();
+        session.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        session.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "轮询视频").toString());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(session, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit("/技能 生成一个自动轮询视频技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("技能草案 /轮询视频"));
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+
+        int rows = messageCount();
+        submit("API Key: fixture-authoring-secret");
+        assertEquals(rows, messageCount());
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(text("ai.chat.state").getText().toString().contains("在技能设置填写"));
+
+        submit("""
+                提交: POST /v1/videos
+                提交请求编码: application/json
+                提示词字段: prompt
+                提交响应ID: id
+                查询: GET /v1/videos/{id}
+                查询响应ID: id
+                状态字段: status
+                """.trim());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION), session.skillInstructions);
+        assertTrue(session.prompts.isEmpty());
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertTrue(lastAnswer().contains("表示完成的状态值"));
+
+        submit("done 表示完成");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("取回视频"));
+
+        String lookup = "请给出下载接口的文档";
+        session.answer = """
+                ### 下载生成的视频
+                | 配置项 | 填写内容 |
+                | --- | --- |
+                | 请求 | GET /v1/videos/{id}/content |
+                """;
+        submit(lookup);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        submit("按上面的接口资料补齐");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("接口声明已校验"));
+        assertTrue(store.pending().isEmpty());
+
+        submit("保存技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        SkillStore.Detail draft = store.detail("轮询视频");
+        assertTrue(draft.pending());
+        assertTrue(draft.videoMissing().isEmpty());
+        assertTrue(draft.manifest().configFields().isEmpty());
+        assertNull(draft.customConfiguration());
+        assertEquals("/v1/videos", draft.videoFacts().submitPath());
+        assertTrue(store.selectionCatalog().isEmpty());
+
+        AlertDialog settings = openChatSkillSettings("轮询视频");
+        View body = settings.getWindow().getDecorView();
+        TextView heading = body.findViewWithTag("skills.detail.name");
+        assertEquals("/轮询视频", heading.getText().toString());
+        EditText base = body.findViewWithTag("skills.detail.custom.endpoint");
+        EditText bearer = body.findViewWithTag("skills.detail.custom.credential");
+        assertNotNull(base);
+        assertNotNull(bearer);
+        assertTrue(base.getHint().toString().contains("API 基础地址"));
+        assertTrue(bearer.getHint().toString().contains("密钥"));
+        assertEquals("", base.getText().toString());
+        assertEquals("", bearer.getText().toString());
+        base.setText("https://video-api.example.com");
+        assertTrue(body.findViewWithTag("skills.detail.custom.save").performClick());
+        ShadowLooper.idleMainLooper();
+        SkillStore.Detail configured = store.detail("轮询视频");
+        assertFalse(configured.pending());
+        assertEquals("https://video-api.example.com/v1/videos", configured.customConfiguration().endpoint());
+        assertFalse(configured.customConfiguration().hasCredential());
+        assertEquals(1, session.skillInputs.size());
+        assertEquals(List.of(lookup), session.prompts);
+        assertEquals(0, submits.get());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(AiSkills.Entry.WORK,
+                session.transcriptMemory.conversationKey())).isEmpty());
     }
 
     private void assertSlashSkillPreviewsAndRequiresAnExplicitInstall(AiSkills.Entry entry) throws Exception {
@@ -1143,7 +1404,7 @@ public final class AiTestChatDialogTest {
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
         assertTrue(lastAnswer().contains("待配置草稿 /电影片段"));
-        assertTrue(lastAnswer().contains(SkillStore.NEEDS_VIDEO_PROVIDER));
+        assertTrue(lastAnswer().contains("请贴所用视频服务的 API 文档"));
         assertEquals(List.of("电影片段"), store.pending().stream().map(SkillStore.Pending::name).toList());
         assertTrue(store.list().isEmpty());
         SkillStore.Detail detail = store.detail("电影片段");

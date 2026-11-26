@@ -10,6 +10,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 import java.io.DataOutputStream;
@@ -109,6 +110,101 @@ public final class TestChatMemoryDisplayTest {
         assertFalse(disabled.append(disabled.epoch(), shown));
         assertTrue(disabled.readTranscript().isEmpty());
         assertTrue(new TestChatMemory(directory, profile).readTranscript().isEmpty());
+    }
+
+    @Test public void skillDraftSidecarKeepsWorkAndContactSeparateWithoutAddingModelContext() throws Exception {
+        var context = RuntimeEnvironment.getApplication();
+        AiModelConfig profile = profile(3);
+        TestChatMemory work = new TestChatMemory(context, profile);
+        TestChatMemory contact = TestChatMemory.messageConversation(context, profile);
+        AiModelConfig otherProfile = AiModelConfig.fromJson(profile.toJson().put("id", "another-draft-profile"));
+        assertEquals(work.conversationKey(), contact.conversationKey());
+        TestChatMemory.SkillDraft workDraft = new TestChatMemory.SkillDraft("\r\n" + declarationJson() + "\t", "", "", "");
+        TestChatMemory.SkillDraft contactDraft = new TestChatMemory.SkillDraft("", "", "写作草稿", UUID.randomUUID().toString());
+        record(work, ordinary("工作普通消息", "普通回答"));
+        assertTrue(work.writeSkillDraft(work.epoch(), null, workDraft));
+        assertTrue(contact.writeSkillDraft(contact.epoch(), null, contactDraft));
+
+        assertEquals(workDraft, new TestChatMemory(context, profile).readSkillDraft());
+        assertEquals(contactDraft, TestChatMemory.messageConversation(context, profile).readSkillDraft());
+        assertNull(new TestChatMemory(context, otherProfile).readSkillDraft());
+        assertNull(TestChatMemory.messageConversation(context, otherProfile).readSkillDraft());
+        assertEquals(List.of("工作普通消息"), prompts(work.read()));
+        assertEquals(List.of("工作普通消息"), prompts(work.readTranscript()));
+        assertTrue(contact.readTranscript().isEmpty());
+        contact.clear();
+        assertNull(contact.readSkillDraft());
+        assertEquals(workDraft, work.readSkillDraft());
+    }
+
+    @Test public void skillDraftCasChecksTheStoredSnapshotAndClearEpochAcrossInstances() throws Exception {
+        File directory = temporary.newFolder();
+        AiModelConfig profile = profile(2);
+        TestChatMemory first = new TestChatMemory(directory, profile);
+        TestChatMemory second = new TestChatMemory(directory, profile);
+        long epoch = first.epoch();
+        var initial = new TestChatMemory.SkillDraft(declarationJson(), "", "", "");
+        var revised = new TestChatMemory.SkillDraft(declarationJson().replace("改善表达", "保留事实"), "", "", "");
+        assertTrue(first.writeSkillDraft(epoch, null, initial));
+        assertFalse(second.writeSkillDraft(epoch, null, revised));
+        assertTrue(second.writeSkillDraft(epoch, initial, revised));
+        assertFalse(first.writeSkillDraft(epoch, initial, null));
+        assertEquals(revised, first.readSkillDraft());
+
+        second.clear();
+        assertNull(first.readSkillDraft());
+        assertFalse(first.writeSkillDraft(epoch, null, initial));
+        assertTrue(first.writeSkillDraft(first.epoch(), null, revised));
+        TestChatMemory disabled = new TestChatMemory(directory, profile(0));
+        assertNull(disabled.readSkillDraft());
+        assertFalse(disabled.writeSkillDraft(disabled.epoch(), null, initial));
+        assertNull(new TestChatMemory(directory, profile).readSkillDraft());
+        assertTrue(first.writeSkillDraft(first.epoch(), null, initial));
+        assertTrue(second.writeSkillDraft(second.epoch(), initial, null));
+        assertNull(first.readSkillDraft());
+    }
+
+    @Test public void skillDraftRejectsOversizeMalformedTextAndUnpairedPendingIdentity() throws Exception {
+        File directory = temporary.newFolder();
+        TestChatMemory memory = new TestChatMemory(directory, profile(2));
+        var prior = new TestChatMemory.SkillDraft(declarationJson(), "", "", "");
+        assertTrue(memory.writeSkillDraft(memory.epoch(), null, prior));
+        for (var bad : List.of(
+                new TestChatMemory.SkillDraft("字".repeat(48 * 1024), "", "", ""),
+                new TestChatMemory.SkillDraft(declarationJson(), "x".repeat(48 * 1024 + 1), "", ""),
+                new TestChatMemory.SkillDraft(declarationJson() + "\uD800", "", "", ""),
+                new TestChatMemory.SkillDraft(declarationJson(), "", "写作草稿", ""),
+                new TestChatMemory.SkillDraft(declarationJson(), "", "写作草稿", "invalid-pending-id"))) {
+            assertFalse(memory.writeSkillDraft(memory.epoch(), prior, bad));
+            assertEquals(prior, memory.readSkillDraft());
+        }
+        File[] sidecars = directory.listFiles();
+        assertNotNull(sidecars);
+        assertEquals(1, sidecars.length);
+        Files.write(sidecars[0].toPath(), new byte[]{1, 2, 3});
+        assertNull(memory.readSkillDraft());
+        assertTrue(memory.writeSkillDraft(memory.epoch(), null, prior));
+        assertEquals(prior, memory.readSkillDraft());
+    }
+
+    @Test public void evictingAnOldConversationAlsoFencesAndRemovesItsDraft() throws Exception {
+        File directory = temporary.newFolder();
+        AiModelConfig original = profile(2);
+        TestChatMemory old = new TestChatMemory(directory, original);
+        var draft = new TestChatMemory.SkillDraft(declarationJson(), "", "", "");
+        assertTrue(old.writeSkillDraft(old.epoch(), null, draft));
+        long beforeEviction = old.epoch();
+        File oversized = historyFile(directory, old);
+        try (var sparse = new java.io.RandomAccessFile(oversized, "rw")) {
+            sparse.setLength(48L * 1024 * 1024);
+        }
+        AiModelConfig replacement = AiModelConfig.fromJson(original.toJson().put("id", "other-scope"));
+        TestChatMemory current = new TestChatMemory(directory, replacement);
+        assertTrue(current.writeSkillDraft(current.epoch(), null, draft));
+        assertFalse(oversized.exists());
+        assertNull(old.readSkillDraft());
+        assertFalse(old.writeSkillDraft(beforeEviction, null, draft));
+        assertEquals(draft, current.readSkillDraft());
     }
 
     @Test public void authoredDeclarationKeepsExactRawJsonAcrossWritesAndOnlyEntersTheVisibleTranscript() throws Exception {

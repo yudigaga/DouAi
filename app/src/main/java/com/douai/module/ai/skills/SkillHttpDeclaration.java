@@ -53,13 +53,19 @@ public final class SkillHttpDeclaration {
     }
 
     public record Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath, String resultUrlField,
-                        String idField, String stateField, Map<String, VideoState> states) {
+                        String idField, String stateField, Map<String, VideoState> states, int minPollSeconds) {
+        public Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath, String resultUrlField,
+                     String idField, String stateField, Map<String, VideoState> states) {
+            this(statusPath, cancelPath, cancelMethod, downloadPath, resultUrlField, idField, stateField, states, 0);
+        }
+
         public Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath,
                      String idField, String stateField, Map<String, VideoState> states) {
-            this(statusPath, cancelPath, cancelMethod, downloadPath, "", idField, stateField, states);
+            this(statusPath, cancelPath, cancelMethod, downloadPath, "", idField, stateField, states, 0);
         }
 
         public Video {
+            if (minPollSeconds != 0 && (minPollSeconds < 3 || minPollSeconds > 60)) throw new Invalid();
             validatePath(statusPath);
             if (cancelPath == null || cancelMethod == null || downloadPath == null || resultUrlField == null
                     || cancelPath.isEmpty() != cancelMethod.isEmpty() || downloadPath.isEmpty() == resultUrlField.isEmpty()) {
@@ -143,7 +149,9 @@ public final class SkillHttpDeclaration {
             if (canCancel()) data.put("cancelPath", cancelPath).put("cancelMethod", cancelMethod);
             if (resultUrlField.isEmpty()) data.put("downloadPath", downloadPath);
             else data.put("resultUrlField", resultUrlField);
-            return data.put("idField", idField).put("stateField", stateField).put("states", mapping);
+            data.put("idField", idField).put("stateField", stateField).put("states", mapping);
+            if (minPollSeconds != 0) data.put("minPollSeconds", minPollSeconds);
+            return data;
         }
     }
 
@@ -291,8 +299,13 @@ public final class SkillHttpDeclaration {
     }
 
     private static Video readVideo(JSONObject value) throws JSONException {
-        keys(value, Set.of("cancelPath", "cancelMethod", "downloadPath", "resultUrlField"), "statusPath",
+        keys(value, Set.of("cancelPath", "cancelMethod", "downloadPath", "resultUrlField", "minPollSeconds"), "statusPath",
                 "idField", "stateField", "states");
+        int minPollSeconds = 0;
+        if (value.has("minPollSeconds")) {
+            if (!(value.opt("minPollSeconds") instanceof Integer seconds) || seconds == 0) throw new Invalid();
+            minPollSeconds = seconds;
+        }
         JSONObject mapping = value.getJSONObject("states");
         if (mapping.length() == 0 || mapping.length() > MAX_VIDEO_STATES) throw new Invalid();
         Map<String, VideoState> states = new LinkedHashMap<>();
@@ -305,7 +318,7 @@ public final class SkillHttpDeclaration {
                 value.has("cancelMethod") ? text(value.get("cancelMethod"), 6, false) : "",
                 value.has("downloadPath") ? text(value.get("downloadPath"), 320, false) : "",
                 value.has("resultUrlField") ? responsePath(value.get("resultUrlField")) : "",
-                responsePath(value.get("idField")), responsePath(value.get("stateField")), states);
+                responsePath(value.get("idField")), responsePath(value.get("stateField")), states, minPollSeconds);
     }
 
     private static int httpsPort(URI endpoint) { return endpoint.getPort() < 0 ? 443 : endpoint.getPort(); }

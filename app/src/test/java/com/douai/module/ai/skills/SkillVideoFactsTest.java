@@ -91,7 +91,7 @@ public final class SkillVideoFactsTest {
     }
 
     @Test public void approvedDeclarationReuseCopiesFieldsAndOnlySuggestsTheApprovedPublicAddress() throws Exception {
-        JSONObject http = SkillVideoFacts.parse(SUBMIT + POLLING).declaration();
+        JSONObject http = SkillVideoFacts.parse(SUBMIT + POLLING).withMinimumPollSeconds(9).declaration();
         http.getJSONObject("request").put("include_audio", "config.audio");
         JSONObject fields = new JSONObject()
                 .put("key", "audio").put("label", "生成音频").put("type", "boolean").put("required", false);
@@ -107,6 +107,7 @@ public final class SkillVideoFactsTest {
                 reused.declaration().getString("suggestedEndpoint"));
         assertEquals("config.audio", reused.declaration().getJSONObject("request").getString("include_audio"));
         assertEquals("audio", reused.configFields().getJSONObject(0).getString("key"));
+        assertEquals(9, reused.minimumPollSeconds());
         assertFalse(reused.toJson().toString().contains("已配置视频"));
         assertFalse(reused.toJson().toString().contains("保留场景"));
         assertFalse(reused.toJson().has("configValues"));
@@ -355,6 +356,79 @@ public final class SkillVideoFactsTest {
         SkillVideoFacts headingless = SkillVideoFacts.parseReference(
                 SUBMIT + "\nContent-Type: multipart/form-data\n" + POLLING + "\nContent-Type: video/mp4");
         assertEquals("multipart/form-data", headingless.submitEncoding());
+    }
+
+    @Test public void documentedRelativeSubmitRequiresExplicitJsonAndSameOriginApiBase() throws Exception {
+        String notes = """
+                提交: POST /v1/videos
+                提示词字段: prompt
+                提交响应ID: id
+                查询: GET https://video.example.com:8443/v1/videos/{id}
+                查询响应ID: id
+                状态字段: status
+                状态映射: done=completed
+                下载: GET /v1/videos/{id}/content
+                """;
+        SkillVideoFacts unknown = SkillVideoFacts.parseReference(notes);
+        assertEquals("unknown", unknown.submitEncoding());
+        assertFalse(unknown.isComplete());
+        SkillVideoFacts facts = SkillVideoFacts.parseReference(notes + "提交请求编码: application/json");
+        assertTrue(facts.isComplete());
+        assertTrue(facts.needsApiBase());
+        assertEquals("/v1/videos", facts.submitPath());
+        assertEquals("", form(facts, "submitEndpoint").value());
+        assertFalse(form(facts, "submitEndpoint").required());
+        assertFalse(facts.declaration().has("suggestedEndpoint"));
+        assertEquals("/v1/videos/{id}", facts.declaration().getJSONObject("video").getString("statusPath"));
+        SkillVideoFacts reopened = SkillVideoFacts.fromJson(facts.toJson());
+        String base = "https://video.example.com:8443";
+        assertEquals(base + "/v1/videos", reopened.resolveApiBase(base));
+        assertEquals(base, reopened.apiBaseForEndpoint(base + "/v1/videos"));
+        assertEquals("", reopened.apiBaseForEndpoint(base + "/custom/submit"));
+        for (String bad : List.of("http://video.example.com:8443", "https://video.example.com",
+                "https://different.example.com:8443", base + "/gateway", base + "?query=1")) {
+            assertThrows(IllegalArgumentException.class, () -> reopened.resolveApiBase(bad));
+        }
+        for (String badRoute : List.of("//other.example/v1", "/v1/../videos", "/v1/%2Fvideos", "/v1/{id}")) {
+            assertThrows(IllegalArgumentException.class, () -> SkillVideoFacts.parse("提交: POST " + badRoute));
+        }
+    }
+
+    @Test public void minimumPollingIntervalIsAnExplicitLocalPreference() throws Exception {
+        SkillVideoFacts source = SkillVideoFacts.parse(SUBMIT + POLLING + "minPollSeconds: 50");
+        assertEquals(0, source.minimumPollSeconds());
+        assertFalse(source.declaration().getJSONObject("video").has("minPollSeconds"));
+        assertThrows(IllegalArgumentException.class, () -> source.withMinimumPollSeconds(0));
+        assertThrows(IllegalArgumentException.class, () -> source.withMinimumPollSeconds(2));
+        assertThrows(IllegalArgumentException.class, () -> source.withMinimumPollSeconds(61));
+        assertThrows(IllegalArgumentException.class, () -> source.withForm(Map.of("minPollSeconds", "25")));
+        SkillVideoFacts selected = source.withMinimumPollSeconds(15);
+        JSONObject stored = selected.toJson();
+        assertEquals(15, stored.get("minPollSeconds"));
+        assertEquals("MANUAL", stored.getJSONObject("provenance").getString("minPollSeconds"));
+        SkillVideoFacts reopened = SkillVideoFacts.fromJson(stored).fillMissingFrom(source);
+        assertEquals(15, reopened.minimumPollSeconds());
+        assertEquals(15, reopened.declaration().getJSONObject("video").get("minPollSeconds"));
+        assertThrows(IllegalArgumentException.class, () -> SkillVideoFacts.fromJson(stored.put("minPollSeconds", "15")));
+    }
+
+    @Test public void explicitSupplementEnrichesOnlyInferredUnknownForTheSameContract() {
+        SkillVideoFacts missingEncoding = SkillVideoFacts.parseSupplement(SUBMIT + POLLING);
+        SkillVideoFacts json = SkillVideoFacts.parseSupplement("接口资料：\nContent-Type: application/json; charset=utf-8");
+        SkillVideoFacts multipart = SkillVideoFacts.parseSupplement("Content-Type: multipart/form-data");
+        assertEquals("unknown", missingEncoding.submitEncoding());
+        assertFalse(missingEncoding.isComplete());
+        assertTrue(missingEncoding.fillMissingFrom(json).isComplete());
+        assertEquals("multipart/form-data", missingEncoding.fillMissingFrom(multipart).submitEncoding());
+        assertFalse(missingEncoding.fillMissingFrom(multipart).fillMissingFrom(json).isComplete());
+        SkillVideoFacts manual = SkillVideoFacts.parse(SUBMIT + POLLING).withForm(Map.of("submitEncoding", "unknown"));
+        assertFalse(manual.fillMissingFrom(json).isComplete());
+        assertThrows(IllegalArgumentException.class, () -> missingEncoding.fillMissingFrom(
+                SkillVideoFacts.parseSupplement("提交: POST /v2/different\n提交请求编码: application/json")));
+        assertFalse(missingEncoding.fillMissingFrom(SkillVideoFacts.parseSupplement(
+                "状态字段: incompatible\n提交请求编码: application/json")).isComplete());
+        assertEquals("data.id", form(SkillVideoFacts.parseSupplement(
+                "提交响应示例: {\"data\":{\"id\":\"fixture\"}}"), "submitIdField").value());
     }
 
     private static SkillVideoFacts.FormField form(SkillVideoFacts facts, String id) {

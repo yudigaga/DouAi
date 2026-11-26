@@ -60,7 +60,8 @@ final class SkillVideoReference {
             Matcher start = SUBMIT_LINE.matcher(text);
             if (start.find()) {
                 String address = referenceAddress(text.substring(start.end()));
-                submit |= address.regionMatches(true, 0, "https://", 0, 8);
+                submit |= address.regionMatches(true, 0, "https://", 0, 8)
+                        || address.startsWith("/") && !address.startsWith("//");
             }
             Matcher status = STATUS_LINE.matcher(text);
             if (status.find()) polling |= TASK_ID.matcher(referenceAddress(text.substring(status.end()))).find();

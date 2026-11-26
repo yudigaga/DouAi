@@ -17,7 +17,7 @@ import java.util.regex.Pattern;
 
 /** Interprets explicit manual authoring requests and bounds the isolated model's JSON inputs. */
 public final class SkillAuthoring {
-    public enum Mode { DESIGN, REVISE, SAVE }
+    public enum Mode { DESIGN, REVISE, SAVE, PREVIEW, CANCEL, SUPPLEMENT }
 
     public record Action(Mode mode, String request, boolean saveAfter) { }
     public record VideoSource(Action action, String command, String notes, String relatedSkill) { }
@@ -30,6 +30,7 @@ public final class SkillAuthoring {
             documentation（供用户阅读的说明）、instructions（不超过 1600 字）、capabilityId、
             configFields、inputs、outputType 和 trial。可选 displayName（不超过 48 字）与 http。技能 ID 由应用创建。
             “技能”是创建入口的保留名称，name 必须使用另一个命令名。
+            修订 previousDefinition 时保留原有 name 和输出类型，只改用户本轮指定的内容。
             文本使用 capabilityId: "text_model"，outputType: "text"。按需求声明用户需要配置的参数，
             无需参数时返回空数组。文案语气可用 {"key":"tone","label":"语气","type":"enum","required":true,
             "options":["正式","温和"]}，输出长度可用 {"key":"length","label":"输出长度","type":"integer",
@@ -48,6 +49,8 @@ public final class SkillAuthoring {
             在视频技能的模型输出中省略 http，并使用空的 configFields，保留视频输出类型。
             自动轮询与下载限用户已确认提交的原任务 ID。未指定收件人时，自动发送或回传指在发起任务的
             DouAi 会话显示结果。请求中的自动发送不能替代外部提交审核或授权给新收件人。
+            视频最短轮询间隔由应用按用户明确填写的秒数设置，长任务会退避。失败状态显示在原会话，
+            不重新提交视频，也不要承诺能读取供应商未声明的失败详情。
             suggestedEndpoint 只在用户明确提供协议地址时填写，地址须经本人保存后才可用。
             如提供了 requiredOutputType，必须使用该输出类型对应的能力。
             如提供了 requiredCapabilityId，必须使用相应能力。
@@ -93,7 +96,8 @@ public final class SkillAuthoring {
             + "(?:(?:[，,]\\s*" + REQUIREMENT_MARKER + "\\s*[：:]?|[：:])\\s*"
             + "(" + PURPOSE + "{1,180}?))?" + END);
     private static final Pattern SAVE = Pattern.compile("(?i)^" + PREFIX
-            + "(?:内置(?:\\s*" + SAVE_TARGET + ")?|把\\s*" + SAVE_TARGET + "\\s*内置)" + END);
+            + "(?:内置(?:\\s*" + SAVE_TARGET + ")?|把\\s*" + SAVE_TARGET + "\\s*内置"
+            + "|保存\\s*(?:技能|草稿|草案|这份草稿|这个技能|它))" + END);
     private static final Pattern SAVE_TAIL = Pattern.compile("(?i)\\s*(?:[，,]\\s*)?"
             + "(?:并(?:且)?\\s*(?:帮我\\s*)?内置|然后\\s*内置|再\\s*内置)"
             + "(?:\\s*" + SAVE_TARGET + ")?\\s*(?:吧)?\\s*[。！？?!]?\\s*$");
@@ -121,9 +125,42 @@ public final class SkillAuthoring {
     private static final Pattern TABLE_OUTPUT = Pattern.compile(
             "(?i)(?:表格|CSV)(?:输出|导出)?$|(?:输出|提取为|提取成|整理成|转成|生成|导出)\\s*(?:结构化)?\\s*(?:表格|CSV)");
     private static final Pattern VIDEO_OUTPUT = Pattern.compile("生成\\s*视频|视频生成|(?:模拟)?视频$");
-    private static final Pattern VIDEO_SKILL_OUTPUT = Pattern.compile("(?i)^(?:生成|制作|创建|设计|写|做)"
+    private static final Pattern VIDEO_SKILL_OUTPUT = Pattern.compile("(?i)^" + PREFIX + "(?:生成|制作|创建|设计|写|做)"
             + "[^\\r\\n]{0,160}视频\\s*(?:的\\s*)?" + SKILL_WORD + "(?=\\s*(?:[。！？?!，,：:]|$))");
     private static final Pattern CUSTOM_SERVICE = Pattern.compile("(?i)自定义\\s*(?:HTTPS\\s*)?(?:接口|服务)");
+    private static final Pattern PREVIEW = Pattern.compile("^" + PREFIX
+            + "(?:(?:先)?预览(?:(?:当前|这份|这个)?(?:技能|草稿|草案))?|(?:看看|查看)(?:当前|这份|这个)?(?:技能|草稿|草案))" + END);
+    private static final Pattern CANCEL = Pattern.compile("^" + PREFIX
+            + "(?:(?:取消|退出|结束|停止)(?:技能)?(?:编写|编辑)|放弃(?:这份|当前)?(?:草稿|草案))" + END);
+    private static final Pattern USE_REFERENCE = Pattern.compile("^" + PREFIX
+            + "(?:按|根据|依据)(?:上述|上面(?:的)?|刚才(?:的)?)(?:视频接口资料|接口资料|资料)"
+            + "\\s*(?:补齐|补充|填写)(?:接口|草稿|配置)?" + END);
+    private static final Pattern UNCLEAR_EDIT = Pattern.compile("^" + PREFIX
+            + "(?:继续(?:编写|修改)|(?:再|按上面|按刚才)?(?:改|调整|优化|补充)(?:一下|一点)?)" + END);
+    private static final String EDIT_TOPICS = "轮询|间隔|失败|超时|重试|下载|回传|成片|"
+            + "规则|指令|风格|语气|大纲|字数|文案|格式|输出|输入|描述|列名|字段|模型|提示词";
+    private static final Pattern EDIT_TOPIC = Pattern.compile(EDIT_TOPICS);
+    private static final Pattern EDIT_SUBJECT = Pattern.compile("^" + PREFIX
+            + "(?:(?:把|将|让)(?:当前|这个|该|视频|技能的|草稿的)?\\s*)?(?:" + EDIT_TOPICS + "|只在|每隔|如果|遇到|增加|改用|去掉|不要)");
+    private static final Pattern POLL_SPEC = Pattern.compile("(?:^|[，,。；;])\\s*" + PREFIX
+            + "(?:(?:把|将)(?:视频)?\\s*)?(?:轮询(?:的)?间隔(?:\\s*(?:调到|改到|改成|改为|设置为|设为|设成|为|是|[:：]))?\\s*"
+            + "([0-9]+)\\s*秒|每隔\\s*([0-9]+)\\s*秒\\s*(?:查(?:询)?|轮询))");
+    private static final Pattern EDIT_DETAIL = Pattern.compile("改|调|设为|设置|保留|补充|使用|增加|删除|去掉|"
+            + "允许|改用|每隔|不要|不再|只在|只需|最多|至少|(?:失败|超时|完成)(?:时|后|就)");
+    private static final Pattern MATERIAL_HEADER = Pattern.compile("^(?:视频)?接口资料\\h*[:：]\\s*");
+    private static final Pattern MATERIAL_FIELD = Pattern.compile("(?i)^(?:提交响应(?:示例)?|提交请求示例|查询响应(?:示例)?"
+            + "|状态响应示例|提交请求编码|状态映射|下载接口|查询结果字段)\\h*[:：]");
+    private static final Pattern MATERIAL_ENCODING = Pattern.compile("(?i)^(?:Content-Type\\h*[:：]|提交(?:接口)?(?:使用|用|是))"
+            + "\\h*(application/json|multipart/form-data|application/x-www-form-urlencoded|JSON)\\h*[。.]?$");
+    private static final Pattern MATERIAL_STATE = Pattern.compile("^([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
+            + "\\h*(?:表示|代表|就是)\\h*(?:已)?(完成|失败|排队|运行|取消)[。.]?$");
+    private static final Pattern MATERIAL_QUOTE = Pattern.compile(
+            "^(?:[>`\"'「『“‘]|引用|转述|原文|反例|例如|比如|(?:请)?(?:不要|别|不)(?:采用|使用|应用|照抄))");
+    private static final Pattern EDITOR_CREDENTIAL_HEADER = Pattern.compile(
+            "(?i)(?<![A-Za-z0-9_-])(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token)"
+                    + "[`*'\"\\s]{0,4}[:=：]\\h*([^\\r\\n]*)");
+    private static final Pattern BEARER_PLACEHOLDER = Pattern.compile(
+            "(?i)^Bearer\\h+\\$(?:[A-Za-z_][A-Za-z0-9_]*|\\{[A-Za-z_][A-Za-z0-9_]*\\})[`'\"]?\\h*\\\\?$");
 
     private SkillAuthoring() { }
 
@@ -149,6 +186,73 @@ public final class SkillAuthoring {
                 && REFERENCED_VIDEO_INSTALL.matcher(text.trim()).matches();
     }
 
+    public static boolean usesPreviousVideoMaterial(String text) {
+        return editorSentence(text) && USE_REFERENCE.matcher(text.trim()).matches();
+    }
+
+    public static boolean needsEditClarification(String text) {
+        return editorSentence(text) && UNCLEAR_EDIT.matcher(text.trim()).matches();
+    }
+
+    /** The caller already has a video draft selected. These prefixes can carry a single missing fact. */
+    public static String videoMaterialFragment(String text) {
+        if (text == null) return null;
+        String typed = text.trim();
+        Matcher header = MATERIAL_HEADER.matcher(typed);
+        if (header.find()) return typed.substring(header.end());
+        if (MATERIAL_FIELD.matcher(typed).find()) return typed;
+        Matcher encoding = MATERIAL_ENCODING.matcher(typed);
+        if (encoding.matches()) return "提交请求编码: " + encoding.group(1);
+        Matcher state = MATERIAL_STATE.matcher(typed);
+        if (!state.matches()) return null;
+        String value = switch (state.group(2)) {
+            case "完成" -> "completed";
+            case "失败" -> "failed";
+            case "排队" -> "queued";
+            case "运行" -> "running";
+            default -> "cancelled";
+        };
+        return "状态映射: " + state.group(1) + "=" + value;
+    }
+
+    public static boolean canUsePastedVideoMaterial(String text) {
+        return text != null && !MATERIAL_QUOTE.matcher(text.trim()).find();
+    }
+
+    /** Used only inside a user-started editor. The model may revise a draft; it cannot save it. */
+    public static Action continuation(String text) {
+        if (!editorSentence(text)) return null;
+        String typed = text.trim();
+        if (PREVIEW.matcher(typed).matches()) return new Action(Mode.PREVIEW, "", false);
+        if (CANCEL.matcher(typed).matches()) return new Action(Mode.CANCEL, "", false);
+        if (typed.matches("^" + PREFIX + "保存" + END)) return new Action(Mode.SAVE, "", false);
+        if (!question(typed) && EDIT_SUBJECT.matcher(typed).find()
+                && EDIT_TOPIC.matcher(typed).find() && EDIT_DETAIL.matcher(typed).find()) {
+            return new Action(Mode.REVISE, typed, false);
+        }
+        return null;
+    }
+
+    public static int minimumPollSeconds(String text) {
+        if (!editorSentence(text)) return 0;
+        Matcher spec = POLL_SPEC.matcher(text);
+        if (!spec.find()) return 0;
+        if (hasUnclosedQuote(text.substring(0, spec.start()))) return 0;
+        String digits = spec.group(1) == null ? spec.group(2) : spec.group(1);
+        int seconds = Integer.parseInt(digits);
+        if (seconds < 3 || seconds > 60 || spec.find()) {
+            throw new IllegalArgumentException("请明确一个 3 至 60 秒的最短轮询间隔");
+        }
+        return seconds;
+    }
+
+    private static boolean editorSentence(String text) {
+        if (text == null || text.length() > MAX_TYPED || text.codePoints().anyMatch(Character::isISOControl)) return false;
+        String line = text.trim();
+        return !line.isEmpty() && "/>`\"'「『“‘".indexOf(line.charAt(0)) < 0
+                && !line.matches("^(?:他说|她说|同事|有人|转述|引用|例如|比如|举例|原文|请解释|解释).*");
+    }
+
     public static VideoSource videoSource(String text) {
         if (text == null || text.length() > MAX_MODEL_INPUT) return null;
         int lineEnd = text.indexOf('\n');
@@ -172,12 +276,9 @@ public final class SkillAuthoring {
                 related = name;
                 continue;
             }
-            if (!trimmed.isEmpty()) {
-                if (notes.length() > 0) notes.append('\n');
-                notes.append(trimmed);
-            }
+            notes.append(line).append('\n');
         }
-        return new VideoSource(action, command, notes.toString(), related);
+        return new VideoSource(action, command, notes.toString().trim(), related);
     }
 
     public static Action match(String typed, boolean hasDraft) {
@@ -393,6 +494,19 @@ public final class SkillAuthoring {
 
     public static void rejectCredential(String text) {
         if (CREDENTIAL_TEXT.matcher(text).find()) throw new IllegalArgumentException("请在技能配置中填写密钥");
+    }
+
+    public static void rejectEditorCredential(String text) {
+        rejectCredential(text);
+        if (URL_USER_INFO.matcher(text).find()) throw new IllegalArgumentException("请在技能配置中填写密钥");
+        Matcher header = EDITOR_CREDENTIAL_HEADER.matcher(text);
+        while (header.find()) {
+            String value = header.group(2).trim();
+            if (!value.isEmpty() && !("authorization".equalsIgnoreCase(header.group(1))
+                    && BEARER_PLACEHOLDER.matcher(value).matches())) {
+                throw new IllegalArgumentException("请在技能配置中填写密钥");
+            }
+        }
     }
 
     private static void put(JSONObject object, String key, Object value) {
