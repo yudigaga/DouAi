@@ -82,6 +82,9 @@ public final class SkillAuthoring {
     private static final String PURPOSE = "(?:https://[A-Za-z0-9._~:/%+@-]{1,180}+|" + SUBJECT + ")";
     private static final String SKILL_WORD = "(?:skills?|技能)";
     private static final Pattern CREATION_COMMAND = Pattern.compile("^/" + AiSkills.CREATION_COMMAND_NAME + "(?=$|[\\s\\p{Z}])");
+    private static final Pattern REFERENCED_VIDEO_INSTALL = Pattern.compile("^/" + AiSkills.CREATION_COMMAND_NAME
+            + "[\\s\\p{Z}]+(?:按|根据|依据)(?:上述|上面(?:的)?)(?:视频接口资料|接口资料|资料)?\\s*"
+            + "(?:(?:请|帮我|给我)\\s*){0,2}(?:补齐(?:并)?|并)?内置" + END);
     private static final String SAVE_TARGET = "(?:这个\\s*" + SKILL_WORD + "|它)";
     private static final String REQUIREMENT_MARKER = "(?:用于|用来|要能|能|可以|需求是|功能是|要求(?:是)?|需要|请让)";
     private static final Pattern DESIGN = Pattern.compile("(?i)^" + PREFIX
@@ -140,6 +143,12 @@ public final class SkillAuthoring {
         return text != null && CREATION_COMMAND.matcher(text.trim()).lookingAt();
     }
 
+    public static boolean isReferencedVideoInstall(String text) {
+        return text != null && text.length() <= MAX_TYPED
+                && text.codePoints().noneMatch(Character::isISOControl)
+                && REFERENCED_VIDEO_INSTALL.matcher(text.trim()).matches();
+    }
+
     public static VideoSource videoSource(String text) {
         if (text == null || text.length() > MAX_MODEL_INPUT) return null;
         int lineEnd = text.indexOf('\n');
@@ -174,6 +183,7 @@ public final class SkillAuthoring {
     public static Action match(String typed, boolean hasDraft) {
         if (typed == null || typed.length() > MAX_TYPED || typed.codePoints().anyMatch(Character::isISOControl)) return null;
         String sentence = typed.trim();
+        if (isReferencedVideoInstall(sentence)) return null;
         Matcher command = CREATION_COMMAND.matcher(sentence);
         boolean explicitCommand = command.lookingAt();
         if (!explicitCommand && SAVE.matcher(sentence).matches()) return new Action(Mode.SAVE, "", false);

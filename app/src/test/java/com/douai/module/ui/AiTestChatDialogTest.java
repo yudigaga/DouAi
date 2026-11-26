@@ -1429,6 +1429,209 @@ public final class AiTestChatDialogTest {
                 session.transcriptMemory.conversationKey())).isEmpty());
     }
 
+    @Test public void installAboveVideoDocsKeepsCurrentDraftAndLeavesMultipartBlocked() throws Exception {
+        FakeSession session = new FakeSession();
+        session.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        session.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "轮询视频").toString());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(session, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit("/技能 生成一个自动轮询视频技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("技能草案 /轮询视频"));
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+
+        session.answer = """
+                ## 视频 API 接口资料
+
+                ### 1. 创建视频任务
+                | 配置项 | 填写内容 |
+                | --- | --- |
+                | 方法 | `POST` |
+                | URL | `https://api.openai.com/v1/videos` |
+                | 鉴权 | Bearer Token |
+                | Content-Type | `multipart/form-data` |
+                | 模型字段 | `model`，例如 `sora-2` |
+                | 提示词字段 | `prompt` |
+                | 时长字段 | `seconds`，例如 `8` |
+                | 尺寸字段 | `size`，例如 `1280x720` |
+
+                ```bash
+                curl -X POST https://api.openai.com/v1/videos \\
+                  -H "Authorization: Bearer $OPENAI_API_KEY" \\
+                  -F "model=sora-2" -F "prompt=example" -F "seconds=8" -F "size=1280x720"
+                ```
+
+                从返回结果中保存 `id`，作为后续轮询用的 `video_id`。模型名称、时长和尺寸以账号实际可用选项为准。
+
+                ### 2. 查询任务状态
+                | 配置项 | 填写内容 |
+                | --- | --- |
+                | 方法 | `GET` |
+                | URL | `https://api.openai.com/v1/videos/{video_id}` |
+                | 任务 ID 字段 | `id` |
+                | 状态字段 | `status` |
+                完成后进入下载；失败时报告失败。
+
+                ### 3. 下载生成的视频
+                | 配置项 | 填写内容 |
+                | --- | --- |
+                | 方法 | `GET` |
+                | URL | `https://api.openai.com/v1/videos/{video_id}/content` |
+                | 返回类型 | 视频文件，按二进制处理 |
+                """;
+        String docsRequest = "请给我这家供应商的视频 API 文档";
+        submit(docsRequest);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(session.answer, lastAnswer());
+        assertEquals(List.of(docsRequest), session.prompts);
+
+        submit("/技能 按上述帮我内置");
+        assertFalse(send.isEnabled());
+        assertEquals("正在保存草稿", send.getContentDescription());
+        worker.runNext();
+        assertFalse(send.isEnabled());
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals("Reusing the current draft must not generate a new design",
+                List.of(SkillAuthoring.DESIGN_INSTRUCTION), session.skillInstructions);
+        assertEquals(List.of(docsRequest), session.prompts);
+        assertEquals(List.of("轮询视频"), store.pending().stream().map(SkillStore.Pending::name).toList());
+        SkillStore.Detail detail = store.detail("轮询视频");
+        assertTrue(detail.pending());
+        assertNull(detail.current());
+        assertNull(detail.manifest().http());
+        assertNull(detail.customConfiguration());
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertTrue(lastAnswer().contains("待配置草稿 /轮询视频"));
+        assertTrue(lastAnswer().contains("multipart"));
+        assertTrue(lastAnswer().contains("状态映射中的完成状态"));
+
+        var recognized = detail.videoFacts().formFields().stream().collect(java.util.stream.Collectors.toMap(
+                field -> field.id(), field -> field.value()));
+        assertEquals("https://api.openai.com/v1/videos", recognized.get("submitEndpoint"));
+        assertEquals("prompt", recognized.get("promptField"));
+        assertEquals("id", recognized.get("submitIdField"));
+        assertEquals("/v1/videos/{id}", recognized.get("statusPath"));
+        assertEquals("status", recognized.get("stateField"));
+        assertEquals("/v1/videos/{id}/content", recognized.get("downloadPath"));
+        String savedFacts = detail.videoFacts().toJson().toString();
+        assertFalse(savedFacts.contains("Authorization"));
+        assertFalse(savedFacts.contains("OPENAI_API_KEY"));
+        assertFalse(savedFacts.contains("example"));
+        assertFalse(savedFacts.contains("sora-2"));
+
+        AlertDialog settings = openChatSkillSettings("轮询视频");
+        TextView name = settings.getWindow().getDecorView().findViewWithTag("skills.detail.name");
+        assertEquals("/轮询视频", name.getText().toString());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(AiSkills.Entry.WORK, session.transcriptMemory.conversationKey())).isEmpty());
+        assertEquals(0, submits.get());
+    }
+
+    @Test public void ambiguousAboveVideoDocsRequireChoosingOneBeforeMutatingDraft() throws Exception {
+        FakeSession session = new FakeSession();
+        session.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        session.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "轮询视频").toString());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(session, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/技能 生成一个自动轮询视频技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(lastAnswer().contains("技能草案 /轮询视频"));
+
+        String firstEndpoint = "https://first-video.example.com/v1/videos";
+        String secondEndpoint = "https://second-video.example.com/v1/videos";
+        List<String> prompts = List.of("展示供应商甲的视频接口", "展示供应商乙的视频接口", "再写一条普通备注");
+        List<String> endpoints = List.of(firstEndpoint, secondEndpoint);
+        for (int index = 0; index < endpoints.size(); index++) {
+            session.answer = """
+                    ### 创建视频任务
+                    | 项目 | 说明 |
+                    | --- | --- |
+                    | 请求 | POST <%s|创建视频> |
+                    | Content-Type | application/json |
+                    | 提示词字段 | prompt |
+                    | 响应任务 ID 字段 | id |
+
+                    ### 查询视频任务
+                    | 项目 | 说明 |
+                    | --- | --- |
+                    | 请求 | GET /v1/videos/{id} |
+                    | 任务 ID 字段 | id |
+                    | 状态字段 | status |
+                    | 状态映射 | queued=queued,done=completed |
+
+                    ### 下载视频
+                    | 请求 | GET /v1/videos/{id}/content |
+                    """.formatted(endpoints.get(index));
+            submit(prompts.get(index));
+            worker.runNext();
+            ShadowLooper.idleMainLooper();
+        }
+        session.answer = "名称：闲聊";
+        submit(prompts.get(2));
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+
+        SkillStore store = SkillStore.forContext(activity);
+        int rowsBeforeChoice = messageCount();
+        submit("/技能 按上述帮我内置");
+        AlertDialog chooser = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(chooser.isShowing());
+        assertEquals(2, chooser.getListView().getCount());
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(store.pending().isEmpty());
+        assertTrue(chooser.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(store.pending().isEmpty());
+        assertEquals(rowsBeforeChoice, messageCount());
+        assertEquals(1, session.skillInputs.size());
+        assertEquals(prompts, session.prompts);
+        assertEquals(0, submits.get());
+
+        submit("/技能 按上述帮我内置");
+        AlertDialog chooseAgain = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(chooseAgain.isShowing());
+        ListView options = chooseAgain.getListView();
+        int selected = -1;
+        for (int index = 0; index < options.getCount(); index++) {
+            if (String.valueOf(options.getAdapter().getItem(index)).contains("first-video.example.com")) selected = index;
+        }
+        assertTrue("The older candidate is independently selectable by its own endpoint", selected >= 0);
+        org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(chooseAgain).clickOnItem(selected);
+        ShadowLooper.idleMainLooper();
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(List.of("轮询视频"), store.pending().stream().map(SkillStore.Pending::name).toList());
+        SkillStore.Detail detail = store.detail("轮询视频");
+        assertNull(detail.customConfiguration());
+        assertEquals(firstEndpoint, detail.videoFacts().formFields().stream()
+                .filter(field -> "submitEndpoint".equals(field.id())).findFirst().orElseThrow().value());
+        assertFalse(detail.videoFacts().toJson().toString().contains(secondEndpoint));
+        assertEquals(1, session.skillInputs.size());
+        assertEquals(prompts, session.prompts);
+        assertEquals(0, submits.get());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(AiSkills.Entry.CONTACT,
+                session.transcriptMemory.conversationKey())).isEmpty());
+    }
+
     @Test public void pollingVideoFieldFormKeepsEditsAndRecognizedFieldsAcrossReopen() throws Exception {
         FakeSession model = new FakeSession();
         model.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());

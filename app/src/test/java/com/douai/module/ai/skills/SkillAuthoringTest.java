@@ -89,6 +89,18 @@ public final class SkillAuthoringTest {
         }
     }
 
+    @Test public void explicitReferenceIsSeparateFromDesignAndIgnoresQuotingAndLookalikeCommands() {
+        String command = "/技能 按上述帮我内置";
+        assertTrue(SkillAuthoring.isReferencedVideoInstall(command));
+        assertTrue(SkillAuthoring.isReferencedVideoInstall("/技能　根据上面的接口资料补齐并内置。"));
+        assertNull(SkillAuthoring.match(command, false));
+        assertNull(SkillAuthoring.match(command, true));
+        for (String text : List.of("按上述帮我内置", "> " + command, "「" + command + "」",
+                "```text\n" + command + "\n```", "/技能名 按上述帮我内置", command + "\n接口资料")) {
+            assertFalse(text, SkillAuthoring.isReferencedVideoInstall(text));
+        }
+    }
+
     @Test public void revisionRequiresAnExistingDraftAndARequestToChangeIt() {
         assertNull(SkillAuthoring.match("把它改成正式语气", false));
         assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.REVISE, "把它改成正式语气", false),

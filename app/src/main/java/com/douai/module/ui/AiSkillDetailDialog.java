@@ -481,6 +481,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private static String videoFactHelp(SkillVideoFacts.FormField field) {
+        if ("submitEncoding".equals(field.id())) return "按接口文档填写。当前执行器只支持 application/json。";
         if ("resultUrlField".equals(field.id())) return "查询响应中返回成片链接的字段，与下载路径任选一项。";
         if ("downloadPath".equals(field.id())) return "下载的 GET 路径，含独立的 {id}。查询已返回成片链接时可留空。";
         return switch (field.type()) {

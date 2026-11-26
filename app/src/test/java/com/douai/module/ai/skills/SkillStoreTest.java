@@ -358,6 +358,97 @@ public class SkillStoreTest {
         assertTrue(reopened.list().isEmpty());
     }
 
+    @Test public void priorVideoReferenceUsesAnExactPendingDraftAndOnlyFillsUnsetFacts() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        saveVideoDraft(store, videoDraft("镜头动画"));
+        assertNotNull(store.saveGenerated(SkillStore.mockDraft("生成图片"), null).pending());
+        SkillStore.Detail initial = store.detail("镜头动画");
+        SkillVideoFacts earlier = SkillVideoFacts.parse("查询: GET /older/jobs/{id}");
+        store.saveVideoFactsForm(initial, earlier, java.util.Map.of("promptField", "my_prompt", "statusPath", ""));
+        java.util.List<SkillStore.Detail> candidates = store.pendingVideoDrafts();
+        assertEquals(1, candidates.size());
+        SkillStore.Detail chosen = candidates.get(0);
+        assertEquals("镜头动画", chosen.name());
+        assertEquals(SkillResult.Type.VIDEO, chosen.outputType());
+
+        SkillVideoFacts reference = SkillVideoFacts.parse("""
+                提交: POST https://video.example.com/v1/jobs
+                提示词字段: documented_prompt
+                查询: GET /v1/jobs/{id}
+                提交响应ID: job_id
+                """);
+        SkillStore.Detail applied = store.applyVideoReference(chosen, reference);
+        assertNull(applied.customConfiguration());
+        assertEquals("my_prompt", videoFormField(applied, "promptField").value());
+        assertEquals("", videoFormField(applied, "statusPath").value());
+        assertEquals("job_id", videoFormField(applied, "submitIdField").value());
+        assertTrue(store.list().isEmpty());
+        assertEquals(applied.deleteTarget(), videoStore(root).pendingVideoDrafts().get(0).deleteTarget());
+        assertThrows(IllegalStateException.class, () -> store.applyVideoReference(chosen, reference));
+    }
+
+    @Test public void referencedUnsavedVideoPreviewCannotReplaceADraftSavedAfterTheChoice() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        String name = "镜头动画";
+        SkillStore.DraftPreview unsaved = SkillStore.validateAuthoredDraft(videoDraft(name).toString());
+        SkillVideoFacts reference = SkillVideoFacts.parse("提示词字段: prompt");
+        assertTrue(store.pendingVideoDrafts().isEmpty());
+        saveVideoDraft(store, videoDraft(name).put("description", "较新的本机草稿"));
+        var catalog = new File(root, "catalog.json").toPath();
+        String original = Files.readString(catalog);
+        assertThrows(IllegalStateException.class, () -> store.saveReferencedVideoDraft(unsaved, reference));
+        assertEquals(original, Files.readString(catalog));
+        assertEquals("较新的本机草稿", store.detail(name).manifest().description());
+
+        SkillStore.DraftPreview distinct = SkillStore.validateAuthoredDraft(videoDraft("空白动画").toString());
+        SkillStore.SaveResult result = store.saveReferencedVideoDraft(distinct, reference);
+        assertNull(result.installed());
+        assertEquals("空白动画", result.pending().name());
+        assertEquals("prompt", videoFormField(store.detail("空白动画"), "promptField").value());
+        assertTrue(store.list().isEmpty());
+    }
+
+    @Test public void unsupportedSubmissionEvidenceRemainsPendingUntilAnExplicitJsonCorrection() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        String name = "镜头动画";
+        saveVideoDraft(store, videoDraft(name));
+        SkillVideoFacts complete = SkillVideoFacts.parse("""
+                提交: POST https://video.example.com/v1/jobs
+                提示词字段: prompt
+                提交响应ID: job_id
+                查询: GET /v1/jobs/{id}
+                查询响应ID: id
+                状态字段: status
+                状态映射: done=completed
+                下载: GET /v1/jobs/{id}/file
+                """);
+        SkillVideoFacts unsupported = complete.withForm(java.util.Map.of("submitEncoding", "multipart/form-data"));
+        SkillStore.Detail blocked = store.applyVideoReference(store.detail(name), unsupported);
+        assertTrue(blocked.pending());
+        assertNull(blocked.manifest().http());
+        assertTrue(blocked.reason().contains("application/json"));
+        assertEquals("multipart/form-data", blocked.videoFacts().submitEncoding());
+        assertNull(blocked.customConfiguration());
+        assertTrue(store.list().isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> store.saveVideoDeclaration(blocked, videoHttp().toString()));
+        assertThrows(IllegalArgumentException.class, () -> store.saveVideoFactsForm(blocked, null,
+                java.util.Map.of("submitEncoding", "")));
+
+        SkillStore reopened = videoStore(root);
+        SkillStore.Detail exact = reopened.detail(name);
+        assertEquals(blocked.deleteTarget(), exact.deleteTarget());
+        assertThrows(IllegalArgumentException.class, () -> reopened.saveAuthoredVideoDraft(
+                SkillStore.prepareAuthoredVideoDraft(videoDraft(name).toString(), complete), complete));
+        SkillStore.Detail corrected = reopened.saveVideoFactsForm(exact, null, java.util.Map.of("submitEncoding", "application/json"));
+        assertTrue(corrected.pending());
+        assertNotNull(corrected.manifest().http());
+        assertNull(corrected.customConfiguration());
+        assertTrue(reopened.list().isEmpty());
+    }
+
     @Test public void videoFormRetainsOnlyUnchangedBindingsAndRestoresOrdinaryValuesAfterPartialSave() throws Exception {
         File root = temp.newFolder();
         SkillStore store = videoStore(root);
@@ -380,6 +471,13 @@ public class SkillStoreTest {
         assertEquals(bound.customConfiguration(), relabelled.customConfiguration());
         assertEquals(current.current(), relabelled.current());
         assertTrue(relabelled.pending());
+        SkillVideoFacts incompatible = SkillVideoFacts.fromForm(java.util.Map.of("submitEncoding", "multipart/form-data"));
+        var catalog = new File(root, "catalog.json").toPath();
+        String beforeReference = Files.readString(catalog);
+        assertThrows(IllegalArgumentException.class, () -> store.applyVideoReference(relabelled, incompatible));
+        assertEquals(beforeReference, Files.readString(catalog));
+        assertEquals(relabelled.customConfiguration(), store.detail(name).customConfiguration());
+        assertEquals(8, store.detail(name).manifestValues().get("duration"));
         assertThrows(SkillCustomService.Failure.class, () -> store.saveVideoFactsForm(relabelled, null,
                 java.util.Map.of("submitEndpoint", "https://other.example.com/v2/" + pendingKey)));
         assertEquals(relabelled.deleteTarget(), store.detail(name).deleteTarget());

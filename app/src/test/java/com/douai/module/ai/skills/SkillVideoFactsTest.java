@@ -206,6 +206,157 @@ public final class SkillVideoFactsTest {
         assertEquals("", form(ambiguous, "resultUrlField").value());
     }
 
+    @Test public void markdownAndCurlPrefillGroundedFieldsButKeepMultipartPending() throws Exception {
+        SkillVideoFacts facts = SkillVideoFacts.parseReference("""
+                ## 视频 API
+                ### 1. 创建视频任务
+                | 项目 | 说明 |
+                | --- | --- |
+                | 请求 | `POST <https://video.example.com/v1/videos|创建任务>` |
+                | Content-Type | `multipart/form-data` |
+                | 提示词字段 | `prompt` |
+                | 响应任务 ID 字段 | `id` |
+
+                | 参数 | 类型 | 示例值 |
+                | --- | --- | --- |
+                | `prompt` | string | `a-unique-example` |
+
+                ```bash
+                curl -X POST https://video.example.com/v1/videos -H "Authorization: Bearer $PROVIDER_API_KEY" -F "model=video-example" -F "prompt=a-unique-example"
+                ```
+
+                ### 2. 查询视频任务
+                | 请求 | `GET [查询](https://video.example.com/v1/videos/{video_id})` |
+                | 任务 ID 字段 | `id` |
+                | 状态字段 | `status` |
+
+                | 状态值 | 含义 |
+                | --- | --- |
+                | `queued` | 排队中 |
+                | `in_progress` | 处理中 |
+                | `completed` | 已完成 |
+                | `failed` | 失败 |
+
+                ### 3. 下载视频
+                | 请求 | `GET <https://video.example.com/v1/videos/{video_id}/content|成片>` |
+                """);
+        assertEquals("https://video.example.com/v1/videos", form(facts, "submitEndpoint").value());
+        assertEquals("prompt", form(facts, "promptField").value());
+        assertEquals("id", form(facts, "submitIdField").value());
+        assertEquals("/v1/videos/{id}", form(facts, "statusPath").value());
+        assertEquals("id", form(facts, "statusIdField").value());
+        assertEquals("status", form(facts, "stateField").value());
+        assertEquals("/v1/videos/{id}/content", form(facts, "downloadPath").value());
+        assertTrue(form(facts, "states").value().contains("in_progress=running"));
+        assertEquals("multipart/form-data", facts.submitEncoding());
+        assertFalse(facts.supportsSubmissionEncoding());
+        assertFalse(facts.isComplete());
+        assertEquals(1, facts.missing().size());
+        assertTrue(facts.missing().get(0).contains("multipart"));
+        assertThrows(IllegalArgumentException.class, facts::declaration);
+        JSONObject stored = facts.toJson();
+        assertFalse(stored.toString().contains("PROVIDER_API_KEY"));
+        assertFalse(stored.toString().contains("a-unique-example"));
+        assertFalse(stored.toString().contains("video-example"));
+        assertEquals("multipart/form-data", SkillVideoFacts.fromJson(stored).submitEncoding());
+    }
+
+    @Test public void curlEvidenceRequiresStaticArgumentsAndScopedPollingTemplates() throws Exception {
+        SkillVideoFacts facts = SkillVideoFacts.parseReference("""
+                ### 创建视频
+                curl -X POST --json '{"prompt":"测试示例"}' -H 'Authorization: Bearer ${VIDEO_API_KEY}' https://video.example.com/v1/tasks
+                ### 查询视频
+                curl https://video.example.com/v1/tasks/concrete-example
+                """);
+        assertEquals("application/json", facts.submitEncoding());
+        assertEquals("prompt", form(facts, "promptField").value());
+        assertEquals("", form(facts, "statusPath").value());
+        assertFalse(facts.toJson().toString().contains("concrete-example"));
+        assertFalse(facts.toJson().toString().contains("测试示例"));
+        assertFalse(facts.toJson().toString().contains("VIDEO_API_KEY"));
+
+        for (String curl : List.of(
+                "curl -X POST -H 'Authorization: Bearer synthetic-secret-value' https://video.example.com/v1/tasks",
+                "curl -X POST -H 'Authorization: Basic synthetic-secret-value' https://video.example.com/v1/tasks",
+                "curl -X POST -H 'Authorization: Bearer ${VIDEO_API_KEY:-synthetic-secret-value}' https://video.example.com/v1/tasks",
+                "curl -F 'prompt=$(read-untrusted)' https://video.example.com/v1/tasks",
+                "curl 'https://video.example.com/v1/$VIDEO_API_KEY' -F 'prompt=example'",
+                "curl https://video.example.com/v1/tasks | secondary-command",
+                "### 创建视频\n| Authorization | Basic synthetic-secret-value |")) {
+            var denied = assertThrows(IllegalArgumentException.class, () -> SkillVideoFacts.parse(curl));
+            assertFalse(denied.getMessage().contains("synthetic-secret-value"));
+        }
+    }
+
+    @Test public void undocumentedSubmitEncodingStaysPendingWhileLegacyLabelsStayCompatible() throws Exception {
+        SkillVideoFacts bare = SkillVideoFacts.parseReference("""
+                ### 创建视频
+                | 方法 | POST |
+                | URL | https://video.example.com/v1/tasks |
+                """);
+        assertEquals("https://video.example.com/v1/tasks", form(bare, "submitEndpoint").value());
+        assertEquals("unknown", bare.submitEncoding());
+        assertTrue(bare.missing().stream().anyMatch(message -> message.contains("application/json")));
+        assertEquals("", SkillVideoFacts.parse(SUBMIT).submitEncoding());
+        assertTrue(SkillVideoFacts.parse(SUBMIT + POLLING).isComplete());
+    }
+
+    @Test public void doublyQuotedSlackReferenceUsesTheDescribedIdAndLeavesUndocumentedStatesMissing() throws Exception {
+        SkillVideoFacts facts = SkillVideoFacts.parseReference("""
+                > > ## 视频 API 接口资料
+                > > ### 1. 创建视频任务
+                > > | 项目 | 说明 |
+                > > | --- | --- |
+                > > | 请求 | `POST <https://video.example.com/v1/videos|创建任务>` |
+                > > | Content-Type | `multipart/form-data` |
+                > > | 提示词字段 | `prompt` |
+                > >
+                > > ```bash
+                > > curl -X POST https://video.example.com/v1/videos \\
+                > >   -H "Authorization: Bearer $VIDEO_API_KEY" \\
+                > >   -F "prompt=仅为示例" -F "model=example-model"
+                > > ```
+                > >
+                > > 从返回结果中保存 `id`，作为后续轮询用的 `video_id`。模型名称、时长和尺寸以你的账号实际可用选项为准。
+                > >
+                > > ### 2. 查询视频任务
+                > > | 请求 | `GET <https://video.example.com/v1/videos/{video_id}|查询>` |
+                > > | 状态字段 | `status` |
+                > > | 任务 ID 字段 | `id` |
+                > >
+                > > ### 3. 下载生成的视频
+                > > | 请求 | `GET <https://video.example.com/v1/videos/{video_id}/content|成片>` |
+                """);
+        assertEquals("id", form(facts, "submitIdField").value());
+        assertEquals("https://video.example.com/v1/videos", form(facts, "submitEndpoint").value());
+        assertEquals("/v1/videos/{id}", form(facts, "statusPath").value());
+        assertEquals("status", form(facts, "stateField").value());
+        assertEquals("/v1/videos/{id}/content", form(facts, "downloadPath").value());
+        assertEquals("", form(facts, "states").value());
+        assertTrue(facts.missing().contains("状态映射中的完成状态"));
+        assertTrue(facts.missing().stream().anyMatch(reason -> reason.contains("multipart")));
+        assertFalse(facts.toJson().toString().contains("仅为示例"));
+        assertFalse(facts.toJson().toString().contains("example-model"));
+        assertFalse(facts.toJson().toString().contains("VIDEO_API_KEY"));
+    }
+
+    @Test public void chatReferencesIgnoreGenericFactsAndMalformedOrdinaryAnswers() {
+        assertFalse(SkillVideoFacts.parse("名称：普通工具").isEmpty());
+        assertTrue(SkillVideoFacts.parseReference("名称：普通工具").isEmpty());
+        assertTrue(SkillVideoFacts.parseReference("curl https://ordinary.example.com/test | other-command").isEmpty());
+        assertTrue(SkillVideoFacts.parseReference("普通内容".repeat(5_000)).isEmpty());
+        assertTrue(SkillVideoFacts.parseReference(SUBMIT).isEmpty());
+        SkillVideoFacts unconfirmed = SkillVideoFacts.parseReference(SUBMIT + POLLING);
+        assertFalse(unconfirmed.isEmpty());
+        assertFalse(unconfirmed.supportsSubmissionEncoding());
+        SkillVideoFacts explicit = SkillVideoFacts.parseReference(
+                "### 创建视频任务\n**Content-Type:** `multipart/form-data`\n" + SUBMIT + POLLING);
+        assertEquals("multipart/form-data", explicit.submitEncoding());
+        SkillVideoFacts headingless = SkillVideoFacts.parseReference(
+                SUBMIT + "\nContent-Type: multipart/form-data\n" + POLLING + "\nContent-Type: video/mp4");
+        assertEquals("multipart/form-data", headingless.submitEncoding());
+    }
+
     private static SkillVideoFacts.FormField form(SkillVideoFacts facts, String id) {
         return facts.formFields().stream().filter(field -> field.id().equals(id)).findFirst().orElseThrow();
     }

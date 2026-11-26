@@ -31,11 +31,17 @@ public final class SkillVideoFacts {
             + "(?:authorization|proxy-authorization|cookie|set-cookie|x[-_ ]?auth[-_ ]?token|(?:x[-_ ]?)?api[-_ ]?key"
             + "|access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|secret|password|token|密钥|访问令牌|凭据|密码)"
             + "[\"']?\\s*[:=：]\\s*\\S");
+    private static final Pattern SECRET_ASSIGNMENT = Pattern.compile("(?i)(?:^|[\\s;])"
+            + "[A-Za-z_][A-Za-z0-9_]*(?:API_KEY|ACCESS_KEY|TOKEN|SECRET|PASSWORD)\\s*=\\s*\\S");
     private static final String INVALID = "视频接口事实格式无效，请核对方法、路径和字段";
     private static final String SECRET_NOTES = "请移除接口说明中的密钥、凭据或授权头";
     private static final String PROMPT = "promptField";
     private static final String STATES = "states";
     private static final String PROVENANCE = "provenance";
+    static final String JSON_ENCODING = "application/json";
+    static final String MULTIPART_ENCODING = "multipart/form-data";
+    static final String URLENCODED_ENCODING = "application/x-www-form-urlencoded";
+    static final String UNKNOWN_ENCODING = "unknown";
     private static final Set<String> ID_FIELDS = Set.of("id", "taskid", "jobid");
     private static final Set<String> STATUS_FIELDS = Set.of("state", "status");
     private static final Set<String> URL_FIELDS = Set.of("videourl", "resulturl", "downloadurl");
@@ -43,6 +49,7 @@ public final class SkillVideoFacts {
     private enum Fact {
         LABEL("label", ""),
         SUBMIT("submitEndpoint", "提交 POST 的公网 HTTPS 地址"),
+        ENCODING("submitEncoding", "提交请求编码"),
         SUBMIT_ID("submitIdField", "提交响应任务 ID 字段"),
         STATUS("statusPath", "查询 GET 路径（含 {id}）"),
         STATUS_ID("statusIdField", "查询响应任务 ID 字段"),
@@ -77,6 +84,7 @@ public final class SkillVideoFacts {
     private static final List<FormSpec> FORM = List.of(
             new FormSpec(Fact.LABEL, "服务名称", FieldType.TEXT, false),
             new FormSpec(Fact.SUBMIT, Fact.SUBMIT.missing, FieldType.HTTPS_URL, true),
+            new FormSpec(Fact.ENCODING, Fact.ENCODING.missing, FieldType.TEXT, false),
             new FormSpec(null, PROMPT, "提示词字段", FieldType.JSON_FIELD, true),
             new FormSpec(Fact.SUBMIT_ID, Fact.SUBMIT_ID.missing, FieldType.JSON_PATH, true),
             new FormSpec(Fact.STATUS, Fact.STATUS.missing, FieldType.TASK_PATH, true),
@@ -123,10 +131,21 @@ public final class SkillVideoFacts {
                 "[]", Collections.emptyList(), Collections.emptyMap(), Source.EMPTY);
     }
 
-    public static SkillVideoFacts parse(String notes) {
+    public static SkillVideoFacts parse(String notes) { return parseNotes(notes, false); }
+
+    public static SkillVideoFacts parseReference(String notes) {
+        if (notes == null || !SkillVideoReference.recognizable(notes.substring(0, Math.min(notes.length(), MAX_NOTES)))) {
+            return empty();
+        }
+        return parseNotes(notes, true);
+    }
+
+    private static SkillVideoFacts parseNotes(String notes, boolean requireEncoding) {
         if (notes == null) return empty();
         if (notes.length() > MAX_NOTES) throw invalid();
         if (notes.trim().isEmpty()) return empty();
+        SkillVideoReference.Notes reference = SkillVideoReference.normalize(notes);
+        notes = reference.text();
         checkSecrets(notes);
         String[] lines = notes.split("\\R", -1);
         if (lines.length > 128) throw invalid();
@@ -177,6 +196,8 @@ public final class SkillVideoFacts {
             switch (label) {
                 case "名称", "服务名称", "label", "name" -> put(facts, Fact.LABEL, checked(Fact.LABEL, value));
                 case "提交", "提交接口", "提交地址", "submit" -> put(facts, Fact.SUBMIT, endpoint(operation(value, "POST")));
+                case "提交请求编码", "提交编码", "submitencoding" -> facts.merge(Fact.ENCODING,
+                        encoding(value), SkillVideoFacts::mergeEncoding);
                 case "提示词字段", "提示词参数", "promptfield", "prompt" -> {
                     String key = field(value);
                     if (request.containsValue("argument") && !"argument".equals(request.get(key))) throw invalid();
@@ -204,6 +225,9 @@ public final class SkillVideoFacts {
                         put(facts, Fact.RESULT_URL, responsePath(value));
                 default -> { /* Only recognized, verified facts are retained. */ }
             }
+        }
+        if ((requireEncoding || reference.documentedSubmit()) && facts.containsKey(Fact.SUBMIT)) {
+            facts.putIfAbsent(Fact.ENCODING, UNKNOWN_ENCODING);
         }
         if (!conflictingPrompts && !promptExample.isEmpty() && !request.containsValue("argument")
                 && !request.containsKey(promptExample)) request.put(promptExample, "argument");
@@ -278,6 +302,7 @@ public final class SkillVideoFacts {
         if (origin == Source.REUSED_SKILL || configuredEndpoint != null && !configuredEndpoint.isEmpty()) {
             put(stored, Fact.SUBMIT.key, endpoint(configuredEndpoint));
         }
+        put(stored, Fact.ENCODING.key, JSON_ENCODING);
         put(stored, Fact.SUBMIT_ID.key, http.responseField());
         put(stored, Fact.STATUS.key, video.statusPath());
         put(stored, Fact.STATUS_ID.key, video.idField());
@@ -364,7 +389,12 @@ public final class SkillVideoFacts {
     }
 
     private String formValue(FormSpec spec) {
-        if (spec.fact() != null) return facts.getOrDefault(spec.fact(), "");
+        if (spec.fact() != null) {
+            String value = facts.getOrDefault(spec.fact(), "");
+            return facts.containsKey(Fact.SUBMIT) && value.startsWith("https://")
+                    && (spec.fact() == Fact.STATUS || spec.fact() == Fact.CANCEL || spec.fact() == Fact.DOWNLOAD)
+                    ? path(value) : value;
+        }
         if (PROMPT.equals(spec.id())) {
             for (Map.Entry<String, String> item : request.entrySet()) {
                 if ("argument".equals(item.getValue())) return item.getKey();
@@ -464,6 +494,10 @@ public final class SkillVideoFacts {
 
     public boolean isComplete() { return missing().isEmpty(); }
 
+    public String submitEncoding() { return facts.getOrDefault(Fact.ENCODING, ""); }
+
+    public boolean supportsSubmissionEncoding() { return submitEncoding().isEmpty() || JSON_ENCODING.equals(submitEncoding()); }
+
     public List<String> missing() {
         List<String> missing = new ArrayList<>();
         for (FormSpec spec : FORM) {
@@ -477,6 +511,13 @@ public final class SkillVideoFacts {
         boolean result = facts.containsKey(Fact.RESULT_URL);
         if (!download && !result) missing.add("下载 GET 路径（含 {id}），或查询响应成品 HTTPS 地址字段");
         if (download && result) missing.add("下载 GET 路径与查询响应成品地址字段只能填写一种");
+        if (!supportsSubmissionEncoding()) {
+            missing.add(switch (submitEncoding()) {
+                case MULTIPART_ENCODING -> "当前视频技能只支持 JSON 提交，供应商使用 multipart/form-data";
+                case URLENCODED_ENCODING -> "当前视频技能只支持 JSON 提交，供应商使用表单编码";
+                default -> "请确认提交请求编码，当前视频技能只支持 application/json";
+            });
+        }
         return Collections.unmodifiableList(missing);
     }
 
@@ -532,6 +573,7 @@ public final class SkillVideoFacts {
                 yield value;
             }
             case SUBMIT -> endpoint(value);
+            case ENCODING -> encoding(value);
             case SUBMIT_ID, STATUS_ID, STATE, RESULT_URL -> responsePath(value);
             case STATUS, CANCEL, DOWNLOAD -> route(value);
             case CANCEL_METHOD -> {
@@ -545,6 +587,22 @@ public final class SkillVideoFacts {
         String[] words = value.split("\\s+", 2);
         if (words.length != 2 || !words[0].equalsIgnoreCase(expectedMethod) || words[1].isEmpty()) throw invalid();
         return unquote(words[1]);
+    }
+
+    static String encoding(String value) {
+        String bare = value.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
+        return switch (bare) {
+            case JSON_ENCODING, "json" -> JSON_ENCODING;
+            case MULTIPART_ENCODING, "multipart", "form-data" -> MULTIPART_ENCODING;
+            case URLENCODED_ENCODING, "urlencoded", "form-urlencoded" -> URLENCODED_ENCODING;
+            default -> UNKNOWN_ENCODING;
+        };
+    }
+
+    static String mergeEncoding(String first, String second) {
+        if (first.equals(second)) return first;
+        if (first.equals(MULTIPART_ENCODING) || second.equals(MULTIPART_ENCODING)) return MULTIPART_ENCODING;
+        return UNKNOWN_ENCODING;
     }
 
     private static String unquote(String value) {
@@ -613,6 +671,7 @@ public final class SkillVideoFacts {
     }
 
     private static String endpoint(String value) {
+        if (value == null || value.contains("$(") || value.contains("${")) throw invalid();
         try { return SkillCustomService.validateEndpoint(value); }
         catch (SkillCustomService.Failure invalid) { throw invalid(); }
     }
@@ -759,11 +818,11 @@ public final class SkillVideoFacts {
         catch (IllegalArgumentException malformed) { throw invalid(); }
     }
 
-    private static void checkSecrets(String value) {
+    static void checkSecrets(String value) {
         if (value == null || value.length() > MAX_NOTES) throw invalid();
         try {
             SkillAuthoring.rejectCredential(value);
-            if (SECRET.matcher(value).find()) throw invalid();
+            if (SECRET.matcher(value).find() || SECRET_ASSIGNMENT.matcher(value).find()) throw invalid();
         } catch (IllegalArgumentException secret) {
             throw new IllegalArgumentException(SECRET_NOTES);
         }
