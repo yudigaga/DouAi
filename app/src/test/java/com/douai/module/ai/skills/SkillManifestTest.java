@@ -60,6 +60,34 @@ public final class SkillManifestTest {
         assertThrows(IllegalArgumentException.class, () -> SkillManifest.parse(image.toString()));
     }
 
+    @Test public void optionalServiceReferenceIsLogicalAndMustMatchTheDeclaredCapability() throws Exception {
+        JSONObject text = textProposal(new JSONArray());
+        SkillManifest legacy = SkillManifest.parse(text.toString());
+        assertFalse(legacy.toJson().has("serviceRef"));
+        assertEquals(SkillCapabilityRegistry.ServiceRef.SELECTED_MODEL, legacy.serviceRef());
+        text.put("serviceRef", "selected_model");
+        assertEquals("selected_model", SkillManifest.parse(text.toString()).toJson().getString("serviceRef"));
+        JSONObject table = textProposal(new JSONArray()).put("capabilityId", "table_model")
+                .put("outputType", "table").put("serviceRef", "selected_model");
+        table.getJSONObject("trial").put("expectedType", "table");
+        assertEquals("selected_model", SkillManifest.parse(table.toString()).toJson().getString("serviceRef"));
+        JSONObject image = textProposal(new JSONArray()).put("capabilityId", "image_generation")
+                .put("outputType", "image").put("serviceRef", "image_connection");
+        image.getJSONObject("trial").put("expectedType", "image");
+        assertEquals("image_connection", SkillManifest.parse(image.toString()).toJson().getString("serviceRef"));
+        JSONObject video = textProposal(new JSONArray()).put("capabilityId", "video_task")
+                .put("outputType", "video").put("serviceRef", "skill_https");
+        video.getJSONObject("trial").put("expectedType", "video");
+        assertEquals("skill_https", SkillManifest.parse(video.toString()).toJson().getString("serviceRef"));
+        JSONObject direct = textProposal(new JSONArray()).put("capabilityId", "custom_service").put("serviceRef", "skill_https");
+        assertEquals(SkillCapabilityRegistry.ServiceRef.SKILL_HTTPS, SkillManifest.parse(direct.toString()).serviceRef());
+        for (Object invalid : List.of("skill_https", "https://service.example.test/v1", "profile-01", "Bearer fixture-secret", 1,
+                JSONObject.NULL, new JSONObject().put("name", "selected_model"))) {
+            text.put("serviceRef", invalid);
+            assertThrows(IllegalArgumentException.class, () -> SkillManifest.parse(text.toString()));
+        }
+    }
+
     @Test public void changingFieldTypeKeepsCompatibleValuesAndRequiresConfirmationForReplacement() throws Exception {
         File directory = temporary.newFolder();
         SkillServices services = SkillServices.forContext(RuntimeEnvironment.getApplication());

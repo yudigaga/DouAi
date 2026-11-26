@@ -128,6 +128,20 @@ public final class SkillAuthoringTest {
                 () -> SkillAuthoring.rejectEditorCredential("Cookie: session=fixture-only"));
     }
 
+    @Test public void newVideoRequestCanNameItsEvidenceInTheSameSentence() {
+        String command = "/技能 帮我做个生成视频的技能";
+        SkillAuthoring.VideoSource visible = SkillAuthoring.videoSource(command + "，按你发的接口资料填写");
+        assertNotNull(visible);
+        assertEquals("帮我做个生成视频的技能", visible.action().request());
+        assertEquals("", visible.relatedSkill());
+        SkillAuthoring.VideoSource configured = SkillAuthoring.videoSource(command + "，沿用 /已有视频 的服务，并内置");
+        assertNotNull(configured);
+        assertEquals("已有视频", configured.relatedSkill());
+        assertEquals("帮我做个生成视频的技能", configured.action().request());
+        assertTrue(configured.action().saveAfter());
+        assertNull(SkillAuthoring.videoSource("「" + command + "，按你发的接口资料填写」"));
+    }
+
     @Test public void revisionRequiresAnExistingDraftAndARequestToChangeIt() {
         assertNull(SkillAuthoring.match("把它改成正式语气", false));
         assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.REVISE, "把它改成正式语气", false),

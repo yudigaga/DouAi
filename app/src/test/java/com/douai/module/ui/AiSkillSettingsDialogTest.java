@@ -125,6 +125,90 @@ public final class AiSkillSettingsDialogTest {
         detail.dismiss();
     }
 
+    @Test public void directHttpImageOnlyOffersGenericSettingsAndCanEditTypedMappings() throws Exception {
+        String name = "接口图片";
+        String manifest = """
+                {"schemaVersion":4,"name":"接口图片","description":"通过接口返回图片","documentation":"输入提示词。",
+                 "instructions":"根据输入生成图片","capabilityId":"custom_service","configFields":[
+                     {"key":"size","label":"尺寸","type":"integer","required":false,"min":1,"max":100}],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"image","trial":{"input":"样例","expectedType":"image"},
+                 "http":{"version":1,"label":"图片接口","request":{"prompt":"argument"},"response":"image"}}
+                """;
+        assertNotNull(store.saveAuthoredDraft(SkillStore.validateAuthoredDraft(manifest)).pending());
+        SkillStore.Detail initial = store.detail(name);
+        assertThrows(IllegalStateException.class, () -> store.saveConfiguration(name, initial.draftId(),
+                SkillServices.Adapter.MOCK_IMAGE, "", "", 0, ""));
+        assertEquals(initial.deleteTarget(), store.detail(name).deleteTarget());
+        reopenManager();
+        AlertDialog detail = skillDetail(skillRow(name));
+        assertNotNull(dialogView(detail, "skills.detail.custom.endpoint"));
+        assertNull(dialogView(detail, "skills.detail.adapter"));
+        assertNull(dialogView(detail, "skills.detail.retry"));
+        assertTrue(dialogView(detail, "skills.detail.direct_contract.replace").performClick());
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        ((EditText) dialogView(editor, "skills.detail.direct_contract.request.0")).setText("caption");
+        assertTrue(dialogView(editor, "skills.detail.direct_contract.add").performClick());
+        ((EditText) dialogView(editor, "skills.detail.direct_contract.request.1")).setText("width");
+        ((Spinner) dialogView(editor, "skills.detail.direct_contract.source.1")).setSelection(1);
+        ((EditText) dialogView(editor, "skills.detail.direct_contract.response")).setText("encoded");
+        confirm(editor);
+
+        SkillStore.Detail pending = store.detail(name);
+        assertTrue(pending.pending());
+        assertEquals(SkillResult.Type.IMAGE, pending.outputType());
+        assertEquals(java.util.Map.of("caption", "argument", "width", "config.size"), pending.manifest().http().request());
+        assertEquals("encoded", pending.manifest().http().responseField());
+        assertNull(pending.customConfiguration());
+        assertTrue(store.list().isEmpty());
+    }
+
+    @Test public void videoReplacementUsesTheNewFactsWhileCurrentBindingStaysActive() throws Exception {
+        String name = "接口视频";
+        String definition = """
+                {"schemaVersion":4,"name":"接口视频","description":"通过接口生成视频","documentation":"输入提示词。",
+                 "instructions":"使用原任务 ID 查询","capabilityId":"video_task","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"video","trial":{"input":"样例","expectedType":"video"}}
+                """;
+        String firstEndpoint = "https://first-video.example.com/v1/jobs";
+        String revisedEndpoint = "https://second-video.example.com/v2/tasks";
+        var prior = com.douai.module.ai.skills.SkillVideoFacts.parse(videoProviderNotes(firstEndpoint, "/v1/jobs/{id}"));
+        store.saveAuthoredVideoDraft(SkillStore.prepareAuthoredVideoDraft(definition, prior), prior);
+        SkillStore.Detail active = store.configureCustomService(store.detail(name), firstEndpoint, "");
+        assertNotNull(active.current());
+        reopenManager();
+        AlertDialog detail = skillDetail(skillRow(name));
+        assertTrue(dialogView(detail, "skills.detail.video_contract.replace").performClick());
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(((EditText) dialogView(editor, "skills.detail.video_facts.field.submitEndpoint")).getText().toString().isEmpty());
+        ((EditText) dialogView(editor, "skills.detail.video_facts.input")).setText(videoProviderNotes(revisedEndpoint, "/v2/tasks/{id}"));
+        confirm(editor);
+
+        SkillStore.Detail changed = store.detail(name);
+        assertTrue(changed.pending());
+        assertEquals(active.current(), changed.current());
+        assertNull(changed.customConfiguration());
+        assertEquals(revisedEndpoint, changed.manifest().http().suggestedEndpoint());
+        assertEquals("/v2/tasks/{id}", changed.manifest().http().video().statusPath());
+        var currentCall = AiSkills.match(AiSkills.Entry.WORK, "/接口视频 样例", store);
+        assertEquals(firstEndpoint, store.previewCustomService(currentCall).endpoint());
+    }
+
+    private static String videoProviderNotes(String endpoint, String status) {
+        return """
+                提交: POST %s
+                提交请求编码: application/json
+                提示词字段: prompt
+                提交响应ID: task_id
+                查询: GET %s
+                查询响应ID: id
+                状态字段: status
+                状态映射: finished=completed
+                下载: GET %s/content
+                """.formatted(endpoint, status, status);
+    }
+
     @Test public void sameNameInstalledAndPendingSkillsShareOneTruthfulSettingsRow() throws Exception {
         String name = "统一技能入口";
         installTextSkill(name, "保持段落结构");

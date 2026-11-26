@@ -20,7 +20,7 @@ public final class SkillAuthoring {
     public enum Mode { DESIGN, REVISE, SAVE, PREVIEW, CANCEL, SUPPLEMENT }
 
     public record Action(Mode mode, String request, boolean saveAfter) { }
-    public record VideoSource(Action action, String command, String notes, String relatedSkill) { }
+    public record VideoSource(Action action, String command, String notes, String relatedSkill, boolean visibleMaterial) { }
     public record FieldEdit(String label, String value) { }
 
     public static final String DESIGN_INSTRUCTION = """
@@ -29,7 +29,9 @@ public final class SkillAuthoring {
             不要代码围栏和额外解释。
             顶层仅包含 schemaVersion（整数 4）、name（1 至 24 字，无空格和斜杠）、description、
             documentation（供用户阅读的说明）、instructions（不超过 1600 字）、capabilityId、
-            configFields、inputs、outputType 和 trial。可选 displayName（不超过 48 字）与 http。技能 ID 由应用创建。
+            configFields、inputs、outputType 和 trial。可选 displayName（不超过 48 字）、serviceRef 与 http。
+            serviceRef 指明应用以内的绑定方式：文本和表格模型用 selected_model，独立图片服务用 image_connection，
+            自定义接口和视频任务用 skill_https。只能匹配能力，不能写账号、主机、服务 ID 或任何凭据。技能 ID 由应用创建。
             “技能”是创建入口的保留名称，name 必须使用另一个命令名。
             修订 previousDefinition 时保留原有 name 和输出类型，只改用户本轮指定的内容。
             文本使用 capabilityId: "text_model"，outputType: "text"。按需求声明用户需要配置的参数，
@@ -152,6 +154,11 @@ public final class SkillAuthoring {
             + "\\s*(?:补齐|补充|填写)(?:接口|草稿|配置)?"
             + "|(?:就\\s*)?按\\s*你(?:刚才)?发(?:给我)?的\\s*(?:填写|填好)"
             + "|(?:视频)?接口(?:资料|字段)?\\s*(?:需要|要)\\s*(?:帮我|请你)\\s*填好)" + END);
+    private static final Pattern VIDEO_SOURCE_SUFFIX = Pattern.compile(
+            "[，,\\s]+(?:按(?:你(?:刚才)?发(?:给我)?的|上面(?:的)?|刚才(?:的)?)(?:视频)?接口资料(?:填写|补齐)?"
+                    + "|沿用(?:已配置的)?(?:技能)?\\s*/([\\p{L}\\p{N}_-]{1,24})(?:\\s*的(?:视频)?服务)?)"
+                    + "\\s*[。.]?\\s*$");
+    private static final Pattern SOURCE_HEADER = Pattern.compile("^(?:视频)?接口资料\\s*[:：]\\s*");
     private static final Pattern UNCLEAR_EDIT = Pattern.compile("^" + PREFIX
             + "(?:继续(?:编写|修改)|(?:再|按上面|按刚才)?(?:改|调整|优化|补充)(?:一下|一点)?)" + END);
     private static final String EDIT_TOPICS = "轮询|间隔|失败|超时|重试|下载|回传|成片|"
@@ -297,16 +304,27 @@ public final class SkillAuthoring {
     public static VideoSource videoSource(String text) {
         if (text == null || text.length() > MAX_MODEL_INPUT) return null;
         int lineEnd = text.indexOf('\n');
-        if (lineEnd < 0) return null;
-        String command = text.substring(0, lineEnd).trim();
+        String command = (lineEnd < 0 ? text : text.substring(0, lineEnd)).trim();
         Action action = match(command, false);
-        if (action == null || action.mode() != Mode.DESIGN || explicitOutput(action.request()) != SkillResult.Type.VIDEO) return null;
-        String supplied = text.substring(lineEnd + 1).trim();
+        if (action == null || action.mode() != Mode.DESIGN) return null;
         String related = "";
+        boolean visible = false;
+        Matcher source = VIDEO_SOURCE_SUFFIX.matcher(action.request());
+        if (isCreationCommand(command) && source.find()) {
+            related = source.group(1) == null ? "" : source.group(1);
+            visible = related.isEmpty();
+            action = new Action(Mode.DESIGN, action.request().substring(0, source.start()).trim(), action.saveAfter());
+        }
+        if (explicitOutput(action.request()) != SkillResult.Type.VIDEO) return null;
+        if (lineEnd < 0) return visible || !related.isEmpty()
+                ? new VideoSource(action, command, "", related, visible) : null;
+        String supplied = text.substring(lineEnd + 1).trim();
         StringBuilder notes = new StringBuilder();
         for (String line : supplied.split("\\r?\\n", -1)) {
             String trimmed = line.trim();
-            if (trimmed.matches("接口资料\\s*[：:]?")) continue;
+            if ("接口资料".equals(trimmed) || "视频接口资料".equals(trimmed)) continue;
+            Matcher heading = SOURCE_HEADER.matcher(trimmed);
+            if (heading.find()) line = trimmed.substring(heading.end());
             if (trimmed.matches("沿用技能\\s*[：:].*")) {
                 int separator = trimmed.indexOf('：');
                 String name = trimmed.substring((separator >= 0 ? separator : trimmed.indexOf(':')) + 1).trim();
@@ -319,7 +337,11 @@ public final class SkillAuthoring {
             }
             notes.append(line).append('\n');
         }
-        return new VideoSource(action, command, notes.toString().trim(), related);
+        String material = notes.toString().trim();
+        if (visible && (!material.isEmpty() || !related.isEmpty())) {
+            throw new IllegalArgumentException("请为新视频技能选择一份接口资料");
+        }
+        return new VideoSource(action, command, material, related, visible);
     }
 
     public static Action match(String typed, boolean hasDraft) {

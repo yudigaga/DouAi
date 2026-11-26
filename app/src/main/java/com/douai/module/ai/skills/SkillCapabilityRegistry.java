@@ -15,24 +15,38 @@ public final class SkillCapabilityRegistry {
         public String label() { return label; }
     }
 
+    public enum ServiceRef {
+        SELECTED_MODEL("selected_model", "当前 AI 模型"),
+        IMAGE_CONNECTION("image_connection", "图片服务配置"),
+        SKILL_HTTPS("skill_https", "技能 HTTPS 接口");
+
+        private final String id;
+        private final String label;
+        ServiceRef(String id, String label) { this.id = id; this.label = label; }
+        public String id() { return id; }
+        public String label() { return label; }
+    }
+
     public enum Capability {
-        TEXT_MODEL("text_model", "text_model", SkillResult.Type.TEXT, ExecutionMode.DIRECT, 2000),
-        TABLE_MODEL("table_model", "table_model", SkillResult.Type.TABLE, ExecutionMode.DIRECT, 2000),
-        VIDEO_TASK("video_task", "video_task", SkillResult.Type.VIDEO, ExecutionMode.POLLING, 2000),
-        CUSTOM_SERVICE("custom_service", "custom_service", SkillResult.Type.TEXT, ExecutionMode.DIRECT, 2000),
-        IMAGE_GENERATION("image_generation", "service", SkillResult.Type.IMAGE, ExecutionMode.DIRECT, 4000);
+        TEXT_MODEL("text_model", "text_model", SkillResult.Type.TEXT, ExecutionMode.DIRECT, ServiceRef.SELECTED_MODEL, 2000),
+        TABLE_MODEL("table_model", "table_model", SkillResult.Type.TABLE, ExecutionMode.DIRECT, ServiceRef.SELECTED_MODEL, 2000),
+        VIDEO_TASK("video_task", "video_task", SkillResult.Type.VIDEO, ExecutionMode.POLLING, ServiceRef.SKILL_HTTPS, 2000),
+        CUSTOM_SERVICE("custom_service", "custom_service", SkillResult.Type.TEXT, ExecutionMode.DIRECT, ServiceRef.SKILL_HTTPS, 2000),
+        IMAGE_GENERATION("image_generation", "service", SkillResult.Type.IMAGE, ExecutionMode.DIRECT, ServiceRef.IMAGE_CONNECTION, 4000);
 
         private final String id;
         private final String kind;
         private final SkillResult.Type outputType;
         private final ExecutionMode executionMode;
+        private final ServiceRef serviceRef;
         private final int maxInput;
 
-        Capability(String id, String kind, SkillResult.Type outputType, ExecutionMode executionMode, int maxInput) {
+        Capability(String id, String kind, SkillResult.Type outputType, ExecutionMode executionMode, ServiceRef serviceRef, int maxInput) {
             this.id = id;
             this.kind = kind;
             this.outputType = outputType;
             this.executionMode = executionMode;
+            this.serviceRef = serviceRef;
             this.maxInput = maxInput;
         }
 
@@ -40,8 +54,9 @@ public final class SkillCapabilityRegistry {
         public String kind() { return kind; }
         public SkillResult.Type outputType() { return outputType; }
         public ExecutionMode executionMode() { return executionMode; }
+        public ServiceRef serviceRef() { return serviceRef; }
         public int maxInput() { return maxInput; }
-        public boolean usesModel() { return this == TEXT_MODEL || this == TABLE_MODEL; }
+        public boolean usesModel() { return serviceRef == ServiceRef.SELECTED_MODEL; }
     }
 
     private SkillCapabilityRegistry() { }

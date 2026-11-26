@@ -35,6 +35,38 @@ public class SkillVideoJobsTest {
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
     private final AtomicLong clock = new AtomicLong(1_000);
 
+    public record ChatVideoContract(String submitEndpoint, String expectedPayload, String submitReply,
+                                    String statusEndpoint, String statusReply, String downloadEndpoint) { }
+
+    public static SkillVideoJobs chatFixture(Context context, ChatVideoContract contract, AtomicInteger submits,
+                                           AtomicInteger statuses, AtomicInteger downloads) {
+        return new SkillVideoJobs(new File(context.getFilesDir(), "douai_real_video_jobs"), System::currentTimeMillis,
+                (method, media, endpoint, bearer, body, deadline, admission) -> {
+                    admission.check();
+                    assertEquals("", bearer);
+                    if (method == SkillHttpsTransport.Method.POST) {
+                        assertFalse(media);
+                        assertEquals(contract.submitEndpoint(), endpoint);
+                        assertEquals(contract.expectedPayload(), new String(body, StandardCharsets.UTF_8));
+                        assertEquals(1, submits.incrementAndGet());
+                        if (contract.submitReply() == null) {
+                            throw new SkillHttpsTransport.Failure(SkillHttpsTransport.Kind.DEADLINE, true);
+                        }
+                        return json(202, contract.submitReply());
+                    }
+                    assertEquals(SkillHttpsTransport.Method.GET, method);
+                    assertNull(body);
+                    if (media) {
+                        assertEquals(contract.downloadEndpoint(), endpoint);
+                        assertEquals(1, downloads.incrementAndGet());
+                        return new SkillHttpsTransport.Response(200, "video/mp4", structuralMp4());
+                    }
+                    assertEquals(contract.statusEndpoint(), endpoint);
+                    assertEquals(1, statuses.incrementAndGet());
+                    return json(200, contract.statusReply());
+                });
+    }
+
     public static SkillVideoJobs chatFixture(Context context, AtomicInteger submits) {
         return new SkillVideoJobs(new File(context.getFilesDir(), "douai_real_video_jobs"), System::currentTimeMillis,
                 (method, media, uri, bearer, body, deadline, admission) -> {

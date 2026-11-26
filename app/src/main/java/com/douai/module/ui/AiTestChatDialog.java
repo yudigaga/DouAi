@@ -835,9 +835,11 @@ final class AiTestChatDialog extends Dialog {
         sendMessage(prompt, images, documents, retryAnswer, approvedService, choice, selectionDone, null);
     }
 
+    private record AuthoringMaterial(SkillAuthoring.Action action, SkillVideoFacts facts) { }
+
     private void sendMessage(String prompt, List<ChatImage> images, List<Document> documents, ChatMessage retryAnswer,
                              SkillStore.CustomCall approvedService, SkillSelection.Choice choice, boolean selectionDone,
-                             SkillVideoFacts selectedMaterial) {
+                             AuthoringMaterial selectedMaterial) {
         String commandText = prompt.trim();
         List<PendingAttachment> selected = new ArrayList<>(retryAnswer == null ? draftPending : retryAnswer.retryPending);
         if (disposed || busy
@@ -874,7 +876,7 @@ final class AiTestChatDialog extends Dialog {
         try {
             videoSource = skillStore != null && retryAnswer == null ? SkillAuthoring.videoSource(commandText) : null;
             boolean editing = skillEntry != null && retryAnswer == null && previousDraft != null && approvedService == null;
-            SkillVideoFacts material = selectedMaterial;
+            SkillVideoFacts material = selectedMaterial == null ? null : selectedMaterial.facts();
             if (editing && material == null) {
                 try { SkillAuthoring.rejectEditorCredential(commandText); }
                 catch (IllegalArgumentException credential) {
@@ -900,6 +902,7 @@ final class AiTestChatDialog extends Dialog {
                 }
             }
             SkillAuthoring.Action requested = skillStore == null || retryAnswer != null ? null
+                    : selectedMaterial != null ? selectedMaterial.action()
                     : material != null ? new SkillAuthoring.Action(SkillAuthoring.Mode.SUPPLEMENT, "", false)
                     : videoSource == null ? SkillAuthoring.match(commandText, editing) : videoSource.action();
             if (editing && requested == null) {
@@ -970,12 +973,27 @@ final class AiTestChatDialog extends Dialog {
                 updateSend();
                 return;
             }
+            if (canAuthor && selectedMaterial == null && requested.mode() == SkillAuthoring.Mode.DESIGN
+                    && SkillAuthoring.explicitOutput(requested.request()) == SkillResult.Type.VIDEO
+                    && images.isEmpty() && documents.isEmpty() && selected.isEmpty()) {
+                if (videoSource != null && videoSource.visibleMaterial()) {
+                    chooseVisibleVideoSource(prompt, requested);
+                    return;
+                }
+                if (videoSource == null && creationCommand) {
+                    List<String> configured = skillStore.configuredVideoSourceNames();
+                    if (!configured.isEmpty()) {
+                        chooseConfiguredVideoSource(prompt, requested, configured);
+                        return;
+                    }
+                }
+            }
             authoring = canAuthor ? requested : null;
             if (targetedFacts != null) {
                 authoredFacts = targetedFacts;
             } else if (material != null) {
-                SkillVideoFacts prior = skillDraftFacts == null ? SkillVideoFacts.empty() : skillDraftFacts;
-                authoredFacts = prior.fillMissingFrom(material);
+                authoredFacts = authoring.mode() == SkillAuthoring.Mode.DESIGN || skillDraftFacts == null
+                        ? material : skillDraftFacts.fillMissingFrom(material);
             } else if (videoSource != null) {
                 SkillVideoFacts supplied = SkillVideoFacts.parse(videoSource.notes());
                 if (videoSource.relatedSkill().isEmpty()) authoredFacts = supplied;
@@ -1674,6 +1692,36 @@ final class AiTestChatDialog extends Dialog {
         updateSend();
     }
 
+    private void sendAuthoringMaterial(String prompt, SkillAuthoring.Action action, SkillVideoFacts facts) {
+        sendMessage(prompt, List.of(), List.of(), null, null, null, false, new AuthoringMaterial(action, facts));
+    }
+
+    private void chooseVisibleVideoSource(String prompt, SkillAuthoring.Action action) {
+        List<VideoReferenceMaterial> materials = visibleVideoMaterials(null, true);
+        if (materials.isEmpty()) {
+            sendAuthoringMaterial(prompt, action, SkillVideoFacts.empty());
+            return;
+        }
+        chooseVideoReference("选择用于新视频技能的接口资料", materials, VideoReferenceMaterial::label,
+                generation, false, material -> sendAuthoringMaterial(prompt, action, material.facts()));
+    }
+
+    private void chooseConfiguredVideoSource(String prompt, SkillAuthoring.Action action, List<String> names) {
+        List<String> choices = new ArrayList<>(names);
+        if (choices.size() > 1) choices.add("");
+        chooseVideoReference("选择已配置的视频接口", choices, name -> name.isEmpty() ? "先创建待配置草稿" : "/" + name,
+                generation, false, name -> {
+                    SkillVideoFacts facts;
+                    try {
+                        facts = name.isEmpty() ? SkillVideoFacts.empty() : skillStore.videoFactsForSkill(name);
+                    } catch (Exception unavailable) {
+                        showAuthoringStatus("所选视频服务已变化，请重新选择接口资料。");
+                        return;
+                    }
+                    sendAuthoringMaterial(prompt, action, facts);
+                });
+    }
+
     private static boolean otherDraftTarget(String request) {
         int changed = request.indexOf("改");
         String target = changed < 0 ? request : request.substring(0, changed);
@@ -1698,7 +1746,7 @@ final class AiTestChatDialog extends Dialog {
             return;
         }
         List<VideoReferenceTarget> targets = new ArrayList<>();
-        List<VideoReferenceMaterial> materials = new ArrayList<>();
+        List<VideoReferenceMaterial> materials;
         try {
             if (!store.enabled()) {
                 showAuthoringStatus("请先启用 AI Skills");
@@ -1719,25 +1767,7 @@ final class AiTestChatDialog extends Dialog {
                 showAuthoringStatus("没有可补齐的视频草稿，请先用 /技能 创建");
                 return;
             }
-            int examined = 0;
-            for (int index = transcript.size() - 1; index >= 0 && examined < VIDEO_REFERENCE_MESSAGES; index--) {
-                ChatMessage message = transcript.get(index);
-                if (message.user) continue;
-                if (message.artifact instanceof SkillResult.Declaration declaration) {
-                    if (preview == null || !sameAuthoringThread(declaration, preview, index)) break;
-                    continue;
-                }
-                if (message.color != TEXT || TextUtils.isEmpty(message.copyText)) continue;
-                examined++;
-                SkillVideoFacts facts = SkillVideoFacts.parseReference(message.copyText);
-                if (!facts.isEmpty()) {
-                    String endpoint = facts.formFields().stream().filter(field -> "submitEndpoint".equals(field.id()))
-                            .map(SkillVideoFacts.FormField::value).findFirst().orElse("");
-                    String host = endpoint.isEmpty() ? null : Uri.parse(endpoint).getHost();
-                    materials.add(new VideoReferenceMaterial(message, facts, "助手消息 " + (index + 1)
-                            + (host == null ? "" : " · " + host)));
-                }
-            }
+            materials = visibleVideoMaterials(preview, false);
         } catch (IllegalArgumentException invalid) {
             showAuthoringStatus("无法安全读取上面的接口资料，请核对资料并移除其中的密钥");
             return;
@@ -1761,8 +1791,38 @@ final class AiTestChatDialog extends Dialog {
                 target -> chooseVideoReference("选择要使用的接口资料", materials, VideoReferenceMaterial::label,
                         expectedGeneration, false, material -> {
                             if (install) saveVideoReference(prompt, store, target, material);
-                            else sendMessage(prompt, List.of(), List.of(), null, null, null, false, material.facts());
+                            else sendAuthoringMaterial(prompt,
+                                    new SkillAuthoring.Action(SkillAuthoring.Mode.SUPPLEMENT, "", false), material.facts());
                         }));
+    }
+
+    private List<VideoReferenceMaterial> visibleVideoMaterials(SkillStore.DraftPreview preview, boolean newDraft) {
+        List<VideoReferenceMaterial> materials = new ArrayList<>();
+        int examined = 0;
+        for (int index = transcript.size() - 1; index >= 0 && examined < VIDEO_REFERENCE_MESSAGES; index--) {
+            ChatMessage message = transcript.get(index);
+            if (message.user) continue;
+            if (message.artifact instanceof SkillResult.Declaration declaration) {
+                if (!newDraft && (preview == null || !sameAuthoringThread(declaration, preview, index))) break;
+                continue;
+            }
+            if (message.color != TEXT || TextUtils.isEmpty(message.copyText)) continue;
+            examined++;
+            SkillVideoFacts facts;
+            try {
+                facts = SkillVideoFacts.parseReference(message.copyText);
+            } catch (IllegalArgumentException invalid) {
+                if (!newDraft) throw invalid;
+                continue;
+            }
+            if (facts.isEmpty()) continue;
+            String endpoint = facts.formFields().stream().filter(field -> "submitEndpoint".equals(field.id()))
+                    .map(SkillVideoFacts.FormField::value).findFirst().orElse("");
+            String host = endpoint.isEmpty() ? null : Uri.parse(endpoint).getHost();
+            materials.add(new VideoReferenceMaterial(message, facts, "助手消息 " + (index + 1)
+                    + (host == null ? "" : " · " + host)));
+        }
+        return materials;
     }
 
     private boolean previewingVideoDraft() { return skillDraft != null && skillDraft.outputType() == SkillResult.Type.VIDEO; }

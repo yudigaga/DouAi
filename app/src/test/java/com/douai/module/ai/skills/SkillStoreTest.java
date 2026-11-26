@@ -659,6 +659,166 @@ public class SkillStoreTest {
         assertEquals("multipart/form-data", store.detail("表单动画").videoFacts().submitEncoding());
     }
 
+    @Test public void explicitVideoReplacementIsAtomicAndNeverInheritsEitherOldBinding() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        String name = "镜头动画";
+        var draft = SkillStore.validateAuthoredDraft(videoDraft(name).toString());
+        SkillVideoFacts first = switchVideoFacts("first.example.com", "prompt", "原供应商模型");
+        SkillVideoFacts next = switchVideoFacts("second.example.com", "scene", "新供应商型号")
+                .withForm(java.util.Map.of("statusPath", "https://second.example.com/v1/jobs/{id}"));
+        String firstEndpoint = "https://first.example.com/v1/submit";
+        String secondEndpoint = "https://second.example.com/v1/submit";
+        String priorKey = "fixture-first-active-key";
+        String pendingKey = "fixture-first-pending-key";
+        assertNotNull(store.saveConversationDraft(draft, first, null).pending());
+        SkillStore.Detail active = store.configureCustomService(store.detail(name), firstEndpoint, priorKey, false,
+                java.util.Map.of("model", "first-model", "duration", "6"));
+        assertEquals(java.util.List.of(name), store.configuredVideoSourceNames());
+        AiSkills.Invocation before = AiSkills.match(AiSkills.Entry.CONTACT, "/镜头动画 海边", store);
+        var openReview = store.previewCustomService(before);
+        var approved = store.approveCustomService(store.previewCustomService(before));
+        assertNotNull(store.saveConversationDraft(draft, first, null).pending());
+        SkillStore.Detail pending = store.configureCustomService(store.detail(name), firstEndpoint, pendingKey, false,
+                java.util.Map.of("model", "pending-model", "duration", "8"));
+        assertTrue(pending.canReplace());
+        var catalog = new File(root, "catalog.json").toPath();
+        String beforeSwap = Files.readString(catalog);
+        assertThrows(IllegalStateException.class, () -> store.replaceVideoContract(active, next));
+        assertThrows(IllegalArgumentException.class, () -> store.replaceVideoContract(pending, SkillVideoFacts.empty()));
+        var leakedUrl = assertThrows(SkillCustomService.Failure.class, () -> store.replaceVideoContract(pending,
+                next.withForm(java.util.Map.of("submitEndpoint", secondEndpoint + "/" + priorKey))));
+        assertFalse(leakedUrl.getMessage().contains(priorKey));
+        var leakedLabel = assertThrows(IllegalArgumentException.class, () -> store.replaceVideoContract(pending,
+                next.withForm(java.util.Map.of("label", pendingKey))));
+        assertFalse(leakedLabel.getMessage().contains(pendingKey));
+        assertEquals(beforeSwap, Files.readString(catalog));
+
+        SkillStore.Detail candidate = store.replaceVideoContract(pending, next);
+        assertTrue(candidate.pending());
+        assertFalse(candidate.canReplace());
+        assertEquals(active.current(), candidate.current());
+        assertEquals(name, candidate.name());
+        assertEquals(pending.manifest().instructions(), candidate.manifest().instructions());
+        assertEquals(8, candidate.manifestValues().get("duration"));
+        assertFalse(candidate.manifestValues().containsKey("model"));
+        assertNull(candidate.customConfiguration());
+        assertEquals(secondEndpoint, candidate.manifest().http().suggestedEndpoint());
+        assertEquals(firstEndpoint, store.previewCustomService(before).endpoint());
+        var currentCatalog = new JSONObject(Files.readString(catalog));
+        assertTrue(currentCatalog.getJSONObject("drafts").getJSONObject(name).isNull("customBinding"));
+        assertEquals(new JSONObject(beforeSwap).getJSONObject("skills").getJSONObject(name).toString(),
+                currentCatalog.getJSONObject("skills").getJSONObject(name).toString());
+        assertThrows(IllegalStateException.class, () -> store.activateReplacement(pending));
+
+        SkillStore reopened = videoStore(root);
+        assertThrows(IllegalArgumentException.class, () -> reopened.configureCustomService(reopened.detail(name),
+                "https://third.example.com/v1/submit", ""));
+        assertEquals(candidate.deleteTarget(), reopened.detail(name).deleteTarget());
+        SkillStore.Detail configured = reopened.configureCustomService(reopened.detail(name), secondEndpoint, "", false,
+                java.util.Map.of("model", "second-model", "duration", "8"));
+        assertFalse(configured.customConfiguration().hasCredential());
+        assertTrue(configured.canReplace());
+        assertEquals(firstEndpoint, reopened.previewCustomService(before).endpoint());
+        SkillStore.Detail published = reopened.activateReplacement(configured);
+        assertEquals(2, published.current().version());
+        assertEquals(secondEndpoint, published.customConfiguration().endpoint());
+        assertThrows(IllegalStateException.class, () -> reopened.approveCustomService(openReview));
+        assertThrows(IllegalStateException.class,
+                () -> reopened.executeCustomService(before, approved, Long.MAX_VALUE, null));
+        AiSkills.Invocation call = AiSkills.match(AiSkills.Entry.WORK, "/镜头动画 海边", reopened);
+        var review = reopened.previewCustomService(call);
+        assertEquals(secondEndpoint, review.endpoint());
+        assertEquals("海边", new JSONObject(review.payload()).getString("scene"));
+        assertEquals("second-model", new JSONObject(review.payload()).getString("model"));
+        assertEquals(java.util.List.of(name), reopened.configuredVideoSourceNames());
+    }
+
+    @Test public void replacingDirectMappingRequiresASeparateBindingAndConfirmation() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        JSONObject manifest = new JSONObject("""
+                {"schemaVersion":4,"name":"检查接口","description":"提取文字","documentation":"输入原稿",
+                 "instructions":"检查格式","capabilityId":"custom_service",
+                 "configFields":[{"key":"style","label":"风格","type":"text","required":true}],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"},
+                 "http":{"version":1,"label":"文本服务","suggestedEndpoint":"https://first.example.com/v1/text",
+                         "request":{"text":"argument","style":"config.style"},"response":"text"}}
+                """);
+        String name = "检查接口";
+        var authored = SkillStore.validateAuthoredDraft(manifest.toString());
+        assertNotNull(store.saveConversationDraft(authored, null, null).pending());
+        String endpoint = "https://first.example.com/v1/text";
+        SkillStore.Detail installed = store.configureCustomService(store.detail(name), endpoint, "fixture-first-text-key",
+                false, java.util.Map.of("style", "简洁"));
+        AiSkills.Invocation captured = AiSkills.match(AiSkills.Entry.WORK, "/检查接口 原稿", store);
+        var oldApproval = store.approveCustomService(store.previewCustomService(captured));
+        var catalog = new File(root, "catalog.json").toPath();
+        String before = Files.readString(catalog);
+        assertThrows(IllegalArgumentException.class, () -> store.replaceDirectContract(installed,
+                java.util.Map.of("prompt", "config.absent"), "reply"));
+        assertEquals(before, Files.readString(catalog));
+
+        SkillStore.Detail candidate = store.replaceDirectContract(installed,
+                java.util.Map.of("prompt", "argument", "tone", "config.style"), "reply");
+        assertTrue(candidate.pending());
+        assertFalse(candidate.canReplace());
+        assertEquals("", candidate.manifest().http().suggestedEndpoint());
+        assertEquals("简洁", candidate.manifestValues().get("style"));
+        assertNull(candidate.customConfiguration());
+        assertEquals(endpoint, store.previewCustomService(captured).endpoint());
+        assertThrows(IllegalStateException.class, () -> store.replaceDirectContract(installed,
+                java.util.Map.of("prompt", "argument"), "reply"));
+        SkillStore.Detail ready = store.configureCustomService(candidate, endpoint, "");
+        assertTrue(ready.canReplace());
+        assertFalse(ready.customConfiguration().hasCredential());
+        store.activateReplacement(ready);
+        assertThrows(IllegalStateException.class,
+                () -> store.executeCustomService(captured, oldApproval, Long.MAX_VALUE, null));
+        var replacement = store.previewCustomService(AiSkills.match(AiSkills.Entry.CONTACT, "/检查接口 新稿", store));
+        assertEquals("新稿", new JSONObject(replacement.payload()).getString("prompt"));
+        assertEquals("简洁", new JSONObject(replacement.payload()).getString("tone"));
+        assertTrue(store.configuredVideoSourceNames().isEmpty());
+    }
+
+    @Test public void unsupportedVideoReplacementCannotDisplaceAnInstalledSource() throws Exception {
+        SkillStore store = videoStore(temp.newFolder());
+        String name = "镜头动画";
+        var draft = SkillStore.validateAuthoredDraft(videoDraft(name).toString());
+        SkillVideoFacts first = switchVideoFacts("first.example.com", "prompt", "旧型号");
+        assertNotNull(store.saveConversationDraft(draft, first, null).pending());
+        SkillStore.Detail installed = store.configureCustomService(store.detail(name), "https://first.example.com/v1/submit",
+                "", false, java.util.Map.of("model", "first", "duration", "8"));
+        SkillVideoFacts unsupported = switchVideoFacts("second.example.com", "scene", "新型号")
+                .withForm(java.util.Map.of("submitEncoding", "multipart/form-data"));
+        SkillStore.Detail staged = store.replaceVideoContract(installed, unsupported);
+        assertTrue(staged.pending());
+        assertNull(staged.manifest().http());
+        assertNull(staged.customConfiguration());
+        assertTrue(staged.videoMissing().stream().anyMatch(reason -> reason.contains("multipart")));
+        assertEquals(installed.current(), staged.current());
+        assertEquals(java.util.List.of(name), store.configuredVideoSourceNames());
+        store.setSkillEnabled(name, false);
+        assertTrue(store.configuredVideoSourceNames().isEmpty());
+        assertThrows(IllegalStateException.class, () -> store.videoFactsForSkill(name));
+    }
+
+    private static SkillVideoFacts switchVideoFacts(String host, String prompt, String modelLabel) {
+        return SkillVideoFacts.parse("""
+                提交: POST https://%s/v1/submit
+                提示词字段: %s
+                提交响应ID: id
+                必填文本字段: model %s
+                必填整数字段: duration 时长
+                查询: GET /v1/jobs/{id}
+                查询响应ID: id
+                状态字段: status
+                状态映射: done=completed
+                下载: GET /v1/jobs/{id}/video
+                """.formatted(host, prompt, modelLabel));
+    }
+
     private static SkillStore videoStore(File root) {
         var vault = new com.douai.module.ai.AiCredentialVault(
                 () -> new javax.crypto.spec.SecretKeySpec(new byte[32], "AES"));

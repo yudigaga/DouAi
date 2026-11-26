@@ -87,7 +87,7 @@ public record SkillManifest(String name, String displayName, String description,
     public static SkillManifest parse(String json) {
         try {
             JSONObject data = SkillAuthoring.readObject(json, 8192);
-            keys(data, Set.of("displayName", "http"), "schemaVersion", "name", "description", "documentation", "instructions",
+            keys(data, Set.of("displayName", "http", "serviceRef"), "schemaVersion", "name", "description", "documentation", "instructions",
                     "capabilityId", "configFields", "inputs", "outputType", "trial");
             if (!Integer.valueOf(SCHEMA_VERSION).equals(data.get("schemaVersion"))) throw invalid();
             String name = checkedText(data.get("name"), 24, false);
@@ -98,6 +98,9 @@ public record SkillManifest(String name, String displayName, String description,
             String instruction = checkedText(data.get("instructions"), 1600, true);
             SkillCapabilityRegistry.Capability capability = SkillCapabilityRegistry.require(
                     checkedText(data.get("capabilityId"), 32, false));
+            if (data.has("serviceRef") && !capability.serviceRef().id().equals(data.get("serviceRef"))) {
+                throw new Invalid("技能清单的服务引用与能力不匹配");
+            }
             SkillResult.Type output = SkillResult.Type.fromWire(checkedText(data.get("outputType"), 12, false));
             boolean declaredHttp = data.has("http");
             boolean service = capability == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE
@@ -141,6 +144,8 @@ public record SkillManifest(String name, String displayName, String description,
     public boolean usesHttp() {
         return capability == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE || http != null;
     }
+
+    public SkillCapabilityRegistry.ServiceRef serviceRef() { return capability.serviceRef(); }
 
     public boolean hasConfigurableFields() { return capability.usesModel() || http != null; }
 
