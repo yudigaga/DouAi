@@ -8,11 +8,13 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -21,7 +23,7 @@ public final class SkillVideoFacts {
     private static final int MAX_NOTES = 16_000;
     private static final int MAX_STATES = 12;
     private static final int MAX_RESPONSE_DEPTH = 4;
-    private static final Pattern LINE = Pattern.compile("^\\s*([-*]\\s+)?([^:：]{1,48})[:：]\\s*(.*?)\\s*$");
+    private static final Pattern LINE = Pattern.compile("^\\s*(?:[-*+]|#{1,6})?\\s*([^:：]{1,48})[:：]\\s*(.*?)\\s*$");
     private static final Pattern FIELD = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,31}");
     private static final Pattern STATE = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,31}");
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9._~-]{1,64}");
@@ -31,6 +33,12 @@ public final class SkillVideoFacts {
             + "[\"']?\\s*[:=：]\\s*\\S");
     private static final String INVALID = "视频接口事实格式无效，请核对方法、路径和字段";
     private static final String SECRET_NOTES = "请移除接口说明中的密钥、凭据或授权头";
+    private static final String PROMPT = "promptField";
+    private static final String STATES = "states";
+    private static final String PROVENANCE = "provenance";
+    private static final Set<String> ID_FIELDS = Set.of("id", "taskid", "jobid");
+    private static final Set<String> STATUS_FIELDS = Set.of("state", "status");
+    private static final Set<String> URL_FIELDS = Set.of("videourl", "resulturl", "downloadurl");
 
     private enum Fact {
         LABEL("label", ""),
@@ -41,26 +49,68 @@ public final class SkillVideoFacts {
         STATE("stateField", "状态字段"),
         CANCEL("cancelPath", "取消路径（含 {id}）"),
         CANCEL_METHOD("cancelMethod", "取消方式（POST 或 DELETE）"),
-        DOWNLOAD("downloadPath", "下载 GET 路径（含 {id}）");
+        DOWNLOAD("downloadPath", "下载 GET 路径（含 {id}）"),
+        RESULT_URL("resultUrlField", "查询响应成品 HTTPS 地址字段");
 
         final String key;
         final String missing;
         Fact(String key, String missing) { this.key = key; this.missing = missing; }
     }
 
+    public enum FieldType { TEXT, HTTPS_URL, JSON_FIELD, JSON_PATH, TASK_PATH, STATE_MAP, CANCEL_METHOD }
+
+    public enum Source {
+        EMPTY("未填写"), DOCUMENT("文档提取"), REUSED_SKILL("已有技能"), MANUAL("手动填写"), STORED("已保存");
+        private final String label;
+        Source(String label) { this.label = label; }
+        public String label() { return label; }
+    }
+
+    public record FormField(String id, String label, FieldType type, boolean required, String value, Source source) {}
+
+    private record FormSpec(Fact fact, String id, String label, FieldType type, boolean required) {
+        FormSpec(Fact fact, String label, FieldType type, boolean required) {
+            this(fact, fact.key, label, type, required);
+        }
+    }
+
+    private static final List<FormSpec> FORM = List.of(
+            new FormSpec(Fact.LABEL, "服务名称", FieldType.TEXT, false),
+            new FormSpec(Fact.SUBMIT, Fact.SUBMIT.missing, FieldType.HTTPS_URL, true),
+            new FormSpec(null, PROMPT, "提示词字段", FieldType.JSON_FIELD, true),
+            new FormSpec(Fact.SUBMIT_ID, Fact.SUBMIT_ID.missing, FieldType.JSON_PATH, true),
+            new FormSpec(Fact.STATUS, Fact.STATUS.missing, FieldType.TASK_PATH, true),
+            new FormSpec(Fact.STATUS_ID, Fact.STATUS_ID.missing, FieldType.JSON_PATH, true),
+            new FormSpec(Fact.STATE, Fact.STATE.missing, FieldType.JSON_PATH, true),
+            new FormSpec(null, STATES, "状态映射", FieldType.STATE_MAP, true),
+            new FormSpec(Fact.CANCEL_METHOD, Fact.CANCEL_METHOD.missing, FieldType.CANCEL_METHOD, false),
+            new FormSpec(Fact.CANCEL, Fact.CANCEL.missing, FieldType.TASK_PATH, false),
+            new FormSpec(Fact.DOWNLOAD, Fact.DOWNLOAD.missing, FieldType.TASK_PATH, false),
+            new FormSpec(Fact.RESULT_URL, Fact.RESULT_URL.missing, FieldType.JSON_PATH, false));
+
     private final Map<Fact, String> facts;
     private final Map<String, String> request;
     private final Map<String, String> states;
     private final String declarations;
     private final List<SkillManifest.ConfigField> config;
+    private final Map<String, Source> provenance;
 
     private SkillVideoFacts(Map<Fact, String> facts, Map<String, String> request, Map<String, String> states,
-                           String declarations, List<SkillManifest.ConfigField> config) {
+                           String declarations, List<SkillManifest.ConfigField> config,
+                           Map<String, Source> provenance, Source defaultSource) {
         this.facts = Collections.unmodifiableMap(new EnumMap<>(facts));
         this.request = Collections.unmodifiableMap(new LinkedHashMap<>(request));
         this.states = Collections.unmodifiableMap(new LinkedHashMap<>(states));
         this.declarations = declarations;
         this.config = config;
+        Map<String, Source> sources = new LinkedHashMap<>();
+        for (FormSpec field : FORM) {
+            Source source = provenance.get(field.id());
+            if (!formValue(field).isEmpty()) sources.put(field.id(), source == null ? defaultSource : source);
+            else if (source == Source.MANUAL) sources.put(field.id(), source);
+        }
+        if (!sources.keySet().containsAll(provenance.keySet())) throw invalid();
+        this.provenance = Collections.unmodifiableMap(sources);
         checkOrigins();
         String id = facts.get(Fact.STATUS_ID);
         String state = facts.get(Fact.STATE);
@@ -70,7 +120,7 @@ public final class SkillVideoFacts {
 
     public static SkillVideoFacts empty() {
         return new SkillVideoFacts(new EnumMap<>(Fact.class), Collections.emptyMap(), Collections.emptyMap(),
-                "[]", Collections.emptyList());
+                "[]", Collections.emptyList(), Collections.emptyMap(), Source.EMPTY);
     }
 
     public static SkillVideoFacts parse(String notes) {
@@ -84,11 +134,45 @@ public final class SkillVideoFacts {
         Map<String, String> request = new LinkedHashMap<>();
         Map<String, String> states = new LinkedHashMap<>();
         Map<String, JSONObject> fields = new LinkedHashMap<>();
-        for (String line : lines) {
-            Matcher item = LINE.matcher(line);
+        Map<Fact, String> responseExamples = new EnumMap<>(Fact.class);
+        Set<Fact> ambiguousExamples = EnumSet.noneOf(Fact.class);
+        String promptExample = "";
+        boolean conflictingPrompts = false;
+        for (int index = 0; index < lines.length; index++) {
+            Matcher item = LINE.matcher(lines[index]);
             if (!item.matches()) continue;
-            String label = item.group(2).toLowerCase(Locale.ROOT).replaceAll("[\\s_-]", "");
-            String value = item.group(3).trim();
+            String label = item.group(1).toLowerCase(Locale.ROOT).replaceAll("[\\s_*`-]", "");
+            String value = unquote(item.group(2).trim());
+            Example example = Example.find(label);
+            if (example != null) {
+                if (value.isEmpty() && index + 1 < lines.length && lines[index + 1].trim().matches("```(?i:json)?")) {
+                    StringBuilder body = new StringBuilder();
+                    index += 2;
+                    while (index < lines.length && !lines[index].trim().equals("```")) {
+                        body.append(lines[index++]).append('\n');
+                    }
+                    if (index == lines.length) throw invalid();
+                    value = body.toString();
+                }
+                if (value.isEmpty()) continue;
+                JSONObject sample = strict(value);
+                if (example == Example.REQUEST) {
+                    String found = samplePrompt(sample);
+                    if (!found.isEmpty()) {
+                        if (!promptExample.isEmpty() && !promptExample.equals(found)) conflictingPrompts = true;
+                        promptExample = found;
+                    }
+                } else {
+                    sampleField(responseExamples, ambiguousExamples,
+                            example == Example.SUBMIT ? Fact.SUBMIT_ID : Fact.STATUS_ID, sample, ID_FIELDS, null);
+                    if (example == Example.STATUS) {
+                        sampleField(responseExamples, ambiguousExamples, Fact.STATE, sample, STATUS_FIELDS, null);
+                        sampleField(responseExamples, ambiguousExamples, Fact.RESULT_URL, sample, URL_FIELDS,
+                                facts.get(Fact.SUBMIT));
+                    }
+                }
+                continue;
+            }
             if (value.isEmpty()) continue;
             switch (label) {
                 case "名称", "服务名称", "label", "name" -> put(facts, Fact.LABEL, checked(Fact.LABEL, value));
@@ -116,14 +200,25 @@ public final class SkillVideoFacts {
                     put(facts, Fact.CANCEL_METHOD, method);
                 }
                 case "下载", "下载接口", "download" -> put(facts, Fact.DOWNLOAD, route(operation(value, "GET")));
+                case "查询结果字段", "状态结果字段", "查询结果地址字段", "成品地址字段", "resulturlfield", "statusresultfield" ->
+                        put(facts, Fact.RESULT_URL, responsePath(value));
                 default -> { /* Only recognized, verified facts are retained. */ }
             }
         }
+        if (!conflictingPrompts && !promptExample.isEmpty() && !request.containsValue("argument")
+                && !request.containsKey(promptExample)) request.put(promptExample, "argument");
+        if (facts.containsKey(Fact.DOWNLOAD)) responseExamples.remove(Fact.RESULT_URL);
+        responseExamples.forEach(facts::putIfAbsent);
         JSONArray declared = new JSONArray(fields.values());
-        return new SkillVideoFacts(facts, request, states, declared.toString(), validateConfig(declared));
+        return new SkillVideoFacts(facts, request, states, declared.toString(), validateConfig(declared),
+                Collections.emptyMap(), Source.DOCUMENT);
     }
 
     public static SkillVideoFacts fromJson(JSONObject stored) {
+        return decode(stored, Source.STORED);
+    }
+
+    private static SkillVideoFacts decode(JSONObject stored, Source defaultSource) {
         if (stored == null || stored.length() == 0) return empty();
         JSONObject object = strict(stored.toString());
         if (!Integer.valueOf(1).equals(object.opt("version"))) throw invalid();
@@ -148,6 +243,11 @@ public final class SkillVideoFacts {
             if (fields == null) throw invalid();
             expected++;
         }
+        Map<String, Source> sources = Collections.emptyMap();
+        if (object.has(PROVENANCE)) {
+            sources = readProvenance(object.optJSONObject(PROVENANCE));
+            expected++;
+        }
         if (object.length() != expected) throw invalid();
         List<SkillManifest.ConfigField> validated = validateConfig(fields);
         for (String source : request.values()) {
@@ -155,12 +255,18 @@ public final class SkillVideoFacts {
                 throw invalid();
             }
         }
-        return new SkillVideoFacts(facts, request, states, fields == null ? "[]" : fields.toString(), validated);
+        return new SkillVideoFacts(facts, request, states, fields == null ? "[]" : fields.toString(), validated,
+                sources, defaultSource);
     }
 
     /** Copies the validated shape and suggests the separately approved endpoint. */
     public static SkillVideoFacts fromDeclaration(SkillManifest manifest, String configuredEndpoint) {
+        return fromDeclaration(manifest, configuredEndpoint, Source.REUSED_SKILL);
+    }
+
+    public static SkillVideoFacts fromDeclaration(SkillManifest manifest, String configuredEndpoint, Source origin) {
         if (manifest == null || manifest.outputType() != SkillResult.Type.VIDEO || manifest.http() == null) throw invalid();
+        if (origin != Source.REUSED_SKILL && origin != Source.STORED) throw invalid();
         SkillHttpDeclaration http = manifest.http();
         SkillHttpDeclaration.Video video = http.video();
         if (video == null) throw invalid();
@@ -169,18 +275,23 @@ public final class SkillVideoFacts {
         video.states().forEach((raw, state) -> put(storedStates, raw, state.name().toLowerCase(Locale.ROOT)));
         put(stored, "version", 1);
         put(stored, Fact.LABEL.key, http.label());
-        put(stored, Fact.SUBMIT.key, endpoint(configuredEndpoint));
+        if (origin == Source.REUSED_SKILL || configuredEndpoint != null && !configuredEndpoint.isEmpty()) {
+            put(stored, Fact.SUBMIT.key, endpoint(configuredEndpoint));
+        }
         put(stored, Fact.SUBMIT_ID.key, http.responseField());
         put(stored, Fact.STATUS.key, video.statusPath());
         put(stored, Fact.STATUS_ID.key, video.idField());
         put(stored, Fact.STATE.key, video.stateField());
-        put(stored, Fact.CANCEL.key, video.cancelPath());
-        put(stored, Fact.CANCEL_METHOD.key, video.cancelMethod());
-        put(stored, Fact.DOWNLOAD.key, video.downloadPath());
+        if (video.canCancel()) {
+            put(stored, Fact.CANCEL.key, video.cancelPath());
+            put(stored, Fact.CANCEL_METHOD.key, video.cancelMethod());
+        }
+        if (!video.downloadPath().isEmpty()) put(stored, Fact.DOWNLOAD.key, video.downloadPath());
+        if (!video.resultUrlField().isEmpty()) put(stored, Fact.RESULT_URL.key, video.resultUrlField());
         put(stored, "states", storedStates);
         put(stored, "request", new JSONObject(http.request()));
         put(stored, "configFields", manifest.toJson().optJSONArray("configFields"));
-        return fromJson(stored);
+        return decode(stored, origin);
     }
 
     public JSONObject toJson() {
@@ -190,42 +301,182 @@ public final class SkillVideoFacts {
         if (!request.isEmpty()) put(stored, "request", new JSONObject(request));
         if (!states.isEmpty()) put(stored, "states", new JSONObject(states));
         if (!config.isEmpty()) put(stored, "configFields", configFields());
+        if (!provenance.isEmpty()) {
+            JSONObject sources = new JSONObject();
+            provenance.forEach((field, source) -> put(sources, field, source.name()));
+            put(stored, PROVENANCE, sources);
+        }
         return stored;
+    }
+
+    public static SkillVideoFacts fromForm(Map<String, String> values) { return empty().withForm(values); }
+
+    public SkillVideoFacts withForm(Map<String, String> changes) {
+        if (changes == null || changes.isEmpty()) return this;
+        if (changes.size() > FORM.size()) throw invalid();
+        Map<Fact, String> updatedFacts = new EnumMap<>(Fact.class);
+        updatedFacts.putAll(facts);
+        Map<String, String> updatedRequest = new LinkedHashMap<>(request);
+        Map<String, String> updatedStates = new LinkedHashMap<>(states);
+        Map<String, Source> updatedSources = new LinkedHashMap<>(provenance);
+        int length = 0;
+        for (Map.Entry<String, String> entry : changes.entrySet()) {
+            FormSpec spec = formSpec(entry.getKey());
+            String raw = entry.getValue();
+            if (raw == null || raw.length() > MAX_NOTES - length) throw invalid();
+            length += raw.length();
+            checkSecrets(raw);
+            String value = raw.trim();
+            String prior = formValue(spec);
+            if (spec.fact() != null) {
+                if (!value.isEmpty()) value = checked(spec.fact(), value);
+                if (prior.equals(value)) continue;
+                if (value.isEmpty()) updatedFacts.remove(spec.fact());
+                else updatedFacts.put(spec.fact(), value);
+            } else if (PROMPT.equals(spec.id())) {
+                if (!value.isEmpty()) value = field(value);
+                if (prior.equals(value)) continue;
+                updatedRequest.values().removeIf("argument"::equals);
+                if (!value.isEmpty()) put(updatedRequest, value, "argument");
+            } else {
+                Map<String, String> replacement = new LinkedHashMap<>();
+                if (!value.isEmpty()) readStates(value, replacement);
+                if (states.equals(replacement)) continue;
+                updatedStates = replacement;
+            }
+            updatedSources.put(spec.id(), Source.MANUAL);
+        }
+        if (updatedRequest.size() > 7) throw invalid();
+        return new SkillVideoFacts(updatedFacts, updatedRequest, updatedStates, declarations, config,
+                updatedSources, Source.MANUAL);
+    }
+
+    public List<FormField> formFields() {
+        List<FormField> fields = new ArrayList<>();
+        for (FormSpec spec : FORM) {
+            boolean required = spec.required()
+                    || spec.fact() == Fact.CANCEL && facts.containsKey(Fact.CANCEL_METHOD)
+                    || spec.fact() == Fact.CANCEL_METHOD && facts.containsKey(Fact.CANCEL);
+            fields.add(new FormField(spec.id(), spec.label(), spec.type(), required, formValue(spec),
+                    provenance.getOrDefault(spec.id(), Source.EMPTY)));
+        }
+        return Collections.unmodifiableList(fields);
+    }
+
+    private String formValue(FormSpec spec) {
+        if (spec.fact() != null) return facts.getOrDefault(spec.fact(), "");
+        if (PROMPT.equals(spec.id())) {
+            for (Map.Entry<String, String> item : request.entrySet()) {
+                if ("argument".equals(item.getValue())) return item.getKey();
+            }
+            return "";
+        }
+        List<String> lines = new ArrayList<>();
+        states.forEach((raw, normalized) -> lines.add(raw + "=" + normalized));
+        return String.join("\n", lines);
+    }
+
+    private static FormSpec formSpec(String id) {
+        for (FormSpec spec : FORM) if (spec.id().equals(id)) return spec;
+        throw invalid();
+    }
+
+    private static Map<String, Source> readProvenance(JSONObject stored) {
+        if (stored == null || stored.length() > FORM.size()) throw invalid();
+        Map<String, Source> used = new LinkedHashMap<>();
+        try {
+            for (Iterator<String> ids = stored.keys(); ids.hasNext();) {
+                String id = ids.next();
+                formSpec(id);
+                Source source = Source.valueOf(string(stored.opt(id)));
+                if (source == Source.EMPTY) throw invalid();
+                used.put(id, source);
+            }
+        } catch (IllegalArgumentException malformed) { throw invalid(); }
+        return used;
     }
 
     public SkillVideoFacts merge(SkillVideoFacts newer) {
         if (newer == null || newer.isEmpty()) return this;
+        if (provenance.containsValue(Source.MANUAL)) return fillMissingFrom(newer);
         String priorEndpoint = facts.get(Fact.SUBMIT);
         String nextEndpoint = newer.facts.get(Fact.SUBMIT);
         if (priorEndpoint != null && nextEndpoint != null && !priorEndpoint.equals(nextEndpoint)) return newer;
-        if (newer.missing().isEmpty()) return newer;
-        Map<Fact, String> mergedFacts = new EnumMap<>(Fact.class);
-        mergedFacts.putAll(facts);
-        mergedFacts.putAll(newer.facts);
-        Map<String, String> mergedStates = new LinkedHashMap<>(states);
-        mergedStates.putAll(newer.states);
-        if (mergedStates.size() > MAX_STATES) throw invalid();
-        Map<String, String> mergedRequest = new LinkedHashMap<>(request);
-        if (newer.request.containsValue("argument")) mergedRequest.values().removeIf("argument"::equals);
-        mergedRequest.putAll(newer.request);
-        if (mergedRequest.size() > 7) throw invalid();
-        Map<String, JSONObject> mergedFields = new LinkedHashMap<>();
-        indexConfig(configFields(), mergedFields);
-        indexConfig(newer.configFields(), mergedFields);
-        JSONArray declarations = new JSONArray(mergedFields.values());
-        return new SkillVideoFacts(mergedFacts, mergedRequest, mergedStates, declarations.toString(),
-                validateConfig(declarations));
+        if (newer.isComplete()) return newer;
+        return combine(newer, false);
     }
 
-    public boolean isEmpty() { return facts.isEmpty() && request.isEmpty() && states.isEmpty(); }
+    /** Fills unset fields from extracted documentation or an approved Skill shape. */
+    public SkillVideoFacts fillMissingFrom(SkillVideoFacts incoming) {
+        if (incoming == null || incoming.isEmpty()) return this;
+        String current = facts.get(Fact.SUBMIT);
+        String offered = incoming.facts.get(Fact.SUBMIT);
+        if (current != null && offered != null && !current.equals(offered)) {
+            throw new IllegalArgumentException("提交地址与已填写的接口资料不同，请核对地址");
+        }
+        return combine(incoming, true);
+    }
+
+    private SkillVideoFacts combine(SkillVideoFacts newer, boolean fillOnly) {
+        Map<Fact, String> mergedFacts = new EnumMap<>(Fact.class);
+        mergedFacts.putAll(facts);
+        Map<String, Source> mergedSources = new LinkedHashMap<>(provenance);
+        for (Map.Entry<Fact, String> item : newer.facts.entrySet()) {
+            Fact field = item.getKey();
+            if (fillOnly && (provenance.containsKey(field.key)
+                    || field == Fact.RESULT_URL && facts.containsKey(Fact.DOWNLOAD)
+                    || field == Fact.DOWNLOAD && facts.containsKey(Fact.RESULT_URL))) continue;
+            mergedFacts.put(field, item.getValue());
+            mergedSources.put(field.key, newer.provenance.get(field.key));
+        }
+        Map<String, String> mergedStates = new LinkedHashMap<>(states);
+        if (!fillOnly || provenance.get(STATES) != Source.MANUAL) {
+            newer.states.forEach((key, value) -> {
+                if (fillOnly) mergedStates.putIfAbsent(key, value);
+                else mergedStates.put(key, value);
+            });
+            if (!newer.states.isEmpty() && (!fillOnly || states.isEmpty())) {
+                mergedSources.put(STATES, newer.provenance.get(STATES));
+            }
+        }
+        if (mergedStates.size() > MAX_STATES) throw invalid();
+        Map<String, String> mergedRequest = new LinkedHashMap<>(request);
+        boolean addPrompt = newer.request.containsValue("argument") && (!fillOnly || !provenance.containsKey(PROMPT));
+        if (addPrompt) {
+            mergedRequest.values().removeIf("argument"::equals);
+            mergedSources.put(PROMPT, newer.provenance.get(PROMPT));
+        }
+        newer.request.forEach((key, value) -> {
+            if ("argument".equals(value) && !addPrompt) return;
+            if (fillOnly) mergedRequest.putIfAbsent(key, value);
+            else mergedRequest.put(key, value);
+        });
+        if (mergedRequest.size() > 7) throw invalid();
+        Map<String, JSONObject> mergedFields = new LinkedHashMap<>();
+        indexConfig(configFields(), mergedFields, false);
+        indexConfig(newer.configFields(), mergedFields, fillOnly);
+        JSONArray declarations = new JSONArray(mergedFields.values());
+        return new SkillVideoFacts(mergedFacts, mergedRequest, mergedStates, declarations.toString(),
+                validateConfig(declarations), mergedSources, Source.STORED);
+    }
+
+    public boolean isEmpty() { return facts.isEmpty() && request.isEmpty() && states.isEmpty() && provenance.isEmpty(); }
+
+    public boolean isComplete() { return missing().isEmpty(); }
 
     public List<String> missing() {
         List<String> missing = new ArrayList<>();
-        for (Fact fact : Fact.values()) {
-            if (fact != Fact.LABEL && !facts.containsKey(fact)) missing.add(fact.missing);
+        for (FormSpec spec : FORM) {
+            if (spec.required() && spec.fact() != null && !facts.containsKey(spec.fact())) missing.add(spec.label());
         }
         if (!request.containsValue("argument")) missing.add("提示词字段");
         if (!states.containsValue("completed")) missing.add("状态映射中的完成状态");
+        if (facts.containsKey(Fact.CANCEL) && !facts.containsKey(Fact.CANCEL_METHOD)) missing.add(Fact.CANCEL_METHOD.missing);
+        if (!facts.containsKey(Fact.CANCEL) && facts.containsKey(Fact.CANCEL_METHOD)) missing.add(Fact.CANCEL.missing);
+        boolean download = facts.containsKey(Fact.DOWNLOAD);
+        boolean result = facts.containsKey(Fact.RESULT_URL);
+        if (!download && !result) missing.add("下载 GET 路径（含 {id}），或查询响应成品 HTTPS 地址字段");
+        if (download && result) missing.add("下载 GET 路径与查询响应成品地址字段只能填写一种");
         return Collections.unmodifiableList(missing);
     }
 
@@ -239,9 +490,12 @@ public final class SkillVideoFacts {
         if (!missing.isEmpty()) throw new IllegalArgumentException("视频接口事实缺少 " + String.join("、", missing));
         JSONObject video = new JSONObject();
         put(video, "statusPath", path(facts.get(Fact.STATUS)));
-        put(video, "cancelPath", path(facts.get(Fact.CANCEL)));
-        put(video, "cancelMethod", facts.get(Fact.CANCEL_METHOD));
-        put(video, "downloadPath", path(facts.get(Fact.DOWNLOAD)));
+        if (facts.containsKey(Fact.CANCEL)) {
+            put(video, "cancelPath", path(facts.get(Fact.CANCEL)));
+            put(video, "cancelMethod", facts.get(Fact.CANCEL_METHOD));
+        }
+        if (facts.containsKey(Fact.DOWNLOAD)) put(video, "downloadPath", path(facts.get(Fact.DOWNLOAD)));
+        else put(video, "resultUrlField", facts.get(Fact.RESULT_URL));
         put(video, "idField", facts.get(Fact.STATUS_ID));
         put(video, "stateField", facts.get(Fact.STATE));
         put(video, "states", new JSONObject(states));
@@ -278,11 +532,11 @@ public final class SkillVideoFacts {
                 yield value;
             }
             case SUBMIT -> endpoint(value);
-            case SUBMIT_ID, STATUS_ID, STATE -> responsePath(value);
+            case SUBMIT_ID, STATUS_ID, STATE, RESULT_URL -> responsePath(value);
             case STATUS, CANCEL, DOWNLOAD -> route(value);
             case CANCEL_METHOD -> {
-                if (!value.equals("POST") && !value.equals("DELETE")) throw invalid();
-                yield value;
+                if (!value.equalsIgnoreCase("POST") && !value.equalsIgnoreCase("DELETE")) throw invalid();
+                yield value.toUpperCase(Locale.ROOT);
             }
         };
     }
@@ -290,7 +544,72 @@ public final class SkillVideoFacts {
     private static String operation(String value, String expectedMethod) {
         String[] words = value.split("\\s+", 2);
         if (words.length != 2 || !words[0].equalsIgnoreCase(expectedMethod) || words[1].isEmpty()) throw invalid();
-        return words[1];
+        return unquote(words[1]);
+    }
+
+    private static String unquote(String value) {
+        return value.length() > 1 && value.charAt(0) == '`' && value.charAt(value.length() - 1) == '`'
+                ? value.substring(1, value.length() - 1).trim() : value;
+    }
+
+    private enum Example {
+        REQUEST, SUBMIT, STATUS;
+
+        static Example find(String label) {
+            return switch (label) {
+                case "请求示例", "提交请求示例", "requestexample", "submitrequestexample" -> REQUEST;
+                case "提交响应", "提交响应示例", "submitresponse", "submitresponseexample" -> SUBMIT;
+                case "查询响应", "查询响应示例", "状态响应示例", "statusresponse", "statusresponseexample" -> STATUS;
+                default -> null;
+            };
+        }
+    }
+
+    private static String samplePrompt(JSONObject request) {
+        boolean prompt = request.opt("prompt") instanceof String;
+        boolean textPrompt = request.opt("text_prompt") instanceof String;
+        if (prompt == textPrompt) return "";
+        return prompt ? "prompt" : "text_prompt";
+    }
+
+    private static void sampleField(Map<Fact, String> results, Set<Fact> ambiguous, Fact fact,
+                                    JSONObject object, Set<String> knownNames, String submit) {
+        if (ambiguous.contains(fact)) return;
+        List<String> paths = new ArrayList<>();
+        samplePaths(object, knownNames, "", 0, paths, submit);
+        if (paths.size() == 1) {
+            String route = paths.get(0);
+            String previous = results.putIfAbsent(fact, route);
+            if (previous == null || previous.equals(route)) return;
+        } else if (paths.isEmpty()) return;
+        results.remove(fact);
+        ambiguous.add(fact);
+    }
+
+    private static void samplePaths(JSONObject object, Set<String> knownNames, String prefix, int depth,
+                                    List<String> paths, String submit) {
+        if (depth >= MAX_RESPONSE_DEPTH || paths.size() > 1) return;
+        for (Iterator<String> names = object.keys(); names.hasNext() && paths.size() <= 1;) {
+            String key = names.next();
+            try { field(key); }
+            catch (IllegalArgumentException unsupported) { continue; }
+            Object value = object.opt(key);
+            String path = prefix.isEmpty() ? key : prefix + "." + key;
+            if (value instanceof JSONObject nested) {
+                samplePaths(nested, knownNames, path, depth + 1, paths, submit);
+            } else if (value instanceof String example && knownNames.contains(
+                    key.toLowerCase(Locale.ROOT).replace("_", "").replace("-", ""))
+                    && (knownNames != URL_FIELDS || validUrlExample(example, submit))) {
+                paths.add(path);
+            }
+        }
+    }
+
+    private static boolean validUrlExample(String example, String submit) {
+        try {
+            String origin = authority(endpoint(example));
+            return submit == null || origin.equals(authority(submit));
+        } catch (IllegalArgumentException invalid) { return false; }
     }
 
     private static String endpoint(String value) {
@@ -380,10 +699,11 @@ public final class SkillVideoFacts {
         put(request, name, "config." + name);
     }
 
-    private static void indexConfig(JSONArray declarations, Map<String, JSONObject> fields) {
+    private static void indexConfig(JSONArray declarations, Map<String, JSONObject> fields, boolean fillOnly) {
         for (int index = 0; index < declarations.length(); index++) {
             JSONObject declaration = declarations.optJSONObject(index);
-            fields.put(declaration.optString("key"), declaration);
+            if (fillOnly) fields.putIfAbsent(declaration.optString("key"), declaration);
+            else fields.put(declaration.optString("key"), declaration);
         }
     }
 
@@ -392,7 +712,7 @@ public final class SkillVideoFacts {
             readStateObject(strict(value), states);
             return;
         }
-        for (String part : value.split("[,，;；]", -1)) {
+        for (String part : value.split("[,，;；\\r\\n]+", -1)) {
             String[] pair = part.trim().split("\\s*(?:->|→|=|:|：)\\s*", -1);
             if (pair.length != 2) throw invalid();
             putState(states, pair[0], pair[1]);

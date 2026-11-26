@@ -167,6 +167,40 @@ public final class SkillHttpDeclarationTest {
         }
     }
 
+    @Test public void videoAllowsEitherDocumentedResultTypeAndOnlyCompleteCancellation() throws Exception {
+        JSONObject raw = new JSONObject(VIDEO);
+        JSONObject options = raw.getJSONObject("video");
+        options.remove("cancelPath");
+        options.remove("cancelMethod");
+        options.remove("downloadPath");
+        options.put("resultUrlField", "data.result.url");
+        var parsed = SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of());
+        JSONObject serialized = parsed.toJson().getJSONObject("video");
+        assertEquals("data.result.url", serialized.getString("resultUrlField"));
+        assertFalse(serialized.has("downloadPath"));
+        assertFalse(serialized.has("cancelPath"));
+        assertFalse(serialized.has("cancelMethod"));
+        assertEquals(parsed, parse(parsed.toJson().toString(), SkillResult.Type.VIDEO));
+
+        options.put("downloadPath", "/jobs/{id}/content");
+        assertThrows(SkillHttpDeclaration.Invalid.class,
+                () -> SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of()));
+        options.remove("downloadPath");
+        options.remove("resultUrlField");
+        assertThrows(SkillHttpDeclaration.Invalid.class,
+                () -> SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of()));
+        options.put("resultUrlField", "data.api_key.url");
+        assertThrows(SkillHttpDeclaration.Invalid.class,
+                () -> SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of()));
+        options.put("resultUrlField", "data.result.url").put("cancelMethod", "DELETE");
+        assertThrows(SkillHttpDeclaration.Invalid.class,
+                () -> SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of()));
+        options.remove("cancelMethod");
+        options.put("cancelPath", "/jobs/{id}/cancel");
+        assertThrows(SkillHttpDeclaration.Invalid.class,
+                () -> SkillHttpDeclaration.parse(raw, SkillResult.Type.VIDEO, List.of()));
+    }
+
     @Test public void rejectsVideoRouteEscapesAmbiguousStatesAndInvalidOperationFields() throws Exception {
         for (String path : List.of("https://other.example.com/jobs/{id}", "//other.example.com/{id}", "/jobs",
                 "/jobs/{id}/next/{id}", "/jobs/prefix-{id}", "/jobs/{id}.json", "/jobs/{id}/../content",

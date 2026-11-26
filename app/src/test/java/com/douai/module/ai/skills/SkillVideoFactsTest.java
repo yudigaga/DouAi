@@ -8,6 +8,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.Assert.*;
 
@@ -131,5 +132,81 @@ public final class SkillVideoFactsTest {
         assertEquals("integer", config.getJSONObject(1).getString("type"));
         assertFalse(config.getJSONObject(1).getBoolean("required"));
         assertThrows(IllegalArgumentException.class, () -> SkillVideoFacts.parse("必填文本字段: api_key 供应商密钥"));
+    }
+
+    @Test public void manualFormEditsAndExplicitClearsSurviveDocumentExtractionAndRestore() throws Exception {
+        SkillVideoFacts initial = SkillVideoFacts.parse(SUBMIT + POLLING);
+        assertEquals(SkillVideoFacts.Source.DOCUMENT, form(initial, "submitEndpoint").source());
+        assertEquals(SkillVideoFacts.FieldType.HTTPS_URL, form(initial, "submitEndpoint").type());
+        assertEquals(SkillVideoFacts.Source.DOCUMENT,
+                form(initial.withForm(Map.of("submitEndpoint", form(initial, "submitEndpoint").value())), "submitEndpoint").source());
+        SkillVideoFacts manual = initial.withForm(Map.of(
+                "statusPath", "/adjusted/{id}/status",
+                "cancelPath", "",
+                "cancelMethod", "",
+                "downloadPath", "",
+                "resultUrlField", "data.output.video_url"));
+        SkillVideoFacts restored = SkillVideoFacts.fromJson(manual.toJson()).fillMissingFrom(initial);
+        assertTrue(restored.isComplete());
+        assertEquals("/adjusted/{id}/status", form(restored, "statusPath").value());
+        assertEquals(SkillVideoFacts.Source.MANUAL, form(restored, "statusPath").source());
+        assertEquals(SkillVideoFacts.Source.MANUAL, form(restored, "cancelPath").source());
+        assertEquals("", form(restored, "cancelPath").value());
+        assertEquals(SkillVideoFacts.Source.DOCUMENT, form(restored, "promptField").source());
+        JSONObject routes = restored.declaration().getJSONObject("video");
+        assertFalse(routes.has("downloadPath"));
+        assertFalse(routes.has("cancelPath"));
+        assertEquals("data.output.video_url", routes.getString("resultUrlField"));
+        assertThrows(IllegalArgumentException.class, () -> restored.withForm(Map.of("unknown", "value")));
+    }
+
+    @Test public void incompleteFormSupportsPartialCancelAndLegacyStoredProvenance() throws Exception {
+        SkillVideoFacts partial = SkillVideoFacts.fromForm(Map.of("cancelMethod", "delete", "promptField", "prompt"));
+        assertFalse(partial.isComplete());
+        assertTrue(form(partial, "cancelPath").required());
+        assertEquals("DELETE", form(partial, "cancelMethod").value());
+        assertEquals(SkillVideoFacts.Source.MANUAL, form(partial, "cancelMethod").source());
+        JSONObject serialized = SkillVideoFacts.parse(SUBMIT).toJson();
+        serialized.remove("provenance");
+        SkillVideoFacts legacy = SkillVideoFacts.fromJson(serialized);
+        assertEquals(SkillVideoFacts.Source.STORED, form(legacy, "submitEndpoint").source());
+        assertEquals(SkillVideoFacts.Source.EMPTY, form(legacy, "stateField").source());
+        assertThrows(IllegalArgumentException.class,
+                () -> legacy.fillMissingFrom(SkillVideoFacts.parse("提交: POST https://different.example.com/submit")));
+    }
+
+    @Test public void examplesExtractUniqueNamedFieldsWhileRoutesAndMappingsRemainExplicit() throws Exception {
+        SkillVideoFacts examples = SkillVideoFacts.parse("""
+                **提交**: POST `https://video.example.com:8443/v1/tasks`
+                请求示例: {"prompt":"海边","model":"provider-model"}
+                提交响应示例:
+                ```json
+                {
+                  "data":{"task_id":"fixture"}
+                }
+                ```
+                查询响应示例: {"data":{"task_id":"fixture","status":"done","video_url":"https://video.example.com:8443/v1/files/fixture"}}
+                curl -X GET https://undocumented.example.com/v1/tasks/{id}
+                """);
+        assertEquals("prompt", form(examples, "promptField").value());
+        assertEquals("data.task_id", form(examples, "submitIdField").value());
+        assertEquals("data.task_id", form(examples, "statusIdField").value());
+        assertEquals("data.status", form(examples, "stateField").value());
+        assertEquals("data.video_url", form(examples, "resultUrlField").value());
+        assertTrue(examples.missing().contains("查询 GET 路径（含 {id}）"));
+        assertTrue(examples.missing().contains("状态映射中的完成状态"));
+        assertFalse(examples.toJson().toString().contains("provider-model"));
+        assertFalse(examples.toJson().toString().contains("files/fixture"));
+        assertTrue(examples.withForm(Map.of("statusPath", "/v1/tasks/{id}", "states", "done=completed")).isComplete());
+        SkillVideoFacts ambiguous = SkillVideoFacts.parse("""
+                提交响应示例: {"data":{"id":"one","job_id":"two"}}
+                查询响应示例: {"data":{"video_url":"not-an-address"}}
+                """);
+        assertEquals("", form(ambiguous, "submitIdField").value());
+        assertEquals("", form(ambiguous, "resultUrlField").value());
+    }
+
+    private static SkillVideoFacts.FormField form(SkillVideoFacts facts, String id) {
+        return facts.formFields().stream().filter(field -> field.id().equals(id)).findFirst().orElseThrow();
     }
 }

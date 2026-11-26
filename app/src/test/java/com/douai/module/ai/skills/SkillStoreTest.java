@@ -106,6 +106,23 @@ public class SkillStoreTest {
         assertNotNull(store.saveVideoDeclaration(changed, videoHttp().toString()).manifest().http());
     }
 
+    @Test public void pastedVideoDeclarationCanUseAResultFieldWithoutCancellation() throws Exception {
+        SkillStore store = videoStore(temp.newFolder());
+        saveVideoDraft(store, videoDraft("镜头动画"));
+        JSONObject http = videoHttp();
+        JSONObject video = http.getJSONObject("video");
+        video.remove("cancelPath");
+        video.remove("cancelMethod");
+        video.remove("downloadPath");
+        video.put("resultUrlField", "data.result.url");
+        SkillStore.Detail saved = store.saveVideoDeclaration(store.detail("镜头动画"), http.toString());
+        assertTrue(saved.pending());
+        assertTrue(saved.manifest().http().video().cancelPath().isEmpty());
+        assertTrue(saved.manifest().http().video().downloadPath().isEmpty());
+        assertEquals("data.result.url", saved.manifest().http().video().resultUrlField());
+        assertNull(saved.customConfiguration());
+    }
+
     @Test public void aSingleCopiedJsonFenceAcceptsEachSupportedVideoDeclarationShape() throws Exception {
         JSONObject wrapper = new JSONObject().put("http", videoHttp()).put("configFields", new JSONArray());
         JSONObject full = videoDraft("复制来的名称").put("http", videoHttp());
@@ -306,6 +323,90 @@ public class SkillStoreTest {
         assertNull(complete.customConfiguration());
         assertTrue(complete.reason().contains("公网 HTTPS"));
         assertTrue(reopened.list().isEmpty());
+    }
+
+    @Test public void videoFormMergesOnlyMissingFactsAndReopensWithTheExactManualEdits() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        SkillVideoFacts original = SkillVideoFacts.parse("""
+                提交: POST https://video.example.com/v1/jobs
+                提示词字段: prompt
+                提交响应ID: job_id
+                """);
+        store.saveAuthoredVideoDraft(SkillStore.prepareAuthoredVideoDraft(videoDraft("镜头动画").toString(), original), original);
+        SkillStore.Detail initial = store.detail("镜头动画");
+        SkillVideoFacts supplement = SkillVideoFacts.parse("""
+                提示词字段: document_prompt
+                查询: GET /v1/jobs/{id}
+                """);
+        SkillStore.Detail edited = store.saveVideoFactsForm(initial, supplement,
+                java.util.Map.of("promptField", "manual_prompt", "statusPath", ""));
+        assertTrue(edited.pending());
+        assertNull(edited.manifest().http());
+        assertFalse(initial.draftId().equals(edited.draftId()));
+        assertThrows(IllegalStateException.class, () -> store.saveVideoFactsForm(initial, supplement, java.util.Map.of()));
+
+        SkillStore reopened = videoStore(root);
+        SkillStore.Detail saved = reopened.detail("镜头动画");
+        assertEquals(edited.deleteTarget(), saved.deleteTarget());
+        assertEquals("manual_prompt", videoFormField(saved, "promptField").value());
+        assertEquals(SkillVideoFacts.Source.MANUAL, videoFormField(saved, "promptField").source());
+        assertEquals("", videoFormField(saved, "statusPath").value());
+        SkillStore.Detail withMoreDocs = reopened.saveVideoFactsForm(saved, supplement, java.util.Map.of());
+        assertEquals("manual_prompt", videoFormField(withMoreDocs, "promptField").value());
+        assertEquals("", videoFormField(withMoreDocs, "statusPath").value());
+        assertTrue(reopened.list().isEmpty());
+    }
+
+    @Test public void videoFormRetainsOnlyUnchangedBindingsAndRestoresOrdinaryValuesAfterPartialSave() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        String name = "镜头动画";
+        String endpoint = "https://saved.example.com/v1/submit";
+        JSONObject http = videoHttp();
+        http.getJSONObject("request").put("duration", "config.duration");
+        JSONArray fields = new JSONArray().put(new JSONObject().put("key", "duration").put("label", "时长")
+                .put("type", "integer").put("required", true).put("min", 1).put("max", 15));
+        saveVideoDraft(store, videoDraft(name).put("http", http).put("configFields", fields));
+        SkillStore.Detail valued = store.saveManifestValues(store.detail(name), java.util.Map.of("duration", "6"));
+        SkillStore.Detail current = store.configureCustomService(valued, endpoint, "synthetic-video-source-key");
+
+        SkillVideoFacts facts = store.videoFactsForSkill(name);
+        store.saveAuthoredVideoDraft(SkillStore.prepareAuthoredVideoDraft(videoDraft(name).toString(), facts), facts);
+        String pendingKey = "synthetic-video-pending-key";
+        SkillStore.Detail bound = store.configureCustomService(store.detail(name), endpoint, pendingKey, false,
+                java.util.Map.of("duration", "8"));
+        SkillStore.Detail relabelled = store.saveVideoFactsForm(bound, null, java.util.Map.of("label", "新服务名称"));
+        assertEquals(bound.customConfiguration(), relabelled.customConfiguration());
+        assertEquals(current.current(), relabelled.current());
+        assertTrue(relabelled.pending());
+        assertThrows(SkillCustomService.Failure.class, () -> store.saveVideoFactsForm(relabelled, null,
+                java.util.Map.of("submitEndpoint", "https://other.example.com/v2/" + pendingKey)));
+        assertEquals(relabelled.deleteTarget(), store.detail(name).deleteTarget());
+
+        SkillStore.Detail changed = store.saveVideoFactsForm(relabelled, null,
+                java.util.Map.of("submitEndpoint", "https://other.example.com/v2/submit", "statusPath", "/v2/jobs/{id}"));
+        assertTrue(changed.pending());
+        assertEquals("/v2/jobs/{id}", changed.manifest().http().video().statusPath());
+        assertEquals("https://other.example.com/v2/submit", changed.manifest().http().suggestedEndpoint());
+        assertNull(changed.customConfiguration());
+        assertEquals(8, changed.manifestValues().get("duration"));
+        SkillStore.Detail partial = store.saveVideoFactsForm(changed, null, java.util.Map.of("statusPath", ""));
+        assertNull(partial.manifest().http());
+        assertTrue(partial.videoMissing().stream().anyMatch(field -> field.contains("查询 GET")));
+
+        SkillStore reopened = videoStore(root);
+        SkillStore.Detail completed = reopened.saveVideoFactsForm(reopened.detail(name), null,
+                java.util.Map.of("statusPath", "/v2/jobs/{id}"));
+        assertTrue(completed.pending());
+        assertNull(completed.customConfiguration());
+        assertEquals(current.current(), completed.current());
+        assertEquals(8, completed.manifestValues().get("duration"));
+        assertFalse(Files.readString(new File(root, "catalog.json").toPath()).contains(pendingKey));
+    }
+
+    private static SkillVideoFacts.FormField videoFormField(SkillStore.Detail detail, String id) {
+        return detail.videoFacts().formFields().stream().filter(field -> id.equals(field.id())).findFirst().orElseThrow();
     }
 
     private static SkillStore videoStore(File root) {

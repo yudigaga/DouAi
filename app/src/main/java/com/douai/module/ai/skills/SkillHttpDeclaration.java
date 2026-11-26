@@ -52,16 +52,29 @@ public final class SkillHttpDeclaration {
         }
     }
 
-    public record Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath,
+    public record Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath, String resultUrlField,
                         String idField, String stateField, Map<String, VideoState> states) {
+        public Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath,
+                     String idField, String stateField, Map<String, VideoState> states) {
+            this(statusPath, cancelPath, cancelMethod, downloadPath, "", idField, stateField, states);
+        }
+
         public Video {
             validatePath(statusPath);
-            validatePath(cancelPath);
-            validatePath(downloadPath);
-            if (!"POST".equals(cancelMethod) && !"DELETE".equals(cancelMethod)) throw new Invalid();
+            if (cancelPath == null || cancelMethod == null || downloadPath == null || resultUrlField == null
+                    || cancelPath.isEmpty() != cancelMethod.isEmpty() || downloadPath.isEmpty() == resultUrlField.isEmpty()) {
+                throw new Invalid();
+            }
+            if (!cancelPath.isEmpty()) {
+                validatePath(cancelPath);
+                if (!"POST".equals(cancelMethod) && !"DELETE".equals(cancelMethod)) throw new Invalid();
+            }
+            if (!downloadPath.isEmpty()) validatePath(downloadPath);
+            else responsePath(resultUrlField);
             responsePath(idField);
             responsePath(stateField);
-            if (idField.equals(stateField) || states == null || !states.containsValue(VideoState.COMPLETED)
+            if (idField.equals(stateField) || resultUrlField.equals(idField) || resultUrlField.equals(stateField)
+                    || states == null || !states.containsValue(VideoState.COMPLETED)
                     || states.size() > MAX_VIDEO_STATES) throw new Invalid();
             for (Map.Entry<String, VideoState> state : states.entrySet()) {
                 if (state.getKey() == null || !PROVIDER_STATE.matcher(state.getKey()).matches()
@@ -87,12 +100,38 @@ public final class SkillHttpDeclaration {
             return expand(configuredEndpoint, statusPath, id);
         }
 
+        public boolean canCancel() { return !cancelPath.isEmpty(); }
+
         public String cancelEndpoint(String configuredEndpoint, String id) {
+            if (!canCancel()) throw new Invalid();
             return expand(configuredEndpoint, cancelPath, id);
         }
 
         public String downloadEndpoint(String configuredEndpoint, String id) {
+            if (downloadPath.isEmpty()) throw new Invalid();
             return expand(configuredEndpoint, downloadPath, id);
+        }
+
+        String completedDownloadEndpoint(JSONObject response, String configuredEndpoint, String id) {
+            if (readStatus(response, id) != VideoState.COMPLETED) throw new Invalid();
+            if (resultUrlField.isEmpty()) return downloadEndpoint(configuredEndpoint, id);
+            String link = text(readResponseString(response, resultUrlField), 2048, false);
+            URI status = URI.create(statusEndpoint(configuredEndpoint, id));
+            URI result;
+            try { result = URI.create(link); } catch (IllegalArgumentException invalid) { throw new Invalid(); }
+            if (link.startsWith("//") || result.isOpaque() || result.getRawUserInfo() != null || result.getRawQuery() != null
+                    || result.getRawFragment() != null || !result.equals(result.normalize())
+                    || !result.isAbsolute() && result.getRawAuthority() != null) throw new Invalid();
+            for (String segment : result.getPath().split("/", -1)) {
+                if (".".equals(segment) || "..".equals(segment)) throw new Invalid();
+            }
+            String validated = endpoint(status.resolve(result).toString());
+            URI target = URI.create(validated);
+            if (!status.getHost().equalsIgnoreCase(target.getHost()) || httpsPort(status) != httpsPort(target)) {
+                throw new Invalid();
+            }
+            checkCredential(target.getPath());
+            return validated;
         }
 
         private JSONObject toJson() throws JSONException {
@@ -100,9 +139,11 @@ public final class SkillHttpDeclaration {
             for (Map.Entry<String, VideoState> state : states.entrySet()) {
                 mapping.put(state.getKey(), state.getValue().wireName());
             }
-            return new JSONObject().put("statusPath", statusPath).put("cancelPath", cancelPath)
-                    .put("cancelMethod", cancelMethod).put("downloadPath", downloadPath)
-                    .put("idField", idField).put("stateField", stateField).put("states", mapping);
+            JSONObject data = new JSONObject().put("statusPath", statusPath);
+            if (canCancel()) data.put("cancelPath", cancelPath).put("cancelMethod", cancelMethod);
+            if (resultUrlField.isEmpty()) data.put("downloadPath", downloadPath);
+            else data.put("resultUrlField", resultUrlField);
+            return data.put("idField", idField).put("stateField", stateField).put("states", mapping);
         }
     }
 
@@ -250,7 +291,7 @@ public final class SkillHttpDeclaration {
     }
 
     private static Video readVideo(JSONObject value) throws JSONException {
-        keys(value, Collections.emptySet(), "statusPath", "cancelPath", "cancelMethod", "downloadPath",
+        keys(value, Set.of("cancelPath", "cancelMethod", "downloadPath", "resultUrlField"), "statusPath",
                 "idField", "stateField", "states");
         JSONObject mapping = value.getJSONObject("states");
         if (mapping.length() == 0 || mapping.length() > MAX_VIDEO_STATES) throw new Invalid();
@@ -259,10 +300,15 @@ public final class SkillHttpDeclaration {
             String state = names.next();
             states.put(state, VideoState.fromWire(text(mapping.get(state), 10, false)));
         }
-        return new Video(text(value.get("statusPath"), 320, false), text(value.get("cancelPath"), 320, false),
-                text(value.get("cancelMethod"), 6, false), text(value.get("downloadPath"), 320, false),
+        return new Video(text(value.get("statusPath"), 320, false),
+                value.has("cancelPath") ? text(value.get("cancelPath"), 320, false) : "",
+                value.has("cancelMethod") ? text(value.get("cancelMethod"), 6, false) : "",
+                value.has("downloadPath") ? text(value.get("downloadPath"), 320, false) : "",
+                value.has("resultUrlField") ? responsePath(value.get("resultUrlField")) : "",
                 responsePath(value.get("idField")), responsePath(value.get("stateField")), states);
     }
+
+    private static int httpsPort(URI endpoint) { return endpoint.getPort() < 0 ? 443 : endpoint.getPort(); }
 
     private static String expand(String configuredEndpoint, String template, String id) {
         URI configured = URI.create(endpoint(configuredEndpoint));

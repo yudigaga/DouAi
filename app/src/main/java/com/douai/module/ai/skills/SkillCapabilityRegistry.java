@@ -7,28 +7,39 @@ import java.util.Map;
 
 /** Only application-owned capabilities can be selected from a declaration. */
 public final class SkillCapabilityRegistry {
+    public enum ExecutionMode {
+        DIRECT("直接返回"), POLLING("异步轮询");
+
+        private final String label;
+        ExecutionMode(String label) { this.label = label; }
+        public String label() { return label; }
+    }
+
     public enum Capability {
-        TEXT_MODEL("text_model", "text_model", SkillResult.Type.TEXT, 2000),
-        TABLE_MODEL("table_model", "table_model", SkillResult.Type.TABLE, 2000),
-        VIDEO_TASK("video_task", "video_task", SkillResult.Type.VIDEO, 2000),
-        CUSTOM_SERVICE("custom_service", "custom_service", SkillResult.Type.TEXT, 2000),
-        IMAGE_GENERATION("image_generation", "service", SkillResult.Type.IMAGE, 4000);
+        TEXT_MODEL("text_model", "text_model", SkillResult.Type.TEXT, ExecutionMode.DIRECT, 2000),
+        TABLE_MODEL("table_model", "table_model", SkillResult.Type.TABLE, ExecutionMode.DIRECT, 2000),
+        VIDEO_TASK("video_task", "video_task", SkillResult.Type.VIDEO, ExecutionMode.POLLING, 2000),
+        CUSTOM_SERVICE("custom_service", "custom_service", SkillResult.Type.TEXT, ExecutionMode.DIRECT, 2000),
+        IMAGE_GENERATION("image_generation", "service", SkillResult.Type.IMAGE, ExecutionMode.DIRECT, 4000);
 
         private final String id;
         private final String kind;
         private final SkillResult.Type outputType;
+        private final ExecutionMode executionMode;
         private final int maxInput;
 
-        Capability(String id, String kind, SkillResult.Type outputType, int maxInput) {
+        Capability(String id, String kind, SkillResult.Type outputType, ExecutionMode executionMode, int maxInput) {
             this.id = id;
             this.kind = kind;
             this.outputType = outputType;
+            this.executionMode = executionMode;
             this.maxInput = maxInput;
         }
 
         public String id() { return id; }
         public String kind() { return kind; }
         public SkillResult.Type outputType() { return outputType; }
+        public ExecutionMode executionMode() { return executionMode; }
         public int maxInput() { return maxInput; }
         public boolean usesModel() { return this == TEXT_MODEL || this == TABLE_MODEL; }
     }

@@ -44,7 +44,8 @@ public final class SkillVideoJobs {
     private static final Object IO_LOCK = new Object();
     private static final Pattern SCOPE_KEY = Pattern.compile("[a-f0-9]{64}");
     private static final Pattern HASH = Pattern.compile("[A-Za-z0-9_-]{43}");
-    private static final int FORMAT_VERSION = 1;
+    private static final int LEGACY_FORMAT_VERSION = 1;
+    private static final int FORMAT_VERSION = 2;
     private static final int MAX_JOBS = 40;
     private static final int MAX_SCOPES = 128;
     private static final int MAX_POLL_VISITS = 120;
@@ -111,8 +112,13 @@ public final class SkillVideoJobs {
     }
 
     public record Job(UUID localId, String skillId, String revisionId, String configRevision, long createdAtMillis,
-                      State state, boolean linked) {
-        public boolean canCancel() { return state == State.QUEUED || state == State.RUNNING; }
+                      State state, boolean linked, boolean cancellationSupported) {
+        public Job(UUID localId, String skillId, String revisionId, String configRevision, long createdAtMillis,
+                   State state, boolean linked) {
+            this(localId, skillId, revisionId, configRevision, createdAtMillis, state, linked, true);
+        }
+
+        public boolean canCancel() { return cancellationSupported && (state == State.QUEUED || state == State.RUNNING); }
     }
 
     public enum Code {
@@ -150,12 +156,14 @@ public final class SkillVideoJobs {
                          int pollVisits) {
         Entry change(State next, String id, long nextPoll, UUID nextTicket, String media) {
             return new Entry(new Job(job.localId(), job.skillId(), job.revisionId(), job.configRevision(),
-                    job.createdAtMillis(), next, job.linked()), fingerprint, id, nextPoll, nextTicket, media, pollVisits);
+                    job.createdAtMillis(), next, job.linked(), job.cancellationSupported()),
+                    fingerprint, id, nextPoll, nextTicket, media, pollVisits);
         }
 
         Entry linked() {
             return new Entry(new Job(job.localId(), job.skillId(), job.revisionId(), job.configRevision(),
-                    job.createdAtMillis(), job.state(), true), fingerprint, remoteId, nextPollAt, ticket, mediaHash, pollVisits);
+                    job.createdAtMillis(), job.state(), true, job.cancellationSupported()),
+                    fingerprint, remoteId, nextPollAt, ticket, mediaHash, pollVisits);
         }
 
         Entry claimPoll(long leasedUntil) {
@@ -211,7 +219,7 @@ public final class SkillVideoJobs {
             if (catalog.jobs().size() >= MAX_JOBS) throw new Failure(Code.LIMIT);
             // This record is already uncertain before the request can leave the device.
             Job job = new Job(localId, binding.skillId(), binding.revisionId(), binding.configRevision(),
-                    clock.getAsLong(), State.SUBMIT_UNKNOWN, false);
+                    clock.getAsLong(), State.SUBMIT_UNKNOWN, false, binding.declaration().video().canCancel());
             Entry intent = new Entry(job, binding.fingerprint(), "", 0, UUID.randomUUID(), "", 0);
             update(file, catalog, intent);
             return new Claim(intent, true);
@@ -260,12 +268,21 @@ public final class SkillVideoJobs {
         });
         Entry claimed = claim.entry();
         if (!claim.execute()) return claimed == null ? null : claimed.job();
-        if (claimed.job().state() == State.DOWNLOAD_READY) return download(scope, claimed, access, deadlineNanos);
         try {
             SkillHttpDeclaration.Video video = access.binding().declaration().video();
+            String endpoint = access.binding().endpoint();
+            if (claimed.job().state() == State.DOWNLOAD_READY) {
+                if (video.resultUrlField().isEmpty()) {
+                    return download(scope, claimed, access, video.downloadEndpoint(endpoint, claimed.remoteId()), deadlineNanos);
+                }
+                Job restored = reconcileDownloaded(scope, claimed, false);
+                if (restored != null) return restored;
+                // The provider link is never persisted. An interrupted download re-reads the same task.
+            }
             SkillHttpsTransport.Response response = call(scope, claimed, access, SkillHttpsTransport.Method.GET,
-                    false, video.statusEndpoint(access.binding().endpoint(), claimed.remoteId()), null, deadlineNanos);
-            State state = switch (video.readStatus(json(response), claimed.remoteId())) {
+                    false, video.statusEndpoint(endpoint, claimed.remoteId()), null, deadlineNanos);
+            JSONObject status = json(response);
+            State state = switch (video.readStatus(status, claimed.remoteId())) {
                 case QUEUED -> claimed.job().state() == State.RUNNING ? State.RUNNING : State.QUEUED;
                 case RUNNING -> State.RUNNING;
                 case COMPLETED -> State.DOWNLOAD_READY;
@@ -275,9 +292,14 @@ public final class SkillVideoJobs {
             if (claimed.job().state() == State.CANCEL_PENDING && (state == State.QUEUED || state == State.RUNNING)) {
                 state = State.CANCEL_PENDING;
             }
+            if (claimed.job().state() == State.DOWNLOAD_READY && (state == State.QUEUED || state == State.RUNNING)) {
+                return finish(scope, claimed, State.DOWNLOAD_READY, claimed.remoteId(), nextPoll(claimed), claimed.mediaHash()).job();
+            }
             if (state == State.DOWNLOAD_READY) {
-                Entry ready = finish(scope, claimed, state, claimed.remoteId(), claimed.nextPollAt(), "");
-                if (ready.ticket().equals(claimed.ticket())) return download(scope, ready, access, deadlineNanos);
+                String downloadUrl = video.completedDownloadEndpoint(status, endpoint, claimed.remoteId());
+                if (AiCredentialVault.imageEndpointContainsCredential(downloadUrl, access.bearer())) throw new Failure(Code.RESPONSE);
+                Entry ready = finish(scope, claimed, state, claimed.remoteId(), claimed.nextPollAt(), claimed.mediaHash());
+                if (ready.ticket().equals(claimed.ticket())) return download(scope, ready, access, downloadUrl, deadlineNanos);
                 return ready.job();
             }
             return finish(scope, claimed, state, claimed.remoteId(), nextPoll(claimed), "").job();
@@ -365,25 +387,28 @@ public final class SkillVideoJobs {
         });
     }
 
-    private Job download(Scope scope, Entry ready, Access access, long deadlineNanos) throws Failure {
+    private Job reconcileDownloaded(Scope scope, Entry ready, boolean checkSpace) throws Failure {
+        return locked(scope, (file, catalog) -> {
+            Entry current = sameClaim(ready, catalog);
+            if (!current.ticket().equals(ready.ticket()) || current.job().state() != State.DOWNLOAD_READY) return current.job();
+            Path media = clip(scope, ready.job().localId());
+            String hash = current.mediaHash();
+            if (hash.isEmpty() || !hash.equals(localHash(media))) {
+                if (checkSpace) requireMediaSpace(MAX_MEDIA_BYTES);
+                return null;
+            }
+            Entry complete = current.change(State.COMPLETED, current.remoteId(), 0, current.ticket(), hash);
+            update(file, catalog, complete);
+            return complete.job();
+        });
+    }
+
+    private Job download(Scope scope, Entry ready, Access access, String downloadUrl, long deadlineNanos) throws Failure {
         try {
-            Job existing = locked(scope, (file, catalog) -> {
-                Entry current = sameClaim(ready, catalog);
-                if (!current.ticket().equals(ready.ticket()) || current.job().state() != State.DOWNLOAD_READY) return current.job();
-                Path media = clip(scope, ready.job().localId());
-                String hash = current.mediaHash();
-                if (hash.isEmpty() || !hash.equals(localHash(media))) {
-                    requireMediaSpace(MAX_MEDIA_BYTES);
-                    return null;
-                }
-                Entry complete = current.change(State.COMPLETED, current.remoteId(), 0, current.ticket(), hash);
-                update(file, catalog, complete);
-                return complete.job();
-            });
+            Job existing = reconcileDownloaded(scope, ready, true);
             if (existing != null) return existing;
             SkillHttpsTransport.Response response = call(scope, ready, access, SkillHttpsTransport.Method.GET, true,
-                    access.binding().declaration().video().downloadEndpoint(access.binding().endpoint(), ready.remoteId()),
-                    null, deadlineNanos);
+                    downloadUrl, null, deadlineNanos);
             if (response.status() == 202 || response.status() == 408 || response.status() == 429 || response.status() >= 500) {
                 throw new Failure(Code.TRANSPORT);
             }
@@ -525,7 +550,10 @@ public final class SkillVideoJobs {
     }
 
     private static void requireCurrent(Entry entry, Access access) throws Failure {
-        if (access == null || !entry.fingerprint().equals(access.binding().fingerprint())) throw new Failure(Code.STALE);
+        if (access == null || !entry.fingerprint().equals(access.binding().fingerprint())
+                || entry.job().cancellationSupported() != access.binding().declaration().video().canCancel()) {
+            throw new Failure(Code.STALE);
+        }
     }
 
     private static boolean definiteRefusal(int status) {
@@ -582,14 +610,16 @@ public final class SkillVideoJobs {
             throw new Failure(Code.STORAGE);
         }
         try (DataInputStream input = new DataInputStream(Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS))) {
-            if (input.readInt() != FORMAT_VERSION) throw new Failure(Code.STORAGE);
+            int version = input.readInt();
+            if (version != FORMAT_VERSION && version != LEGACY_FORMAT_VERSION) throw new Failure(Code.STORAGE);
             long generation = input.readLong();
             int count = input.readInt();
             if (generation < 0 || count < 0 || count > MAX_JOBS) throw new Failure(Code.STORAGE);
             for (int index = 0; index < count; index++) {
                 UUID id = UUID.fromString(input.readUTF());
                 Job job = new Job(id, input.readUTF(), input.readUTF(), input.readUTF(), input.readLong(),
-                        State.valueOf(input.readUTF()), input.readBoolean());
+                        State.valueOf(input.readUTF()), input.readBoolean(),
+                        version == LEGACY_FORMAT_VERSION || input.readBoolean());
                 Entry entry = new Entry(job, input.readUTF(), input.readUTF(), input.readLong(),
                         UUID.fromString(input.readUTF()), input.readUTF(), input.readUnsignedByte());
                 if (!uuid(job.skillId()) || !uuid(job.revisionId()) || !uuid(job.configRevision()) || job.createdAtMillis() < 0
@@ -632,6 +662,7 @@ public final class SkillVideoJobs {
                 output.writeLong(job.createdAtMillis());
                 output.writeUTF(job.state().name());
                 output.writeBoolean(job.linked());
+                output.writeBoolean(job.cancellationSupported());
                 output.writeUTF(entry.fingerprint());
                 output.writeUTF(entry.remoteId());
                 output.writeLong(entry.nextPollAt());

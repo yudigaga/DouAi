@@ -290,8 +290,9 @@ final class AiSkillVideoCards {
         }, target -> showConfirmation(expected, job, target));
     }
 
-    private CancelTarget cancelTarget(SkillVideoJobs.Scope scope, UUID id, SkillVideoJobs.Access access) throws SkillVideoJobs.Failure {
+    private CancelTarget cancelTarget(SkillVideoJobs.Scope scope, UUID id, SkillVideoJobs.Access access) throws IOException {
         SkillHttpDeclaration.Video video = access.binding().declaration().video();
+        if (!video.canCancel()) throw new StaleJob();
         return new CancelTarget(video.cancelMethod(), jobs.cancelTarget(scope, id, access));
     }
 

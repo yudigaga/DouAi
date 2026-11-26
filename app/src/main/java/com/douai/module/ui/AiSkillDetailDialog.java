@@ -46,9 +46,11 @@ import com.douai.module.ui.miuix.MiuixFormControls;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -302,12 +304,16 @@ final class AiSkillDetailDialog implements AutoCloseable {
     private void customConfiguration(SkillStore.Detail detail) {
         SkillManifest manifest = detail.manifest();
         if (manifest == null) return;
-        if (!manifest.usesHttp()) {
-            if (detail.pending() && detail.outputType() == SkillResult.Type.VIDEO) {
-                button(body, "补充接口资料", "skills.detail.video_facts.open", () -> showVideoFacts(detail));
-            }
-            return;
+        SkillCapabilityRegistry.ExecutionMode mode = manifest.capability().executionMode();
+        boolean polling = mode == SkillCapabilityRegistry.ExecutionMode.POLLING;
+        if (polling || manifest.usesHttp()) {
+            text(body, "执行方式 · " + mode.label(), "skills.detail.execution_mode");
+            text(body, "输出类型 · " + detail.outputType().label(), "skills.detail.output_type");
         }
+        if (polling && detail.pending() && (!manifest.usesHttp() || detail.videoFacts() != null)) {
+            button(body, "填写接口字段", "skills.detail.video_facts.open", () -> showVideoFacts(detail));
+        }
+        if (!manifest.usesHttp()) return;
         SkillHttpDeclaration declaration = manifest.http();
         SkillStore.CustomConfiguration current = detail.customConfiguration();
         section(declaration == null ? "HTTPS 服务" : declaration.label(), "skills.detail.custom");
@@ -317,8 +323,10 @@ final class AiSkillDetailDialog implements AutoCloseable {
                 "skills.detail.custom.contract");
         if (declaration != null && declaration.video() != null) {
             SkillHttpDeclaration.Video video = declaration.video();
-            text(body, "查询 GET " + video.statusPath() + "\n取消 " + video.cancelMethod() + " " + video.cancelPath()
-                            + "\n下载 GET " + video.downloadPath(), "skills.detail.custom.video_routes");
+            String routes = "查询 GET " + video.statusPath()
+                    + (video.downloadPath().isEmpty() ? "\n成片链接字段 " + video.resultUrlField() : "\n下载 GET " + video.downloadPath());
+            if (video.canCancel()) routes += "\n取消 " + video.cancelMethod() + " " + video.cancelPath();
+            text(body, routes, "skills.detail.custom.video_routes");
         }
         EditText endpoint = input(body, "公网 HTTPS 完整接口地址", "skills.detail.custom.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
@@ -344,51 +352,94 @@ final class AiSkillDetailDialog implements AutoCloseable {
         LinearLayout form = column();
         int padding = dp(16);
         form.setPadding(padding, 0, padding, padding);
-        text(form, "按文档逐行填写接口资料，例如「状态字段：data.status」。也可关联已有的视频技能。密钥在服务配置单独填写。",
+        text(form, "可从文档、请求和响应示例识别已确认字段，再逐项补齐。密钥在服务配置单独填写。",
                 "skills.detail.video_facts.guidance");
-        if (!detail.videoMissing().isEmpty()) {
-            text(form, "待补充 " + String.join("、", detail.videoMissing()), "skills.detail.video_facts.missing");
-        }
         int multiline = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-        EditText input = input(form, "接口资料", "skills.detail.video_facts.input", multiline, 4096, false);
-        input.setMinLines(5);
-        input.setGravity(Gravity.TOP | Gravity.START);
-        disableSecretStateTransfer(input);
-        View control = MiuixFormControls.viewFor(input);
-        if (control != input) disableSecretStateTransfer(control);
+        EditText notes = input(form, "接口资料（可选）", "skills.detail.video_facts.input", multiline, 16001, false);
+        notes.setMinLines(2);
+        notes.setGravity(Gravity.TOP | Gravity.START);
+        disableSecretStateTransfer(notes);
+        View noteControl = MiuixFormControls.viewFor(notes);
+        if (noteControl != notes) disableSecretStateTransfer(noteControl);
         EditText related = input(form, "关联已配置的视频技能命令名（可选）", "skills.detail.video_facts.related",
                 InputType.TYPE_CLASS_TEXT, 25, false);
         TextView error = text(form, "", "skills.detail.video_facts.error");
         error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        SkillVideoFacts initial = detail.videoFacts() == null ? SkillVideoFacts.empty() : detail.videoFacts();
+        SkillVideoFacts[] prefilled = {initial};
+        TextView missing = text(form, videoMissingLabel(initial), "skills.detail.video_facts.missing");
+        Map<String, VideoFactControl> controls = new LinkedHashMap<>();
+        Set<String> edited = new LinkedHashSet<>();
+        boolean[] applying = {false};
+        button(form, "识别资料", "skills.detail.video_facts.prefill", () -> {
+            try {
+                SkillVideoFacts supplied = videoFactSource(notes, related);
+                if (supplied.isEmpty()) {
+                    error.setText("未识别到可预填的字段");
+                    return;
+                }
+                SkillVideoFacts merged = prefilled[0].fillMissingFrom(supplied);
+                applying[0] = true;
+                try {
+                    for (SkillVideoFacts.FormField field : merged.formFields()) {
+                        if (edited.contains(field.id())) continue;
+                        VideoFactControl row = controls.get(field.id());
+                        row.input().setText(field.value());
+                        row.source().setText(videoFactSourceLabel(field));
+                    }
+                } finally {
+                    applying[0] = false;
+                }
+                prefilled[0] = merged;
+                missing.setText(videoMissingLabel(merged));
+                error.setText("已识别资料，请核对字段后保存");
+            } catch (IllegalArgumentException invalid) {
+                error.setText("无法识别资料，请核对接口字段和关联技能名称");
+            }
+        });
+        for (SkillVideoFacts.FormField field : initial.formFields()) {
+            String label = field.label() + (field.required() ? "（必填）" : "");
+            String tag = "skills.detail.video_facts.field." + field.id();
+            if (!miuix) text(form, label, tag + ".label");
+            text(form, videoFactHelp(field), tag + ".help");
+            int type = field.type() == SkillVideoFacts.FieldType.HTTPS_URL
+                    ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
+                    : field.type() == SkillVideoFacts.FieldType.STATE_MAP ? multiline
+                    : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            EditText edit = input(form, label, tag, type, 2048, false);
+            edit.setText(field.value());
+            TextView source = text(form, videoFactSourceLabel(field), "skills.detail.video_facts.source." + field.id());
+            controls.put(field.id(), new VideoFactControl(edit, source));
+            edit.addTextChangedListener(new TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
+                @Override public void onTextChanged(CharSequence value, int start, int before, int count) { }
+                @Override public void afterTextChanged(Editable value) {
+                    if (applying[0]) return;
+                    edited.add(field.id());
+                    source.setText(value.toString().trim().isEmpty() ? "待填写" : "来源 · 本次填写");
+                }
+            });
+        }
         ScrollView scroll = new ScrollView(context);
         scroll.addView(form);
-        AlertDialog editor = builder("补充视频接口资料").setView(scroll).setNegativeButton("取消", null)
-                .setPositiveButton("保存资料", null).create();
+        AlertDialog editor = builder("视频接口字段").setView(scroll).setNegativeButton("取消", null)
+                .setPositiveButton("保存草稿", null).create();
         showChild(editor);
         if (!editor.isShowing()) return;
         editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
             if (!active() || !editor.isShowing() || confirmation != editor) return;
             SkillStore.Detail updated;
             try {
-                SkillVideoFacts supplied = SkillVideoFacts.parse(input.getText().toString());
-                String command = fieldValue(related);
-                if (command.startsWith("/")) command = command.substring(1);
-                if (!command.isEmpty()) {
-                    SkillVideoFacts existing;
-                    try { existing = store.videoFactsForSkill(command); }
-                    catch (Exception unavailable) {
-                        error.setText("找不到已启用且已配置的对应视频技能");
-                        return;
-                    }
-                    supplied = existing.merge(supplied);
-                }
-                if (supplied.isEmpty()) {
-                    error.setText("请补充接口资料或填写一个已配置的视频技能命令名");
+                SkillVideoFacts supplied = prefilled[0].fillMissingFrom(videoFactSource(notes, related));
+                Map<String, String> entered = new LinkedHashMap<>();
+                for (String id : edited) entered.put(id, fieldValue(controls.get(id).input()));
+                if (supplied.isEmpty() && entered.isEmpty()) {
+                    error.setText("请填写至少一个接口字段");
                     return;
                 }
-                updated = store.addVideoFacts(detail, supplied);
+                updated = store.saveVideoFactsForm(detail, supplied, entered);
             } catch (IllegalArgumentException invalid) {
-                error.setText("接口资料无效，请核对接口字段并移除密钥");
+                error.setText("接口字段无效，请核对方法、路径和字段格式");
                 return;
             } catch (IllegalStateException stale) {
                 error.setText("草稿已变化，请重新打开技能配置后再试");
@@ -397,12 +448,50 @@ final class AiSkillDetailDialog implements AutoCloseable {
                 error.setText("暂时无法保存视频接口资料");
                 return;
             }
-            input.setText("");
+            notes.setText("");
             editor.dismiss();
             render(updated, updated.manifest().http() == null ? "资料已保存，请继续补充缺项"
                     : "接口声明已生成，请核对服务配置");
             if (onChanged != null) onChanged.run();
         });
+    }
+
+    private record VideoFactControl(EditText input, TextView source) {}
+
+    private SkillVideoFacts videoFactSource(EditText notes, EditText related) {
+        SkillVideoFacts supplied = SkillVideoFacts.parse(notes.getText().toString());
+        String command = fieldValue(related);
+        if (command.startsWith("/")) command = command.substring(1);
+        if (command.isEmpty()) return supplied;
+        try {
+            return supplied.fillMissingFrom(store.videoFactsForSkill(command));
+        } catch (Exception unavailable) {
+            throw new IllegalArgumentException("关联的视频技能不可用");
+        }
+    }
+
+    private static String videoFactSourceLabel(SkillVideoFacts.FormField field) {
+        if (field.value().isEmpty()) return field.required() ? "待填写" : "选填";
+        return "来源 · " + field.source().label();
+    }
+
+    private static String videoMissingLabel(SkillVideoFacts facts) {
+        List<String> missing = facts.missing();
+        return missing.isEmpty() ? "接口字段已齐全" : "待补充 " + String.join("、", missing);
+    }
+
+    private static String videoFactHelp(SkillVideoFacts.FormField field) {
+        if ("resultUrlField".equals(field.id())) return "查询响应中返回成片链接的字段，与下载路径任选一项。";
+        if ("downloadPath".equals(field.id())) return "下载的 GET 路径，含独立的 {id}。查询已返回成片链接时可留空。";
+        return switch (field.type()) {
+            case HTTPS_URL -> "提交任务的 POST 地址，须为完整公网 HTTPS 地址。";
+            case JSON_FIELD -> "提交请求中接收提示词的 JSON 字段名。";
+            case JSON_PATH -> "用点分隔 JSON 对象层级，例如 data.id。";
+            case TASK_PATH -> "以 / 开头的同源路径，含独立的 {id} 路径段。";
+            case STATE_MAP -> "填写文档中的状态对应关系，例如 done=completed。";
+            case CANCEL_METHOD -> "服务支持取消时填 POST 或 DELETE。";
+            case TEXT -> "用于在配置页识别该接口。";
+        };
     }
 
     private void saveCustomConfiguration(SkillStore.Detail detail, String endpoint, EditText bearer, boolean clear,

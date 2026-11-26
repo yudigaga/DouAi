@@ -6,6 +6,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
+import org.json.JSONObject;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
@@ -161,6 +162,121 @@ public class SkillVideoJobsTest {
                 status + "/content"), sent);
     }
 
+    @Test public void statusResultVideoRecoversWithOriginalIdWithoutPersistingLinkOrOfferingCancellation() throws Exception {
+        File directory = temporary.newFolder();
+        List<String> sent = new ArrayList<>();
+        SkillVideoJobs.Access access = access(resultUrlBinding(), () -> {});
+        SkillVideoJobs.Transport transport = (method, media, url, bearer, body, deadline, gate) -> {
+            gate.check();
+            assertEquals(KEY, bearer);
+            sent.add(method.name() + " " + url);
+            return switch (sent.size()) {
+                case 1 -> json(202, "{\"job_id\":\"direct_1\"}");
+                case 2 -> json(200, directStatus("direct_1", "/media/first_clip.mp4"));
+                case 3 -> new SkillHttpsTransport.Response(503, "", new byte[0]);
+                case 4 -> json(200, directStatus("direct_1", "https://video.example.com:9443/media/next_clip.mp4"));
+                case 5 -> new SkillHttpsTransport.Response(200, "video/mp4", structuralMp4());
+                default -> throw new AssertionError("unexpected network");
+            };
+        };
+        var jobs = new SkillVideoJobs(directory, clock::get, transport);
+        UUID local = UUID.randomUUID();
+        var queued = jobs.submit(WORK, jobs.generation(WORK), local, access, POST, Long.MAX_VALUE);
+        assertEquals(SkillVideoJobs.State.QUEUED, queued.state());
+        assertFalse(queued.canCancel());
+        var reopened = new SkillVideoJobs(directory, clock::get, transport);
+        assertFalse(reopened.list(WORK).get(0).canCancel());
+        assertThrows(SkillVideoJobs.Failure.class, () -> reopened.cancelTarget(WORK, local, access));
+        assertEquals(queued, reopened.cancel(WORK, local, access, Long.MAX_VALUE));
+        assertEquals(1, sent.size());
+        assertThrows(SkillVideoJobs.Failure.class, () -> reopened.refresh(WORK, local, access, Long.MAX_VALUE));
+        assertEquals(SkillVideoJobs.State.DOWNLOAD_READY, reopened.list(WORK).get(0).state());
+        for (File file : directory.listFiles((parent, name) -> name.endsWith(".bin"))) {
+            String registry = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+            assertFalse(registry.contains("first_clip.mp4"));
+        }
+
+        clock.addAndGet(60_000);
+        var restored = new SkillVideoJobs(directory, clock::get, transport);
+        assertEquals(SkillVideoJobs.State.COMPLETED, restored.refresh(WORK, local, access, Long.MAX_VALUE).state());
+        File artifact = restored.playableFile(WORK, local);
+        assertArrayEquals(structuralMp4(), Files.readAllBytes(artifact.toPath()));
+        Files.write(artifact.toPath(), bytes("tampered"));
+        assertNull(restored.playableFile(WORK, local));
+        String status = "GET https://video.example.com:9443/jobs/direct_1";
+        assertEquals(List.of("POST " + ENDPOINT, status, "GET https://video.example.com:9443/media/first_clip.mp4",
+                status, "GET https://video.example.com:9443/media/next_clip.mp4"), sent);
+    }
+
+    @Test public void directResultRefusesWrongJobPrivateForeignCredentialAndAmbiguousLinks() throws Exception {
+        String[] replies = {
+                directStatus("other", "/media/clip.mp4"),
+                directStatus("direct_2", "https://other.example.com:9443/media/clip.mp4"),
+                directStatus("direct_2", "https://video.example.com/media/clip.mp4"),
+                directStatus("direct_2", "https://127.0.0.1:9443/media/clip.mp4"),
+                directStatus("direct_2", "//other.example.com/media/clip.mp4"),
+                directStatus("direct_2", "///other.example.com/media/clip.mp4"),
+                directStatus("direct_2", "http://video.example.com:9443/media/clip.mp4"),
+                directStatus("direct_2", "https://user@video.example.com:9443/media/clip.mp4"),
+                directStatus("direct_2", "/media/clip.mp4?token=irrelevant"),
+                directStatus("direct_2", "/media/clip.mp4#unsafe"),
+                directStatus("direct_2", "/media/" + KEY + "/clip.mp4"),
+                directStatus("direct_2", "/media/%2e%2e/clip.mp4"),
+                directStatus("direct_2", "../media/clip.mp4")
+        };
+        var access = access(resultUrlBinding(), () -> {});
+        var reads = new AtomicInteger();
+        var jobs = new SkillVideoJobs(temporary.newFolder(), clock::get, (method, media, url, token, body, deadline, gate) -> {
+            gate.check();
+            assertFalse("An invalid result must never reach a download request", media);
+            if (method == SkillHttpsTransport.Method.POST) return json(202, "{\"job_id\":\"direct_2\"}");
+            int read = reads.getAndIncrement();
+            if (read == 0) return json(200, directStatus("direct_2", "https://other.example.com/clip.mp4")
+                    .replace("\"done\"", "\"running\""));
+            return json(200, replies[read - 1]);
+        });
+        UUID local = UUID.randomUUID();
+        jobs.submit(WORK, jobs.generation(WORK), local, access, POST, Long.MAX_VALUE);
+        assertEquals(SkillVideoJobs.State.RUNNING, jobs.refresh(WORK, local, access, Long.MAX_VALUE).state());
+        clock.addAndGet(60_000);
+        for (String ignored : replies) {
+            var failure = assertThrows(SkillVideoJobs.Failure.class,
+                    () -> jobs.refresh(WORK, local, access, Long.MAX_VALUE));
+            assertEquals(SkillVideoJobs.Code.RESPONSE, failure.code());
+            assertNull(jobs.playableFile(WORK, local));
+            clock.addAndGet(60_000);
+        }
+        assertEquals(replies.length + 1, reads.get());
+    }
+
+    @Test public void olderJobCatalogKeepsItsPreviouslyRequiredCancellationCapability() throws Exception {
+        File directory = temporary.newFolder();
+        UUID local = UUID.randomUUID();
+        try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(
+                directory.toPath().resolve("work-" + "a".repeat(64) + ".bin")))) {
+            output.writeInt(1);
+            output.writeLong(0);
+            output.writeInt(1);
+            output.writeUTF(local.toString());
+            for (int index = 0; index < 3; index++) output.writeUTF(UUID.randomUUID().toString());
+            output.writeLong(clock.get());
+            output.writeUTF("QUEUED");
+            output.writeBoolean(false);
+            output.writeUTF("a".repeat(43));
+            output.writeUTF("legacy_task");
+            output.writeLong(0);
+            output.writeUTF(UUID.randomUUID().toString());
+            output.writeUTF("");
+            output.writeByte(0);
+        }
+        var jobs = new SkillVideoJobs(directory, clock::get, null);
+        var restored = jobs.list(WORK).get(0);
+        assertEquals(local, restored.localId());
+        assertTrue(restored.canCancel());
+        jobs.markLinked(WORK, local);
+        assertTrue(jobs.list(WORK).get(0).canCancel());
+    }
+
     @Test public void cancellationSendsOnceUsesTheOriginalIdAndOnlyThenPolls() throws Exception {
         List<SkillHttpsTransport.Method> sent = new ArrayList<>();
         var jobs = new SkillVideoJobs(temporary.newFolder(), clock::get, (method, media, url, bearer, body, deadline, gate) -> {
@@ -208,6 +324,22 @@ public class SkillVideoJobsTest {
 
     private static SkillVideoJobs.Binding binding() {
         return binding("job_id", "id", "state");
+    }
+
+    private static SkillVideoJobs.Binding resultUrlBinding() throws Exception {
+        var ordinary = binding();
+        JSONObject schema = ordinary.declaration().toJson();
+        JSONObject video = schema.getJSONObject("video");
+        video.remove("cancelPath");
+        video.remove("cancelMethod");
+        video.remove("downloadPath");
+        video.put("resultUrlField", "data.result.url");
+        return new SkillVideoJobs.Binding(ordinary.skillId(), ordinary.revisionId(), ordinary.configRevision(),
+                SkillHttpDeclaration.parse(schema, SkillResult.Type.VIDEO, List.of()), ENDPOINT);
+    }
+
+    private static String directStatus(String id, String url) {
+        return "{\"id\":\"" + id + "\",\"state\":\"done\",\"data\":{\"result\":{\"url\":\"" + url + "\"}}}";
     }
 
     private static SkillVideoJobs.Binding binding(String response, String idField, String stateField) {
