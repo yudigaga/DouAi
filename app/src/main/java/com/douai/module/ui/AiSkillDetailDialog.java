@@ -93,12 +93,27 @@ final class AiSkillDetailDialog implements AutoCloseable {
 
     AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
                         ModelDiscovery discovery, ExecutorService discoveryWorker) {
+        this(context, miuix, exactSkillName, onChanged, discovery, discoveryWorker, null, null);
+    }
+
+    static AiSkillDetailDialog preview(Context context, boolean miuix, SkillStore.DraftPreview draft, SkillVideoFacts facts) {
+        if (draft == null) throw new IllegalArgumentException("没有可查看的技能草案");
+        SkillVideoFacts supplied = facts == null ? SkillVideoFacts.empty() : facts;
+        SkillStore.DraftPreview validated = draft.outputType() == SkillResult.Type.VIDEO
+                ? SkillStore.prepareAuthoredVideoDraft(draft.definition(), supplied)
+                : SkillStore.validateAuthoredDraft(draft.definition());
+        return new AiSkillDetailDialog(context, miuix, validated.name(), null, null, null, validated, supplied);
+    }
+
+    private AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
+                                ModelDiscovery discovery, ExecutorService discoveryWorker,
+                                SkillStore.DraftPreview preview, SkillVideoFacts facts) {
         this.context = context;
         this.miuix = miuix;
         name = exactSkillName;
         this.onChanged = onChanged;
-        store = SkillStore.forContext(context);
-        this.discovery = discovery == null ? store::discoverImageModels : discovery;
+        store = preview == null ? SkillStore.forContext(context) : null;
+        this.discovery = discovery != null ? discovery : store == null ? null : store::discoverImageModels;
         this.discoveryWorker = discoveryWorker;
         body = column();
         body.setTag("skills.detail." + name);
@@ -107,7 +122,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
         ScrollView scroll = new ScrollView(context);
         scroll.addView(body);
         dialog = builder("技能配置").setView(scroll).setNegativeButton("关闭", null).create();
-        reload("");
+        if (preview == null) reload("");
+        else renderDraftPreview(preview, facts);
     }
 
     AlertDialog dialog() { return dialog; }
@@ -132,18 +148,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         clearKey();
         body.removeAllViews();
         SkillManifest manifest = detail == null ? null : detail.manifest();
-        String displayName = manifest == null ? name : manifest.displayName();
-        boolean hasDisplayName = displayName != null && !displayName.isBlank() && !displayName.equals(name);
-        if (hasDisplayName) {
-            TextView label = text(body, displayName, "skills.detail.display_name");
-            label.setTypeface(null, Typeface.BOLD);
-            label.setAccessibilityHeading(true);
-        }
-        TextView title = text(body, "/" + name, "skills.detail.name");
-        if (!hasDisplayName) {
-            title.setTypeface(null, Typeface.BOLD);
-            title.setAccessibilityHeading(true);
-        }
+        renderHeading(manifest == null ? name : manifest.displayName());
         if (detail == null) {
             status = text(body, feedback.isEmpty() ? "此技能已不存在" : feedback, "skills.detail.status");
             status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
@@ -188,6 +193,61 @@ final class AiSkillDetailDialog implements AutoCloseable {
             button(body, detail.pending() ? "编辑草稿" : "编辑当前配置", "skills.detail.edit", () -> showEdit(deleteTarget));
             button(body, "删除", "skills.detail.delete", () -> reviewDelete(deleteTarget));
         }
+    }
+
+    private void renderHeading(String displayName) {
+        boolean hasDisplayName = displayName != null && !displayName.isBlank() && !displayName.equals(name);
+        if (hasDisplayName) {
+            TextView label = text(body, displayName, "skills.detail.display_name");
+            label.setTypeface(null, Typeface.BOLD);
+            label.setAccessibilityHeading(true);
+        }
+        TextView title = text(body, "/" + name, "skills.detail.name");
+        if (!hasDisplayName) {
+            title.setTypeface(null, Typeface.BOLD);
+            title.setAccessibilityHeading(true);
+        }
+    }
+
+    private void renderDraftPreview(SkillStore.DraftPreview draft, SkillVideoFacts facts) {
+        SkillManifest manifest = draft.capabilityId().isEmpty() ? null : SkillManifest.parse(draft.definition());
+        renderHeading(manifest == null ? name : manifest.displayName());
+        section("技能草案", "skills.detail.draft");
+        text(body, outputLabel(draft.outputType()) + " · 会话预览", "skills.detail.draft_summary");
+        text(body, draft.description(), "skills.detail.draft_description");
+        if (manifest != null && !manifest.documentation().isEmpty()) {
+            text(body, manifest.documentation(), "skills.detail.draft_documentation");
+        }
+        if (!draft.instruction().isEmpty()) text(body, draft.instruction(), "skills.detail.draft_instruction");
+        if (draft.outputType() == SkillResult.Type.VIDEO) {
+            text(body, "执行方式 · " + SkillCapabilityRegistry.ExecutionMode.POLLING.label(), "skills.detail.execution_mode");
+            text(body, "输出类型 · " + draft.outputType().label(), "skills.detail.output_type");
+            text(body, videoMissingLabel(facts), "skills.detail.video_facts.missing");
+            button(body, "查看接口字段", "skills.detail.video_facts.open", () -> showReadOnlyVideoFacts(facts));
+        }
+        if (draft.outputType() == SkillResult.Type.VIDEO || manifest != null && manifest.usesHttp()) {
+            text(body, "内置后可在技能设置填写服务地址和密钥。", "skills.detail.status");
+        }
+    }
+
+    private void showReadOnlyVideoFacts(SkillVideoFacts facts) {
+        if (!active()) return;
+        LinearLayout form = column();
+        int padding = dp(16);
+        form.setPadding(padding, 0, padding, padding);
+        text(form, videoMissingLabel(facts), "skills.detail.video_facts.missing");
+        if (facts.minimumPollSeconds() != 0) {
+            text(form, "最短轮询间隔 · " + facts.minimumPollSeconds() + " 秒", "skills.detail.video_facts.min_poll_seconds");
+        }
+        for (SkillVideoFacts.FormField field : facts.formFields()) {
+            String tag = "skills.detail.video_facts.field." + field.id();
+            text(form, videoFactLabel(field), tag + ".label");
+            text(form, field.value(), tag).setTextIsSelectable(true);
+            text(form, videoFactSourceLabel(field), "skills.detail.video_facts.source." + field.id());
+        }
+        ScrollView scroll = new ScrollView(context);
+        scroll.addView(form);
+        showChild(builder("视频接口字段").setView(scroll).setNegativeButton("关闭", null).create());
     }
 
     private void showEdit(SkillStore.DeleteTarget expected) {
@@ -411,7 +471,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
             }
         });
         for (SkillVideoFacts.FormField field : initial.formFields()) {
-            String label = field.label() + (field.required() ? "（必填）" : "");
+            String label = videoFactLabel(field);
             String tag = "skills.detail.video_facts.field." + field.id();
             if (!miuix) text(form, label, tag + ".label");
             text(form, videoFactHelp(field), tag + ".help");
@@ -486,6 +546,10 @@ final class AiSkillDetailDialog implements AutoCloseable {
     private static String videoFactSourceLabel(SkillVideoFacts.FormField field) {
         if (field.value().isEmpty()) return field.required() ? "待填写" : "选填";
         return "来源 · " + field.source().label();
+    }
+
+    private static String videoFactLabel(SkillVideoFacts.FormField field) {
+        return field.label() + (field.required() ? "（必填）" : "");
     }
 
     private static String videoMissingLabel(SkillVideoFacts facts) {
@@ -1143,7 +1207,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (closed) return;
         closed = true;
         cancelModelLookup("dialog_closed");
-        discoveryWorker.shutdownNow();
+        if (discoveryWorker != null) discoveryWorker.shutdownNow();
         clearKey();
         if (confirmation != null) confirmation.dismiss();
         confirmation = null;

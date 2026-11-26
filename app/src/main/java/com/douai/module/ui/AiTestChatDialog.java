@@ -96,6 +96,9 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Model test conversation using a fixed profile snapshot and optional bounded private history. */
 final class AiTestChatDialog extends Dialog {
@@ -140,6 +143,11 @@ final class AiTestChatDialog extends Dialog {
     private static final String SAVING_HISTORY = "正在保存历史…";
     private static final String RESTORING_CHAT = "正在恢复对话和草稿，请稍后发送。";
     private static final int VIDEO_REFERENCE_MESSAGES = 12;
+    private static final Pattern EDIT_CREDENTIAL = Pattern.compile("(?i)(?:密钥|密码|凭据|令牌|api[ _-]*key|authorization"
+            + "|token|bearer|cookie)\\s*(?:改成|改为|调整为|修改为|换成|设置为|设为|填成|填写为)");
+    private static final Pattern NAMED_DRAFT_FIELD = Pattern.compile("^(.*?(?:把|将)\\s*)(?:技能\\s*)?/"
+            + "([\\p{L}\\p{N}_-]{1,24})\\s*的\\s*");
+    private static final Pattern FIELD_CHANGE = Pattern.compile("改成|改为|调整为|修改为|换成|设置为|设为|填成|填写为");
     private static final String HISTORY_UNCONFIRMED = "技能已完成，但未能确认历史已保存。结果保留在当前会话。";
     private static final ExecutorService VIDEO_IO = new ThreadPoolExecutor(0, 2, 30, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(8), task -> {
@@ -171,6 +179,8 @@ final class AiTestChatDialog extends Dialog {
     private final ImageButton attach;
     private final TextView state;
     private final TextView skillEditorStatus;
+    private final LinearLayout skillEditorBar;
+    private final Button skillDraftSettings;
     private final LinearLayout attachments;
     private final HorizontalScrollView attachmentScroll;
     private final HorizontalScrollView skillMenu;
@@ -480,8 +490,17 @@ final class AiTestChatDialog extends Dialog {
         skillEditorStatus = label("", 12, MUTED);
         skillEditorStatus.setTag("ai.chat.skill_editor");
         skillEditorStatus.setPadding(dp(10), dp(5), dp(10), dp(5));
-        skillEditorStatus.setVisibility(View.GONE);
-        root.addView(skillEditorStatus, wrap());
+        skillEditorBar = new LinearLayout(context);
+        skillEditorBar.setGravity(Gravity.CENTER_VERTICAL);
+        skillEditorBar.setVisibility(View.GONE);
+        skillEditorBar.addView(skillEditorStatus, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        skillDraftSettings = new Button(context);
+        skillDraftSettings.setAllCaps(false);
+        skillDraftSettings.setText("查看草稿配置");
+        skillDraftSettings.setOnClickListener(ignored -> showCurrentDraftDetails());
+        skillEditorBar.addView(skillDraftSettings, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(skillEditorBar, wrap());
 
         messages = new ListView(context);
         messages.setTag("ai.chat.messages");
@@ -659,6 +678,7 @@ final class AiTestChatDialog extends Dialog {
         messages.setBackgroundColor(Color.TRANSPARENT);
         messages.setPadding(dp(12), 0, dp(12), dp(8));
         move(state, content, wrap());
+        move(skillEditorBar, content, wrap());
         move(messages, content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         move(attachmentScroll, content, wrap());
         quickReplies = new HorizontalScrollView(nativeViews.root.getContext());
@@ -696,6 +716,7 @@ final class AiTestChatDialog extends Dialog {
         nativeViews.root.setFitsSystemWindows(Build.VERSION.SDK_INT < 30);
         // Theme only module-owned status/attachment content. Host controls retain their native palette.
         ModuleTheme.bind(state);
+        ModuleTheme.bind(skillEditorBar);
         ModuleTheme.bind(attachmentScroll);
         ModuleTheme.bind(skillMenu);
     }
@@ -888,6 +909,47 @@ final class AiTestChatDialog extends Dialog {
                 }
                 requested = SkillAuthoring.continuation(commandText);
             }
+            SkillVideoFacts targetedFacts = null;
+            if (requested != null && requested.mode() == SkillAuthoring.Mode.REVISE) {
+                String revision = editing ? localDraftField(requested.request(), previousDraft.name()) : requested.request();
+                SkillAuthoring.FieldEdit change = SkillAuthoring.fieldEdit(revision);
+                if (EDIT_CREDENTIAL.matcher(revision).find()
+                        || (change != null && change.label().matches(
+                        "(?i).*(密钥|密码|凭据|令牌|api[ _-]*key|authorization|token|bearer|cookie).*"))) {
+                    if (prompt.equals(input.getText().toString())) input.setText("");
+                    showAuthoringStatus("请移除密钥，并在技能设置填写。");
+                    return;
+                }
+                if (!editing || otherDraftTarget(revision)) {
+                    showAuthoringStatus(editing ? "当前正在编写 /" + previousDraft.name() + "。请确认要修改哪一份草稿。"
+                            : "请先在当前会话创建或打开要修改的草稿。");
+                    return;
+                }
+                Matcher fields = FIELD_CHANGE.matcher(revision);
+                if (SkillAuthoring.needsEditClarification(revision)
+                        || (change == null && fields.find() && fields.find())) {
+                    showAuthoringStatus("请说清要修改 /" + previousDraft.name() + " 的哪个字段和新值。");
+                    return;
+                }
+                if (change != null && previousDraft.outputType() == SkillResult.Type.VIDEO) {
+                    if (change.label().matches("(?i)提交(?:请求)?(?:格式|编码)|content[ _-]*type|submitencoding")) {
+                        showAuthoringStatus("请贴服务文档中的提交编码示例，以便核对接口实际支持的格式。");
+                        return;
+                    }
+                    String field = SkillVideoFacts.chatEditableField(change.label());
+                    if (!field.isEmpty()) {
+                        SkillVideoFacts prior = skillDraftFacts == null ? SkillVideoFacts.empty() : skillDraftFacts;
+                        try {
+                            targetedFacts = prior.withForm(Map.of(field, change.value()));
+                        } catch (IllegalArgumentException invalid) {
+                            showAuthoringStatus("此字段的值不符合接口格式，当前草稿已保留。");
+                            return;
+                        }
+                        requested = new SkillAuthoring.Action(SkillAuthoring.Mode.SUPPLEMENT,
+                                requested.request(), requested.saveAfter());
+                    }
+                }
+            }
             int pollSeconds = 0;
             if (editing && previousDraft.outputType() == SkillResult.Type.VIDEO && requested != null
                     && requested.mode() == SkillAuthoring.Mode.REVISE) {
@@ -900,7 +962,8 @@ final class AiTestChatDialog extends Dialog {
             }
             boolean creationCommand = skillEntry != null && retryAnswer == null && SkillAuthoring.isCreationCommand(commandText);
             boolean canAuthor = (creationCommand || requested != null) && skillStore != null && skillStore.enabled();
-            if ((creationCommand || videoSource != null) && (!canAuthor || requested == null || requested.request().isEmpty())) {
+            if ((creationCommand || videoSource != null) && (!canAuthor || requested == null
+                    || requested.mode() == SkillAuthoring.Mode.DESIGN && requested.request().isEmpty())) {
                 state.setText(!canAuthor ? "请先启用 AI Skills"
                         : requested == null ? "请在 /技能 后填写不超过 400 字的单行需求"
                         : "请在 /技能 后填写技能需求");
@@ -908,7 +971,9 @@ final class AiTestChatDialog extends Dialog {
                 return;
             }
             authoring = canAuthor ? requested : null;
-            if (material != null) {
+            if (targetedFacts != null) {
+                authoredFacts = targetedFacts;
+            } else if (material != null) {
                 SkillVideoFacts prior = skillDraftFacts == null ? SkillVideoFacts.empty() : skillDraftFacts;
                 authoredFacts = prior.fillMissingFrom(material);
             } else if (videoSource != null) {
@@ -1028,7 +1093,8 @@ final class AiTestChatDialog extends Dialog {
             return;
         }
         cancelRestore();
-        String displayedPrompt = authoring != null && authoring.mode() == SkillAuthoring.Mode.SUPPLEMENT && selectedMaterial == null
+        String displayedPrompt = authoring != null && authoring.mode() == SkillAuthoring.Mode.SUPPLEMENT
+                && authoring.request().isEmpty() && selectedMaterial == null
                 ? "补充视频接口资料" : videoSource == null ? prompt : videoSource.command();
         ChatMessage answer = retryAnswer;
         if (answer == null) {
@@ -1123,7 +1189,9 @@ final class AiTestChatDialog extends Dialog {
                         if (revising && !previousDraft.name().equals(validated.name())) {
                             throw new IllegalArgumentException("修订必须保留当前技能命令名");
                         }
-                        authored = validated;
+                        authored = revising && requiredOutput == SkillResult.Type.VIDEO
+                                ? applyFocusedVideoRevision(previousDraft, validated, authoring.request(), authoredFacts)
+                                : validated;
                     }
                     turn.checkStopped();
                 } else if (turn.skill != null) {
@@ -1270,6 +1338,23 @@ final class AiTestChatDialog extends Dialog {
         }
         try { return active.skillModel(system, input); }
         finally { turn.usingSkillModel = false; }
+    }
+
+    private static SkillStore.DraftPreview applyFocusedVideoRevision(
+            SkillStore.DraftPreview previous, SkillStore.DraftPreview proposal, String request, SkillVideoFacts facts)
+            throws org.json.JSONException {
+        SkillAuthoring.FieldEdit change = SkillAuthoring.fieldEdit(localDraftField(request, previous.name()));
+        String property = change == null ? "instructions" : switch (change.label().trim()) {
+            case "简介", "技能简介" -> "description";
+            case "使用说明", "文档" -> "documentation";
+            case "显示名称", "显示名" -> "displayName";
+            case "输入", "输入限制", "输入长度" -> "inputs";
+            default -> "instructions";
+        };
+        org.json.JSONObject original = new org.json.JSONObject(previous.definition());
+        org.json.JSONObject edited = new org.json.JSONObject(proposal.definition());
+        if (edited.has(property)) original.put(property, edited.get(property));
+        return SkillStore.prepareAuthoredVideoDraft(original.toString(), facts);
     }
 
     private void queuePartialReply(RequestTurn turn, String text) {
@@ -1589,6 +1674,19 @@ final class AiTestChatDialog extends Dialog {
         updateSend();
     }
 
+    private static boolean otherDraftTarget(String request) {
+        int changed = request.indexOf("改");
+        String target = changed < 0 ? request : request.substring(0, changed);
+        return target.matches(".*(?:另一个|另一项|另一份|上一个|上一份|其他|别的)(?:的)?(?:技能|草稿|草案).*")
+                || target.matches(".*(?:技能\\s*/|(?:把|将)\\s*/)[\\p{L}\\p{N}_-]+.*");
+    }
+
+    private static String localDraftField(String request, String currentName) {
+        Matcher target = NAMED_DRAFT_FIELD.matcher(request);
+        return target.find() && currentName.equals(target.group(2)) ? target.group(1) + request.substring(target.end())
+                : request;
+    }
+
     private void referenceVideoDraft(String prompt, boolean install) {
         SkillStore store = skillStore;
         if (store == null) {
@@ -1607,7 +1705,7 @@ final class AiTestChatDialog extends Dialog {
                 return;
             }
             SkillStore.DraftPreview preview = skillDraft;
-            if (install) {
+            if (install && preview == null) {
                 for (SkillStore.Detail saved : store.pendingVideoDrafts()) {
                     if (!pendingSkillDraftId.equals(saved.draftId())) {
                         targets.add(new VideoReferenceTarget(saved.name(), saved, null, null));
@@ -1648,22 +1746,31 @@ final class AiTestChatDialog extends Dialog {
             return;
         }
         if (materials.isEmpty()) {
-            showAuthoringStatus("没找到可引用的视频接口资料，请先提供接口示例");
+            if (!install && previewingVideoDraft()) {
+                showAuthoringStatus(skillDraftFacts != null && skillDraftFacts.isComplete()
+                        ? "接口字段已填写，可以查看草稿配置。"
+                        : videoDraftStatus(skillDraftFacts));
+            } else {
+                showAuthoringStatus("没找到可引用的视频接口资料，请先提供接口示例");
+            }
             return;
         }
         int expectedGeneration = generation;
         chooseVideoReference("选择要补齐的视频草稿", targets, VideoReferenceTarget::label, expectedGeneration,
+                skillDraft == null,
                 target -> chooseVideoReference("选择要使用的接口资料", materials, VideoReferenceMaterial::label,
-                        expectedGeneration, material -> {
+                        expectedGeneration, false, material -> {
                             if (install) saveVideoReference(prompt, store, target, material);
                             else sendMessage(prompt, List.of(), List.of(), null, null, null, false, material.facts());
                         }));
     }
 
+    private boolean previewingVideoDraft() { return skillDraft != null && skillDraft.outputType() == SkillResult.Type.VIDEO; }
+
     private <T> void chooseVideoReference(String title, List<T> options, Function<T, String> label,
-                                          int expectedGeneration, Consumer<T> selected) {
+                                          int expectedGeneration, boolean requireSelection, Consumer<T> selected) {
         if (disposed || busy || generation != expectedGeneration) return;
-        if (options.size() == 1) {
+        if (options.size() == 1 && !requireSelection) {
             selected.accept(options.get(0));
             return;
         }
@@ -1682,7 +1789,7 @@ final class AiTestChatDialog extends Dialog {
         if (index == 0 || !transcript.get(index - 1).user) return false;
         String userText = transcript.get(index - 1).text;
         SkillAuthoring.Action action = SkillAuthoring.match(userText, true);
-        if (SkillAuthoring.isCreationCommand(userText) || (action != null && action.mode() == SkillAuthoring.Mode.DESIGN)) {
+        if (action != null && action.mode() == SkillAuthoring.Mode.DESIGN) {
             return false;
         }
         try {
@@ -2119,8 +2226,10 @@ final class AiTestChatDialog extends Dialog {
 
     private void updateSend() {
         state.setVisibility(TextUtils.isEmpty(state.getText()) ? View.GONE : View.VISIBLE);
-        skillEditorStatus.setVisibility(skillDraft == null ? View.GONE : View.VISIBLE);
+        skillEditorBar.setVisibility(skillDraft == null ? View.GONE : View.VISIBLE);
         skillEditorStatus.setText(skillDraft == null ? "" : "正在编写 /" + skillDraft.name() + " · 可直接说想改什么");
+        skillDraftSettings.setTag(skillDraft == null ? null : "ai.chat.skill.draft_settings." + skillDraft.name());
+        skillDraftSettings.setEnabled(!disposed && !busy && skillDraft != null);
         boolean hasContent = !input.getText().toString().trim().isEmpty() || !draftImages.isEmpty()
                 || !draftDocuments.isEmpty() || !draftPending.isEmpty();
         if (nativeViews == null) send.setImageResource(busy ? android.R.drawable.ic_menu_close_clear_cancel : android.R.drawable.ic_menu_send);
@@ -2182,12 +2291,23 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void showSkillDetails(String skillName) {
+        showSkillDetails(() -> new AiSkillDetailDialog(getContext(), useMiuix, skillName, this::updateSend));
+    }
+
+    private void showCurrentDraftDetails() {
+        SkillStore.DraftPreview draft = skillDraft;
+        SkillVideoFacts facts = skillDraftFacts;
+        if (busy || draft == null) return;
+        showSkillDetails(() -> AiSkillDetailDialog.preview(getContext(), useMiuix, draft, facts));
+    }
+
+    private void showSkillDetails(Supplier<AiSkillDetailDialog> createPage) {
         Activity owner = ownerActivity();
         if (disposed || owner == null || owner.isFinishing() || owner.isDestroyed()) return;
         if (skillDetails != null) skillDetails.dismiss();
         AiSkillDetailDialog page = null;
         try {
-            page = new AiSkillDetailDialog(getContext(), useMiuix, skillName, this::updateSend);
+            page = createPage.get();
             AiSkillDetailDialog opened = page;
             Dialog child = page.dialog();
             child.setOwnerActivity(owner);

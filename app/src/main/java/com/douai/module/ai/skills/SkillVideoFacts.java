@@ -436,6 +436,31 @@ public final class SkillVideoFacts {
         return Collections.unmodifiableList(fields);
     }
 
+    /** Names accepted for a direct chat edit. Encoding and authorization are evidence or settings only. */
+    public static String chatEditableField(String label) {
+        for (FormSpec spec : FORM) {
+            if (spec.fact() != Fact.ENCODING && spec.id().equalsIgnoreCase(label)) return spec.id();
+        }
+        String normalized = label.replaceAll("[\\p{Z}\\s]", "").toLowerCase(Locale.ROOT)
+                .replaceFirst("^(?:当前的?|现有的?|已填写的|这个技能的|视频的|接口的)", "");
+        return switch (normalized) {
+            case "服务名称", "服务名" -> "label";
+            case "提交地址", "提交接口地址", "提交post地址" -> "submitEndpoint";
+            case "提交路径", "提交接口路径", "提交post路径" -> "submitPath";
+            case "提示词字段", "提示词参数" -> "promptField";
+            case "提交响应id", "提交响应id字段", "提交响应任务id字段", "提交任务id字段" -> "submitIdField";
+            case "查询路径", "查询接口路径", "查询get路径", "查询路径（含{id}）" -> "statusPath";
+            case "查询响应id", "查询响应id字段", "查询响应任务id字段", "查询任务id字段" -> "statusIdField";
+            case "状态字段", "查询状态字段" -> "stateField";
+            case "状态映射" -> "states";
+            case "取消方式", "取消方法" -> "cancelMethod";
+            case "取消路径", "取消接口路径" -> "cancelPath";
+            case "下载路径", "下载接口路径", "下载get路径" -> "downloadPath";
+            case "成片地址字段", "查询成片地址字段", "查询响应成品地址字段" -> "resultUrlField";
+            default -> "";
+        };
+    }
+
     private String formValue(FormSpec spec) {
         if (spec.fact() != null) {
             String value = facts.getOrDefault(spec.fact(), "");

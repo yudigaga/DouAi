@@ -141,6 +141,86 @@ public final class SkillAuthoringTest {
         assertNull(SkillAuthoring.match("修改是什么意思？", true));
     }
 
+    @Test public void explicitAuthoringRoutesExistingDraftActionsEvenWithoutATarget() {
+        String create = "帮我做个生成视频的技能";
+        String revise = "帮我把某某改成某某";
+        for (boolean hasDraft : new boolean[]{false, true}) {
+            var design = SkillAuthoring.match("/技能 " + create, hasDraft);
+            assertEquals(SkillAuthoring.Mode.DESIGN, design.mode());
+            assertEquals(SkillResult.Type.VIDEO, SkillAuthoring.explicitOutput(design.request()));
+            for (String spacing : List.of("", " ", "　")) {
+                assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.REVISE, revise, false),
+                        SkillAuthoring.match("/技能" + spacing + revise, hasDraft));
+            }
+            assertEquals(new SkillAuthoring.Action(SkillAuthoring.Mode.SAVE, "", false),
+                    SkillAuthoring.match("/技能 帮我内置", hasDraft));
+            assertEquals(SkillAuthoring.Mode.REVISE,
+                    SkillAuthoring.match("/技能 把轮询间隔改成 8 秒", hasDraft).mode());
+        }
+        assertTrue(SkillAuthoring.isCreationCommand("/技能" + revise));
+        assertFalse(SkillAuthoring.isCreationCommand("/技能助手 " + revise));
+        assertNull(SkillAuthoring.match("/技能助手 " + revise, true));
+        assertNull(SkillAuthoring.match("「/技能" + revise + "」", true));
+        assertNull(SkillAuthoring.match("/技能 「" + revise + "」", false));
+        assertNull(SkillAuthoring.match(revise, false));
+    }
+
+    @Test public void naturalVideoMaterialFollowupsAreReferenceOnlyAndRejectQuoting() {
+        for (String phrase : List.of("接口需要帮我填好", "就按你发的填写")) {
+            for (String prefix : List.of("", "/技能 ", "/技能　")) {
+                String text = prefix + phrase + "。";
+                assertTrue(text, SkillAuthoring.usesPreviousVideoMaterial(text));
+                assertNull(text, SkillAuthoring.match(text, true));
+            }
+            for (String other : List.of("「" + phrase + "」", "> " + phrase, "有人说" + phrase,
+                    "例子：" + phrase, "/技能名 " + phrase, "/技能 ‘" + phrase + "’")) {
+                assertFalse(other, SkillAuthoring.usesPreviousVideoMaterial(other));
+            }
+        }
+        assertTrue(SkillAuthoring.usesPreviousVideoMaterial("根据刚才的接口资料填写接口"));
+        assertFalse(SkillAuthoring.usesPreviousVideoMaterial("接口需要怎么填？"));
+        assertFalse(SkillAuthoring.usesPreviousVideoMaterial("就按你发的填写，然后执行"));
+    }
+
+    @Test public void explicitSingleFieldEditsExposeOnlyTheLabelAndValue() {
+        String request = "帮我把查询路径改成 /jobs/{id}/status";
+        var expected = new SkillAuthoring.FieldEdit("查询路径", "/jobs/{id}/status");
+        for (String prefix : List.of("", "/技能", "/技能 ", "/技能　")) {
+            assertEquals(expected, SkillAuthoring.fieldEdit(prefix + request));
+        }
+        assertEquals(new SkillAuthoring.FieldEdit("提交地址", "https://fixture.example.com/jobs"),
+                SkillAuthoring.fieldEdit("/技能帮我把提交地址改为 https://fixture.example.com/jobs"));
+        assertEquals(SkillAuthoring.Mode.REVISE,
+                SkillAuthoring.match("/技能帮我把提交地址改为 https://fixture.example.com/jobs", false).mode());
+        assertEquals(new SkillAuthoring.FieldEdit("API Key", "fixture-placeholder"),
+                SkillAuthoring.fieldEdit("请将 API Key 改成 fixture-placeholder"));
+        assertEquals(SkillAuthoring.Mode.REVISE,
+                SkillAuthoring.match("/技能 帮我把标题改为「如何拍视频」", false).mode());
+        for (String other : List.of("「" + request + "」", "比如" + request, "/技能助手 " + request,
+                "帮我把查询路径改成 /a，再把状态字段改成 state",
+                "帮我把查询路径改成 /a 和把状态字段改为 state", "查询路径应该填什么？")) {
+            assertNull(other, SkillAuthoring.fieldEdit(other));
+        }
+    }
+
+    @Test public void vagueOrMultipleScopedChangesNeverBecomeNewDesigns() {
+        String multiple = "帮我把查询路径改成 x，再把状态字段改成 y";
+        for (boolean hasDraft : new boolean[]{false, true}) {
+            for (String text : List.of("/技能 帮我改一下", "/技能 " + multiple, "/技能" + multiple)) {
+                SkillAuthoring.Action action = SkillAuthoring.match(text, hasDraft);
+                assertNotNull(text, action);
+                assertEquals(text, SkillAuthoring.Mode.REVISE, action.mode());
+                assertFalse(action.saveAfter());
+                assertNull(text, SkillAuthoring.fieldEdit(text));
+            }
+            assertNull(SkillAuthoring.match("/技能 你好。", hasDraft));
+            assertNull(SkillAuthoring.match("/技能 这个技能为什么这么设计？", hasDraft));
+            assertNull(SkillAuthoring.match("/技能助手 " + multiple, hasDraft));
+            assertEquals(SkillAuthoring.Mode.DESIGN,
+                    SkillAuthoring.match("/技能 生成一个教我如何拍视频的技能", hasDraft).mode());
+        }
+    }
+
     @Test public void quotedAndOrdinaryDiscussionRemainChatEvenWithADraft() {
         for (String sentence : new String[]{"如何写一个周报 Skill？", "帮我写一个生图 Skill 的使用说明",
                 "如何写一个生图 skills 并内置？", "帮我写一个生图 skills 的介绍", "「帮我写一个生图 skills 并内置」",

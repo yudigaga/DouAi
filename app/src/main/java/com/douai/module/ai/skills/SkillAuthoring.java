@@ -21,6 +21,7 @@ public final class SkillAuthoring {
 
     public record Action(Mode mode, String request, boolean saveAfter) { }
     public record VideoSource(Action action, String command, String notes, String relatedSkill) { }
+    public record FieldEdit(String label, String value) { }
 
     public static final String DESIGN_INSTRUCTION = """
             你为 DouAi 设计或修订一个供用户手动调用的 Skill。只依据输入 JSON 的 requirement
@@ -84,7 +85,8 @@ public final class SkillAuthoring {
     private static final String SUBJECT = "[^\\r\\n。！？?!：:；;，,\\x60]";
     private static final String PURPOSE = "(?:https://[A-Za-z0-9._~:/%+@-]{1,180}+|" + SUBJECT + ")";
     private static final String SKILL_WORD = "(?:skills?|技能)";
-    private static final Pattern CREATION_COMMAND = Pattern.compile("^/" + AiSkills.CREATION_COMMAND_NAME + "(?=$|[\\s\\p{Z}])");
+    private static final String CREATION_PREFIX = "/" + AiSkills.CREATION_COMMAND_NAME;
+    private static final Pattern CREATION_COMMAND = Pattern.compile("^" + CREATION_PREFIX + "(?=$|[\\s\\p{Z}])");
     private static final Pattern REFERENCED_VIDEO_INSTALL = Pattern.compile("^/" + AiSkills.CREATION_COMMAND_NAME
             + "[\\s\\p{Z}]+(?:按|根据|依据)(?:上述|上面(?:的)?)(?:视频接口资料|接口资料|资料)?\\s*"
             + "(?:(?:请|帮我|给我)\\s*){0,2}(?:补齐(?:并)?|并)?内置" + END);
@@ -113,6 +115,19 @@ public final class SkillAuthoring {
             + "|(?:修改|修订|优化|完善)\\s*" + DRAFT_TARGET + "\\s*[，,：:]?\\s*" + SUBJECT + "{0,180}?"
             + "|再\\s*" + CHANGE + "\\s*" + SUBJECT + "{0,120}?(?:示例|格式|指令|限制|参数|说明)" + SUBJECT + "{0,60}?"
             + "|再\\s*(?:简洁|简单|精简|详细|具体|自然|正式|口语化|短|长)(?:一点|一些|些))" + END);
+    private static final Pattern SCOPED_CHANGE = Pattern.compile("^" + PREFIX
+            + "(?:把|将)\\s*" + SUBJECT + "{1,60}?\\s*(?:改成|改为|调整为|修改为|换成)\\s*[：:]?\\s*"
+            + SUBJECT + "{1,180}?" + END);
+    private static final String FIELD_SET = "改成|改为|调整为|修改为|换成|设置为|设为|填成|填写为";
+    private static final Pattern FIELD_EDIT = Pattern.compile("^" + PREFIX
+            + "(?:把|将)\\s*([\\p{L}\\p{N}_ -]{1,32}?)\\s*(?:" + FIELD_SET + ")\\s*[：:]?\\s*"
+            + "([^\\r\\n。！？?!；;，,\\x60]{1,240}?)\\s*[。！？?!]?\\s*$");
+    private static final Pattern NEXT_FIELD = Pattern.compile(FIELD_SET);
+    private static final Pattern FIELD_EDIT_SEPARATOR = Pattern.compile("\\s*[,，;；]\\s*(?:(?:再|然后|并|同时)\\s*)?");
+    private static final Pattern SCOPED_DESIGN_VERB = Pattern.compile("^" + PREFIX
+            + "(?:生成|制作|创建|新建|设计|编写|写|做|开发)");
+    private static final Pattern SCOPED_SOCIAL = Pattern.compile(
+            "^(?:你好(?:呀|啊)?|您好|哈喽|谢谢(?:你)?|你是谁|你能做什么|你在吗|还在吗)" + END);
     private static final Pattern CREDENTIAL_TEXT = Pattern.compile("(?i)(?:\\bbearer\\s+[A-Za-z0-9._~+/=-]{8,}"
             + "|(?:api[ _-]*key|access[ _-]*token|密钥|访问令牌)\\s*[:：=]\\s*['\"“]?[A-Za-z0-9._~+/=-]{8,}"
             + "|(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}))");
@@ -133,8 +148,10 @@ public final class SkillAuthoring {
     private static final Pattern CANCEL = Pattern.compile("^" + PREFIX
             + "(?:(?:取消|退出|结束|停止)(?:技能)?(?:编写|编辑)|放弃(?:这份|当前)?(?:草稿|草案))" + END);
     private static final Pattern USE_REFERENCE = Pattern.compile("^" + PREFIX
-            + "(?:按|根据|依据)(?:上述|上面(?:的)?|刚才(?:的)?)(?:视频接口资料|接口资料|资料)"
-            + "\\s*(?:补齐|补充|填写)(?:接口|草稿|配置)?" + END);
+            + "(?:(?:按|根据|依据)(?:上述|上面(?:的)?|刚才(?:的)?)(?:视频接口资料|接口资料|资料)"
+            + "\\s*(?:补齐|补充|填写)(?:接口|草稿|配置)?"
+            + "|(?:就\\s*)?按\\s*你(?:刚才)?发(?:给我)?的\\s*(?:填写|填好)"
+            + "|(?:视频)?接口(?:资料|字段)?\\s*(?:需要|要)\\s*(?:帮我|请你)\\s*填好)" + END);
     private static final Pattern UNCLEAR_EDIT = Pattern.compile("^" + PREFIX
             + "(?:继续(?:编写|修改)|(?:再|按上面|按刚才)?(?:改|调整|优化|补充)(?:一下|一点)?)" + END);
     private static final String EDIT_TOPICS = "轮询|间隔|失败|超时|重试|下载|回传|成片|"
@@ -177,7 +194,7 @@ public final class SkillAuthoring {
     }
 
     public static boolean isCreationCommand(String text) {
-        return text != null && CREATION_COMMAND.matcher(text.trim()).lookingAt();
+        return text != null && creationBody(text.trim()) != null;
     }
 
     public static boolean isReferencedVideoInstall(String text) {
@@ -187,11 +204,35 @@ public final class SkillAuthoring {
     }
 
     public static boolean usesPreviousVideoMaterial(String text) {
-        return editorSentence(text) && USE_REFERENCE.matcher(text.trim()).matches();
+        if (text == null || text.length() > MAX_TYPED) return false;
+        String sentence = text.trim();
+        String body = sentence.startsWith(CREATION_PREFIX)
+                ? stripLeadingCommandSpace(sentence.substring(CREATION_PREFIX.length())) : sentence;
+        return editorSentence(body) && USE_REFERENCE.matcher(body).matches();
+    }
+
+    public static FieldEdit fieldEdit(String request) {
+        if (request == null || request.length() > MAX_TYPED) return null;
+        String sentence = request.trim();
+        String body = creationBody(sentence);
+        return singleField(body == null ? sentence : body);
+    }
+
+    private static FieldEdit singleField(String sentence) {
+        if (!editorSentence(sentence) || hasUnclosedQuote(sentence)) return null;
+        Matcher field = FIELD_EDIT.matcher(sentence);
+        if (!field.matches()) return null;
+        String value = field.group(2).trim();
+        if (value.isEmpty() || NEXT_FIELD.matcher(value).find()) return null;
+        return new FieldEdit(field.group(1).trim(), value);
     }
 
     public static boolean needsEditClarification(String text) {
-        return editorSentence(text) && UNCLEAR_EDIT.matcher(text.trim()).matches();
+        if (text == null || text.length() > MAX_TYPED) return false;
+        String sentence = text.trim();
+        String body = creationBody(sentence);
+        String request = body == null ? sentence : body;
+        return editorSentence(request) && (UNCLEAR_EDIT.matcher(request).matches() || multipleFieldEdit(request));
     }
 
     /** The caller already has a video draft selected. These prefixes can carry a single missing fact. */
@@ -284,12 +325,14 @@ public final class SkillAuthoring {
     public static Action match(String typed, boolean hasDraft) {
         if (typed == null || typed.length() > MAX_TYPED || typed.codePoints().anyMatch(Character::isISOControl)) return null;
         String sentence = typed.trim();
-        if (isReferencedVideoInstall(sentence)) return null;
-        Matcher command = CREATION_COMMAND.matcher(sentence);
-        boolean explicitCommand = command.lookingAt();
-        if (!explicitCommand && SAVE.matcher(sentence).matches()) return new Action(Mode.SAVE, "", false);
+        if (isReferencedVideoInstall(sentence) || usesPreviousVideoMaterial(sentence)) return null;
+        String body = creationBody(sentence);
+        boolean explicitCommand = body != null;
+        String designText = explicitCommand ? body : sentence;
+        if (explicitCommand && !designText.isEmpty()
+                && (!editorSentence(designText) || hasUnclosedQuote(designText))) return null;
+        if (SAVE.matcher(designText).matches()) return new Action(Mode.SAVE, "", false);
 
-        String designText = explicitCommand ? stripLeadingCommandSpace(sentence.substring(command.end())) : sentence;
         Matcher tail = SAVE_TAIL.matcher(designText);
         boolean saveAfter = tail.find();
         if (saveAfter) {
@@ -299,7 +342,22 @@ public final class SkillAuthoring {
             saveAfter = !unclosed && !NEGATES_SAVE_TAIL.matcher(beforeTail).find();
             if (saveAfter) designText = beforeTail;
         }
-        if (explicitCommand) return new Action(Mode.DESIGN, designText.trim(), saveAfter && !designText.trim().isEmpty());
+        if (explicitCommand) {
+            String request = designText.trim();
+            if (needsEditClarification(request)) return new Action(Mode.REVISE, request, false);
+            if (SCOPED_CHANGE.matcher(request).matches() || singleField(request) != null
+                    || !question(request) && REVISE.matcher(request).matches()) {
+                return new Action(Mode.REVISE, request, saveAfter);
+            }
+            Action existing = continuation(request);
+            if (existing != null) {
+                return existing.mode() == Mode.REVISE && saveAfter
+                        ? new Action(Mode.REVISE, request, true) : existing;
+            }
+            if (SCOPED_SOCIAL.matcher(request).matches()
+                    || question(request) && !SCOPED_DESIGN_VERB.matcher(request).find()) return null;
+            return new Action(Mode.DESIGN, request, saveAfter && !request.isEmpty());
+        }
         Matcher design = DESIGN.matcher(designText);
         if (design.matches()) {
             String detail = design.group(2).trim();
@@ -312,6 +370,22 @@ public final class SkillAuthoring {
             return new Action(Mode.REVISE, sentence, false);
         }
         return null;
+    }
+
+    private static String creationBody(String sentence) {
+        Matcher command = CREATION_COMMAND.matcher(sentence);
+        if (command.lookingAt()) return stripLeadingCommandSpace(sentence.substring(command.end()));
+        if (sentence.length() > MAX_TYPED || !sentence.startsWith(CREATION_PREFIX + "帮我把")) return null;
+        String body = sentence.substring(CREATION_PREFIX.length());
+        return (SCOPED_CHANGE.matcher(body).matches() && !hasUnclosedQuote(body)
+                || singleField(body) != null || multipleFieldEdit(body)) ? body : null;
+    }
+
+    private static boolean multipleFieldEdit(String request) {
+        String[] edits = FIELD_EDIT_SEPARATOR.split(request, -1);
+        if (edits.length < 2) return false;
+        for (String edit : edits) if (singleField(edit) == null) return false;
+        return true;
     }
 
     private static String stripLeadingCommandSpace(String requirement) {
