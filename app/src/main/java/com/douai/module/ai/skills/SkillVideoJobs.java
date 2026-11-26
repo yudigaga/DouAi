@@ -44,13 +44,14 @@ public final class SkillVideoJobs {
     private static final Object IO_LOCK = new Object();
     private static final Pattern SCOPE_KEY = Pattern.compile("[a-f0-9]{64}");
     private static final Pattern HASH = Pattern.compile("[A-Za-z0-9_-]{43}");
-    private static final int LEGACY_FORMAT_VERSION = 1;
-    private static final int FORMAT_VERSION = 2;
+    static final String JOURNAL_DIRECTORY = "douai_real_video_jobs_v3";
+    private static final int FORMAT_VERSION = 3;
     private static final int MAX_JOBS = 40;
     private static final int MAX_SCOPES = 128;
     private static final int MAX_POLL_VISITS = 120;
     private static final int MAX_DEVICE_ATTEMPTS_PER_MINUTE = 48;
-    private static final int MAX_METADATA_BYTES = 32 * 1024;
+    private static final int MAX_METADATA_BYTES = 1024 * 1024;
+    private static final int MAX_SAVED_PATH = 2048;
     private static final int MAX_JSON_BYTES = 16 * 1024;
     private static final int MAX_MEDIA_BYTES = SkillHttpsTransport.MAX_VIDEO_BYTES;
     private static final long TOTAL_MEDIA_BYTES = 96L * 1024 * 1024;
@@ -89,6 +90,19 @@ public final class SkillVideoJobs {
         }
 
         @Override public String toString() { return "SkillVideoJobs.Binding"; }
+    }
+
+    /** Immutable continuation contract and the existing endpoint-bound ciphertext. */
+    public record Pinned(Binding binding, String encryptedBearer) {
+        public Pinned {
+            Objects.requireNonNull(binding);
+            new SkillCustomService.Binding(binding.skillId(), binding.configRevision(), binding.endpoint(), encryptedBearer);
+            SkillHttpDeclaration restored = SkillHttpDeclaration.parse(binding.declaration().toJson().toString(),
+                    SkillResult.Type.VIDEO, List.of());
+            if (!binding.declaration().equals(restored)) throw new IllegalArgumentException("视频任务的接口声明无法保存");
+        }
+
+        @Override public String toString() { return "SkillVideoJobs.Pinned"; }
     }
 
     @FunctionalInterface public interface Admission { void check() throws IOException; }
@@ -152,22 +166,36 @@ public final class SkillVideoJobs {
     private record Catalog(long generation, Map<UUID, Entry> jobs) {}
     private record Claim(Entry entry, boolean execute) {}
     private record Cancellation(Entry entry, State previous) {}
+    private record Routes(String statusPath, String resultPath) {
+        static final Routes EMPTY = new Routes("", "");
+
+        Routes {
+            if (!isRelativeSavedPath(statusPath) || !isRelativeSavedPath(resultPath)) {
+                throw new IllegalArgumentException("视频任务路径无效");
+            }
+        }
+    }
     private record Entry(Job job, String fingerprint, String remoteId, long nextPollAt, UUID ticket, String mediaHash,
-                         int pollVisits) {
+                         int pollVisits, Pinned pinned, Routes routes) {
         Entry change(State next, String id, long nextPoll, UUID nextTicket, String media) {
+            return change(next, id, nextPoll, nextTicket, media, routes);
+        }
+
+        Entry change(State next, String id, long nextPoll, UUID nextTicket, String media, Routes savedRoutes) {
             return new Entry(new Job(job.localId(), job.skillId(), job.revisionId(), job.configRevision(),
                     job.createdAtMillis(), next, job.linked(), job.cancellationSupported()),
-                    fingerprint, id, nextPoll, nextTicket, media, pollVisits);
+                    fingerprint, id, nextPoll, nextTicket, media, pollVisits,
+                    next.terminal() ? null : pinned, next.terminal() ? Routes.EMPTY : savedRoutes);
         }
 
         Entry linked() {
             return new Entry(new Job(job.localId(), job.skillId(), job.revisionId(), job.configRevision(),
                     job.createdAtMillis(), job.state(), true, job.cancellationSupported()),
-                    fingerprint, remoteId, nextPollAt, ticket, mediaHash, pollVisits);
+                    fingerprint, remoteId, nextPollAt, ticket, mediaHash, pollVisits, pinned, routes);
         }
 
         Entry claimPoll(long leasedUntil) {
-            return new Entry(job, fingerprint, remoteId, leasedUntil, UUID.randomUUID(), mediaHash, pollVisits + 1);
+            return new Entry(job, fingerprint, remoteId, leasedUntil, UUID.randomUUID(), mediaHash, pollVisits + 1, pinned, routes);
         }
     }
 
@@ -176,7 +204,7 @@ public final class SkillVideoJobs {
     private final Transport transport;
 
     public static SkillVideoJobs forContext(Context context) {
-        return new SkillVideoJobs(new File(context.getFilesDir(), "douai_real_video_jobs"),
+        return new SkillVideoJobs(new File(context.getFilesDir(), JOURNAL_DIRECTORY),
                 System::currentTimeMillis, SkillVideoJobs::https);
     }
 
@@ -198,17 +226,42 @@ public final class SkillVideoJobs {
         });
     }
 
+    public Pinned pinned(Scope scope, Job job) throws Failure {
+        if (job == null || job.localId() == null) throw new Failure(Code.STALE);
+        return locked(scope, (file, catalog) -> {
+            Entry current = catalog.jobs().get(job.localId());
+            if (current == null) throw new Failure(Code.CLEARED);
+            Job stored = current.job();
+            if (stored.state().terminal() || current.pinned() == null || !stored.skillId().equals(job.skillId())
+                    || !stored.revisionId().equals(job.revisionId()) || !stored.configRevision().equals(job.configRevision())
+                    || stored.createdAtMillis() != job.createdAtMillis()) throw new Failure(Code.STALE);
+            return current.pinned();
+        });
+    }
+
     public Job submit(Scope scope, long expectedGeneration, UUID localId, Access access,
                       byte[] approvedJson, long deadlineNanos) throws Failure {
+        return submit(scope, expectedGeneration, localId, access, approvedJson, deadlineNanos, null);
+    }
+
+    public Job submit(Scope scope, long expectedGeneration, UUID localId, Access access,
+                      byte[] approvedJson, long deadlineNanos, Pinned pinned) throws Failure {
         Objects.requireNonNull(localId);
         if (access == null || approvedJson == null || approvedJson.length == 0 || approvedJson.length > 64 * 1024) {
             throw new Failure(Code.INVALID_INPUT);
         }
+        if (pinned != null && (!pinned.binding().equals(access.binding())
+                || pinned.encryptedBearer().isEmpty() != access.bearer().isEmpty())) throw new Failure(Code.INVALID_INPUT);
         byte[] payload = approvedJson.clone();
         if (AiCredentialVault.containsImageCredential(new String(payload, StandardCharsets.UTF_8), access.bearer())) {
             throw new Failure(Code.INVALID_INPUT);
         }
         Binding binding = access.binding();
+        if (AiCredentialVault.imageEndpointContainsCredential(binding.endpoint(), access.bearer())
+                || pinned != null && AiCredentialVault.containsImageCredential(
+                binding.declaration().toJson().toString().replace("\\/", "/"), access.bearer())) {
+            throw new Failure(Code.INVALID_INPUT);
+        }
         Claim claim = locked(scope, (file, catalog) -> {
             if (catalog.generation() != expectedGeneration) throw new Failure(Code.CLEARED);
             Entry old = catalog.jobs().get(localId);
@@ -220,7 +273,7 @@ public final class SkillVideoJobs {
             // This record is already uncertain before the request can leave the device.
             Job job = new Job(localId, binding.skillId(), binding.revisionId(), binding.configRevision(),
                     clock.getAsLong(), State.SUBMIT_UNKNOWN, false, binding.declaration().video().canCancel());
-            Entry intent = new Entry(job, binding.fingerprint(), "", 0, UUID.randomUUID(), "", 0);
+            Entry intent = new Entry(job, binding.fingerprint(), "", 0, UUID.randomUUID(), "", 0, pinned, Routes.EMPTY);
             update(file, catalog, intent);
             return new Claim(intent, true);
         });
@@ -231,25 +284,33 @@ public final class SkillVideoJobs {
             response = call(scope, intent, access, SkillHttpsTransport.Method.POST, false, binding.endpoint(),
                     payload, deadlineNanos);
         } catch (SkillHttpsTransport.Failure failure) {
-            if (failure.mayHaveSent()) return intent.job();
+            if (failure.mayHaveSent()) return finishUnknown(scope, intent);
             return finish(scope, intent, State.FAILED, "", 0, "").job();
         } catch (Failure rejectedLocally) {
             if (rejectedLocally.code() != Code.CLEARED) finish(scope, intent, State.FAILED, "", 0, "");
             throw rejectedLocally;
         } catch (IOException unavailable) {
-            return intent.job();
+            return finishUnknown(scope, intent);
         }
         if (definiteRefusal(response.status())) return finish(scope, intent, State.FAILED, "", 0, "").job();
         try {
-            String remoteId = binding.declaration().readSubmittedTaskId(json(response));
-            if (AiCredentialVault.containsImageCredential(remoteId, access.bearer())) return intent.job();
-            int minPollSeconds = binding.declaration().video().minPollSeconds();
+            JSONObject submitted = json(response);
+            String remoteId = binding.declaration().readSubmittedTaskId(submitted);
+            if (AiCredentialVault.containsImageCredential(remoteId, access.bearer())) return finishUnknown(scope, intent);
+            SkillHttpDeclaration.Video video = binding.declaration().video();
+            String statusPath = video.readSubmittedStatusPath(submitted, binding.endpoint());
+            requireRouteOmitsCredential(video.statusRequest(binding.endpoint(), remoteId, statusPath).endpoint(), access.bearer());
+            int minPollSeconds = video.minPollSeconds();
             long firstPoll = minPollSeconds == 0 ? 0 : clock.getAsLong() + TimeUnit.SECONDS.toMillis(minPollSeconds);
-            return finish(scope, intent, State.QUEUED, remoteId, firstPoll, "").job();
+            return finish(scope, intent, State.QUEUED, remoteId, firstPoll, "", new Routes(statusPath, "")).job();
         } catch (IllegalArgumentException | Failure invalid) {
             if (invalid instanceof Failure failure && failure.code() != Code.RESPONSE) throw failure;
-            return intent.job();
+            return finishUnknown(scope, intent);
         }
+    }
+
+    private Job finishUnknown(Scope scope, Entry intent) throws Failure {
+        return intent.pinned() == null ? intent.job() : finish(scope, intent, State.SUBMIT_UNKNOWN, "", 0, "").job();
     }
 
     public Job refresh(Scope scope, UUID localId, Access access, long deadlineNanos) throws Failure {
@@ -274,15 +335,15 @@ public final class SkillVideoJobs {
         try {
             String endpoint = access.binding().endpoint();
             if (claimed.job().state() == State.DOWNLOAD_READY) {
-                if (video.resultUrlField().isEmpty()) {
-                    return download(scope, claimed, access, video.downloadEndpoint(endpoint, claimed.remoteId()), deadlineNanos);
-                }
-                Job restored = reconcileDownloaded(scope, claimed, false);
-                if (restored != null) return restored;
-                // The provider link is never persisted. An interrupted download re-reads the same task.
+                String downloadUrl = video.savedDownloadEndpoint(endpoint, claimed.remoteId(), claimed.routes().resultPath());
+                return download(scope, claimed, access, downloadUrl, deadlineNanos);
             }
-            SkillHttpsTransport.Response response = call(scope, claimed, access, SkillHttpsTransport.Method.GET,
-                    false, video.statusEndpoint(endpoint, claimed.remoteId()), null, deadlineNanos);
+            String savedStatusPath = claimed.routes().statusPath();
+            SkillHttpDeclaration.StatusRequest statusRequest = video.statusRequest(endpoint, claimed.remoteId(), savedStatusPath);
+            SkillHttpsTransport.Method method = statusRequest.method() == SkillHttpDeclaration.StatusMethod.POST
+                    ? SkillHttpsTransport.Method.POST : SkillHttpsTransport.Method.GET;
+            SkillHttpsTransport.Response response = call(scope, claimed, access, method, false,
+                    statusRequest.endpoint(), statusRequest.body(), deadlineNanos);
             JSONObject status = json(response);
             State state = switch (video.readStatus(status, claimed.remoteId())) {
                 case QUEUED -> claimed.job().state() == State.RUNNING ? State.RUNNING : State.QUEUED;
@@ -294,13 +355,12 @@ public final class SkillVideoJobs {
             if (claimed.job().state() == State.CANCEL_PENDING && (state == State.QUEUED || state == State.RUNNING)) {
                 state = State.CANCEL_PENDING;
             }
-            if (claimed.job().state() == State.DOWNLOAD_READY && (state == State.QUEUED || state == State.RUNNING)) {
-                return finish(scope, claimed, State.DOWNLOAD_READY, claimed.remoteId(), nextPoll(claimed, video), claimed.mediaHash()).job();
-            }
             if (state == State.DOWNLOAD_READY) {
-                String downloadUrl = video.completedDownloadEndpoint(status, endpoint, claimed.remoteId());
-                if (AiCredentialVault.imageEndpointContainsCredential(downloadUrl, access.bearer())) throw new Failure(Code.RESPONSE);
-                Entry ready = finish(scope, claimed, state, claimed.remoteId(), claimed.nextPollAt(), claimed.mediaHash());
+                String resultPath = video.completedDownloadPath(status, endpoint, claimed.remoteId(), savedStatusPath);
+                String downloadUrl = video.savedDownloadEndpoint(endpoint, claimed.remoteId(), resultPath);
+                requireRouteOmitsCredential(downloadUrl, access.bearer());
+                Entry ready = finish(scope, claimed, state, claimed.remoteId(), claimed.nextPollAt(), "",
+                        new Routes(savedStatusPath, resultPath));
                 if (ready.ticket().equals(claimed.ticket())) return download(scope, ready, access, downloadUrl, deadlineNanos);
                 return ready.job();
             }
@@ -322,7 +382,9 @@ public final class SkillVideoJobs {
             Entry recorded = catalog.jobs().get(localId);
             if (recorded == null || !recorded.job().canCancel()) throw new Failure(Code.STALE);
             requireCurrent(recorded, access);
-            return access.binding().declaration().video().cancelEndpoint(access.binding().endpoint(), recorded.remoteId());
+            String endpoint = access.binding().declaration().video().cancelEndpoint(access.binding().endpoint(), recorded.remoteId());
+            requireRouteOmitsCredential(endpoint, access.bearer());
+            return endpoint;
         });
     }
 
@@ -389,14 +451,14 @@ public final class SkillVideoJobs {
         });
     }
 
-    private Job reconcileDownloaded(Scope scope, Entry ready, boolean checkSpace) throws Failure {
+    private Job reconcileDownloaded(Scope scope, Entry ready) throws Failure {
         return locked(scope, (file, catalog) -> {
             Entry current = sameClaim(ready, catalog);
             if (!current.ticket().equals(ready.ticket()) || current.job().state() != State.DOWNLOAD_READY) return current.job();
             Path media = clip(scope, ready.job().localId());
             String hash = current.mediaHash();
             if (hash.isEmpty() || !hash.equals(localHash(media))) {
-                if (checkSpace) requireMediaSpace(MAX_MEDIA_BYTES);
+                requireMediaSpace(MAX_MEDIA_BYTES);
                 return null;
             }
             Entry complete = current.change(State.COMPLETED, current.remoteId(), 0, current.ticket(), hash);
@@ -408,7 +470,7 @@ public final class SkillVideoJobs {
     private Job download(Scope scope, Entry ready, Access access, String downloadUrl, long deadlineNanos) throws Failure {
         SkillHttpDeclaration.Video video = access.binding().declaration().video();
         try {
-            Job existing = reconcileDownloaded(scope, ready, true);
+            Job existing = reconcileDownloaded(scope, ready);
             if (existing != null) return existing;
             SkillHttpsTransport.Response response = call(scope, ready, access, SkillHttpsTransport.Method.GET, true,
                     downloadUrl, null, deadlineNanos);
@@ -458,6 +520,7 @@ public final class SkillVideoJobs {
                                               boolean media, String endpoint, byte[] body, long deadline) throws IOException {
         if (transport == null) throw new AssertionError("Unexpected fixture request");
         if (!sameOrigin(access.binding().endpoint(), endpoint)) throw new Failure(Code.STALE);
+        requireRouteOmitsCredential(endpoint, access.bearer());
         locked(scope, (file, catalog) -> {
             verifyClaim(entry, access, catalog);
             consumeNetworkBudget(clock.getAsLong());
@@ -521,10 +584,15 @@ public final class SkillVideoJobs {
     }
 
     private Entry finish(Scope scope, Entry expected, State state, String remoteId, long poll, String media) throws Failure {
+        return finish(scope, expected, state, remoteId, poll, media, expected.routes());
+    }
+
+    private Entry finish(Scope scope, Entry expected, State state, String remoteId, long poll, String media, Routes routes)
+            throws Failure {
         return locked(scope, (file, catalog) -> {
             Entry current = sameClaim(expected, catalog);
             if (!current.ticket().equals(expected.ticket()) || current.job().state() != expected.job().state()) return current;
-            Entry next = current.change(state, remoteId, poll, current.ticket(), media);
+            Entry next = current.change(state, remoteId, poll, current.ticket(), media, routes);
             update(file, catalog, next);
             return next;
         });
@@ -544,8 +612,8 @@ public final class SkillVideoJobs {
     private long nextPoll(Entry entry, SkillHttpDeclaration.Video video) {
         int attempts = entry.pollVisits();
         long backoff = attempts <= 6 ? 3_000 : attempts <= 30 ? 12_000 : 30_000;
-        // A fixed download route retries the media directly, without making another status request.
-        boolean mediaOnly = entry.job().state() == State.DOWNLOAD_READY && video.resultUrlField().isEmpty();
+        // A proven saved result retries media directly, without making another status request.
+        boolean mediaOnly = entry.job().state() == State.DOWNLOAD_READY;
         long floor = mediaOnly ? 0 : TimeUnit.SECONDS.toMillis(video.minPollSeconds());
         return clock.getAsLong() + Math.max(backoff, floor);
     }
@@ -566,6 +634,17 @@ public final class SkillVideoJobs {
     private static boolean definiteRefusal(int status) {
         return status == 400 || status == 401 || status == 403 || status == 404 || status == 405
                 || status == 413 || status == 415 || status == 422;
+    }
+
+    private static void requireRouteOmitsCredential(String endpoint, String bearer) throws Failure {
+        if (AiCredentialVault.imageEndpointContainsCredential(endpoint, bearer)) throw new Failure(Code.RESPONSE);
+    }
+
+    private static boolean isRelativeSavedPath(String path) {
+        if (path.isEmpty()) return true;
+        if (path.length() > MAX_SAVED_PATH || !path.startsWith("/") || path.startsWith("//")) return false;
+        URI value = URI.create(path);
+        return path.equals(value.getRawPath()) && value.equals(value.normalize());
     }
 
     private static boolean sameOrigin(String approved, String actual) {
@@ -617,18 +696,23 @@ public final class SkillVideoJobs {
             throw new Failure(Code.STORAGE);
         }
         try (DataInputStream input = new DataInputStream(Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS))) {
-            int version = input.readInt();
-            if (version != FORMAT_VERSION && version != LEGACY_FORMAT_VERSION) throw new Failure(Code.STORAGE);
+            if (input.readInt() != FORMAT_VERSION) throw new Failure(Code.STORAGE);
             long generation = input.readLong();
             int count = input.readInt();
             if (generation < 0 || count < 0 || count > MAX_JOBS) throw new Failure(Code.STORAGE);
             for (int index = 0; index < count; index++) {
                 UUID id = UUID.fromString(input.readUTF());
                 Job job = new Job(id, input.readUTF(), input.readUTF(), input.readUTF(), input.readLong(),
-                        State.valueOf(input.readUTF()), input.readBoolean(),
-                        version == LEGACY_FORMAT_VERSION || input.readBoolean());
-                Entry entry = new Entry(job, input.readUTF(), input.readUTF(), input.readLong(),
-                        UUID.fromString(input.readUTF()), input.readUTF(), input.readUnsignedByte());
+                        State.valueOf(input.readUTF()), input.readBoolean(), input.readBoolean());
+                String fingerprint = input.readUTF();
+                String remoteId = input.readUTF();
+                long nextPollAt = input.readLong();
+                UUID ticket = UUID.fromString(input.readUTF());
+                String mediaHash = input.readUTF();
+                int pollVisits = input.readUnsignedByte();
+                Routes routes = new Routes(input.readUTF(), input.readUTF());
+                Pinned pinned = readPinned(input, job);
+                Entry entry = new Entry(job, fingerprint, remoteId, nextPollAt, ticket, mediaHash, pollVisits, pinned, routes);
                 if (!uuid(job.skillId()) || !uuid(job.revisionId()) || !uuid(job.configRevision()) || job.createdAtMillis() < 0
                         || entry.nextPollAt() < 0 || !HASH.matcher(entry.fingerprint()).matches()
                         || entry.pollVisits() > MAX_POLL_VISITS
@@ -636,11 +720,35 @@ public final class SkillVideoJobs {
                         || (job.state() == State.COMPLETED || !entry.mediaHash().isEmpty())
                                 && !HASH.matcher(entry.mediaHash()).matches()
                         || job.state() != State.SUBMIT_UNKNOWN && job.state() != State.FAILED && entry.remoteId().isEmpty()
+                        || (job.state() == State.DOWNLOAD_READY) == routes.resultPath().isEmpty()
+                        || job.state().terminal() && !routes.statusPath().isEmpty()
                         || jobs.put(id, entry) != null) throw new Failure(Code.STORAGE);
+                validatePinnedEntry(entry);
             }
             if (input.read() != -1) throw new Failure(Code.STORAGE);
             return new Catalog(generation, jobs);
         }
+    }
+
+    private static Pinned readPinned(DataInputStream input, Job job) throws IOException {
+        if (!input.readBoolean()) return null;
+        String endpoint = input.readUTF();
+        String encryptedBearer = input.readUTF();
+        SkillHttpDeclaration declaration = SkillHttpDeclaration.parse(input.readUTF(), SkillResult.Type.VIDEO, List.of());
+        Binding binding = new Binding(job.skillId(), job.revisionId(), job.configRevision(), declaration, endpoint);
+        return new Pinned(binding, encryptedBearer);
+    }
+
+    private static void validatePinnedEntry(Entry entry) throws Failure {
+        if (entry.pinned() == null) return;
+        Binding policy = entry.pinned().binding();
+        SkillHttpDeclaration.Video video = policy.declaration().video();
+        State state = entry.job().state();
+        if (!entry.fingerprint().equals(policy.fingerprint()) || entry.job().cancellationSupported() != video.canCancel()
+                || state.terminal() && state != State.SUBMIT_UNKNOWN) throw new Failure(Code.STORAGE);
+        if (state == State.SUBMIT_UNKNOWN) return;
+        video.statusRequest(policy.endpoint(), entry.remoteId(), entry.routes().statusPath());
+        if (state == State.DOWNLOAD_READY) video.savedDownloadEndpoint(policy.endpoint(), entry.remoteId(), entry.routes().resultPath());
     }
 
     private void update(Path file, Catalog catalog, Entry entry) throws IOException {
@@ -676,6 +784,15 @@ public final class SkillVideoJobs {
                 output.writeUTF(entry.ticket().toString());
                 output.writeUTF(entry.mediaHash());
                 output.writeByte(entry.pollVisits());
+                output.writeUTF(entry.routes().statusPath());
+                output.writeUTF(entry.routes().resultPath());
+                Pinned pinned = entry.pinned();
+                output.writeBoolean(pinned != null);
+                if (pinned != null) {
+                    output.writeUTF(pinned.binding().endpoint());
+                    output.writeUTF(pinned.encryptedBearer());
+                    output.writeUTF(pinned.binding().declaration().toJson().toString());
+                }
             }
             output.flush();
         });

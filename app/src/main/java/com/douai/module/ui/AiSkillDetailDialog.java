@@ -396,7 +396,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
                 "skills.detail.custom.contract");
         if (declaration != null && declaration.video() != null) {
             SkillHttpDeclaration.Video video = declaration.video();
-            String routes = "查询 GET " + video.statusPath()
+            String routes = "查询 " + videoStatusRoute(video)
                     + (video.downloadPath().isEmpty() ? "\n成片链接字段 " + video.resultUrlField() : "\n下载 GET " + video.downloadPath());
             if (video.canCancel()) routes += "\n取消 " + video.cancelMethod() + " " + video.cancelPath();
             text(body, routes, "skills.detail.custom.video_routes");
@@ -681,6 +681,10 @@ final class AiSkillDetailDialog implements AutoCloseable {
     private static String videoFactHelp(SkillVideoFacts.FormField field) {
         if ("submitPath".equals(field.id())) return "文档中的 POST 路径，以 / 开头。与完整提交地址任选一项。";
         if ("submitEncoding".equals(field.id())) return "按接口文档填写。当前执行器只支持 application/json。";
+        if ("statusPath".equals(field.id())) return "查询 GET 路径，含独立的 {id}；三种查询方式只填一种。";
+        if ("statusUrlField".equals(field.id())) return "提交响应中返回查询地址的 JSON 字段。只接受同源 HTTPS 地址或同源路径。";
+        if ("statusPostPath".equals(field.id())) return "查询 POST 的同源固定路径，不含 {id}；任务 ID 通过请求体传入。";
+        if ("statusPostIdField".equals(field.id())) return "查询 POST JSON 请求中接收原任务 ID 的字段名。";
         if ("resultUrlField".equals(field.id())) return "查询响应中返回成片链接的字段，与下载路径任选一项。";
         if ("downloadPath".equals(field.id())) return "下载的 GET 路径，含独立的 {id}。查询已返回成片链接时可留空。";
         return switch (field.type()) {
@@ -692,6 +696,14 @@ final class AiSkillDetailDialog implements AutoCloseable {
             case CANCEL_METHOD -> "服务支持取消时填 POST 或 DELETE。";
             case TEXT -> "用于在配置页识别该接口。";
         };
+    }
+
+    static String videoStatusRoute(SkillHttpDeclaration.Video video) {
+        if (!video.statusUrlField().isEmpty()) return "GET 提交响应中的同源地址（" + video.statusUrlField() + "）";
+        if (!video.statusPostPath().isEmpty()) {
+            return "POST " + video.statusPostPath() + "（JSON 字段 " + video.statusPostIdField() + "）";
+        }
+        return "GET " + video.statusPath();
     }
 
     private void saveCustomConfiguration(SkillStore.Detail detail, String endpoint, EditText bearer, boolean clear,

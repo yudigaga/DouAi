@@ -2390,7 +2390,7 @@ public final class AiTestChatDialogTest {
         assertEquals(SkillVideoJobs.State.QUEUED, queued.state());
         assertEquals(1, submits.get());
         assertEquals(0, statuses.get());
-        SkillVideoJobs.Job completed = jobs.refresh(scope, queued.localId(), store.openVideoAccess(queued),
+        SkillVideoJobs.Job completed = jobs.refresh(scope, queued.localId(), store.openVideoAccess(jobs, scope, queued),
                 System.nanoTime() + TimeUnit.SECONDS.toNanos(10));
         assertEquals(SkillVideoJobs.State.COMPLETED, completed.state());
         assertNotNull(jobs.playableFile(scope, queued.localId()));
@@ -2453,6 +2453,189 @@ public final class AiTestChatDialogTest {
         assertEquals(1, submits.get());
         assertEquals(1, statuses.get());
         assertEquals(1, downloads.get());
+    }
+
+    @Test public void reenteredVideoJobsKeepTheirOriginalConfigurationAcrossASwapAndConversationEntries() throws Exception {
+        String alphaEndpoint = "https://video-alpha.example.com/v1/create";
+        String betaEndpoint = "https://video-beta.example.com/v1/create";
+        AtomicInteger alphaSubmits = new AtomicInteger();
+        AtomicInteger alphaReads = new AtomicInteger();
+        AtomicInteger alphaDownloads = new AtomicInteger();
+        SkillVideoJobs alpha = SkillVideoJobsTest.chatFixture(activity, new SkillVideoJobsTest.ChatVideoContract(
+                alphaEndpoint, "{\"prompt\":\"海上日出\"}", "{\"job\":{\"id\":\"alpha_id\"}}",
+                "https://video-alpha.example.com/jobs/alpha_id",
+                "{\"job\":{\"id\":\"alpha_id\",\"state\":\"done\"}}",
+                "https://video-alpha.example.com/media/alpha_id"), alphaSubmits, alphaReads, alphaDownloads);
+        AtomicInteger betaSubmits = new AtomicInteger();
+        AtomicInteger betaReads = new AtomicInteger();
+        AtomicInteger betaDownloads = new AtomicInteger();
+        SkillVideoJobs beta = SkillVideoJobsTest.chatFixture(activity, new SkillVideoJobsTest.ChatVideoContract(
+                betaEndpoint, "{\"text_prompt\":\"远山晚霞\"}",
+                "{\"data\":{\"id\":\"beta_id\",\"status_url\":\"/tasks/beta_id/inspect\"}}",
+                "https://video-beta.example.com/tasks/beta_id/inspect",
+                "{\"data\":{\"id\":\"beta_id\",\"status\":\"ready\"}}",
+                "https://video-beta.example.com/media/beta_id"), betaSubmits, betaReads, betaDownloads);
+
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        work.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "切换视频").toString());
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, alpha);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("""
+                /技能 帮我做个生成视频的技能
+                接口资料：
+                提交: POST https://video-alpha.example.com/v1/create
+                提交请求编码: application/json
+                提示词字段: prompt
+                提交响应ID: job.id
+                查询: GET /jobs/{id}
+                查询响应ID: job.id
+                状态字段: job.state
+                状态映射: done=completed
+                下载: GET /media/{id}
+                """.trim());
+        finishOfflineChatTurn();
+        submit("/技能 帮我内置");
+        finishOfflineChatTurn();
+        configurePreviewedVideo("切换视频", alphaEndpoint, "完整接口地址");
+        SkillStore store = SkillStore.forContext(activity);
+
+        submit("/切换视频 海上日出");
+        AlertDialog firstReview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(videoReviewText(firstReview).contains("POST " + alphaEndpoint));
+        assertEquals(0, alphaSubmits.get());
+        assertTrue(firstReview.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        dialog.onWindowFocusChanged(false);
+        finishOfflineChatTurn();
+        SkillVideoJobs.Scope workScope = new SkillVideoJobs.Scope(AiSkills.Entry.WORK, work.transcriptMemory.conversationKey());
+        SkillVideoJobs.Job first = alpha.list(workScope).get(0);
+        assertEquals(SkillVideoJobs.State.QUEUED, first.state());
+        assertEquals(1, alphaSubmits.get());
+        assertEquals(0, alphaReads.get());
+
+        AlertDialog settings = openChatSkillSettings("切换视频");
+        View detail = settings.getWindow().getDecorView();
+        assertTrue(detail.findViewWithTag("skills.detail.video_contract.replace").performClick());
+        AlertDialog replacement = (AlertDialog) ShadowDialog.getLatestDialog();
+        EditText notes = replacement.getWindow().getDecorView().findViewWithTag("skills.detail.video_facts.input");
+        notes.setText("""
+                提交: POST https://video-beta.example.com/v1/create
+                提交请求编码: application/json
+                提示词字段: text_prompt
+                提交响应ID: data.id
+                查询地址字段: data.status_url
+                查询响应ID: data.id
+                状态字段: data.status
+                状态映射: ready=completed
+                下载: GET /media/{id}
+                """);
+        assertTrue(replacement.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(store.detail("切换视频").pending());
+        EditText address = detail.findViewWithTag("skills.detail.custom.endpoint");
+        address.setText(betaEndpoint);
+        assertTrue(detail.findViewWithTag("skills.detail.custom.save").performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(store.detail("切换视频").canReplace());
+        assertTrue(detail.findViewWithTag("skills.detail.replace").performClick());
+        AlertDialog enable = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(enable.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(store.detail("切换视频").pending());
+        assertEquals(betaEndpoint, store.detail("切换视频").customConfiguration().endpoint());
+        assertEquals("data.status_url", store.detail("切换视频").manifest().http().video().statusUrlField());
+        assertEquals(first, alpha.list(workScope).get(0));
+        settings.dismiss();
+        ShadowLooper.idleMainLooper();
+
+        FakeSession resumedWork = new FakeSession();
+        resumedWork.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(resumedWork, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, alpha);
+        dialog.onWindowFocusChanged(false);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertSingleConversationVideoCard(resumedWork.transcriptMemory, first.localId());
+        SkillVideoJobs.Access admittedA = store.openVideoAccess(alpha, workScope, first);
+        store.setSkillEnabled("切换视频", false);
+        assertThrows(Exception.class, () -> store.openVideoAccess(alpha, workScope, first));
+        assertThrows(Exception.class, admittedA.admission()::check);
+        assertEquals(0, alphaReads.get());
+        assertEquals(0, alphaDownloads.get());
+        store.setSkillEnabled("切换视频", true);
+        SkillVideoJobs.Job finishedA = alpha.refresh(workScope, first.localId(), store.openVideoAccess(alpha, workScope, first),
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(10));
+        assertEquals(SkillVideoJobs.State.COMPLETED, finishedA.state());
+        assertNotNull(alpha.playableFile(workScope, first.localId()));
+        assertTrue(resumedWork.prompts.isEmpty());
+        assertTrue(resumedWork.skillInputs.isEmpty());
+
+        FakeSession contact = new FakeSession();
+        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT, null, beta);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        SkillVideoJobs.Scope contactScope = new SkillVideoJobs.Scope(AiSkills.Entry.CONTACT,
+                contact.transcriptMemory.conversationKey());
+        assertEquals(0, messageCount());
+        assertTrue(beta.list(contactScope).isEmpty());
+        submit("/切换视频 远山晚霞");
+        AlertDialog secondReview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(videoReviewText(secondReview).contains("POST " + betaEndpoint));
+        assertTrue(videoReviewText(secondReview).contains("\"text_prompt\":\"远山晚霞\""));
+        assertEquals(0, betaSubmits.get());
+        assertTrue(secondReview.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        dialog.onWindowFocusChanged(false);
+        finishOfflineChatTurn();
+        SkillVideoJobs.Job second = beta.list(contactScope).get(0);
+        assertNotEquals(first.localId(), second.localId());
+        assertSingleConversationVideoCard(contact.transcriptMemory, second.localId());
+        SkillVideoJobs.Job finishedB = beta.refresh(contactScope, second.localId(), store.openVideoAccess(beta, contactScope, second),
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(10));
+        assertEquals(SkillVideoJobs.State.COMPLETED, finishedB.state());
+        assertNotNull(beta.playableFile(contactScope, second.localId()));
+        assertNull(beta.playableFile(contactScope, first.localId()));
+        assertNull(alpha.playableFile(workScope, second.localId()));
+        assertEquals(List.of(finishedA), alpha.list(workScope));
+        assertEquals(List.of(finishedB), beta.list(contactScope));
+
+        FakeSession restoredWork = new FakeSession();
+        restoredWork.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(restoredWork, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, alpha);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertSingleConversationVideoCard(restoredWork.transcriptMemory, first.localId());
+
+        FakeSession restoredContact = new FakeSession();
+        restoredContact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        reopen(restoredContact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT, null, beta);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertSingleConversationVideoCard(restoredContact.transcriptMemory, second.localId());
+        assertTrue(restoredWork.prompts.isEmpty());
+        assertTrue(restoredContact.prompts.isEmpty());
+        assertTrue(restoredWork.skillInputs.isEmpty());
+        assertTrue(restoredContact.skillInputs.isEmpty());
+
+        assertEquals(1, alphaSubmits.get());
+        assertEquals(1, alphaReads.get());
+        assertEquals(1, alphaDownloads.get());
+        assertEquals(1, betaSubmits.get());
+        assertEquals(1, betaReads.get());
+        assertEquals(1, betaDownloads.get());
+    }
+
+    private void assertSingleConversationVideoCard(TestChatMemory history, java.util.UUID requestId) {
+        int cards = 0;
+        for (int index = 0; index < messageCount(); index++) {
+            if (messageRow(index).findViewWithTag("ai.chat.skill.video.card") != null) cards++;
+        }
+        assertEquals(1, cards);
+        assertEquals(List.of(requestId), history.readTranscript().stream()
+                .filter(turn -> turn.artifact instanceof SkillResult.Video)
+                .map(turn -> ((SkillResult.Video) turn.artifact).requestId()).toList());
     }
 
     @Test public void uniqueConfiguredVideoSourcePrefillsFreshContactDraftWithoutSharingBinding() throws Exception {

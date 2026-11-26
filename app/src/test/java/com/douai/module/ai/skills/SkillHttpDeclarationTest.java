@@ -241,6 +241,102 @@ public final class SkillHttpDeclarationTest {
                 SkillHttpDeclaration.parse(unknownState, SkillResult.Type.VIDEO, List.of()));
     }
 
+    @Test public void videoStatusCanUseOnlyTheSubmittedSameOriginUrlAndPersistedPath() throws Exception {
+        JSONObject raw = new JSONObject(VIDEO);
+        JSONObject routes = raw.getJSONObject("video");
+        routes.remove("statusPath");
+        routes.remove("downloadPath");
+        routes.put("statusUrlField", "data.status_url").put("resultUrlField", "data.download_url");
+        SkillHttpDeclaration declaration = parse(raw.toString(), SkillResult.Type.VIDEO);
+        assertEquals(declaration, parse(declaration.toJson().toString(), SkillResult.Type.VIDEO));
+        var video = declaration.video();
+        String submit = "https://video.example.com:8443/v2/submit";
+        String statusPath = video.readSubmittedStatusPath(new JSONObject("""
+                {"data":{"status_url":"jobs/task_1/status"}}
+                """), submit);
+        assertEquals("/v2/jobs/task_1/status", statusPath);
+        var request = video.statusRequest(submit, "task_1", statusPath);
+        assertEquals(SkillHttpDeclaration.StatusMethod.GET, request.method());
+        assertEquals("https://video.example.com:8443/v2/jobs/task_1/status", request.endpoint());
+        assertNull(request.body());
+        JSONObject completed = new JSONObject("""
+                {"id":"task_1","state":"done","data":{"download_url":"clip.mp4"}}
+                """);
+        String savedResult = video.completedDownloadPath(completed, submit, "task_1", statusPath);
+        assertEquals("/v2/jobs/task_1/clip.mp4", savedResult);
+        assertEquals("https://video.example.com:8443" + savedResult,
+                video.savedDownloadEndpoint(submit, "task_1", savedResult));
+        assertThrows(SkillHttpDeclaration.Invalid.class,
+                () -> video.completedDownloadPath(completed, submit, "task_2", statusPath));
+        for (String unsafe : List.of("https://other.example.com:8443/jobs/task_1",
+                "https://video.example.com/jobs/task_1", "//video.example.com:8443/jobs/task_1",
+                "https://name@video.example.com:8443/jobs/task_1", "/jobs/task_1?signature=fixture",
+                "/jobs/task_1#part", "/jobs/%2e%2e/task_1", "/jobs/%252e%252e/task_1",
+                "/jobs/%2Ftask_1", "/jobs/%5ctask_1", "/jobs/%00task_1")) {
+            JSONObject reply = new JSONObject().put("data", new JSONObject().put("status_url", unsafe));
+            assertThrows(unsafe, SkillHttpDeclaration.Invalid.class, () -> video.readSubmittedStatusPath(reply, submit));
+        }
+        for (String unsafe : List.of("", "relative/task_1", "//other.example.com/task_1",
+                "https://video.example.com:8443/task_1", "/task_1?sign=fixture")) {
+            assertThrows(SkillHttpDeclaration.Invalid.class, () -> video.statusRequest(submit, "task_1", unsafe));
+            assertThrows(SkillHttpDeclaration.Invalid.class, () -> video.savedDownloadEndpoint(submit, "task_1", unsafe));
+        }
+        assertThrows(SkillHttpDeclaration.Invalid.class, () -> video.readSubmittedStatusPath(
+                new JSONObject().put("data", new JSONObject().put("status_url", 12)), submit));
+    }
+
+    @Test public void postStatusUsesOnlyAnExplicitFlatOriginalIdBodyAndStaticPath() throws Exception {
+        JSONObject raw = new JSONObject(VIDEO);
+        JSONObject routes = raw.getJSONObject("video");
+        routes.remove("statusPath");
+        routes.put("statusPostPath", "/v2/task/progress").put("statusPostIdField", "task_id");
+        SkillHttpDeclaration declaration = parse(raw.toString(), SkillResult.Type.VIDEO);
+        assertEquals(declaration, parse(declaration.toJson().toString(), SkillResult.Type.VIDEO));
+        assertFalse(declaration.toJson().getJSONObject("video").has("statusPath"));
+        var video = declaration.video();
+        String submit = "https://video.example.com/v2/submit";
+        assertEquals("", video.readSubmittedStatusPath(new JSONObject().put("status_url", "/ignored"), submit));
+        var request = video.statusRequest(submit, "task_1", "");
+        assertEquals(SkillHttpDeclaration.StatusMethod.POST, request.method());
+        assertEquals("https://video.example.com/v2/task/progress", request.endpoint());
+        byte[] bytes = request.body();
+        assertEquals("{\"task_id\":\"task_1\"}", new String(bytes, StandardCharsets.UTF_8));
+        bytes[0] = 'x';
+        assertEquals('{', request.body()[0]);
+        assertThrows(SkillHttpDeclaration.Invalid.class, () -> video.statusRequest(submit, "other/id", ""));
+        assertThrows(SkillHttpDeclaration.Invalid.class, () -> video.statusRequest(submit, "task_1", "/tampered"));
+        assertEquals("/v1/jobs/task_1/content", video.completedDownloadPath(
+                new JSONObject().put("id", "task_1").put("state", "done"), submit, "task_1", ""));
+        assertThrows(SkillHttpDeclaration.Invalid.class, () -> video.savedDownloadEndpoint(submit, "task_1", "/wrong"));
+    }
+
+    @Test public void statusModesAreMutuallyExclusiveAndCannotSmuggleAnUntypedPostOrUrl() throws Exception {
+        for (String properties : List.of(
+                "{}",
+                "{\"statusPath\":\"/jobs/{id}\",\"statusUrlField\":\"data.status_url\"}",
+                "{\"statusPath\":\"/jobs/{id}\",\"statusPostPath\":\"/progress\",\"statusPostIdField\":\"id\"}",
+                "{\"statusUrlField\":\"data.status_url\",\"statusPostPath\":\"/progress\",\"statusPostIdField\":\"id\"}",
+                "{\"statusUrlField\":\"job_id\"}",
+                "{\"statusUrlField\":\"job_id.link\"}",
+                "{\"statusUrlField\":\"data.api_key\"}",
+                "{\"statusPostPath\":\"/progress\"}",
+                "{\"statusPostIdField\":\"id\"}",
+                "{\"statusPostPath\":\"/jobs/{id}\",\"statusPostIdField\":\"id\"}",
+                "{\"statusPostPath\":\"/progress?query=1\",\"statusPostIdField\":\"id\"}",
+                "{\"statusPostPath\":\"/progress\",\"statusPostIdField\":\"data.id\"}",
+                "{\"statusPostPath\":\"/progress\",\"statusPostIdField\":\"authorization\"}")) {
+            JSONObject raw = new JSONObject(VIDEO);
+            JSONObject configured = raw.getJSONObject("video");
+            configured.remove("statusPath");
+            JSONObject fields = new JSONObject(properties);
+            for (java.util.Iterator<String> names = fields.keys(); names.hasNext();) {
+                String name = names.next();
+                configured.put(name, fields.get(name));
+            }
+            assertThrows(properties, SkillHttpDeclaration.Invalid.class, () -> parse(raw.toString(), SkillResult.Type.VIDEO));
+        }
+    }
+
     private static SkillHttpDeclaration parse(String json, SkillResult.Type type) {
         return SkillHttpDeclaration.parse(json, type, List.of());
     }

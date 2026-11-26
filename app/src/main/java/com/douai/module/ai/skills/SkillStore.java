@@ -740,7 +740,9 @@ public final class SkillStore {
     private static boolean sameVideoRoutes(SkillHttpDeclaration.Video first, SkillHttpDeclaration.Video second) {
         if (first == null || second == null) return first == second;
         // The local minimum polling delay does not change the approved request or its destination.
-        return first.statusPath().equals(second.statusPath()) && first.cancelPath().equals(second.cancelPath())
+        return first.statusPath().equals(second.statusPath()) && first.statusUrlField().equals(second.statusUrlField())
+                && first.statusPostPath().equals(second.statusPostPath())
+                && first.statusPostIdField().equals(second.statusPostIdField()) && first.cancelPath().equals(second.cancelPath())
                 && first.cancelMethod().equals(second.cancelMethod()) && first.downloadPath().equals(second.downloadPath())
                 && first.resultUrlField().equals(second.resultUrlField()) && first.idField().equals(second.idField())
                 && first.stateField().equals(second.stateField()) && first.states().equals(second.states());
@@ -1065,12 +1067,13 @@ public final class SkillStore {
             }
             if (video == null) throw new IllegalStateException("视频任务需要已开启的本地会话历史");
             SkillVideoJobs.Binding route = new SkillVideoJobs.Binding(binding.skillId(), call.revisionId(),
-                    binding.revision(), review.preview.declaration(), binding.endpoint());
+                    binding.revision(), continuationPolicy(review.preview.declaration()), binding.endpoint());
+            SkillVideoJobs.Pinned pinned = new SkillVideoJobs.Pinned(route, binding.encryptedBearer());
             return customService.executeVideo(approved.approval, binding, deadline, admission,
                     (bearer, body, limit, check) -> {
                         SkillVideoJobs.Access access = new SkillVideoJobs.Access(route, bearer, check::check);
                         SkillVideoJobs.Job job = video.jobs().submit(video.scope(), video.generation(),
-                                video.requestId(), access, body, limit);
+                                video.requestId(), access, body, limit, pinned);
                         return new SkillResult.Video(job.localId());
                     });
         } finally {
@@ -1087,39 +1090,44 @@ public final class SkillStore {
         }
     }
 
-    private record VideoRoute(SkillCustomService.Binding credential, SkillVideoJobs.Binding policy) {}
+    private static SkillHttpDeclaration continuationPolicy(SkillHttpDeclaration declaration) throws JSONException {
+        // The approved submission already has a compiled body. Keep only the task and follow-up contract.
+        JSONObject policy = declaration.toJson();
+        policy.remove("suggestedEndpoint");
+        policy.put("request", new JSONObject().put("input", "argument"));
+        return SkillHttpDeclaration.parse(policy, SkillResult.Type.VIDEO, Collections.emptyList());
+    }
 
-    public SkillVideoJobs.Access openVideoAccess(SkillVideoJobs.Job job) throws Exception {
-        VideoRoute route = locked(state -> videoRoute(state, job));
-        return new SkillVideoJobs.Access(route.policy(), customService.credential(route.credential()), () -> {
+    public SkillVideoJobs.Access openVideoAccess(SkillVideoJobs jobs, SkillVideoJobs.Scope scope, SkillVideoJobs.Job job)
+            throws Exception {
+        SkillVideoJobs.Pinned pinned = jobs.pinned(scope, job);
+        SkillVideoJobs.Binding policy = pinned.binding();
+        checkVideoContinuation(policy.skillId());
+        SkillCustomService.Binding credential = new SkillCustomService.Binding(policy.skillId(), policy.configRevision(),
+                policy.endpoint(), pinned.encryptedBearer());
+        return new SkillVideoJobs.Access(policy, customService.credential(credential), () -> {
             try {
-                if (!route.equals(locked(state -> videoRoute(state, job)))) throw new IOException("视频任务配置已变化");
+                checkVideoContinuation(policy.skillId());
             } catch (Exception unavailable) {
-                throw new IOException("视频任务配置已变化");
+                throw new IOException("视频任务的技能已停用或删除");
             }
         });
     }
 
-    private VideoRoute videoRoute(JSONObject state, SkillVideoJobs.Job job) throws Exception {
-        if (state.getBoolean("enabled")) {
-            JSONObject skills = state.getJSONObject("skills");
-            for (Iterator<String> names = skills.keys(); names.hasNext();) {
-                String name = names.next();
-                if (AiSkills.CREATION_COMMAND_NAME.equals(name)) continue;
-                JSONObject record = skills.getJSONObject(name);
-                if (!job.skillId().equals(record.optString("skillId")) || !record.getBoolean("enabled")) continue;
-                JSONObject revision = activeRevision(record);
-                if (resultType(revision) != SkillResult.Type.VIDEO || !job.revisionId().equals(revision.getString("directory"))) break;
-                SkillCustomService.Binding binding = readCustomBinding(record);
-                if (binding == null || !binding.revision().equals(job.configRevision())) break;
-                Executable executable = readExecution(revisionDirectory(revision));
-                SkillManifest manifest = executable.manifest();
-                if (manifest == null || manifest.http() == null || manifest.http().video() == null) break;
-                return new VideoRoute(binding, new SkillVideoJobs.Binding(binding.skillId(), job.revisionId(),
-                        binding.revision(), manifest.http(), binding.endpoint()));
+    private void checkVideoContinuation(String skillId) throws Exception {
+        locked(state -> {
+            if (state.getBoolean("enabled")) {
+                JSONObject skills = state.getJSONObject("skills");
+                for (Iterator<String> names = skills.keys(); names.hasNext();) {
+                    String name = names.next();
+                    if (AiSkills.CREATION_COMMAND_NAME.equals(name)) continue;
+                    JSONObject record = skills.getJSONObject(name);
+                    if (skillId.equals(record.optString("skillId")) && record.getBoolean("enabled")
+                            && resultType(activeRevision(record)) == SkillResult.Type.VIDEO) return null;
+                }
             }
-        }
-        throw new IllegalStateException("视频任务的技能已停用或配置已变化");
+            throw new IllegalStateException("视频任务的技能已停用或删除");
+        });
     }
 
     private Executable reviewExecution(JSONObject state, AiSkills.Invocation call) throws Exception {

@@ -37,7 +37,7 @@ final class AiSkillVideoCards {
     private static final long REQUEST_NANOS = TimeUnit.SECONDS.toNanos(30);
     private static final int RETAINED_LIMIT = 100;
     private static final String UNAVAILABLE = "无法读取本机视频任务";
-    private static final String CONFIG_CHANGED = "视频技能已停用或供应商配置已变化";
+    private static final String CONFIG_CHANGED = "视频技能已停用，或原任务接口不可用";
     private static final String JOB_CHANGED = "视频任务状态已变化，请重新核对";
     private static final String PLAY_FAILED = "本机视频无法播放";
 
@@ -252,7 +252,7 @@ final class AiSkillVideoCards {
 
     private SkillVideoJobs.Access openAccess(SkillVideoJobs.Job job, Work task) throws Exception {
         task.check();
-        SkillVideoJobs.Access access = store.get().openVideoAccess(job);
+        SkillVideoJobs.Access access = store.get().openVideoAccess(jobs, task.watch.scope(), job);
         task.check();
         return new SkillVideoJobs.Access(access.binding(), access.bearer(), () -> {
             task.check();

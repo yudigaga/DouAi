@@ -52,6 +52,8 @@ public final class SkillAuthoring {
             在视频技能的模型输出中省略 http，并使用空的 configFields，保留视频输出类型。
             自动轮询与下载限用户已确认提交的原任务 ID。未指定收件人时，自动发送或回传指在发起任务的
             DouAi 会话显示结果。请求中的自动发送不能替代外部提交审核或授权给新收件人。
+            查询支持固定 GET、提交响应给出的同源 GET 地址、或仅携带原任务 ID 的 JSON POST。
+            查询和取回成片沿用该任务提交时确认的接口配置。
             视频最短轮询间隔由应用按用户明确填写的秒数设置，长任务会退避。失败状态显示在原会话，
             不重新提交视频，也不要承诺能读取供应商未声明的失败详情。
             suggestedEndpoint 只在用户明确提供协议地址时填写，地址须经本人保存后才可用。
@@ -173,7 +175,7 @@ public final class SkillAuthoring {
             + "允许|改用|每隔|不要|不再|只在|只需|最多|至少|(?:失败|超时|完成)(?:时|后|就)");
     private static final Pattern MATERIAL_HEADER = Pattern.compile("^(?:视频)?接口资料\\h*[:：]\\s*");
     private static final Pattern MATERIAL_FIELD = Pattern.compile("(?i)^(?:提交响应(?:示例)?|提交请求示例|查询响应(?:示例)?"
-            + "|状态响应示例|提交请求编码|状态映射|下载接口|查询结果字段)\\h*[:：]");
+            + "|状态响应示例|提交请求编码|状态映射|下载接口|查询结果字段|查询响应地址字段|查询请求ID字段)\\h*[:：]");
     private static final Pattern MATERIAL_ENCODING = Pattern.compile("(?i)^(?:Content-Type\\h*[:：]|提交(?:接口)?(?:使用|用|是))"
             + "\\h*(application/json|multipart/form-data|application/x-www-form-urlencoded|JSON)\\h*[。.]?$");
     private static final Pattern MATERIAL_STATE = Pattern.compile("^([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"

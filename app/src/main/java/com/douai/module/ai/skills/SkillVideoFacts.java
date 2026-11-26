@@ -55,6 +55,9 @@ public final class SkillVideoFacts {
         MIN_POLL("minPollSeconds", ""),
         SUBMIT_ID("submitIdField", "提交响应任务 ID 字段"),
         STATUS("statusPath", "查询 GET 路径（含 {id}）"),
+        STATUS_URL("statusUrlField", "提交响应的查询地址字段"),
+        STATUS_POST("statusPostPath", "查询 POST 路径"),
+        STATUS_POST_ID("statusPostIdField", "查询 POST 任务 ID 字段"),
         STATUS_ID("statusIdField", "查询响应任务 ID 字段"),
         STATE("stateField", "状态字段"),
         CANCEL("cancelPath", "取消路径（含 {id}）"),
@@ -92,6 +95,9 @@ public final class SkillVideoFacts {
             new FormSpec(null, PROMPT, "提示词字段", FieldType.JSON_FIELD, true),
             new FormSpec(Fact.SUBMIT_ID, Fact.SUBMIT_ID.missing, FieldType.JSON_PATH, true),
             new FormSpec(Fact.STATUS, Fact.STATUS.missing, FieldType.TASK_PATH, true),
+            new FormSpec(Fact.STATUS_URL, Fact.STATUS_URL.missing, FieldType.JSON_PATH, false),
+            new FormSpec(Fact.STATUS_POST, Fact.STATUS_POST.missing, FieldType.TASK_PATH, false),
+            new FormSpec(Fact.STATUS_POST_ID, Fact.STATUS_POST_ID.missing, FieldType.JSON_FIELD, false),
             new FormSpec(Fact.STATUS_ID, Fact.STATUS_ID.missing, FieldType.JSON_PATH, true),
             new FormSpec(Fact.STATE, Fact.STATE.missing, FieldType.JSON_PATH, true),
             new FormSpec(null, STATES, "状态映射", FieldType.STATE_MAP, true),
@@ -235,8 +241,16 @@ public final class SkillVideoFacts {
                 case "选填整数字段", "optionalintegerfield" -> readConfig(value, "integer", false, fields, request);
                 case "提交响应id", "提交任务id", "submitid", "submitidfield", "submitresponseid" ->
                         put(facts, Fact.SUBMIT_ID, responsePath(value));
-                case "查询", "查询接口", "状态查询", "status", "statusroute" ->
-                        put(facts, Fact.STATUS, route(operation(value, "GET")));
+                case "查询", "查询接口", "状态查询", "status", "statusroute" -> {
+                    if (value.regionMatches(true, 0, "POST", 0, 4)) {
+                        put(facts, Fact.STATUS_POST, route(operation(value, "POST"), false));
+                    } else put(facts, Fact.STATUS, route(operation(value, "GET")));
+                }
+                case "查询响应地址字段", "查询地址字段", "提交响应查询地址字段", "提交响应的查询地址字段", "statusurlfield" ->
+                        put(facts, Fact.STATUS_URL, responsePath(value));
+                case "查询post路径", "statuspostpath" -> put(facts, Fact.STATUS_POST, route(value, false));
+                case "查询请求id字段", "查询postid字段", "查询post任务id字段", "statuspostidfield" ->
+                        put(facts, Fact.STATUS_POST_ID, field(value));
                 case "查询响应id", "查询任务id", "statusid", "statusidfield", "statusresponseid" ->
                         put(facts, Fact.STATUS_ID, responsePath(value));
                 case "状态字段", "statefield", "statusfield" -> put(facts, Fact.STATE, responsePath(value));
@@ -337,7 +351,12 @@ public final class SkillVideoFacts {
         put(stored, Fact.ENCODING.key, JSON_ENCODING);
         if (video.minPollSeconds() != 0) put(stored, Fact.MIN_POLL.key, video.minPollSeconds());
         put(stored, Fact.SUBMIT_ID.key, http.responseField());
-        put(stored, Fact.STATUS.key, video.statusPath());
+        if (!video.statusPath().isEmpty()) put(stored, Fact.STATUS.key, video.statusPath());
+        if (!video.statusUrlField().isEmpty()) put(stored, Fact.STATUS_URL.key, video.statusUrlField());
+        if (!video.statusPostPath().isEmpty()) {
+            put(stored, Fact.STATUS_POST.key, video.statusPostPath());
+            put(stored, Fact.STATUS_POST_ID.key, video.statusPostIdField());
+        }
         put(stored, Fact.STATUS_ID.key, video.idField());
         put(stored, Fact.STATE.key, video.stateField());
         if (video.canCancel()) {
@@ -428,8 +447,11 @@ public final class SkillVideoFacts {
         for (FormSpec spec : FORM) {
             boolean required = spec.required()
                     || spec.fact() == Fact.CANCEL && facts.containsKey(Fact.CANCEL_METHOD)
-                    || spec.fact() == Fact.CANCEL_METHOD && facts.containsKey(Fact.CANCEL);
+                    || spec.fact() == Fact.CANCEL_METHOD && facts.containsKey(Fact.CANCEL)
+                    || spec.fact() == Fact.STATUS_POST && facts.containsKey(Fact.STATUS_POST_ID)
+                    || spec.fact() == Fact.STATUS_POST_ID && facts.containsKey(Fact.STATUS_POST);
             if (spec.fact() == Fact.SUBMIT && facts.containsKey(Fact.SUBMIT_PATH)) required = false;
+            if (spec.fact() == Fact.STATUS && otherStatusMode(Fact.STATUS)) required = false;
             fields.add(new FormField(spec.id(), spec.label(), spec.type(), required, formValue(spec),
                     provenance.getOrDefault(spec.id(), Source.EMPTY)));
         }
@@ -450,6 +472,9 @@ public final class SkillVideoFacts {
             case "提示词字段", "提示词参数" -> "promptField";
             case "提交响应id", "提交响应id字段", "提交响应任务id字段", "提交任务id字段" -> "submitIdField";
             case "查询路径", "查询接口路径", "查询get路径", "查询路径（含{id}）" -> "statusPath";
+            case "查询响应地址字段", "查询地址字段", "提交响应查询地址字段", "提交响应的查询地址字段" -> "statusUrlField";
+            case "查询post路径" -> "statusPostPath";
+            case "查询请求id字段", "查询postid字段", "查询post任务id字段" -> "statusPostIdField";
             case "查询响应id", "查询响应id字段", "查询响应任务id字段", "查询任务id字段" -> "statusIdField";
             case "状态字段", "查询状态字段" -> "stateField";
             case "状态映射" -> "states";
@@ -465,7 +490,7 @@ public final class SkillVideoFacts {
         if (spec.fact() != null) {
             String value = facts.getOrDefault(spec.fact(), "");
             return facts.containsKey(Fact.SUBMIT) && value.startsWith("https://")
-                    && (spec.fact() == Fact.STATUS || spec.fact() == Fact.CANCEL || spec.fact() == Fact.DOWNLOAD)
+                    && routeFact(spec.fact())
                     ? path(value) : value;
         }
         if (PROMPT.equals(spec.id())) {
@@ -537,9 +562,9 @@ public final class SkillVideoFacts {
                     || field == Fact.SUBMIT || field == Fact.SUBMIT_PATH) continue;
             String before = facts.get(field);
             String after = incoming.facts.get(field);
+            if (after != null && otherStatusMode(field)) return false;
             if (before != null && after != null && !before.equals(after)) {
-                boolean route = field == Fact.STATUS || field == Fact.CANCEL || field == Fact.DOWNLOAD;
-                if (!route || before.startsWith("https://") && after.startsWith("https://")
+                if (!routeFact(field) || before.startsWith("https://") && after.startsWith("https://")
                         || !path(before).equals(path(after))) return false;
             }
         }
@@ -565,7 +590,8 @@ public final class SkillVideoFacts {
             boolean enrichEncoding = field == Fact.ENCODING && canEnrichSubmissionEncoding(newer);
             if (fillOnly && (provenance.containsKey(field.key)
                     || field == Fact.RESULT_URL && facts.containsKey(Fact.DOWNLOAD)
-                    || field == Fact.DOWNLOAD && facts.containsKey(Fact.RESULT_URL)) && !enrichEncoding) continue;
+                    || field == Fact.DOWNLOAD && facts.containsKey(Fact.RESULT_URL)
+                    || otherStatusMode(field)) && !enrichEncoding) continue;
             mergedFacts.put(field, item.getValue());
             mergedSources.put(field.key, newer.provenance.get(field.key));
         }
@@ -641,10 +667,17 @@ public final class SkillVideoFacts {
         List<String> missing = new ArrayList<>();
         for (FormSpec spec : FORM) {
             if (spec.fact() == Fact.SUBMIT && facts.containsKey(Fact.SUBMIT_PATH)) continue;
+            if (spec.fact() == Fact.STATUS && otherStatusMode(Fact.STATUS)) continue;
             if (spec.required() && spec.fact() != null && !facts.containsKey(spec.fact())) missing.add(spec.label());
         }
         if (!request.containsValue("argument")) missing.add("提示词字段");
         if (!states.containsValue("completed")) missing.add("状态映射中的完成状态");
+        if (facts.containsKey(Fact.STATUS_POST) && !facts.containsKey(Fact.STATUS_POST_ID)) missing.add(Fact.STATUS_POST_ID.missing);
+        if (!facts.containsKey(Fact.STATUS_POST) && facts.containsKey(Fact.STATUS_POST_ID)) missing.add(Fact.STATUS_POST.missing);
+        if ((facts.containsKey(Fact.STATUS) && otherStatusMode(Fact.STATUS))
+                || (facts.containsKey(Fact.STATUS_URL) && otherStatusMode(Fact.STATUS_URL))) {
+            missing.add("查询 GET 路径、提交响应地址字段和查询 POST 只能选择一种");
+        }
         if (facts.containsKey(Fact.CANCEL) && !facts.containsKey(Fact.CANCEL_METHOD)) missing.add(Fact.CANCEL_METHOD.missing);
         if (!facts.containsKey(Fact.CANCEL) && facts.containsKey(Fact.CANCEL_METHOD)) missing.add(Fact.CANCEL.missing);
         boolean download = facts.containsKey(Fact.DOWNLOAD);
@@ -670,7 +703,12 @@ public final class SkillVideoFacts {
         List<String> missing = missing();
         if (!missing.isEmpty()) throw new IllegalArgumentException("视频接口事实缺少 " + String.join("、", missing));
         JSONObject video = new JSONObject();
-        put(video, "statusPath", path(facts.get(Fact.STATUS)));
+        if (facts.containsKey(Fact.STATUS)) put(video, "statusPath", path(facts.get(Fact.STATUS)));
+        else if (facts.containsKey(Fact.STATUS_URL)) put(video, "statusUrlField", facts.get(Fact.STATUS_URL));
+        else {
+            put(video, "statusPostPath", path(facts.get(Fact.STATUS_POST)));
+            put(video, "statusPostIdField", facts.get(Fact.STATUS_POST_ID));
+        }
         if (facts.containsKey(Fact.CANCEL)) {
             put(video, "cancelPath", path(facts.get(Fact.CANCEL)));
             put(video, "cancelMethod", facts.get(Fact.CANCEL_METHOD));
@@ -697,7 +735,7 @@ public final class SkillVideoFacts {
     }
 
     private void checkRouteOrigins(String origin) {
-        for (Fact operation : new Fact[]{Fact.STATUS, Fact.CANCEL, Fact.DOWNLOAD}) {
+        for (Fact operation : new Fact[]{Fact.STATUS, Fact.STATUS_POST, Fact.CANCEL, Fact.DOWNLOAD}) {
             String route = facts.get(operation);
             if (route == null || !route.startsWith("https://")) continue;
             String actual = route.substring(0, route.indexOf('/', 8));
@@ -720,7 +758,9 @@ public final class SkillVideoFacts {
             case SUBMIT_PATH -> submitPath(value);
             case ENCODING -> encoding(value);
             case MIN_POLL -> throw invalid();
-            case SUBMIT_ID, STATUS_ID, STATE, RESULT_URL -> responsePath(value);
+            case SUBMIT_ID, STATUS_ID, STATUS_URL, STATE, RESULT_URL -> responsePath(value);
+            case STATUS_POST -> route(value, false);
+            case STATUS_POST_ID -> field(value);
             case STATUS, CANCEL, DOWNLOAD -> route(value);
             case CANCEL_METHOD -> {
                 if (!value.equalsIgnoreCase("POST") && !value.equalsIgnoreCase("DELETE")) throw invalid();
@@ -837,6 +877,10 @@ public final class SkillVideoFacts {
     }
 
     private static String route(String value) {
+        return route(value, true);
+    }
+
+    private static String route(String value, boolean taskTemplate) {
         String origin = "";
         if (!value.startsWith("/")) {
             if (!value.regionMatches(true, 0, "https://", 0, 8)) throw invalid();
@@ -845,8 +889,22 @@ public final class SkillVideoFacts {
             origin = authority(endpoint(value.substring(0, slash)));
             value = value.substring(slash);
         }
-        checkPath(value, true);
+        checkPath(value, taskTemplate);
         return origin + value;
+    }
+
+    private boolean otherStatusMode(Fact field) {
+        boolean post = facts.containsKey(Fact.STATUS_POST) || facts.containsKey(Fact.STATUS_POST_ID);
+        return switch (field) {
+            case STATUS -> facts.containsKey(Fact.STATUS_URL) || post;
+            case STATUS_URL -> facts.containsKey(Fact.STATUS) || post;
+            case STATUS_POST, STATUS_POST_ID -> facts.containsKey(Fact.STATUS) || facts.containsKey(Fact.STATUS_URL);
+            default -> false;
+        };
+    }
+
+    private static boolean routeFact(Fact field) {
+        return field == Fact.STATUS || field == Fact.STATUS_POST || field == Fact.CANCEL || field == Fact.DOWNLOAD;
     }
 
     private static void checkPath(String value, boolean taskTemplate) {

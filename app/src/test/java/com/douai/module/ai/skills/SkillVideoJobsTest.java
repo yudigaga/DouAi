@@ -2,12 +2,15 @@ package com.douai.module.ai.skills;
 
 import android.content.Context;
 
+import com.douai.module.ai.AiCredentialVault;
+
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.json.JSONObject;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 import java.io.ByteArrayOutputStream;
@@ -40,7 +43,7 @@ public class SkillVideoJobsTest {
 
     public static SkillVideoJobs chatFixture(Context context, ChatVideoContract contract, AtomicInteger submits,
                                            AtomicInteger statuses, AtomicInteger downloads) {
-        return new SkillVideoJobs(new File(context.getFilesDir(), "douai_real_video_jobs"), System::currentTimeMillis,
+        return new SkillVideoJobs(new File(context.getFilesDir(), SkillVideoJobs.JOURNAL_DIRECTORY), System::currentTimeMillis,
                 (method, media, endpoint, bearer, body, deadline, admission) -> {
                     admission.check();
                     assertEquals("", bearer);
@@ -68,7 +71,7 @@ public class SkillVideoJobsTest {
     }
 
     public static SkillVideoJobs chatFixture(Context context, AtomicInteger submits) {
-        return new SkillVideoJobs(new File(context.getFilesDir(), "douai_real_video_jobs"), System::currentTimeMillis,
+        return new SkillVideoJobs(new File(context.getFilesDir(), SkillVideoJobs.JOURNAL_DIRECTORY), System::currentTimeMillis,
                 (method, media, uri, bearer, body, deadline, admission) -> {
                     admission.check();
                     assertEquals("", bearer);
@@ -154,6 +157,115 @@ public class SkillVideoJobsTest {
         assertEquals(List.of("POST " + ENDPOINT, "GET https://video.example.com:9443/jobs/task_1",
                 "GET https://video.example.com:9443/jobs/task_1",
                 "GET https://video.example.com:9443/jobs/task_1/content"), sent);
+    }
+
+    @Test public void pinnedRouteReopensWithTheOriginalCredentialAndPostsOnlyTheOriginalIdForStatus() throws Exception {
+        File directory = temporary.newFolder();
+        var template = binding();
+        JSONObject declaration = template.declaration().toJson();
+        JSONObject video = declaration.getJSONObject("video");
+        video.remove("statusPath");
+        video.put("statusPostPath", "/jobs/query").put("statusPostIdField", "task_id");
+        var vault = new AiCredentialVault(() -> new javax.crypto.spec.SecretKeySpec(new byte[32], "AES"));
+        var credentials = new SkillCustomService(vault, (endpoint, bearer, body, deadline, limit, check) -> {
+            throw new AssertionError("Local credential sealing must not call the transport");
+        }, System::nanoTime);
+        var sealed = credentials.configure(template.skillId(), ENDPOINT, KEY);
+        var original = new SkillVideoJobs.Binding(template.skillId(), template.revisionId(), sealed.revision(),
+                SkillHttpDeclaration.parse(declaration, SkillResult.Type.VIDEO, List.of()), ENDPOINT);
+        var pin = new SkillVideoJobs.Pinned(original, sealed.encryptedBearer());
+        var journal = directory.toPath().resolve("work-" + WORK.conversationKey() + ".bin");
+        List<String> sent = new ArrayList<>();
+        SkillVideoJobs.Transport transport = (method, media, endpoint, bearer, body, deadline, check) -> {
+            check.check();
+            assertEquals(KEY, bearer);
+            sent.add(method + " " + endpoint);
+            if (endpoint.equals(ENDPOINT)) {
+                String before = new String(Files.readAllBytes(journal), StandardCharsets.UTF_8);
+                assertTrue(before.contains(sealed.encryptedBearer()));
+                assertFalse(before.contains(KEY));
+                assertFalse(before.contains("synthetic-private-user-input"));
+                assertArrayEquals(POST, body);
+                return json(202, "{\"job_id\":\"pinned_1\"}");
+            }
+            if (endpoint.endsWith("/jobs/query")) {
+                assertFalse(media);
+                assertEquals(SkillHttpsTransport.Method.POST, method);
+                assertEquals("{\"task_id\":\"pinned_1\"}", new String(body, StandardCharsets.UTF_8));
+                return json(200, "{\"id\":\"pinned_1\",\"state\":\"done\"}");
+            }
+            assertTrue(media);
+            assertNull(body);
+            return new SkillHttpsTransport.Response(200, "video/mp4", structuralMp4());
+        };
+
+        UUID local = UUID.randomUUID();
+        var jobs = new SkillVideoJobs(directory, clock::get, transport);
+        long generation = jobs.generation(WORK);
+        var queued = jobs.submit(WORK, generation, local, access(original, () -> {}), POST, Long.MAX_VALUE, pin);
+        assertEquals(SkillVideoJobs.State.QUEUED, queued.state());
+        var reopened = new SkillVideoJobs(directory, clock::get, transport);
+        assertThrows(SkillVideoJobs.Failure.class, () -> reopened.pinned(CONTACT, queued));
+        var recovered = reopened.pinned(WORK, queued);
+        assertEquals(pin, recovered);
+        var changed = new SkillVideoJobs.Binding(original.skillId(), UUID.randomUUID().toString(), original.configRevision(),
+                original.declaration(), "https://replacement.example.com/v2/create");
+        assertEquals(SkillVideoJobs.Code.STALE, assertThrows(SkillVideoJobs.Failure.class,
+                () -> reopened.refresh(WORK, local, access(changed, () -> {}), Long.MAX_VALUE)).code());
+        String bearer = credentials.credential(new SkillCustomService.Binding(recovered.binding().skillId(),
+                recovered.binding().configRevision(), recovered.binding().endpoint(), recovered.encryptedBearer()));
+        var resumed = new SkillVideoJobs.Access(recovered.binding(), bearer, () -> {});
+        assertEquals(SkillVideoJobs.State.COMPLETED, reopened.refresh(WORK, local, resumed, Long.MAX_VALUE).state());
+        assertEquals(List.of("POST " + ENDPOINT, "POST https://video.example.com:9443/jobs/query",
+                "GET https://video.example.com:9443/jobs/pinned_1/content"), sent);
+        assertNotNull(reopened.playableFile(WORK, local));
+        assertThrows(SkillVideoJobs.Failure.class, () -> reopened.pinned(WORK, queued));
+        assertFalse(new String(Files.readAllBytes(journal), StandardCharsets.UTF_8).contains(sealed.encryptedBearer()));
+        reopened.clear(WORK);
+        assertNull(reopened.playableFile(WORK, local));
+        assertEquals(SkillVideoJobs.Code.CLEARED, assertThrows(SkillVideoJobs.Failure.class,
+                () -> reopened.submit(WORK, generation, local, resumed, POST, Long.MAX_VALUE, pin)).code());
+        assertEquals(3, sent.size());
+    }
+
+    @Test public void persistsOnlyASafeSubmittedRelativeStatusPathAndRejectsCredentialEcho() throws Exception {
+        File directory = temporary.newFolder();
+        var normal = binding();
+        JSONObject declaration = normal.declaration().toJson();
+        JSONObject video = declaration.getJSONObject("video");
+        video.remove("statusPath");
+        video.put("statusUrlField", "status_url");
+        var configured = new SkillVideoJobs.Binding(normal.skillId(), normal.revisionId(), normal.configRevision(),
+                SkillHttpDeclaration.parse(declaration, SkillResult.Type.VIDEO, List.of()), ENDPOINT);
+        var access = access(configured, () -> {});
+        String status = "https://video.example.com:9443/progress/dynamic_1";
+        List<String> sent = new ArrayList<>();
+        SkillVideoJobs.Transport transport = (method, media, endpoint, bearer, body, deadline, check) -> {
+            check.check();
+            sent.add(method + " " + endpoint);
+            return switch (sent.size()) {
+                case 1 -> json(202, "{\"job_id\":\"hidden\",\"status_url\":\"/progress/" + KEY + "\"}");
+                case 2 -> json(202, "{\"job_id\":\"dynamic_1\",\"status_url\":\"" + status + "\"}");
+                case 3 -> json(200, "{\"id\":\"dynamic_1\",\"state\":\"running\"}");
+                default -> throw new AssertionError("Unexpected network");
+            };
+        };
+        var jobs = new SkillVideoJobs(directory, clock::get, transport);
+        long generation = jobs.generation(WORK);
+        UUID refused = UUID.randomUUID();
+        assertEquals(SkillVideoJobs.State.SUBMIT_UNKNOWN,
+                jobs.submit(WORK, generation, refused, access, POST, Long.MAX_VALUE).state());
+        assertEquals(SkillVideoJobs.State.SUBMIT_UNKNOWN, jobs.refresh(WORK, refused, access, Long.MAX_VALUE).state());
+        UUID local = UUID.randomUUID();
+        assertEquals(SkillVideoJobs.State.QUEUED, jobs.submit(WORK, generation, local, access, POST, Long.MAX_VALUE).state());
+        String journal = new String(Files.readAllBytes(directory.toPath().resolve("work-" + WORK.conversationKey() + ".bin")),
+                StandardCharsets.UTF_8);
+        assertTrue(journal.contains("/progress/dynamic_1"));
+        assertFalse(journal.contains(status));
+        assertFalse(journal.contains(KEY));
+        var reopened = new SkillVideoJobs(directory, clock::get, transport);
+        assertEquals(SkillVideoJobs.State.RUNNING, reopened.refresh(WORK, local, access, Long.MAX_VALUE).state());
+        assertEquals(List.of("POST " + ENDPOINT, "POST " + ENDPOINT, "GET " + status), sent);
     }
 
     @Test public void configuredPollingFloorSurvivesReopenAndNeverShortensAdaptiveBackoff() throws Exception {
@@ -268,7 +380,7 @@ public class SkillVideoJobsTest {
                 status + "/content"), sent);
     }
 
-    @Test public void statusResultVideoRecoversWithOriginalIdWithoutPersistingLinkOrOfferingCancellation() throws Exception {
+    @Test public void statusResultVideoRetriesOnlyItsSavedRelativeMediaPathAndOffersNoCancellation() throws Exception {
         File directory = temporary.newFolder();
         List<String> sent = new ArrayList<>();
         SkillVideoJobs.Access access = access(resultUrlBinding(), () -> {});
@@ -280,8 +392,7 @@ public class SkillVideoJobsTest {
                 case 1 -> json(202, "{\"job_id\":\"direct_1\"}");
                 case 2 -> json(200, directStatus("direct_1", "/media/first_clip.mp4"));
                 case 3 -> new SkillHttpsTransport.Response(503, "", new byte[0]);
-                case 4 -> json(200, directStatus("direct_1", "https://video.example.com:9443/media/next_clip.mp4"));
-                case 5 -> new SkillHttpsTransport.Response(200, "video/mp4", structuralMp4());
+                case 4 -> new SkillHttpsTransport.Response(200, "video/mp4", structuralMp4());
                 default -> throw new AssertionError("unexpected network");
             };
         };
@@ -299,7 +410,9 @@ public class SkillVideoJobsTest {
         assertEquals(SkillVideoJobs.State.DOWNLOAD_READY, reopened.list(WORK).get(0).state());
         for (File file : directory.listFiles((parent, name) -> name.endsWith(".bin"))) {
             String registry = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
-            assertFalse(registry.contains("first_clip.mp4"));
+            assertTrue(registry.contains("/media/first_clip.mp4"));
+            assertFalse(registry.contains("https://video.example.com:9443/media/first_clip.mp4"));
+            assertFalse(registry.contains(KEY));
         }
 
         clock.addAndGet(60_000);
@@ -311,7 +424,7 @@ public class SkillVideoJobsTest {
         assertNull(restored.playableFile(WORK, local));
         String status = "GET https://video.example.com:9443/jobs/direct_1";
         assertEquals(List.of("POST " + ENDPOINT, status, "GET https://video.example.com:9443/media/first_clip.mp4",
-                status, "GET https://video.example.com:9443/media/next_clip.mp4"), sent);
+                "GET https://video.example.com:9443/media/first_clip.mp4"), sent);
     }
 
     @Test public void directResultRefusesWrongJobPrivateForeignCredentialAndAmbiguousLinks() throws Exception {
@@ -355,11 +468,13 @@ public class SkillVideoJobsTest {
         assertEquals(replies.length + 1, reads.get());
     }
 
-    @Test public void olderJobCatalogKeepsItsPreviouslyRequiredCancellationCapability() throws Exception {
-        File directory = temporary.newFolder();
+    @Test public void olderJobCatalogRemainsUnopenedWhileTheNewNamespaceStartsEmpty() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        File directory = new File(context.getFilesDir(), "douai_real_video_jobs");
+        assertTrue(directory.mkdirs());
+        var legacy = directory.toPath().resolve("work-" + "a".repeat(64) + ".bin");
         UUID local = UUID.randomUUID();
-        try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(
-                directory.toPath().resolve("work-" + "a".repeat(64) + ".bin")))) {
+        try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(legacy))) {
             output.writeInt(1);
             output.writeLong(0);
             output.writeInt(1);
@@ -375,12 +490,13 @@ public class SkillVideoJobsTest {
             output.writeUTF("");
             output.writeByte(0);
         }
+        byte[] untouched = Files.readAllBytes(legacy);
         var jobs = new SkillVideoJobs(directory, clock::get, null);
-        var restored = jobs.list(WORK).get(0);
-        assertEquals(local, restored.localId());
-        assertTrue(restored.canCancel());
-        jobs.markLinked(WORK, local);
-        assertTrue(jobs.list(WORK).get(0).canCancel());
+        assertEquals(SkillVideoJobs.Code.STORAGE, assertThrows(SkillVideoJobs.Failure.class, () -> jobs.list(WORK)).code());
+        var current = SkillVideoJobs.forContext(context);
+        assertTrue(current.list(WORK).isEmpty());
+        current.clear(WORK);
+        assertArrayEquals(untouched, Files.readAllBytes(legacy));
     }
 
     @Test public void cancellationSendsOnceUsesTheOriginalIdAndOnlyThenPolls() throws Exception {

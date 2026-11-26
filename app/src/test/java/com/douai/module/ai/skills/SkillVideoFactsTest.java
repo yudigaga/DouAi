@@ -431,6 +431,67 @@ public final class SkillVideoFactsTest {
                 "提交响应示例: {\"data\":{\"id\":\"fixture\"}}"), "submitIdField").value());
     }
 
+    @Test public void videoFactsKeepSubmitReturnedUrlAndPostIdModesSeparateFromFixedGet() throws Exception {
+        String transitions = POLLING.replaceFirst("(?m)^Status: GET[^\\r\\n]*\\R", "");
+        SkillVideoFacts dynamic = SkillVideoFacts.parse(SUBMIT + transitions + "\n查询地址字段: data.status_url");
+        assertTrue(dynamic.isComplete());
+        assertEquals("", form(dynamic, "statusPath").value());
+        assertEquals("data.status_url", form(dynamic, "statusUrlField").value());
+        assertEquals("data.status_url", dynamic.declaration().getJSONObject("video").getString("statusUrlField"));
+        assertEquals(dynamic.declaration().toString(), SkillVideoFacts.fromJson(dynamic.toJson()).declaration().toString());
+
+        SkillVideoFacts partial = SkillVideoFacts.parse(SUBMIT + transitions + "\n查询: POST /v1/jobs/progress");
+        assertFalse(partial.isComplete());
+        assertTrue(form(partial, "statusPostIdField").required());
+        assertEquals("/v1/jobs/progress", form(partial, "statusPostPath").value());
+        SkillVideoFacts ready = partial.fillMissingFrom(SkillVideoFacts.parseSupplement("查询请求ID字段: task_id"));
+        assertTrue(ready.isComplete());
+        JSONObject query = ready.declaration().getJSONObject("video");
+        assertEquals("/v1/jobs/progress", query.getString("statusPostPath"));
+        assertEquals("task_id", query.getString("statusPostIdField"));
+        assertFalse(query.has("statusPath"));
+        assertFalse(query.has("statusUrlField"));
+
+        SkillVideoFacts incompatible = ready.withForm(Map.of("statusPath", "/v1/jobs/{id}"));
+        assertFalse(incompatible.isComplete());
+        assertThrows(IllegalArgumentException.class, incompatible::declaration);
+        assertEquals(query.toString(), ready.fillMissingFrom(dynamic).declaration().getJSONObject("video").toString());
+        assertThrows(IllegalArgumentException.class,
+                () -> SkillVideoFacts.parse("查询: POST /v1/jobs/{id}"));
+        assertThrows(IllegalArgumentException.class,
+                () -> SkillVideoFacts.parseSupplement("查询请求ID字段: data.id"));
+    }
+
+    @Test public void postQueryDocumentationNeedsExplicitPathKeyAndJsonEvidence() throws Exception {
+        SkillVideoFacts facts = SkillVideoFacts.parseReference("""
+                ### 创建视频任务
+                | 请求 | POST https://example.com/v1/tasks |
+                | Content-Type | application/json |
+                | 提示词字段 | prompt |
+                | 响应任务 ID 字段 | id |
+
+                ### 查询视频任务
+                | 请求 | POST https://example.com/v1/tasks/progress |
+                | 查询 POST 任务 ID 字段 | task_id |
+                | 状态字段 | state |
+                | 任务 ID 字段 | id |
+                | 状态映射 | done=completed |
+
+                ### 下载视频
+                | 请求 | GET https://example.com/v1/tasks/{id}/content |
+                """);
+        assertTrue(facts.isComplete());
+        assertEquals("task_id", facts.declaration().getJSONObject("video").getString("statusPostIdField"));
+        assertEquals("", form(facts, "statusPath").value());
+
+        SkillVideoFacts multiBody = SkillVideoFacts.parseReference("""
+                ### 查询视频任务
+                curl --json '{"task_id":"fixture"}' --data-raw extra https://example.com/v1/tasks/progress
+                """);
+        assertEquals("https://example.com/v1/tasks/progress", form(multiBody, "statusPostPath").value());
+        assertEquals("", form(multiBody, "statusPostIdField").value());
+    }
+
     private static SkillVideoFacts.FormField form(SkillVideoFacts facts, String id) {
         return facts.formFields().stream().filter(field -> field.id().equals(id)).findFirst().orElseThrow();
     }

@@ -2079,10 +2079,11 @@ final class AiTestChatDialog extends Dialog {
         String message = "POST " + review.endpoint() + "\n传输字段和值\n" + review.payload() + "\n费用由服务商决定";
         SkillHttpDeclaration.Video video = review.video();
         if (video != null) {
-            message += "\n\n按同一任务 ID 查询 GET " + video.statusPath();
+            message += "\n\n按同一任务 ID 查询 " + AiSkillDetailDialog.videoStatusRoute(video);
             message += video.downloadPath().isEmpty() ? "\n成片链接字段 " + video.resultUrlField()
                     : "\n下载 GET " + video.downloadPath();
             if (video.canCancel()) message += "\n取消任务时另行确认 " + video.cancelMethod() + " " + video.cancelPath();
+            message += "\n本任务使用提交时确认的接口配置。";
         }
         AlertDialog child = new MiuixDialogBuilder(getContext(), useMiuix)
                 .setTitle("确认本次技能服务调用").setMessage(message)

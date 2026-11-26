@@ -52,8 +52,23 @@ public final class SkillHttpDeclaration {
         }
     }
 
+    public enum StatusMethod { GET, POST }
+
+    public record StatusRequest(StatusMethod method, String endpoint, byte[] body) {
+        public StatusRequest { body = body == null ? null : body.clone(); }
+        @Override public byte[] body() { return body == null ? null : body.clone(); }
+        @Override public String toString() { return "Video.StatusRequest"; }
+    }
+
     public record Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath, String resultUrlField,
-                        String idField, String stateField, Map<String, VideoState> states, int minPollSeconds) {
+                        String idField, String stateField, Map<String, VideoState> states, int minPollSeconds,
+                        String statusUrlField, String statusPostPath, String statusPostIdField) {
+        public Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath, String resultUrlField,
+                     String idField, String stateField, Map<String, VideoState> states, int minPollSeconds) {
+            this(statusPath, cancelPath, cancelMethod, downloadPath, resultUrlField, idField, stateField, states,
+                    minPollSeconds, "", "", "");
+        }
+
         public Video(String statusPath, String cancelPath, String cancelMethod, String downloadPath, String resultUrlField,
                      String idField, String stateField, Map<String, VideoState> states) {
             this(statusPath, cancelPath, cancelMethod, downloadPath, resultUrlField, idField, stateField, states, 0);
@@ -66,7 +81,17 @@ public final class SkillHttpDeclaration {
 
         public Video {
             if (minPollSeconds != 0 && (minPollSeconds < 3 || minPollSeconds > 60)) throw new Invalid();
-            validatePath(statusPath);
+            if (statusPath == null || statusUrlField == null || statusPostPath == null || statusPostIdField == null
+                    || statusPostPath.isEmpty() != statusPostIdField.isEmpty()) throw new Invalid();
+            int modes = (statusPath.isEmpty() ? 0 : 1) + (statusUrlField.isEmpty() ? 0 : 1)
+                    + (statusPostPath.isEmpty() ? 0 : 1);
+            if (modes != 1) throw new Invalid();
+            if (!statusPath.isEmpty()) validatePath(statusPath);
+            if (!statusUrlField.isEmpty()) responsePath(statusUrlField);
+            if (!statusPostPath.isEmpty()) {
+                validatePath(statusPostPath, 0);
+                member(statusPostIdField);
+            }
             if (cancelPath == null || cancelMethod == null || downloadPath == null || resultUrlField == null
                     || cancelPath.isEmpty() != cancelMethod.isEmpty() || downloadPath.isEmpty() == resultUrlField.isEmpty()) {
                 throw new Invalid();
@@ -103,7 +128,27 @@ public final class SkillHttpDeclaration {
         }
 
         public String statusEndpoint(String configuredEndpoint, String id) {
-            return expand(configuredEndpoint, statusPath, id);
+            return statusRequest(configuredEndpoint, id, "").endpoint();
+        }
+
+        public String readSubmittedStatusPath(JSONObject response, String configuredEndpoint) {
+            if (statusUrlField.isEmpty()) return "";
+            return resolveProviderUrl(URI.create(endpoint(configuredEndpoint)),
+                    readResponseString(response, statusUrlField)).getRawPath();
+        }
+
+        public StatusRequest statusRequest(String configuredEndpoint, String id, String savedStatusPath) {
+            String original = validateTaskId(id);
+            if (!statusUrlField.isEmpty()) {
+                return new StatusRequest(StatusMethod.GET, savedPathEndpoint(configuredEndpoint, savedStatusPath), null);
+            }
+            if (!"".equals(savedStatusPath)) throw new Invalid();
+            if (!statusPath.isEmpty()) return new StatusRequest(StatusMethod.GET,
+                    expand(configuredEndpoint, statusPath, original), null);
+            try {
+                byte[] body = new JSONObject().put(statusPostIdField, original).toString().getBytes(StandardCharsets.UTF_8);
+                return new StatusRequest(StatusMethod.POST, expand(configuredEndpoint, statusPostPath, original), body);
+            } catch (JSONException malformed) { throw new Invalid(); }
         }
 
         public boolean canCancel() { return !cancelPath.isEmpty(); }
@@ -119,25 +164,27 @@ public final class SkillHttpDeclaration {
         }
 
         String completedDownloadEndpoint(JSONObject response, String configuredEndpoint, String id) {
+            return savedDownloadEndpoint(configuredEndpoint, id,
+                    completedDownloadPath(response, configuredEndpoint, id, ""));
+        }
+
+        public String completedDownloadPath(JSONObject response, String configuredEndpoint, String id, String savedStatusPath) {
             if (readStatus(response, id) != VideoState.COMPLETED) throw new Invalid();
-            if (resultUrlField.isEmpty()) return downloadEndpoint(configuredEndpoint, id);
-            String link = text(readResponseString(response, resultUrlField), 2048, false);
-            URI status = URI.create(statusEndpoint(configuredEndpoint, id));
-            URI result;
-            try { result = URI.create(link); } catch (IllegalArgumentException invalid) { throw new Invalid(); }
-            if (link.startsWith("//") || result.isOpaque() || result.getRawUserInfo() != null || result.getRawQuery() != null
-                    || result.getRawFragment() != null || !result.equals(result.normalize())
-                    || !result.isAbsolute() && result.getRawAuthority() != null) throw new Invalid();
-            for (String segment : result.getPath().split("/", -1)) {
-                if (".".equals(segment) || "..".equals(segment)) throw new Invalid();
+            URI status = URI.create(statusRequest(configuredEndpoint, id, savedStatusPath).endpoint());
+            if (resultUrlField.isEmpty()) return URI.create(downloadEndpoint(configuredEndpoint, id)).getRawPath();
+            return resolveProviderUrl(status, readResponseString(response, resultUrlField)).getRawPath();
+        }
+
+        public String savedDownloadEndpoint(String configuredEndpoint, String id, String savedResultPath) {
+            validateTaskId(id);
+            if (resultUrlField.isEmpty()) {
+                String expected = downloadEndpoint(configuredEndpoint, id);
+                if (!"".equals(savedResultPath) && !URI.create(expected).getRawPath().equals(savedResultPath)) {
+                    throw new Invalid();
+                }
+                return expected;
             }
-            String validated = endpoint(status.resolve(result).toString());
-            URI target = URI.create(validated);
-            if (!status.getHost().equalsIgnoreCase(target.getHost()) || httpsPort(status) != httpsPort(target)) {
-                throw new Invalid();
-            }
-            checkCredential(target.getPath());
-            return validated;
+            return savedPathEndpoint(configuredEndpoint, savedResultPath);
         }
 
         private JSONObject toJson() throws JSONException {
@@ -145,7 +192,10 @@ public final class SkillHttpDeclaration {
             for (Map.Entry<String, VideoState> state : states.entrySet()) {
                 mapping.put(state.getKey(), state.getValue().wireName());
             }
-            JSONObject data = new JSONObject().put("statusPath", statusPath);
+            JSONObject data = new JSONObject();
+            if (!statusPath.isEmpty()) data.put("statusPath", statusPath);
+            else if (!statusUrlField.isEmpty()) data.put("statusUrlField", statusUrlField);
+            else data.put("statusPostPath", statusPostPath).put("statusPostIdField", statusPostIdField);
             if (canCancel()) data.put("cancelPath", cancelPath).put("cancelMethod", cancelMethod);
             if (resultUrlField.isEmpty()) data.put("downloadPath", downloadPath);
             else data.put("resultUrlField", resultUrlField);
@@ -237,6 +287,7 @@ public final class SkillHttpDeclaration {
             }
             if (!request.containsValue(ARGUMENT)) throw new Invalid();
             Video video = videoOutput ? readVideo(object.getJSONObject("video")) : null;
+            if (video != null && overlapsResponsePath(response, video.statusUrlField())) throw new Invalid();
             return new SkillHttpDeclaration(label, suggestion, request, response, video, outputType, used);
         } catch (JSONException malformed) {
             throw new Invalid();
@@ -299,8 +350,8 @@ public final class SkillHttpDeclaration {
     }
 
     private static Video readVideo(JSONObject value) throws JSONException {
-        keys(value, Set.of("cancelPath", "cancelMethod", "downloadPath", "resultUrlField", "minPollSeconds"), "statusPath",
-                "idField", "stateField", "states");
+        keys(value, Set.of("statusPath", "statusUrlField", "statusPostPath", "statusPostIdField", "cancelPath",
+                "cancelMethod", "downloadPath", "resultUrlField", "minPollSeconds"), "idField", "stateField", "states");
         int minPollSeconds = 0;
         if (value.has("minPollSeconds")) {
             if (!(value.opt("minPollSeconds") instanceof Integer seconds) || seconds == 0) throw new Invalid();
@@ -313,15 +364,49 @@ public final class SkillHttpDeclaration {
             String state = names.next();
             states.put(state, VideoState.fromWire(text(mapping.get(state), 10, false)));
         }
-        return new Video(text(value.get("statusPath"), 320, false),
+        return new Video(value.has("statusPath") ? text(value.get("statusPath"), 320, false) : "",
                 value.has("cancelPath") ? text(value.get("cancelPath"), 320, false) : "",
                 value.has("cancelMethod") ? text(value.get("cancelMethod"), 6, false) : "",
                 value.has("downloadPath") ? text(value.get("downloadPath"), 320, false) : "",
                 value.has("resultUrlField") ? responsePath(value.get("resultUrlField")) : "",
-                responsePath(value.get("idField")), responsePath(value.get("stateField")), states, minPollSeconds);
+                responsePath(value.get("idField")), responsePath(value.get("stateField")), states, minPollSeconds,
+                value.has("statusUrlField") ? responsePath(value.get("statusUrlField")) : "",
+                value.has("statusPostPath") ? text(value.get("statusPostPath"), 320, false) : "",
+                value.has("statusPostIdField") ? member(value.get("statusPostIdField")) : "");
     }
 
     private static int httpsPort(URI endpoint) { return endpoint.getPort() < 0 ? 443 : endpoint.getPort(); }
+
+    private static boolean overlapsResponsePath(String first, String second) {
+        return !second.isEmpty() && (first.equals(second) || first.startsWith(second + ".") || second.startsWith(first + "."));
+    }
+
+    private static URI resolveProviderUrl(URI base, String raw) {
+        String link = text(raw, 2048, false);
+        URI candidate;
+        try { candidate = URI.create(link); } catch (IllegalArgumentException invalid) { throw new Invalid(); }
+        if (link.startsWith("//") || candidate.isOpaque() || candidate.getRawUserInfo() != null
+                || candidate.getRawQuery() != null || candidate.getRawFragment() != null || !candidate.equals(candidate.normalize())
+                || !candidate.isAbsolute() && candidate.getRawAuthority() != null) throw new Invalid();
+        String path = candidate.getPath();
+        String rawPath = candidate.getRawPath().toLowerCase(Locale.ROOT);
+        if (rawPath.contains("%2f") || rawPath.contains("%5c") || rawPath.contains("%25")
+                || path.codePoints().anyMatch(c -> c == '\\' || Character.isISOControl(c))) throw new Invalid();
+        for (String segment : path.split("/", -1)) {
+            if (".".equals(segment) || "..".equals(segment)) throw new Invalid();
+        }
+        URI target = URI.create(endpoint(base.resolve(candidate).toString()));
+        if (!base.getHost().equalsIgnoreCase(target.getHost()) || httpsPort(base) != httpsPort(target)) throw new Invalid();
+        checkCredential(target.getPath());
+        return target;
+    }
+
+    private static String savedPathEndpoint(String configuredEndpoint, String path) {
+        if (path == null || !path.startsWith("/")) throw new Invalid();
+        URI target = resolveProviderUrl(URI.create(endpoint(configuredEndpoint)), path);
+        if (!path.equals(target.getRawPath())) throw new Invalid();
+        return target.toString();
+    }
 
     private static String expand(String configuredEndpoint, String template, String id) {
         URI configured = URI.create(endpoint(configuredEndpoint));
@@ -330,6 +415,10 @@ public final class SkillHttpDeclaration {
     }
 
     private static void validatePath(String path) {
+        validatePath(path, 1);
+    }
+
+    private static void validatePath(String path, int expectedPlaceholders) {
         if (path == null || path.length() > 320 || !path.startsWith("/") || path.startsWith("//")) throw new Invalid();
         checkCredential(path);
         String[] segments = path.substring(1).split("/", -1);
@@ -343,7 +432,7 @@ public final class SkillHttpDeclaration {
                 throw new Invalid();
             }
         }
-        if (placeholders != 1) throw new Invalid();
+        if (placeholders != expectedPlaceholders) throw new Invalid();
     }
 
     private static String suggestion(Object raw) {

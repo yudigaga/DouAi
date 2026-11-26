@@ -872,6 +872,88 @@ public class SkillStoreTest {
         assertNull(AiSkills.match(AiSkills.Entry.CONTACT, "/技能 示例", store));
     }
 
+    @Test public void queuedVideoKeepsOnlyItsOwnSealedCredentialAcrossAConfigurationChange() throws Exception {
+        File root = temp.newFolder();
+        File journal = temp.newFolder();
+        SkillStore store = videoStore(root);
+        String name = "镜头动画";
+        saveVideoDraft(store, videoDraft(name));
+        store.saveVideoDeclaration(store.detail(name), videoHttp().toString());
+        String firstKey = "fixture-old-video-credential";
+        String secondKey = "fixture-new-video-credential";
+        String firstOrigin = "https://first.example.com";
+        String secondOrigin = "https://second.example.com";
+        store.configureCustomService(store.detail(name), firstOrigin + "/v1/submit", firstKey);
+        var sent = new java.util.ArrayList<String>();
+        SkillVideoJobs.Transport transport = (method, media, endpoint, bearer, body, deadline, admission) -> {
+            admission.check();
+            boolean first = endpoint.startsWith(firstOrigin + "/");
+            String id = first ? "job_a" : "job_b";
+            assertEquals(first ? firstKey : secondKey, bearer);
+            sent.add(method.name() + " " + endpoint);
+            byte[] response;
+            if (endpoint.endsWith("/v1/submit")) {
+                assertEquals(SkillHttpsTransport.Method.POST, method);
+                response = ("{\"job_id\":\"" + id + "\"}").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            } else {
+                if (first) {
+                    assertEquals(SkillHttpsTransport.Method.GET, method);
+                    assertNull(body);
+                } else {
+                    assertEquals(SkillHttpsTransport.Method.POST, method);
+                    assertEquals("{\"job\":\"job_b\"}", new String(body, java.nio.charset.StandardCharsets.UTF_8));
+                }
+                response = ("{\"id\":\"" + id + "\",\"state\":\"running\"}").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            }
+            return new SkillHttpsTransport.Response(200, "application/json", response);
+        };
+        var clock = new java.util.concurrent.atomic.AtomicLong(1000);
+        SkillVideoJobs jobs = new SkillVideoJobs(journal, clock::get, transport);
+        SkillVideoJobs.Scope a = new SkillVideoJobs.Scope(AiSkills.Entry.WORK, "a".repeat(64));
+        SkillVideoJobs.Scope b = new SkillVideoJobs.Scope(AiSkills.Entry.CONTACT, "a".repeat(64));
+        var callA = AiSkills.match(AiSkills.Entry.WORK, "/镜头动画 海边", store);
+        UUID idA = UUID.randomUUID();
+        store.executeCustomService(callA, store.approveCustomService(store.previewCustomService(callA)), Long.MAX_VALUE,
+                new SkillStore.VideoTurn(jobs, a, jobs.generation(a), idA));
+        SkillVideoFacts secondContract = SkillVideoFacts.parseSupplement("""
+                提交: POST https://second.example.com/v1/submit
+                提交请求编码: application/json
+                提示词字段: prompt
+                提交响应ID: job_id
+                查询: POST /v1/jobs/status
+                查询请求ID字段: job
+                查询响应ID: id
+                状态字段: state
+                状态映射: success=completed,running=running
+                下载: GET /v1/jobs/{id}/content
+                """);
+        SkillStore.Detail pending = store.replaceVideoContract(store.detail(name), secondContract);
+        SkillStore.Detail next = store.configureCustomService(pending, secondOrigin + "/v1/submit", secondKey);
+        store.activateReplacement(next);
+
+        SkillStore reopened = videoStore(root);
+        SkillVideoJobs restoredJobs = new SkillVideoJobs(journal, clock::get, transport);
+        SkillVideoJobs.Job running = restoredJobs.list(a).get(0);
+        var callB = AiSkills.match(AiSkills.Entry.CONTACT, "/镜头动画 山谷", reopened);
+        UUID idB = UUID.randomUUID();
+        reopened.executeCustomService(callB, reopened.approveCustomService(reopened.previewCustomService(callB)), Long.MAX_VALUE,
+                new SkillStore.VideoTurn(restoredJobs, b, restoredJobs.generation(b), idB));
+        assertThrows(SkillVideoJobs.Failure.class, () -> reopened.openVideoAccess(restoredJobs, b, running));
+        SkillVideoJobs.Job newer = restoredJobs.list(b).get(0);
+        assertEquals(SkillVideoJobs.State.RUNNING, restoredJobs.refresh(a, idA,
+                reopened.openVideoAccess(restoredJobs, a, running), Long.MAX_VALUE).state());
+        assertEquals(SkillVideoJobs.State.RUNNING, restoredJobs.refresh(b, idB,
+                reopened.openVideoAccess(restoredJobs, b, newer), Long.MAX_VALUE).state());
+        assertEquals(java.util.List.of("POST " + firstOrigin + "/v1/submit", "POST " + secondOrigin + "/v1/submit",
+                "GET " + firstOrigin + "/v1/jobs/job_a", "POST " + secondOrigin + "/v1/jobs/status"), sent);
+        try (var files = Files.list(journal.toPath())) {
+            for (var file : files.filter(Files::isRegularFile).toList()) {
+                String bytes = new String(Files.readAllBytes(file), java.nio.charset.StandardCharsets.ISO_8859_1);
+                assertFalse(bytes.contains(firstKey) || bytes.contains(secondKey));
+            }
+        }
+    }
+
     @Test public void onlyValidatedTrialPublishesAndReplacementKeepsOnlyTheCurrentDocuments() throws Exception {
         File root = temp.newFolder();
         SkillStore store = new SkillStore(root, SkillServices.forContext(RuntimeEnvironment.getApplication()));

@@ -24,7 +24,9 @@ final class SkillVideoReference {
     private static final Pattern SUBMIT_LINE = Pattern.compile(
             "(?i)^(?:提交|提交接口|提交地址|submit)\\s*[:：]\\s*`?POST\\s+");
     private static final Pattern STATUS_LINE = Pattern.compile(
-            "(?i)^(?:查询|查询接口|状态查询|status|statusroute)\\s*[:：]\\s*`?GET\\s+");
+            "(?i)^(?:查询|查询接口|状态查询|status|statusroute)\\s*[:：]\\s*`?(GET|POST)\\s+");
+    private static final Pattern SUBMITTED_STATUS_LINE = Pattern.compile(
+            "(?i)^(?:查询响应地址字段|查询地址字段|提交响应查询地址字段|提交响应的查询地址字段|statusurlfield)\\s*[:：]");
     private static final Pattern CANCEL_LINE = Pattern.compile(
             "(?i)^(?:取消|取消接口|cancel)\\s*[:：]\\s*`?(?:POST|DELETE)\\s+");
     private static final Pattern DOWNLOAD_LINE = Pattern.compile(
@@ -64,7 +66,13 @@ final class SkillVideoReference {
                         || address.startsWith("/") && !address.startsWith("//");
             }
             Matcher status = STATUS_LINE.matcher(text);
-            if (status.find()) polling |= TASK_ID.matcher(referenceAddress(text.substring(status.end()))).find();
+            if (status.find()) {
+                String address = referenceAddress(text.substring(status.end()));
+                polling |= "POST".equalsIgnoreCase(status.group(1))
+                        ? address.startsWith("/") || address.regionMatches(true, 0, "https://", 0, 8)
+                        : TASK_ID.matcher(address).find();
+            }
+            polling |= SUBMITTED_STATUS_LINE.matcher(text).find();
             if (submit && polling) return true;
         }
         return false;
@@ -215,6 +223,12 @@ final class SkillVideoReference {
             case "状态字段", "statefield", "statusfield" -> {
                 if (section == Section.STATUS) fact("状态字段", right);
             }
+            case "查询响应地址字段", "查询地址字段", "提交响应查询地址字段", "提交响应的查询地址字段", "statusurlfield" -> {
+                if (section == Section.CREATE || section == Section.STATUS) fact("查询响应地址字段", right);
+            }
+            case "查询请求id字段", "查询postid字段", "查询post任务id字段", "statuspostidfield" -> {
+                if (section == Section.STATUS) fact("查询 POST 任务 ID 字段", right);
+            }
             case "状态映射", "statemap", "statusmap" -> {
                 if (section == Section.STATUS) fact("状态映射", right);
             }
@@ -238,6 +252,7 @@ final class SkillVideoReference {
         String method = "";
         String url = "";
         String encoding = "";
+        String statusPostId = "";
         boolean multipart = false;
         boolean body = false;
         List<String> prompts = new ArrayList<>();
@@ -270,11 +285,13 @@ final class SkillVideoReference {
             } else if (List.of("-d", "--data", "--data-raw", "--data-binary", "--json").contains(token)) {
                 String data = safe(argument(words, ++index));
                 if (data.startsWith("@")) throw invalid();
+                if (section == Section.STATUS && body) statusPostId = "";
                 if (token.equals("--json")) encoding = chooseEncoding(encoding, SkillVideoFacts.JSON_ENCODING);
                 if (data.startsWith("{")) {
                     JSONObject example = SkillAuthoring.readObject(data, 16_000, 192);
                     if (example.opt("prompt") instanceof String) addPrompt(prompts, "prompt");
                     if (example.opt("text_prompt") instanceof String) addPrompt(prompts, "text_prompt");
+                    if (section == Section.STATUS && !body) statusPostId = statusExampleField(example);
                 }
                 body = true;
             } else if (List.of("-s", "-S", "-sS", "-Ss", "--silent", "--show-error").contains(token)) {
@@ -289,6 +306,10 @@ final class SkillVideoReference {
         if (method.isEmpty()) method = body ? "POST" : "GET";
         if (!List.of("POST", "GET", "DELETE").contains(method)) throw invalid();
         Section role = section == Section.NONE && method.equals("POST") ? Section.CREATE : section;
+        if (role == Section.STATUS && method.equals("POST")) {
+            if (multipart || !SkillVideoFacts.JSON_ENCODING.equals(encoding)) return;
+            if (!statusPostId.isEmpty()) fact("查询 POST 任务 ID 字段", statusPostId);
+        }
         if (role != Section.NONE) operation(role, method, url);
         if (role == Section.CREATE) {
             if (multipart) encoding = SkillVideoFacts.MULTIPART_ENCODING;
@@ -307,6 +328,10 @@ final class SkillVideoReference {
             documentedSubmit = true;
             return;
         }
+        if (role == Section.STATUS && verb.equals("POST")) {
+            fact("查询", "POST " + address);
+            return;
+        }
         if (role == Section.STATUS || role == Section.DOWNLOAD) {
             if (!verb.equals("GET")) throw invalid();
         } else if (role == Section.CANCEL && !verb.equals("POST") && !verb.equals("DELETE")) throw invalid();
@@ -315,6 +340,14 @@ final class SkillVideoReference {
         if (role == Section.STATUS) fact("查询", "GET " + template);
         else if (role == Section.DOWNLOAD) fact("下载", "GET " + template);
         else if (role == Section.CANCEL) fact("取消", verb + " " + template);
+    }
+
+    private static String statusExampleField(JSONObject example) {
+        if (example.length() != 1) return "";
+        String field = example.keys().next();
+        return example.opt(field) instanceof String && field.matches("[A-Za-z][A-Za-z0-9_-]{0,31}")
+                && List.of("id", "taskid", "jobid", "videoid", "requestid").contains(key(field))
+                ? field : "";
     }
 
     private void fact(String label, String value) {
