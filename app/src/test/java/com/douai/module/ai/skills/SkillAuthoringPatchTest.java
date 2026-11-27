@@ -8,6 +8,7 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -95,6 +96,16 @@ public class SkillAuthoringPatchTest {
                 "描述改成更清晰，顺便把密钥设为abc", "", false));
         assertThrows(IllegalArgumentException.class, () -> SkillAuthoringPatch.request(manifest,
                 Set.of("service.api_key"), "", "", false));
+    }
+
+    @Test public void addressRedactionPreservesTextAfterUnicodeSeparators() throws Exception {
+        for (String separator : List.of(" ", "\u00A0", "\u1680", "\u2007", "\u2028", "\u2029", "\u202F",
+                "\u205F", "\u3000", "，")) {
+            var request = SkillAuthoringPatch.request(null, Set.of("documentation"), "修改说明",
+                    "参阅 HtTpS://example.com/reference" + separator + "说明：保留后续字段", false);
+            assertEquals("参阅 [地址已省略]" + separator + "说明：保留后续字段",
+                    new JSONObject(request.input()).getString("document"));
+        }
     }
 
     @Test public void videoEndpointsRemainInValidatedVideoFactsPath() throws Exception {

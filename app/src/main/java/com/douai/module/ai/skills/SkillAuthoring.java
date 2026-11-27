@@ -164,6 +164,10 @@ public final class SkillAuthoring {
             + "(?:(?:按|根据|照着|参考)(?:上面|上文|前面|刚才)(?:的)?(?:技能|配置|字段)?(?:资料|内容|说明|参数)[，,\\s]*"
             + "(?:帮我\\s*)?(?:来)?(?:填写|填好|填上|补齐)(?:字段|配置|草稿)?"
             + "|把(?:当前|上面|刚才)?(?:的)?(?:技能)?(?:字段|配置|参数)\\s*(?:都)?填(?:好|上))" + END);
+    private static final Pattern CURRENT_VIDEO_ONLY_FILL = Pattern.compile("^" + PREFIX
+            + "(?:按|根据|照着|参考)(?:上面|上文|前面|刚才)(?:的)?(?:视频)?接口资料[，,\\s]*"
+            + "(?:帮我\\s*)?(?:填写|填好|填上|补齐)\\s*(?:当前|这份|这个)(?:的)?\\s*视频(?:技能|草稿)"
+            + "(?:\\s*[，,、]\\s*(?:也)?(?:不要|别)(?:新建(?:技能)?|调用(?:任何|真实)?接口)){0,2}" + END);
     private static final Pattern VIDEO_SOURCE_SUFFIX = Pattern.compile(
             "[，,\\s]+(?:按(?:你(?:刚才)?发(?:给我)?的|上面(?:的)?|刚才(?:的)?)(?:视频)?接口资料(?:填写|补齐)?"
                     + "|沿用(?:已配置的)?(?:技能)?\\s*/([\\p{L}\\p{N}_-]{1,24})(?:\\s*的(?:视频)?服务)?)"
@@ -243,6 +247,14 @@ public final class SkillAuthoring {
         String body = creationBody(sentence);
         String request = body == null ? sentence : body;
         return editorSentence(request) && NATURAL_SKILL_FILL.matcher(request).matches();
+    }
+
+    public static boolean fillsCurrentVideoDraftOnly(String text) {
+        if (text == null || text.length() > MAX_TYPED) return false;
+        String sentence = text.trim();
+        String body = creationBody(sentence);
+        String request = body == null ? sentence : body;
+        return editorSentence(request) && CURRENT_VIDEO_ONLY_FILL.matcher(request).matches();
     }
 
     public static FieldEdit fieldEdit(String request) {

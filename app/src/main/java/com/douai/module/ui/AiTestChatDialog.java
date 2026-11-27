@@ -863,7 +863,12 @@ final class AiTestChatDialog extends Dialog {
             } catch (RuntimeException unavailable) { /* A session without a local transcript can still reply. */ }
         }
         boolean installReference = SkillAuthoring.isReferencedVideoInstall(commandText);
-        boolean naturalFill = skillDraft != null && SkillAuthoring.naturallyFillsSkillFields(commandText);
+        boolean currentVideoOnly = SkillAuthoring.fillsCurrentVideoDraftOnly(commandText);
+        if (currentVideoOnly && retryAnswer == null && selectedMaterial == null && !previewingVideoDraft()) {
+            showAuthoringStatus("当前没有正在编写的视频草稿。");
+            return;
+        }
+        boolean naturalFill = currentVideoOnly || skillDraft != null && SkillAuthoring.naturallyFillsSkillFields(commandText);
         boolean usesReference = SkillAuthoring.usesPreviousVideoMaterial(commandText);
         if (skillEntry != null && retryAnswer == null && selectedMaterial == null && skillDraft != null
                 && !previewingVideoDraft() && !installReference && (naturalFill || usesReference)) {
@@ -1912,7 +1917,8 @@ final class AiTestChatDialog extends Dialog {
             return;
         }
         if (materials.isEmpty()) {
-            if (!install && naturalFill && chooseDraftFieldSource(prompt, false)) return;
+            if (!install && naturalFill && !SkillAuthoring.fillsCurrentVideoDraftOnly(prompt)
+                    && chooseDraftFieldSource(prompt, false)) return;
             if (!install && previewingVideoDraft()) {
                 showAuthoringStatus(skillDraftFacts != null && skillDraftFacts.isComplete()
                         ? "接口字段已填写，可以查看草稿配置。"

@@ -35,8 +35,9 @@ public final class SkillAuthoringPatch {
     private static final int MAX_ENDPOINT = 1024;
     private static final int MAX_MODEL = 120;
     private static final int MAX_EVIDENCE = 1200;
+    // Spell out Unicode White_Space so the JVM and Android agree without an unsupported flag.
     private static final Pattern ADDRESS = Pattern.compile("(?i)(?:[a-z][a-z0-9+.-]*://|(?:https?|file|content|data|javascript)\\h*:)"
-            + "[^\\s|<>\\\"'`，。；！？、）】」』”’]+", Pattern.UNICODE_CHARACTER_CLASS);
+            + "[^\\p{Z}\\x09-\\x0D\\x85|<>\\\"'`，。；！？、）】」』”’]+", Pattern.UNICODE_CASE);
     private static final Pattern ADDRESS_MARKER = Pattern.compile("(?i)[a-z][a-z0-9+.-]*://|(?:https?|file|content|data|javascript)\\h*:");
     private static final Pattern NUMBER = Pattern.compile("[+-]?(?:0|[1-9][0-9]{0,8})(?:\\.[0-9]{1,6})?");
     private static final Pattern MODEL = Pattern.compile("[\\p{L}\\p{N}][\\p{L}\\p{N} ._/@:+()-]{0,119}");

@@ -2726,6 +2726,132 @@ public final class AiTestChatDialogTest {
                 session.transcriptMemory.conversationKey())).isEmpty());
     }
 
+    @Test public void workExplicitCurrentVideoFillUsesDocsWithoutCreatingOrCallingASkill() throws Exception {
+        assertExplicitCurrentVideoFillUsesDocsWithoutCreatingOrCallingASkill(AiSkills.Entry.WORK);
+    }
+
+    @Test public void contactExplicitCurrentVideoFillUsesDocsWithoutCreatingOrCallingASkill() throws Exception {
+        assertExplicitCurrentVideoFillUsesDocsWithoutCreatingOrCallingASkill(AiSkills.Entry.CONTACT);
+    }
+
+    private void assertExplicitCurrentVideoFillUsesDocsWithoutCreatingOrCallingASkill(AiSkills.Entry entry) throws Exception {
+        FakeSession author = new FakeSession();
+        author.transcriptMemory = entry == AiSkills.Entry.CONTACT
+                ? TestChatMemory.messageConversation(activity, restoreConfiguration())
+                : new TestChatMemory(activity, restoreConfiguration());
+        author.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "当前轮询").toString());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(author, ChatImageLoader::thumbnail, entry, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/技能 生成视频技能");
+        finishOfflineChatTurn();
+        TestChatMemory.SkillDraft original = author.transcriptMemory.readSkillDraft();
+        assertNotNull(original);
+        assertFalse(original.authoringId().isBlank());
+        assertTrue(lastAnswer().contains("技能草案 /当前轮询"));
+
+        String ask = "请显示这家视频服务的接口说明";
+        author.answer = """
+                提交: POST https://documented-video.example.com/v1/jobs
+                提交请求编码: application/json
+                提示词字段: prompt
+                提交响应ID: data.id
+                查询: GET /jobs/{id}
+                状态字段: data.status
+                状态映射: working=running,succeeded=completed
+                下载: GET /media/{id}
+                """;
+        submit(ask);
+        finishOfflineChatTurn();
+        assertEquals(author.answer, lastAnswer());
+
+        submit("按上面的接口资料帮我填写当前视频技能，不要新建，也不要调用接口。");
+        if (!worker.tasks.isEmpty()) worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of(ask), author.prompts);
+        assertEquals(1, author.skillInputs.size());
+        TestChatMemory.SkillDraft updated = author.transcriptMemory.readSkillDraft();
+        assertEquals(original.authoringId(), updated.authoringId());
+        JSONObject definition = new JSONObject(updated.definition());
+        assertEquals("当前轮询", definition.getString("name"));
+        assertEquals("video", definition.getString("outputType"));
+        assertFalse(definition.has("http"));
+        JSONObject fields = new JSONObject(updated.videoFacts());
+        assertEquals("https://documented-video.example.com/v1/jobs", fields.getString("submitEndpoint"));
+        assertEquals("data.id", fields.getString("submitIdField"));
+        assertEquals("/jobs/{id}", fields.getString("statusPath"));
+        assertEquals("data.status", fields.getString("stateField"));
+        assertEquals("", fields.optString("statusIdField"));
+        assertTrue(SkillVideoFacts.fromJson(fields).missing().contains("查询响应任务 ID 字段"));
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+        assertTrue(store.selectionCatalog().isEmpty());
+
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = entry == AiSkills.Entry.CONTACT
+                ? TestChatMemory.messageConversation(activity, restoreConfiguration())
+                : new TestChatMemory(activity, restoreConfiguration());
+        reopen(restored, ChatImageLoader::thumbnail, entry, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(updated, restored.transcriptMemory.readSkillDraft());
+        assertTrue(text("ai.chat.skill_editor").getText().toString().contains("正在编写 /当前轮询"));
+        assertTrue(restored.skillInputs.isEmpty());
+        assertTrue(restored.prompts.isEmpty());
+        assertTrue(store.pending().isEmpty());
+        assertEquals(0, submits.get());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(entry, restored.transcriptMemory.conversationKey())).isEmpty());
+    }
+
+    @Test public void explicitCurrentVideoFillDoesNotUseGenericMaterialOrCreateMissingDraft() throws Exception {
+        FakeSession author = new FakeSession();
+        author.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(author, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        String request = "按上面的接口资料帮我填写当前视频技能，不要新建，也不要调用接口。";
+        submit(request);
+        ShadowLooper.idleMainLooper();
+        assertTrue(worker.tasks.isEmpty());
+        assertNull(author.transcriptMemory.readSkillDraft());
+        assertEquals(0, messageCount());
+        assertTrue(author.skillInputs.isEmpty());
+        assertTrue(author.prompts.isEmpty());
+
+        author.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "当前轮询").toString());
+        submit("/技能 生成视频技能");
+        finishOfflineChatTurn();
+        TestChatMemory.SkillDraft original = author.transcriptMemory.readSkillDraft();
+        assertNotNull(original);
+        author.answer = "简介：这是一份普通的文案整理说明。";
+        String ask = "请展示普通文案说明";
+        submit(ask);
+        finishOfflineChatTurn();
+        assertEquals(author.answer, lastAnswer());
+        int rows = messageCount();
+        submit(request);
+        ShadowLooper.idleMainLooper();
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals(rows, messageCount());
+        assertEquals(original, author.transcriptMemory.readSkillDraft());
+        assertEquals(List.of(SkillAuthoring.DESIGN_INSTRUCTION), author.skillInstructions);
+        assertEquals(List.of(ask), author.prompts);
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertEquals(0, submits.get());
+        assertTrue(jobs.list(new SkillVideoJobs.Scope(AiSkills.Entry.WORK,
+                author.transcriptMemory.conversationKey())).isEmpty());
+    }
+
     @Test public void contactNaturalDocsAndSeparateFieldsStayInOneVideoDraftAcrossReentry() throws Exception {
         FakeSession contact = new FakeSession();
         contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
