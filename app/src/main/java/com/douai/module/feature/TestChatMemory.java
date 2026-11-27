@@ -43,11 +43,11 @@ public final class TestChatMemory {
     private static final int MAX_ARTIFACT_PAYLOAD = 48 * 1024;
     private static final int MAX_ARTIFACT_BYTES = 1024 * 1024;
     private static final String DECLARATION_ARTIFACT = "skill_json";
-    private static final int SKILL_DRAFT_VERSION = 1;
+    private static final int SKILL_DRAFT_VERSION = 2;
     private static final int MAX_DRAFT_TEXT_BYTES = 48 * 1024;
     private static final int MAX_DRAFT_ID_BYTES = 36;
     private static final int MAX_DRAFT_NAME_BYTES = MAX_SETTINGS_NAME * 4;
-    private static final int MAX_DRAFT_FILE_BYTES = 2 * MAX_DRAFT_TEXT_BYTES + MAX_DRAFT_ID_BYTES
+    private static final int MAX_DRAFT_FILE_BYTES = 2 * MAX_DRAFT_TEXT_BYTES + 2 * MAX_DRAFT_ID_BYTES + Integer.BYTES
             + MAX_DRAFT_NAME_BYTES + 5 * Integer.BYTES;
     private static final String SKILL_DRAFT_SUFFIX = ".skill-draft";
     private static final Pattern DRAFT_NAME = Pattern.compile("[\\p{L}\\p{N}_-]{1,24}");
@@ -82,7 +82,12 @@ public final class TestChatMemory {
     public String conversationKey() { return file.getName().substring(0, 64); }
 
     /** Active local authoring state. Empty pending fields mean the preview has not been saved to the catalog. */
-    public record SkillDraft(String definition, String videoFacts, String pendingName, String pendingDraftId) {}
+    public record SkillDraft(String definition, String videoFacts, String pendingName, String pendingDraftId,
+                             String authoringId) {
+        public SkillDraft(String definition, String videoFacts, String pendingName, String pendingDraftId) {
+            this(definition, videoFacts, pendingName, pendingDraftId, "");
+        }
+    }
 
     public SkillDraft readSkillDraft() {
         synchronized (IO_LOCK) { return rounds == 0 ? null : readStoredSkillDraft(); }
@@ -107,6 +112,7 @@ public final class TestChatMemory {
                     text(output, next.videoFacts());
                     text(output, next.pendingName());
                     text(output, next.pendingDraftId());
+                    text(output, next.authoringId());
                     output.flush();
                     stream.getFD().sync();
                 }
@@ -123,9 +129,11 @@ public final class TestChatMemory {
     private SkillDraft readStoredSkillDraft() {
         if (!skillDraftFile.isFile() || skillDraftFile.length() > MAX_DRAFT_FILE_BYTES) return null;
         try (DataInputStream input = new DataInputStream(new java.io.FileInputStream(skillDraftFile))) {
-            if (input.readInt() != SKILL_DRAFT_VERSION) return null;
+            int format = input.readInt();
+            if (format != 1 && format != SKILL_DRAFT_VERSION) return null;
             SkillDraft draft = new SkillDraft(draftText(input, MAX_DRAFT_TEXT_BYTES), draftText(input, MAX_DRAFT_TEXT_BYTES),
-                    draftText(input, MAX_DRAFT_NAME_BYTES), draftText(input, MAX_DRAFT_ID_BYTES));
+                    draftText(input, MAX_DRAFT_NAME_BYTES), draftText(input, MAX_DRAFT_ID_BYTES),
+                    format == 1 ? "" : draftText(input, MAX_DRAFT_ID_BYTES));
             return input.read() == -1 && validSkillDraft(draft) ? draft : null;
         } catch (IOException | RuntimeException invalid) {
             return null;
@@ -143,12 +151,16 @@ public final class TestChatMemory {
     private static boolean validSkillDraft(SkillDraft draft) {
         if (!validDraftText(draft.definition(), MAX_DRAFT_TEXT_BYTES) || !validDraftText(draft.videoFacts(), MAX_DRAFT_TEXT_BYTES)
                 || !validDraftText(draft.pendingName(), MAX_DRAFT_NAME_BYTES)
-                || !validDraftText(draft.pendingDraftId(), MAX_DRAFT_ID_BYTES)) return false;
+                || !validDraftText(draft.pendingDraftId(), MAX_DRAFT_ID_BYTES)
+                || !validDraftText(draft.authoringId(), MAX_DRAFT_ID_BYTES)
+                || (!draft.authoringId().isEmpty() && !canonicalDraftId(draft.authoringId()))) return false;
         if (draft.pendingName().isEmpty()) return draft.pendingDraftId().isEmpty() && !draft.definition().isEmpty();
-        if (!DRAFT_NAME.matcher(draft.pendingName()).matches() || draft.pendingDraftId().length() != MAX_DRAFT_ID_BYTES) {
-            return false;
-        }
-        try { return UUID.fromString(draft.pendingDraftId()).toString().equals(draft.pendingDraftId()); }
+        return DRAFT_NAME.matcher(draft.pendingName()).matches() && canonicalDraftId(draft.pendingDraftId());
+    }
+
+    private static boolean canonicalDraftId(String id) {
+        if (id.length() != MAX_DRAFT_ID_BYTES) return false;
+        try { return UUID.fromString(id).toString().equals(id); }
         catch (IllegalArgumentException invalid) { return false; }
     }
 

@@ -39,6 +39,10 @@ public final class SkillVideoFacts {
     private static final String PROMPT = "promptField";
     private static final String STATES = "states";
     private static final String PROVENANCE = "provenance";
+    private static final String FIXED_GET = "fixed_get";
+    private static final String RESPONSE_URL_GET = "response_url_get";
+    private static final String JSON_POST = "json_post";
+    private static final Set<String> STATE_NAMES = Set.of("queued", "running", "completed", "failed", "cancelled");
     static final String JSON_ENCODING = "application/json";
     static final String MULTIPART_ENCODING = "multipart/form-data";
     static final String URLENCODED_ENCODING = "application/x-www-form-urlencoded";
@@ -54,6 +58,7 @@ public final class SkillVideoFacts {
         ENCODING("submitEncoding", "提交请求编码"),
         MIN_POLL("minPollSeconds", ""),
         SUBMIT_ID("submitIdField", "提交响应任务 ID 字段"),
+        QUERY_MODE("queryMode", "查询方式"),
         STATUS("statusPath", "查询 GET 路径（含 {id}）"),
         STATUS_URL("statusUrlField", "提交响应的查询地址字段"),
         STATUS_POST("statusPostPath", "查询 POST 路径"),
@@ -73,7 +78,8 @@ public final class SkillVideoFacts {
     public enum FieldType { TEXT, HTTPS_URL, JSON_FIELD, JSON_PATH, TASK_PATH, STATE_MAP, CANCEL_METHOD }
 
     public enum Source {
-        EMPTY("未填写"), DOCUMENT("文档提取"), REUSED_SKILL("已有技能"), MANUAL("手动填写"), STORED("已保存");
+        EMPTY("未填写"), DOCUMENT("文档提取"), REUSED_SKILL("已有技能"), MANUAL("手动填写"), STORED("已保存"),
+        CHAT_SUGGESTION("聊天资料 · 待核对");
         private final String label;
         Source(String label) { this.label = label; }
         public String label() { return label; }
@@ -94,6 +100,7 @@ public final class SkillVideoFacts {
             new FormSpec(Fact.ENCODING, Fact.ENCODING.missing, FieldType.TEXT, false),
             new FormSpec(null, PROMPT, "提示词字段", FieldType.JSON_FIELD, true),
             new FormSpec(Fact.SUBMIT_ID, Fact.SUBMIT_ID.missing, FieldType.JSON_PATH, true),
+            new FormSpec(Fact.QUERY_MODE, Fact.QUERY_MODE.missing, FieldType.TEXT, false),
             new FormSpec(Fact.STATUS, Fact.STATUS.missing, FieldType.TASK_PATH, true),
             new FormSpec(Fact.STATUS_URL, Fact.STATUS_URL.missing, FieldType.JSON_PATH, false),
             new FormSpec(Fact.STATUS_POST, Fact.STATUS_POST.missing, FieldType.TASK_PATH, false),
@@ -112,6 +119,7 @@ public final class SkillVideoFacts {
     private final String declarations;
     private final List<SkillManifest.ConfigField> config;
     private final Map<String, Source> provenance;
+    private static final List<Fact> QUERY_FIELDS = List.of(Fact.STATUS, Fact.STATUS_URL, Fact.STATUS_POST, Fact.STATUS_POST_ID);
 
     private SkillVideoFacts(Map<Fact, String> facts, Map<String, String> request, Map<String, String> states,
                            String declarations, List<SkillManifest.ConfigField> config,
@@ -133,6 +141,7 @@ public final class SkillVideoFacts {
             sources.put(Fact.MIN_POLL.key, Source.MANUAL);
         }
         if (!sources.keySet().containsAll(provenance.keySet())) throw invalid();
+        if (facts.containsKey(Fact.QUERY_MODE) && sources.get(Fact.QUERY_MODE.key) != Source.MANUAL) throw invalid();
         this.provenance = Collections.unmodifiableMap(sources);
         checkOrigins();
         String endpoint = facts.get(Fact.SUBMIT);
@@ -389,6 +398,90 @@ public final class SkillVideoFacts {
 
     public static SkillVideoFacts fromForm(Map<String, String> values) { return empty().withForm(values); }
 
+    public SkillVideoFacts asChatSuggestion() {
+        Map<String, Source> suggested = new LinkedHashMap<>(provenance);
+        for (FormSpec field : FORM) {
+            if (field.fact() != Fact.QUERY_MODE && !formValue(field).isEmpty()) {
+                suggested.put(field.id(), Source.CHAT_SUGGESTION);
+            }
+        }
+        return new SkillVideoFacts(facts, request, states, declarations, config, suggested, Source.STORED);
+    }
+
+    public boolean needsSubmissionVerification() {
+        Fact effective = facts.containsKey(Fact.SUBMIT) ? Fact.SUBMIT : Fact.SUBMIT_PATH;
+        return facts.containsKey(effective) && provenance.get(effective.key) == Source.CHAT_SUGGESTION;
+    }
+
+    public SkillVideoFacts applyGroundedPatch(Map<String, String> fields, Map<String, String> stateMappings, String queryMode) {
+        return applyGroundedPatch(fields, stateMappings, queryMode, fields == null ? Collections.emptySet() : fields.keySet());
+    }
+
+    /** Applies already grounded literals, with existing fields replaceable only where explicitly allowed. */
+    public SkillVideoFacts applyGroundedPatch(Map<String, String> fields, Map<String, String> stateMappings,
+                                              String queryMode, Set<String> replacements) {
+        Map<String, String> edits = fields == null ? Collections.emptyMap() : fields;
+        Map<String, String> mappings = stateMappings == null ? Collections.emptyMap() : stateMappings;
+        Set<String> overrides = replacements == null ? Collections.emptySet() : replacements;
+        if (edits.size() > FORM.size() || mappings.size() > MAX_STATES || !edits.keySet().containsAll(overrides)) throw invalid();
+        String selected = queryMode == null || queryMode.isEmpty() ? "" : checkedQueryMode(queryMode);
+        String intended = selected.isEmpty() ? queryMode() : selected;
+        Map<String, String> changes = new LinkedHashMap<>();
+        if (!selected.isEmpty()) changes.put(Fact.QUERY_MODE.key, selected);
+        int length = 0;
+        for (Map.Entry<String, String> item : edits.entrySet()) {
+            FormSpec spec = formSpec(item.getKey());
+            if (spec.fact() == Fact.ENCODING || spec.fact() == Fact.QUERY_MODE || STATES.equals(spec.id())) throw invalid();
+            String raw = item.getValue();
+            if (raw == null || raw.length() > MAX_NOTES - length || raw.trim().isEmpty()) throw invalid();
+            length += raw.length();
+            checkSecrets(raw);
+            String value = spec.fact() == null ? field(raw.trim()) : checked(spec.fact(), raw.trim());
+            String routeMode = queryModeFor(spec.fact());
+            if (!routeMode.isEmpty()) {
+                if (!intended.isEmpty() && !intended.equals(routeMode)) {
+                    throw new IllegalArgumentException("请明确选择要修改的查询方式");
+                }
+                intended = routeMode;
+            }
+            String prior = formValue(spec);
+            if (!prior.isEmpty() && !prior.equals(value)
+                    && (spec.fact() == null || !value.equals(facts.get(spec.fact())))
+                    && !overrides.contains(spec.id())) {
+                throw new IllegalArgumentException("已有接口字段需要明确指定修改");
+            }
+            changes.put(spec.id(), value);
+        }
+        Map<String, String> merged = new LinkedHashMap<>(states);
+        for (Map.Entry<String, String> mapping : mappings.entrySet()) {
+            String raw = mapping.getKey();
+            String normalized = mapping.getValue();
+            if (raw == null || normalized == null || !STATE_NAMES.contains(normalized)) throw invalid();
+            checkSecrets(raw);
+            String previous = merged.get(raw);
+            if (previous != null && !previous.equals(normalized)) {
+                throw new IllegalArgumentException("已有状态映射与新资料冲突，请核对该状态");
+            }
+            putState(merged, raw, normalized);
+        }
+        if (!merged.equals(states)) changes.put(STATES, stateLines(merged));
+        return withForm(changes);
+    }
+
+    public String explicitQueryMode() { return facts.getOrDefault(Fact.QUERY_MODE, ""); }
+
+    public String queryMode() {
+        if (!explicitQueryMode().isEmpty()) return explicitQueryMode();
+        String inferred = "";
+        for (Fact field : QUERY_FIELDS) {
+            if (!facts.containsKey(field)) continue;
+            String mode = queryModeFor(field);
+            if (!inferred.isEmpty() && !inferred.equals(mode)) return "";
+            inferred = mode;
+        }
+        return inferred;
+    }
+
     public SkillVideoFacts withMinimumPollSeconds(int seconds) {
         String value = checkedPollSeconds(seconds);
         if (value.equals(facts.get(Fact.MIN_POLL))) return this;
@@ -410,6 +503,11 @@ public final class SkillVideoFacts {
         Map<String, String> updatedRequest = new LinkedHashMap<>(request);
         Map<String, String> updatedStates = new LinkedHashMap<>(states);
         Map<String, Source> updatedSources = new LinkedHashMap<>(provenance);
+        String mode = changes.get(Fact.QUERY_MODE.key);
+        if (mode != null && mode.length() > MAX_NOTES) throw invalid();
+        if (mode != null && !mode.trim().isEmpty() && !mode.trim().equals(explicitQueryMode())) {
+            selectQueryMode(updatedFacts, updatedSources, checkedQueryMode(mode.trim()));
+        }
         int length = 0;
         for (Map.Entry<String, String> entry : changes.entrySet()) {
             FormSpec spec = formSpec(entry.getKey());
@@ -421,7 +519,13 @@ public final class SkillVideoFacts {
             String prior = formValue(spec);
             if (spec.fact() != null) {
                 if (!value.isEmpty()) value = checked(spec.fact(), value);
-                if (prior.equals(value)) continue;
+                if (prior.equals(value)) {
+                    if (!value.isEmpty() && submitLocation(spec.fact())
+                            && updatedSources.get(spec.id()) == Source.CHAT_SUGGESTION) {
+                        updatedSources.put(spec.id(), Source.MANUAL);
+                    }
+                    continue;
+                }
                 if (value.isEmpty()) updatedFacts.remove(spec.fact());
                 else updatedFacts.put(spec.fact(), value);
             } else if (PROMPT.equals(spec.id())) {
@@ -452,6 +556,7 @@ public final class SkillVideoFacts {
                     || spec.fact() == Fact.STATUS_POST_ID && facts.containsKey(Fact.STATUS_POST);
             if (spec.fact() == Fact.SUBMIT && facts.containsKey(Fact.SUBMIT_PATH)) required = false;
             if (spec.fact() == Fact.STATUS && otherStatusMode(Fact.STATUS)) required = false;
+            if (!explicitQueryMode().isEmpty() && explicitQueryMode().equals(queryModeFor(spec.fact()))) required = true;
             fields.add(new FormField(spec.id(), spec.label(), spec.type(), required, formValue(spec),
                     provenance.getOrDefault(spec.id(), Source.EMPTY)));
         }
@@ -461,7 +566,9 @@ public final class SkillVideoFacts {
     /** Names accepted for a direct chat edit. Encoding and authorization are evidence or settings only. */
     public static String chatEditableField(String label) {
         for (FormSpec spec : FORM) {
-            if (spec.fact() != Fact.ENCODING && spec.id().equalsIgnoreCase(label)) return spec.id();
+            if (spec.fact() != Fact.ENCODING && spec.fact() != Fact.QUERY_MODE && spec.id().equalsIgnoreCase(label)) {
+                return spec.id();
+            }
         }
         String normalized = label.replaceAll("[\\p{Z}\\s]", "").toLowerCase(Locale.ROOT)
                 .replaceFirst("^(?:当前的?|现有的?|已填写的|这个技能的|视频的|接口的)", "");
@@ -499,8 +606,12 @@ public final class SkillVideoFacts {
             }
             return "";
         }
+        return stateLines(states);
+    }
+
+    private static String stateLines(Map<String, String> mappings) {
         List<String> lines = new ArrayList<>();
-        states.forEach((raw, normalized) -> lines.add(raw + "=" + normalized));
+        mappings.forEach((raw, normalized) -> lines.add(raw + "=" + normalized));
         return String.join("\n", lines);
     }
 
@@ -587,13 +698,20 @@ public final class SkillVideoFacts {
         Map<String, Source> mergedSources = new LinkedHashMap<>(provenance);
         for (Map.Entry<Fact, String> item : newer.facts.entrySet()) {
             Fact field = item.getKey();
+            if (fillOnly && field == Fact.QUERY_MODE) continue;
+            Source offeredSource = newer.provenance.get(field.key);
+            if (fillOnly && submitLocation(field) && provenance.get(field.key) == Source.CHAT_SUGGESTION
+                    && item.getValue().equals(facts.get(field)) && verifiesSuggestion(offeredSource)) {
+                mergedSources.put(field.key, offeredSource);
+                continue;
+            }
             boolean enrichEncoding = field == Fact.ENCODING && canEnrichSubmissionEncoding(newer);
             if (fillOnly && (provenance.containsKey(field.key)
                     || field == Fact.RESULT_URL && facts.containsKey(Fact.DOWNLOAD)
                     || field == Fact.DOWNLOAD && facts.containsKey(Fact.RESULT_URL)
                     || otherStatusMode(field)) && !enrichEncoding) continue;
             mergedFacts.put(field, item.getValue());
-            mergedSources.put(field.key, newer.provenance.get(field.key));
+            mergedSources.put(field.key, offeredSource);
         }
         Map<String, String> mergedStates = new LinkedHashMap<>(states);
         if (!fillOnly || provenance.get(STATES) != Source.MANUAL) {
@@ -667,15 +785,22 @@ public final class SkillVideoFacts {
         List<String> missing = new ArrayList<>();
         for (FormSpec spec : FORM) {
             if (spec.fact() == Fact.SUBMIT && facts.containsKey(Fact.SUBMIT_PATH)) continue;
-            if (spec.fact() == Fact.STATUS && otherStatusMode(Fact.STATUS)) continue;
+            if (spec.fact() == Fact.STATUS && otherStatusMode(Fact.STATUS) && !FIXED_GET.equals(explicitQueryMode())) continue;
             if (spec.required() && spec.fact() != null && !facts.containsKey(spec.fact())) missing.add(spec.label());
+        }
+        if (needsSubmissionVerification()) {
+            missing.add(facts.containsKey(Fact.SUBMIT) ? "核对并确认提交 POST 地址" : "核对并确认提交 POST 路径");
         }
         if (!request.containsValue("argument")) missing.add("提示词字段");
         if (!states.containsValue("completed")) missing.add("状态映射中的完成状态");
-        if (facts.containsKey(Fact.STATUS_POST) && !facts.containsKey(Fact.STATUS_POST_ID)) missing.add(Fact.STATUS_POST_ID.missing);
-        if (!facts.containsKey(Fact.STATUS_POST) && facts.containsKey(Fact.STATUS_POST_ID)) missing.add(Fact.STATUS_POST.missing);
-        if ((facts.containsKey(Fact.STATUS) && otherStatusMode(Fact.STATUS))
-                || (facts.containsKey(Fact.STATUS_URL) && otherStatusMode(Fact.STATUS_URL))) {
+        if (RESPONSE_URL_GET.equals(explicitQueryMode()) && !facts.containsKey(Fact.STATUS_URL)) {
+            missing.add(Fact.STATUS_URL.missing);
+        }
+        if (JSON_POST.equals(explicitQueryMode()) || facts.containsKey(Fact.STATUS_POST) || facts.containsKey(Fact.STATUS_POST_ID)) {
+            if (!facts.containsKey(Fact.STATUS_POST)) missing.add(Fact.STATUS_POST.missing);
+            if (!facts.containsKey(Fact.STATUS_POST_ID)) missing.add(Fact.STATUS_POST_ID.missing);
+        }
+        if (QUERY_FIELDS.stream().anyMatch(field -> facts.containsKey(field) && otherStatusMode(field))) {
             missing.add("查询 GET 路径、提交响应地址字段和查询 POST 只能选择一种");
         }
         if (facts.containsKey(Fact.CANCEL) && !facts.containsKey(Fact.CANCEL_METHOD)) missing.add(Fact.CANCEL_METHOD.missing);
@@ -757,6 +882,7 @@ public final class SkillVideoFacts {
             case SUBMIT -> endpoint(value);
             case SUBMIT_PATH -> submitPath(value);
             case ENCODING -> encoding(value);
+            case QUERY_MODE -> checkedQueryMode(value);
             case MIN_POLL -> throw invalid();
             case SUBMIT_ID, STATUS_ID, STATUS_URL, STATE, RESULT_URL -> responsePath(value);
             case STATUS_POST -> route(value, false);
@@ -894,6 +1020,9 @@ public final class SkillVideoFacts {
     }
 
     private boolean otherStatusMode(Fact field) {
+        String mode = queryModeFor(field);
+        String selected = explicitQueryMode();
+        if (!mode.isEmpty() && !selected.isEmpty() && !mode.equals(selected)) return true;
         boolean post = facts.containsKey(Fact.STATUS_POST) || facts.containsKey(Fact.STATUS_POST_ID);
         return switch (field) {
             case STATUS -> facts.containsKey(Fact.STATUS_URL) || post;
@@ -903,8 +1032,38 @@ public final class SkillVideoFacts {
         };
     }
 
+    private static String queryModeFor(Fact field) {
+        if (field == Fact.STATUS) return FIXED_GET;
+        if (field == Fact.STATUS_URL) return RESPONSE_URL_GET;
+        if (field == Fact.STATUS_POST || field == Fact.STATUS_POST_ID) return JSON_POST;
+        return "";
+    }
+
+    private static String checkedQueryMode(String mode) {
+        if (!FIXED_GET.equals(mode) && !RESPONSE_URL_GET.equals(mode) && !JSON_POST.equals(mode)) throw invalid();
+        return mode;
+    }
+
+    private static void selectQueryMode(Map<Fact, String> fields, Map<String, Source> sources, String mode) {
+        for (Fact choice : QUERY_FIELDS) {
+            if (mode.equals(queryModeFor(choice))) {
+                if (!fields.containsKey(choice)) sources.remove(choice.key);
+            } else if (fields.remove(choice) != null) {
+                sources.put(choice.key, Source.MANUAL);
+            }
+        }
+    }
+
     private static boolean routeFact(Fact field) {
         return field == Fact.STATUS || field == Fact.STATUS_POST || field == Fact.CANCEL || field == Fact.DOWNLOAD;
+    }
+
+    private static boolean submitLocation(Fact field) {
+        return field == Fact.SUBMIT || field == Fact.SUBMIT_PATH;
+    }
+
+    private static boolean verifiesSuggestion(Source source) {
+        return source == Source.DOCUMENT || source == Source.MANUAL || source == Source.REUSED_SKILL;
     }
 
     private static void checkPath(String value, boolean taskTemplate) {

@@ -492,6 +492,108 @@ public final class SkillVideoFactsTest {
         assertEquals("", form(multiBody, "statusPostIdField").value());
     }
 
+    @Test public void groundedFieldsPreserveUnmentionedValuesAndRejectKnownConflictsAtomically() throws Exception {
+        SkillVideoFacts base = SkillVideoFacts.parse(SUBMIT + POLLING).withMinimumPollSeconds(11);
+        SkillVideoFacts filled = base.applyGroundedPatch(Map.of("label", "视频服务"),
+                Map.of("ready", "completed", "waiting", "queued"), null, java.util.Set.of());
+        assertEquals("fixed_get", filled.queryMode());
+        assertEquals(11, filled.minimumPollSeconds());
+        assertEquals("/v1/tasks/{id}", form(filled, "statusPath").value());
+        JSONObject states = filled.declaration().getJSONObject("video").getJSONObject("states");
+        assertEquals("queued", states.getString("waiting"));
+        assertEquals("completed", states.getString("done"));
+        assertEquals("completed", states.getString("ready"));
+
+        String before = filled.toJson().toString();
+        assertThrows(IllegalArgumentException.class, () -> filled.applyGroundedPatch(
+                Map.of("label", "另一个标签"), Map.of("waiting", "failed"), null));
+        assertThrows(IllegalArgumentException.class, () -> filled.applyGroundedPatch(
+                Map.of("statusIdField", "task.id"), Map.of(), "", java.util.Set.of()));
+        assertThrows(IllegalArgumentException.class, () -> filled.applyGroundedPatch(
+                Map.of("states", "done=failed"), Map.of(), null));
+        assertThrows(IllegalArgumentException.class, () -> filled.applyGroundedPatch(
+                Map.of("submitEncoding", "application/json"), Map.of(), null));
+        assertThrows(IllegalArgumentException.class, () -> filled.applyGroundedPatch(
+                Map.of("label", ""), Map.of(), null));
+        assertEquals(before, filled.toJson().toString());
+        SkillVideoFacts revised = filled.applyGroundedPatch(Map.of("statusIdField", "task.id"),
+                Map.of(), null, java.util.Set.of("statusIdField"));
+        assertEquals("task.id", form(revised, "statusIdField").value());
+        assertEquals(form(filled, "statusPath"), form(revised, "statusPath"));
+    }
+
+    @Test public void explicitlySelectedQueryModeClearsOnlyObsoleteSelectorsAndSurvivesRestore() throws Exception {
+        SkillVideoFacts base = SkillVideoFacts.parse(SUBMIT + POLLING);
+        assertThrows(IllegalArgumentException.class,
+                () -> base.applyGroundedPatch(Map.of("statusPostPath", "/jobs/progress"), Map.of(), null));
+        assertThrows(IllegalArgumentException.class,
+                () -> base.applyGroundedPatch(Map.of("statusPath", "/jobs/{id}"), Map.of(), "json_post"));
+        SkillVideoFacts incomplete = base.applyGroundedPatch(Map.of(), Map.of(), "json_post");
+        assertEquals("json_post", incomplete.explicitQueryMode());
+        assertFalse(incomplete.isComplete());
+        assertEquals("", form(incomplete, "statusPath").value());
+        assertEquals("data.task_id", form(incomplete, "statusIdField").value());
+        assertEquals("data.status", form(incomplete, "stateField").value());
+        assertEquals(form(base, "cancelPath"), form(incomplete, "cancelPath"));
+        assertEquals(form(base, "downloadPath"), form(incomplete, "downloadPath"));
+        assertTrue(incomplete.missing().stream().anyMatch(reason -> reason.contains("POST 路径")));
+        assertTrue(form(incomplete, "statusPostIdField").required());
+
+        SkillVideoFacts reopened = SkillVideoFacts.fromJson(incomplete.toJson()).fillMissingFrom(base);
+        assertEquals("json_post", reopened.queryMode());
+        assertEquals("", form(reopened, "statusPath").value());
+        SkillVideoFacts post = reopened.applyGroundedPatch(
+                Map.of("statusPostPath", "/jobs/progress", "statusPostIdField", "job_id"), Map.of(), null);
+        assertTrue(post.isComplete());
+        assertEquals("job_id", post.declaration().getJSONObject("video").getString("statusPostIdField"));
+        java.util.Map<String, String> manual = new java.util.LinkedHashMap<>();
+        for (SkillVideoFacts.FormField field : post.formFields()) {
+            if (field.source() == SkillVideoFacts.Source.MANUAL) manual.put(field.id(), field.value());
+        }
+        assertEquals(post.declaration().toString(), base.withForm(manual).fillMissingFrom(post).declaration().toString());
+
+        SkillVideoFacts dynamic = post.applyGroundedPatch(Map.of(), Map.of(), "response_url_get");
+        assertEquals("", form(dynamic, "statusPostPath").value());
+        assertEquals("", form(dynamic, "statusPostIdField").value());
+        assertTrue(form(dynamic, "statusUrlField").required());
+        assertFalse(dynamic.isComplete());
+        assertTrue(dynamic.applyGroundedPatch(Map.of("statusUrlField", "data.status_url"), Map.of(), null).isComplete());
+    }
+
+    @Test public void assistantLocationIsVisibleButNeedsExplicitVerificationAndDoesNotBypassOtherChecks() throws Exception {
+        String endpoint = "https://video.example.com:8443/v1/tasks";
+        SkillVideoFacts full = SkillVideoFacts.parse(SUBMIT + POLLING);
+        SkillVideoFacts suggested = SkillVideoFacts.fromJson(full.asChatSuggestion().toJson());
+        assertEquals(endpoint, form(suggested, "submitEndpoint").value());
+        assertEquals(SkillVideoFacts.Source.CHAT_SUGGESTION, form(suggested, "submitEndpoint").source());
+        assertTrue(suggested.needsSubmissionVerification());
+        assertFalse(suggested.isComplete());
+        assertThrows(IllegalArgumentException.class, suggested::declaration);
+        assertTrue(suggested.fillMissingFrom(full.asChatSuggestion()).needsSubmissionVerification());
+        SkillVideoFacts typed = suggested.applyGroundedPatch(Map.of("submitEndpoint", endpoint), Map.of(), null);
+        assertEquals(SkillVideoFacts.Source.MANUAL, form(typed, "submitEndpoint").source());
+        assertFalse(typed.needsSubmissionVerification());
+        assertTrue(typed.isComplete());
+        SkillVideoFacts sameProof = SkillVideoFacts.parseSupplement(
+                "提交: POST " + endpoint + "\n提交请求编码: application/json");
+        SkillVideoFacts verified = suggested.fillMissingFrom(sameProof);
+        assertEquals(SkillVideoFacts.Source.DOCUMENT, form(verified, "submitEndpoint").source());
+        assertTrue(verified.isComplete());
+
+        SkillVideoFacts noResponseId = SkillVideoFacts.parse((SUBMIT + POLLING).replace("Status ID: data.task_id", ""))
+                .asChatSuggestion().withForm(Map.of("submitEndpoint", endpoint));
+        assertFalse(noResponseId.needsSubmissionVerification());
+        assertTrue(noResponseId.missing().contains("查询响应任务 ID 字段"));
+        SkillVideoFacts relative = SkillVideoFacts.parseSupplement((SUBMIT + POLLING)
+                        .replace("https://video.example.com:8443/v1/tasks", "/v1/tasks")
+                        + "\n提交请求编码: multipart/form-data")
+                .asChatSuggestion();
+        assertTrue(relative.needsSubmissionVerification());
+        SkillVideoFacts relativeTyped = relative.withForm(Map.of("submitPath", "/v1/tasks"));
+        assertFalse(relativeTyped.needsSubmissionVerification());
+        assertFalse(relativeTyped.isComplete());
+    }
+
     private static SkillVideoFacts.FormField form(SkillVideoFacts facts, String id) {
         return facts.formFields().stream().filter(field -> field.id().equals(id)).findFirst().orElseThrow();
     }

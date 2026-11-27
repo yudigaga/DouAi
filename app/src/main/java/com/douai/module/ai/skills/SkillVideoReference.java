@@ -17,6 +17,8 @@ final class SkillVideoReference {
     private static final Pattern CURL = Pattern.compile("^\\s*(?:\\$\\s+)?curl(?:\\.exe)?(?:\\s+|$)");
     private static final Pattern BEARER = Pattern.compile("(?i)^Bearer\\s+\\$(?:[A-Za-z_][A-Za-z0-9_]{0,63}"
             + "|\\{[A-Za-z_][A-Za-z0-9_]{0,63}\\})$");
+    private static final Pattern BEARER_FORM_EXAMPLE = Pattern.compile(
+            "(?i)^Bearer\\s+你自己的(?:\\s*<?[A-Za-z][A-Za-z0-9_]{0,32}_API_KEY>?)?$");
     private static final Pattern AUTH_LINE = Pattern.compile("(?i)^\\s*(?:[-*]\\s+)?authorization\\s*[:：]\\s*(.*)$");
     private static final Pattern CONTENT_TYPE_LINE = Pattern.compile(
             "(?i)^(?:[-*+]\\s+)?\\*{0,2}Content[- ]Type\\*{0,2}\\s*[:：]\\*{0,2}\\s*(.+)$");
@@ -37,7 +39,7 @@ final class SkillVideoReference {
     private static final Pattern TASK_ID = Pattern.compile(
             "(?i)(?<=/)(?:\\{(?:id|video_?id|task_?id|job_?id)\\}|:(?:id|video_?id|task_?id|job_?id))(?=/|$)");
     private enum Section { NONE, CREATE, STATUS, CANCEL, DOWNLOAD }
-    private enum Table { NONE, PARAMETERS, STATES }
+    private enum Table { NONE, PARAMETERS, STATES, FORM }
 
     record Notes(String text, boolean documentedSubmit) {}
     private record Route(String method, String address) {}
@@ -53,6 +55,8 @@ final class SkillVideoReference {
     static boolean recognizable(String raw) {
         boolean submit = false;
         boolean polling = false;
+        boolean form = false;
+        int formFields = 0;
         for (String line : documentLines(raw)) {
             String text = line.trim();
             if (text.startsWith("#") && heading(text) != Section.NONE) {
@@ -73,7 +77,18 @@ final class SkillVideoReference {
                         : TASK_ID.matcher(address).find();
             }
             polling |= SUBMITTED_STATUS_LINE.matcher(text).find();
-            if (submit && polling) return true;
+            if (text.isEmpty() || text.startsWith("#")) form = false;
+            if (text.startsWith("|")) {
+                List<String> row = cells(text);
+                if (row.size() >= 2 && formHeader(row)) form = true;
+                else if (form && row.size() >= 2 && !placeholder(row.get(1))) {
+                    String label = formLabel(row.get(0));
+                    if (!label.isEmpty()) formFields++;
+                    submit |= "submit".equals(label);
+                    polling |= List.of("status_get", "status_url", "status_post").contains(label);
+                }
+            }
+            if (submit && polling || formFields >= 2 && (submit || polling)) return true;
         }
         return false;
     }
@@ -129,7 +144,7 @@ final class SkillVideoReference {
     private void documentLine(String line) {
         String text = line.trim();
         Matcher auth = AUTH_LINE.matcher(text);
-        if (auth.matches() && BEARER.matcher(plain(auth.group(1))).matches()) return;
+        if (auth.matches() && safeBearerExample(plain(auth.group(1)))) return;
         Matcher contentType = CONTENT_TYPE_LINE.matcher(text);
         if (section == Section.CREATE && contentType.matches()) {
             SkillVideoFacts.checkSecrets(text);
@@ -144,11 +159,13 @@ final class SkillVideoReference {
         } else if (text.startsWith("|")) {
             List<String> cells = cells(text);
             if (cells.size() >= 2 && "authorization".equals(key(cells.get(0)))
-                    && BEARER.matcher(cells.get(1)).matches()) return;
+                    && safeBearerExample(cells.get(1))) return;
             SkillVideoFacts.checkSecrets(line);
             if (cells.size() >= 2) {
                 SkillVideoFacts.checkSecrets(cells.get(0) + ": " + cells.get(1));
-                if (section != Section.NONE) table(cells);
+                if (formHeader(cells)) table = Table.FORM;
+                else if (table == Table.FORM) formRow(cells);
+                else if (section != Section.NONE) table(cells);
             }
             return;
         } else {
@@ -163,6 +180,88 @@ final class SkillVideoReference {
             if (id.find()) fact("提交响应ID", id.group(1));
         }
         normalized.append(line).append('\n');
+    }
+
+    private static boolean safeBearerExample(String value) {
+        return BEARER.matcher(value).matches() || BEARER_FORM_EXAMPLE.matcher(value).matches();
+    }
+
+    private static boolean formHeader(List<String> row) {
+        return List.of("页面字段", "配置字段", "字段", "配置项").contains(key(row.get(0)))
+                && List.of("填写内容", "填入内容", "填写值", "字段值", "值").contains(key(row.get(1)));
+    }
+
+    private static boolean placeholder(String value) {
+        return value.isEmpty() || value.matches("^(?:[-—]+$|(?:先|暂)?留空.*|不填写.*|上面填.*|见下.*|未知.*|未提供.*)");
+    }
+
+    private static String formLabel(String raw) {
+        return switch (key(raw).replaceFirst("[（(].*$", "")) {
+            case "名称", "服务名称", "服务名" -> "label";
+            case "提交post的公网https地址", "提交post公网https地址", "提交post地址",
+                    "提交https地址", "提交接口地址", "提交地址", "提交post路径", "提交路径" -> "submit";
+            case "提交请求编码", "提交编码", "提交请求格式", "contenttype" -> "encoding";
+            case "提示词字段", "提示词参数" -> "prompt";
+            case "提交响应任务id字段", "提交响应id字段", "提交任务id字段", "提交响应id" -> "submit_id";
+            case "查询get路径", "查询路径", "状态查询路径" -> "status_get";
+            case "查询post路径", "状态post路径" -> "status_post";
+            case "查询地址字段", "查询响应地址字段", "提交响应查询地址字段" -> "status_url";
+            case "查询post任务id字段", "查询请求id字段", "post查询请求任务id字段" -> "status_post_id";
+            case "查询响应任务id字段", "查询响应id字段", "查询任务id字段" -> "status_id";
+            case "查询响应状态字段", "查询状态字段", "状态字段" -> "status";
+            case "状态映射" -> "states";
+            case "状态映射中的完成状态", "完成状态值", "完成状态" -> "completed";
+            case "查询响应成品https地址字段", "查询响应成品地址字段", "查询成片地址字段",
+                    "成片地址字段", "成品地址字段" -> "result";
+            case "下载get路径", "下载路径" -> "download";
+            default -> "";
+        };
+    }
+
+    private void formRow(List<String> row) {
+        String raw = row.get(1);
+        if (placeholder(raw)) return;
+        String field = formLabel(row.get(0));
+        if (field.isEmpty()) {
+            if (section != Section.NONE) table(row);
+            return;
+        }
+        if ("encoding".equals(field)) {
+            String lower = raw.toLowerCase(Locale.ROOT);
+            String encoding = lower.contains("multipart/form-data") ? SkillVideoFacts.MULTIPART_ENCODING
+                    : lower.contains("application/x-www-form-urlencoded") ? SkillVideoFacts.URLENCODED_ENCODING
+                    : lower.contains("application/json") ? SkillVideoFacts.JSON_ENCODING : SkillVideoFacts.encoding(raw);
+            fact("提交请求编码", encoding);
+            return;
+        }
+        String value = formLiteral(raw);
+        if (value.isEmpty()) return;
+        switch (field) {
+            case "label" -> fact("服务名称", value);
+            case "submit" -> operation(Section.CREATE, "POST", value);
+            case "prompt" -> fact("提示词字段", value);
+            case "submit_id" -> fact("提交响应ID", value);
+            case "status_get" -> operation(Section.STATUS, "GET", value);
+            case "status_post" -> operation(Section.STATUS, "POST", value);
+            case "status_url" -> fact("查询响应地址字段", value);
+            case "status_post_id" -> fact("查询请求ID字段", value);
+            case "status_id" -> fact("查询响应ID", value);
+            case "status" -> fact("状态字段", value);
+            case "states" -> fact("状态映射", value);
+            case "completed" -> {
+                if (value.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")) fact("状态映射", value + "=completed");
+            }
+            case "result" -> fact("成品地址字段", value);
+            case "download" -> operation(Section.DOWNLOAD, "GET", value);
+            default -> { }
+        }
+    }
+
+    private static String formLiteral(String value) {
+        if (!value.startsWith("`")) return value;
+        int end = value.indexOf('`', 1);
+        if (end <= 1 || value.indexOf('`', end + 1) >= 0) return "";
+        return value.substring(1, end);
     }
 
     private static Section plainSection(String text) {
