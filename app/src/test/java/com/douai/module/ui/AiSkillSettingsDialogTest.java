@@ -277,6 +277,60 @@ public final class AiSkillSettingsDialogTest {
         }
     }
 
+    @Test public void executableJsonImportUsesHostPickerAndSavesOnlyAfterDraftConfirmation() throws Exception {
+        activity.finish();
+        MarkdownPickerActivity host = Robolectric.buildActivity(MarkdownPickerActivity.class).setup().get();
+        activity = host;
+        store = SkillStore.forContext(host);
+        reopenManager();
+        assertTrue(view("skills.import.json").performClick());
+        Intent intent = host.registry.intent;
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, intent.getAction());
+        assertTrue(intent.hasCategory(Intent.CATEGORY_OPENABLE));
+        assertTrue(List.of(intent.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)).contains("application/json"));
+        assertFalse(intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false));
+        assertEquals(Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                intent.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        assertEquals(0, intent.getFlags()
+                & (Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION));
+
+        String definition = """
+                {"schemaVersion":4,"name":"导入轮询","description":"按文档轮询视频服务","documentation":"输入画面说明",
+                 "instructions":"只按原任务 ID 读取成片。","capabilityId":"video_task","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"video","trial":{"input":"示例","expectedType":"video"},
+                 "http":{"version":1,"label":"视频接口","request":{"prompt":"argument"},"response":"job.id",
+                  "video":{"statusPath":"/jobs/{id}","downloadPath":"/media/{id}","idField":"job.id",
+                           "stateField":"job.status","states":{"done":"completed"}}}}
+                """;
+        Uri document = Uri.parse("content://skill-import/reviewed.json");
+        var resolver = org.robolectric.shadow.api.Shadow
+                .<org.robolectric.shadows.ShadowContentResolver>extract(host.getContentResolver());
+        resolver.registerInputStream(document, new ByteArrayInputStream(definition.getBytes(StandardCharsets.UTF_8)));
+        host.registry.dispatchResult(host.registry.code, Activity.RESULT_OK, new Intent().setData(document));
+        ShadowLooper.idleMainLooper();
+        AlertDialog preview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(preview.isShowing());
+        var summary = org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(preview);
+        String display = String.valueOf(summary.getMessage());
+        assertTrue(display.contains("/导入轮询"));
+        assertTrue(display.contains("按文档轮询视频服务"));
+        assertTrue(display.contains("视频"));
+        assertEquals("先保存为草稿", preview.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+
+        confirm(preview);
+        assertEquals(List.of("导入轮询"), store.pending().stream().map(SkillStore.Pending::name).toList());
+        assertTrue(store.list().isEmpty());
+        SkillStore.Detail saved = store.detail("导入轮询");
+        assertTrue(saved.pending());
+        assertNull(saved.customConfiguration());
+        assertEquals(SkillResult.Type.VIDEO, saved.outputType());
+        assertEquals("/jobs/{id}", saved.manifest().http().video().statusPath());
+        assertNotNull(view(skillRow("导入轮询")));
+    }
+
     @Test public void oneWordImageRequirementStaysPendingUntilExplicitConnectAfterAuthorization() throws Exception {
         enterAndGenerate("生图", "skills.generate.model");
         assertEquals(1, store.pending().size());

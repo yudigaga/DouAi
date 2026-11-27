@@ -1320,6 +1320,36 @@ public final class SkillStore {
         return draft.preview(raw);
     }
 
+    public static DraftPreview validateImportedDraft(String raw) {
+        JSONObject data = SkillAuthoring.readObject(raw, DRAFT_LIMIT);
+        SkillAuthoring.rejectEditorCredential(raw);
+        SkillManifest manifest = SkillManifest.parse(raw);
+        requireRegistrableName(manifest.name());
+        if (manifest.outputType() != SkillResult.Type.IMAGE && manifest.outputType() != SkillResult.Type.VIDEO) {
+            throw new IllegalArgumentException("此入口支持生图和视频技能");
+        }
+        if (manifest.capability() == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE
+                || data.has(SkillManifest.SERVICE_PREFILL) || data.has(SkillManifest.DRAFT_VALUES)
+                || manifest.http() != null && !manifest.http().suggestedEndpoint().isEmpty()) {
+            throw new IllegalArgumentException("技能文件不能包含服务地址、绑定或本机设置");
+        }
+        return manifestDraft(manifest).preview(raw);
+    }
+
+    /** Local import never runs a trial or enables a command. */
+    public Pending saveImportedDraft(DraftPreview preview) throws Exception {
+        if (preview == null || !validateImportedDraft(preview.definition()).equals(preview)) throw invalidDraft();
+        Draft draft = parseAuthored(preview.definition());
+        return locked(state -> {
+            if (state.getJSONObject("skills").has(draft.name()) || state.getJSONObject("drafts").has(draft.name())) {
+                throw new IllegalStateException("已有同名技能或草稿");
+            }
+            String reason = draft.outputType() == SkillResult.Type.IMAGE ? NEEDS_IMAGE_SERVICE
+                    : usesHttp(draft) ? NEEDS_CUSTOM_SERVICE : NEEDS_VIDEO_PROVIDER;
+            return savePending(state, draft, preview.definition(), reason, draft.manifest().readValues(null)).pending();
+        });
+    }
+
     public static String sanitizeModelAuthoringDefinition(String raw) {
         JSONObject definition = SkillAuthoring.readObject(raw, DRAFT_LIMIT);
         boolean changed = definition.has(SkillManifest.DRAFT_VALUES) || definition.has(SkillManifest.SERVICE_PREFILL);

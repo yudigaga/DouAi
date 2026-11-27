@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 4,
+  "name": "提示词生图",
+  "description": "按聊天中给出的提示词生成图片。",
+  "documentation": "输入主体、场景和希望的画面风格。配置并授权本机图片服务后即可使用。",
+  "instructions": "将本次输入作为图片提示词，保留主体、构图、风格和约束。",
+  "capabilityId": "image_generation",
+  "configFields": [],
+  "inputs": [
+    {"key": "argument", "type": "text", "required": true, "maxLength": 4000}
+  ],
+  "outputType": "image",
+  "trial": {"input": "水彩画，一只橘猫坐在窗边，午后暖光", "expectedType": "image"}
+}

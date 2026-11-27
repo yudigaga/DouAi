@@ -1,9 +1,13 @@
 package com.douai.module.ui;
 
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
+import android.content.ContextWrapper;
+import android.content.Intent;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputFilter;
@@ -30,15 +34,23 @@ import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
 import com.douai.module.ui.miuix.MiuixSettingsViews;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 final class AiSkillSettingsDialog implements AutoCloseable {
+    private static final int MAX_JSON_IMPORT_BYTES = 16 * 1024;
     private final Context context;
     private final SettingsStore settings;
     private final boolean miuix;
@@ -51,9 +63,12 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     private final TextView status;
     private final Button generate;
     private final Button simulate;
+    private final Button importJson;
     private final LinearLayout skillRows;
     private ChatCompletionClient.IsolatedTextRequest generation;
     private Future<?> generationTask;
+    private HostConfigFilePicker importPicker;
+    private Future<?> importTask;
     private boolean busy;
     private boolean closed;
     private AiMarkdownSkillSettingsDialog markdown;
@@ -84,6 +99,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         section(content, "自定义技能");
         skillRows = column();
         content.addView(skillRows, matchWrap());
+        importJson = button(content, "导入技能 JSON", "skills.import.json", this::chooseSkillJson);
         addSkillRow(content, "Markdown 技能", "导入并管理 SKILL.md", "skills.markdown.manage", this::showMarkdown);
 
         section(content, "生成或更新技能");
@@ -101,6 +117,98 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     }
 
     AlertDialog dialog() { return dialog; }
+
+    private void chooseSkillJson() {
+        if (!active() || busy || importPicker != null) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_MIME_TYPES,
+                        new String[]{"application/json", "text/plain", "application/octet-stream"})
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        setGenerating(true);
+        status.setText("");
+        importPicker = HostConfigFilePicker.launch(ownerActivity(), intent, uri -> {
+            importPicker = null;
+            if (!active()) return;
+            if (uri == null) {
+                setGenerating(false);
+                return;
+            }
+            runImport("正在读取并校验…", "无法导入，请核对技能 JSON 的格式、编码和大小",
+                    () -> SkillStore.validateImportedDraft(readSkillJson(uri)), this::reviewImportedDraft);
+        });
+        if (importPicker == null) {
+            setGenerating(false);
+            status.setText("无法打开系统文件选择器");
+        }
+    }
+
+    private String readSkillJson(Uri uri) throws IOException {
+        try (InputStream input = context.getContentResolver().openInputStream(uri)) {
+            if (input == null) throw new IOException();
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                if (Thread.currentThread().isInterrupted() || count == 0
+                        || count > MAX_JSON_IMPORT_BYTES - bytes.size()) {
+                    throw new IOException();
+                }
+                bytes.write(buffer, 0, count);
+            }
+            return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes.toByteArray())).toString();
+        }
+    }
+
+    private void reviewImportedDraft(SkillStore.DraftPreview preview) {
+        String summary = "/" + preview.name() + "\n" + preview.description()
+                + "\n输出 · " + outputLabel(preview.outputType());
+        status.setText("");
+        presenter.accept(builder("预览导入技能").setMessage(summary).setNegativeButton("取消", null)
+                .setPositiveButton("先保存为草稿", (child, which) -> {
+                    if (!active() || busy) return;
+                    runImport("正在保存草稿…", "无法保存导入草稿，请核对技能名称或现有草稿",
+                            () -> store.saveImportedDraft(preview),
+                            pending -> refreshAfterChange("已导入草稿 /" + pending.name()));
+                }).create(), null);
+    }
+
+    private <T> void runImport(String progress, String failure, Callable<T> action, Consumer<T> success) {
+        setGenerating(true);
+        status.setText(progress);
+        try {
+            importTask = worker.submit(() -> {
+                T imported = null;
+                try {
+                    if (!Thread.currentThread().isInterrupted()) imported = action.call();
+                } catch (Exception unavailable) {
+                    // The UI shows a fixed message instead of file content or provider errors.
+                }
+                T result = imported;
+                main.post(() -> {
+                    if (!active()) return;
+                    importTask = null;
+                    setGenerating(false);
+                    if (result == null) status.setText(failure);
+                    else success.accept(result);
+                });
+            });
+        } catch (RejectedExecutionException unavailable) {
+            setGenerating(false);
+            status.setText(failure);
+        }
+    }
+
+    private Activity ownerActivity() {
+        Activity owner = dialog.getOwnerActivity();
+        if (owner != null) return owner;
+        for (Context current = context; current instanceof ContextWrapper wrapper; current = wrapper.getBaseContext()) {
+            if (current instanceof Activity activity) return activity;
+            if (current == wrapper.getBaseContext()) break;
+        }
+        return null;
+    }
 
     private void showMarkdown() {
         if (!active() || busy || markdown != null) return;
@@ -241,6 +349,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         this.busy = busy;
         generate.setEnabled(!busy);
         simulate.setEnabled(!busy);
+        importJson.setEnabled(!busy);
         requirements.setEnabled(!busy);
     }
 
@@ -398,6 +507,8 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         }
         if (generation != null) generation.cancel();
         if (generationTask != null) generationTask.cancel(true);
+        if (importPicker != null) importPicker.close();
+        if (importTask != null) importTask.cancel(true);
         worker.shutdownNow();
     }
 }

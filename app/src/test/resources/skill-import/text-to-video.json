@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 4,
+  "name": "提示词生视频",
+  "description": "按画面描述提交视频任务，跟踪状态并在当前对话显示成片。",
+  "documentation": "输入主体、动作、环境和镜头要求。启用前需要核对本机选定的视频服务提交、查询和下载接口。",
+  "instructions": "保留本次输入的主体、动作顺序、镜头运动和限制，提交单次任务。使用原任务状态跟踪，并把下载的成片交给当前会话。",
+  "capabilityId": "video_task",
+  "configFields": [],
+  "inputs": [
+    {"key": "argument", "type": "text", "required": true, "maxLength": 2000}
+  ],
+  "outputType": "video",
+  "trial": {"input": "雨后的街道，镜头缓慢前移，路灯倒映在积水里", "expectedType": "video"}
+}

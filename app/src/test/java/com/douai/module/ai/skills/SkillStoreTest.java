@@ -15,6 +15,7 @@ import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.UUID;
 
@@ -35,6 +36,107 @@ public class SkillStoreTest {
         Context owner = app == null ? context : app;
         return new SkillStore(new File(owner.getNoBackupFilesDir(), "douai-ai/skills"),
                 SkillServices.forContext(owner), registry, SkillCustomService.forDevice());
+    }
+
+    @Test public void portableMediaFilesBecomePendingAndCanBeConfiguredThroughExistingFlows() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        var image = SkillStore.validateImportedDraft(importFixture("text-to-image.json"));
+        var video = SkillStore.validateImportedDraft(importFixture("text-to-video.json"));
+        assertEquals(SkillResult.Type.IMAGE, image.outputType());
+        assertEquals(SkillResult.Type.VIDEO, video.outputType());
+        assertTrue(store.settingsSnapshot().rows().isEmpty());
+        var imageDraft = store.saveImportedDraft(image);
+        var videoDraft = store.saveImportedDraft(video);
+
+        SkillStore reopened = videoStore(root);
+        assertEquals(imageDraft.draftId(), reopened.detail(image.name()).draftId());
+        assertEquals(videoDraft.draftId(), reopened.detail(video.name()).draftId());
+        assertEquals(SkillStore.NEEDS_VIDEO_PROVIDER, reopened.detail(video.name()).reason());
+        for (AiSkills.Entry entry : AiSkills.Entry.values()) {
+            assertThrows(AiSkills.CommandUnavailable.class, () -> AiSkills.match(entry, "/" + image.name() + " 暖光", reopened));
+            assertThrows(AiSkills.CommandUnavailable.class, () -> AiSkills.match(entry, "/" + video.name() + " 镜头前移", reopened));
+        }
+        assertThrows(IllegalStateException.class, () -> reopened.saveImportedDraft(image));
+        assertEquals(imageDraft.draftId(), reopened.detail(image.name()).draftId());
+        assertTrue(reopened.list().isEmpty());
+
+        SkillStore.Detail savedImage = reopened.saveConfiguration(image.name(), imageDraft.draftId(),
+                SkillServices.Adapter.MOCK_IMAGE, "", "", 0, "");
+        reopened.authorizeConfiguration(image.name(), savedImage.draftId(), savedImage.service());
+        for (AiSkills.Entry entry : AiSkills.Entry.values()) {
+            var call = AiSkills.match(entry, "/" + image.name() + " 暖光", reopened);
+            assertEquals(SkillResult.Type.IMAGE, call.command().outputType());
+            assertTrue(AiSkills.executeResult(call, reopened) instanceof SkillResult.Image);
+        }
+    }
+
+    @Test public void importedMediaRejectsBoundServicesAndRespectsExistingInstalledSkill() throws Exception {
+        SkillStore store = videoStore(temp.newFolder());
+        String name = "提示词生视频";
+        JSONObject manifest = new JSONObject(importFixture("text-to-video.json"));
+        JSONObject http = videoHttp();
+        manifest.put("http", http);
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.validateImportedDraft(manifest.toString()));
+        http.remove("suggestedEndpoint");
+        manifest.put("servicePrefill", new JSONObject().put("endpoint", "https://video.example.com/v1/jobs"));
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.validateImportedDraft(manifest.toString()));
+        manifest.remove("servicePrefill");
+        manifest.put("draftValues", new JSONObject());
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.validateImportedDraft(manifest.toString()));
+        manifest.remove("draftValues");
+        manifest.put("documentation", "Authorization: Bearer fixture-video-secret");
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.validateImportedDraft(manifest.toString()));
+
+        manifest.put("documentation", "输入镜头提示词");
+        var imported = SkillStore.validateImportedDraft(manifest.toString());
+        store.installGenerated(new JSONObject(draft("当前版本", "测试")).put("name", name).toString());
+        assertThrows(IllegalStateException.class, () -> store.saveImportedDraft(imported));
+        assertEquals(SkillResult.Type.TEXT, store.detail(name).current().outputType());
+        assertFalse(store.detail(name).pending());
+
+        manifest.put("name", "相对路径视频");
+        var accepted = SkillStore.validateImportedDraft(manifest.toString());
+        store.saveImportedDraft(accepted);
+        var pending = store.detail(accepted.name());
+        assertEquals("/v1/jobs/{id}", pending.manifest().http().video().statusPath());
+        assertNull(pending.customConfiguration());
+    }
+
+    @Test public void newApiVideoPresetUsesTheBoundGatewayAndSameTaskIdAfterConfiguration() throws Exception {
+        var store = videoStore(temp.newFolder());
+        var preview = SkillStore.validateImportedDraft(importFixture("new-api-text-to-video.json"));
+        store.saveImportedDraft(preview);
+        var draft = store.detail(preview.name());
+        assertNull(draft.customConfiguration());
+        String endpoint = "https://gateway.example.com/v1/videos";
+        var enabled = store.configureCustomService(draft, endpoint, "fixture-gateway-token");
+        assertFalse(enabled.pending());
+        for (AiSkills.Entry entry : AiSkills.Entry.values()) {
+            var call = AiSkills.match(entry, "/" + preview.name() + " 雨后街景", store);
+            assertEquals(SkillResult.Type.VIDEO, call.command().outputType());
+        }
+        var declaration = enabled.manifest().http();
+        var request = new JSONObject(new String(declaration.requestBody("雨后街景", enabled.manifestValues()),
+                StandardCharsets.UTF_8));
+        assertEquals("雨后街景", request.getString("prompt"));
+        assertEquals("grok-imagine-video-1.5-lite", request.getString("model"));
+        assertEquals(5, request.getInt("duration"));
+        assertEquals("480p", request.getString("resolution"));
+        assertEquals("id", declaration.responseField());
+        var state = new JSONObject().put("id", "task_123").put("status", "completed");
+        assertEquals("https://gateway.example.com/v1/videos/task_123",
+                declaration.video().statusEndpoint(endpoint, "task_123"));
+        assertEquals(SkillHttpDeclaration.VideoState.COMPLETED, declaration.video().readStatus(state, "task_123"));
+        assertEquals("https://gateway.example.com/v1/videos/task_123/content",
+                declaration.video().completedDownloadEndpoint(state, endpoint, "task_123"));
+    }
+
+    private static String importFixture(String name) throws Exception {
+        try (var input = SkillStoreTest.class.getResourceAsStream("/skill-import/" + name)) {
+            assertNotNull(input);
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 
     @Test public void videoDeclarationPromotesOnlyTheCurrentDraftToEndpointConfiguration() throws Exception {

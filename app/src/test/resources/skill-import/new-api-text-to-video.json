@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 4,
+  "name": "NewAPI生视频",
+  "displayName": "New API 生视频",
+  "description": "使用已配置 xAI 视频渠道的 New API 网关生成短视频。",
+  "documentation": "在技能详情填写网关的完整提交地址，路径为 /v1/videos。模型、时长和分辨率已有默认值。设置好本机服务后，在聊天中输入文字描述，视频将在原会话内显示。",
+  "instructions": "将本次文字作为视频提示词。沿用原任务 ID 查询，完成后获取成片。",
+  "capabilityId": "video_task",
+  "configFields": [
+    {"key": "model", "label": "视频模型", "type": "text", "required": true, "default": "grok-imagine-video-1.5-lite"},
+    {"key": "duration", "label": "时长（秒）", "type": "integer", "required": true, "min": 1, "max": 15, "default": 5},
+    {"key": "resolution", "label": "分辨率", "type": "enum", "required": true, "options": ["480p", "720p"], "default": "480p"}
+  ],
+  "inputs": [
+    {"key": "argument", "type": "text", "required": true, "maxLength": 2000}
+  ],
+  "outputType": "video",
+  "trial": {"input": "镜头沿林间小路缓慢前移，晨雾在树间流动", "expectedType": "video"},
+  "http": {
+    "version": 1,
+    "label": "New API 视频",
+    "request": {"prompt": "argument", "model": "config.model", "duration": "config.duration", "resolution": "config.resolution"},
+    "response": "id",
+    "video": {
+      "statusPath": "/v1/videos/{id}",
+      "downloadPath": "/v1/videos/{id}/content",
+      "idField": "id",
+      "stateField": "status",
+      "states": {"queued": "queued", "in_progress": "running", "completed": "completed", "failed": "failed"}
+    }
+  }
+}
