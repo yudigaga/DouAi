@@ -23,6 +23,8 @@ public record SkillManifest(String name, String displayName, String description,
                             int maxInput, String trialInput, SkillResult.Type outputType,
                             SkillHttpDeclaration http, String definition) {
     public static final int SCHEMA_VERSION = 4;
+    static final String DRAFT_VALUES = "draftValues";
+    static final String SERVICE_PREFILL = "servicePrefill";
     private static final int MAX_FIELDS = 6;
     private static final int MAX_SETTINGS_JSON = 900;
     private static final BigDecimal MAX_NUMBER = BigDecimal.valueOf(1_000_000);
@@ -41,6 +43,10 @@ public record SkillManifest(String name, String displayName, String description,
     }
 
     public enum FieldType { TEXT, MULTILINE, INTEGER, DECIMAL, BOOLEAN, ENUM }
+
+    public record ServicePrefill(String endpoint, String model) {
+        public boolean isEmpty() { return endpoint.isEmpty() && model.isEmpty(); }
+    }
 
     public record ConfigField(String key, String label, String description, FieldType type, boolean required,
                               List<String> options, int maxLength, BigDecimal min, BigDecimal max, Object defaultValue) {
@@ -87,7 +93,8 @@ public record SkillManifest(String name, String displayName, String description,
     public static SkillManifest parse(String json) {
         try {
             JSONObject data = SkillAuthoring.readObject(json, 8192);
-            keys(data, Set.of("displayName", "http", "serviceRef"), "schemaVersion", "name", "description", "documentation", "instructions",
+            keys(data, Set.of("displayName", "http", "serviceRef", SERVICE_PREFILL, DRAFT_VALUES),
+                    "schemaVersion", "name", "description", "documentation", "instructions",
                     "capabilityId", "configFields", "inputs", "outputType", "trial");
             if (!Integer.valueOf(SCHEMA_VERSION).equals(data.get("schemaVersion"))) throw invalid();
             String name = checkedText(data.get("name"), 24, false);
@@ -134,6 +141,8 @@ public record SkillManifest(String name, String displayName, String description,
                 fields.add(field);
             }
             SkillHttpDeclaration http = declaredHttp ? SkillHttpDeclaration.parse(data.getJSONObject("http"), output, fields) : null;
+            if (data.has(DRAFT_VALUES)) checkedDraftValues(data.getJSONObject(DRAFT_VALUES), fields);
+            if (data.has(SERVICE_PREFILL)) checkedServicePrefill(data.getJSONObject(SERVICE_PREFILL), capability);
             return new SkillManifest(name, displayName, description, documentation, instruction, capability, List.copyOf(fields),
                     limit, trialInput, output, http, data.toString());
         } catch (JSONException malformed) {
@@ -206,6 +215,58 @@ public record SkillManifest(String name, String displayName, String description,
     public JSONObject toJson() {
         try { return new JSONObject(definition); }
         catch (JSONException impossible) { throw new IllegalStateException(impossible); }
+    }
+
+    public Map<String, Object> draftValues() {
+        JSONObject local = toJson().optJSONObject(DRAFT_VALUES);
+        return local == null ? Collections.emptyMap() : checkedDraftValues(local, configFields);
+    }
+
+    Map<String, Object> applyDraftValues(Map<String, Object> saved) {
+        Map<String, Object> supplied = draftValues();
+        if (supplied.isEmpty()) return saved;
+        Map<String, Object> merged = new LinkedHashMap<>(saved);
+        merged.putAll(supplied);
+        return withDefaults(merged);
+    }
+
+    public ServicePrefill servicePrefill() {
+        JSONObject local = toJson().optJSONObject(SERVICE_PREFILL);
+        return local == null ? new ServicePrefill("", "") : checkedServicePrefill(local, capability);
+    }
+
+    private static Map<String, Object> checkedDraftValues(JSONObject supplied, List<ConfigField> descriptors) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (Iterator<String> keys = supplied.keys(); keys.hasNext();) {
+            String key = keys.next();
+            ConfigField field = descriptors.stream().filter(item -> item.key().equals(key)).findFirst()
+                    .orElseThrow(SkillManifest::invalid);
+            Object value = field.validate(supplied.opt(key));
+            if (value instanceof String text && SECRET_LABEL.matcher(text).find()) throw invalid();
+            result.put(key, value);
+        }
+        if (result.isEmpty() || valuesJson(result).toString().length() > MAX_SETTINGS_JSON) throw invalid();
+        return Collections.unmodifiableMap(result);
+    }
+
+    private static ServicePrefill checkedServicePrefill(JSONObject supplied, SkillCapabilityRegistry.Capability capability) {
+        boolean image = capability == SkillCapabilityRegistry.Capability.IMAGE_GENERATION;
+        boolean http = capability == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE
+                || capability == SkillCapabilityRegistry.Capability.VIDEO_TASK;
+        int count = (supplied.has("endpoint") ? 1 : 0) + (supplied.has("model") ? 1 : 0);
+        if ((!http && !image) || count == 0 || supplied.length() != count || (!image && supplied.has("model"))) throw invalid();
+        String endpoint = "";
+        if (supplied.has("endpoint")) {
+            try {
+                Object raw = supplied.opt("endpoint");
+                if (!(raw instanceof String address) || address.trim().isEmpty()) throw invalid();
+                endpoint = SkillCustomService.validateEndpoint(address);
+                if (image) endpoint = SkillImageProviderAddress.resolve(endpoint, true);
+            } catch (SkillCustomService.Failure | IllegalArgumentException unsafe) { throw invalid(); }
+        }
+        String model = supplied.has("model") ? checkedText(supplied.opt("model"), 256, false) : "";
+        if (SECRET_LABEL.matcher(model).find()) throw invalid();
+        return new ServicePrefill(endpoint, model);
     }
 
     public Map<String, Object> readValues(JSONObject stored) {

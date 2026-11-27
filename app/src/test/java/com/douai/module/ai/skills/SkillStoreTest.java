@@ -819,6 +819,90 @@ public class SkillStoreTest {
                 """.formatted(host, prompt, modelLabel));
     }
 
+    @Test public void typedConversationPatchOverridesOnlyTargetedSavedValuesAfterExplicitSave() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        JSONObject raw = new JSONObject("""
+                {"schemaVersion":4,"name":"文章润色","description":"润色文字","documentation":"输入文字",
+                 "instructions":"改善表达","capabilityId":"text_model",
+                 "configFields":[
+                   {"key":"tone","label":"风格","type":"enum","options":["正式","温和"],"required":true,"default":"正式"},
+                   {"key":"limit","label":"字数","type":"integer","required":true,"default":80,"min":10,"max":160}
+                 ],"inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"}}
+                """);
+        SkillStore.DraftPreview proposal = SkillStore.prepareModelAuthoredDraft(raw.toString());
+        assertEquals(1, store.saveConversationDraft(proposal, null, null).installed().version());
+        assertNotNull(store.saveConversationDraft(proposal, null, null).pending());
+        SkillStore.Detail entered = store.saveManifestValues(store.detail("文章润色"),
+                java.util.Map.of("tone", "温和", "limit", "120"));
+        assertEquals("温和", entered.manifestValues().get("tone"));
+        SkillStore.DraftPreview patched = SkillStore.applyConversationFields(proposal,
+                java.util.Map.of("config.tone", "正式", "description", "调整后的说明", "displayName", "文案润色"));
+        assertEquals("正式", patched.publicFields().get("config.tone"));
+        assertEquals("调整后的说明", patched.description());
+        assertEquals("温和", store.detail("文章润色").manifestValues().get("tone"));
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.applyConversationFields(proposal,
+                java.util.Map.of("config.limit", "90")));
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.applyConversationFields(proposal,
+                java.util.Map.of("config.limit", 200)));
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.applyConversationFields(proposal,
+                java.util.Map.of("config.unknown", "x")));
+        SkillStore.SaveResult staged = store.saveConversationDraft(patched, null, entered.draftId());
+        assertNotNull(staged.pending());
+        SkillStore.Detail completed = videoStore(root).detail("文章润色");
+        assertEquals("正式", completed.manifestValues().get("tone"));
+        assertEquals(120, completed.manifestValues().get("limit"));
+        assertEquals("文案润色", completed.manifest().displayName());
+        assertEquals(1, completed.current().version());
+    }
+
+    @Test public void verifiedHttpAndImagePrefillAreVisibleWithoutConfiguringAnyBinding() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        JSONObject direct = new JSONObject("""
+                {"schemaVersion":4,"name":"文字接口","description":"提取文字","documentation":"输入文字",
+                 "instructions":"检查格式","capabilityId":"custom_service","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"},
+                 "http":{"version":1,"label":"文本接口","suggestedEndpoint":"https://guessed.example.com/v1/text",
+                         "request":{"input":"argument"},"response":"text"},
+                 "servicePrefill":{"endpoint":"https://guessed.example.com/v1/text"},"draftValues":{"invented":"x"}}
+                """);
+        SkillStore.DraftPreview safe = SkillStore.prepareModelAuthoredDraft(direct.toString());
+        assertTrue(safe.publicFields().isEmpty());
+        assertFalse(safe.definition().contains("guessed.example.com"));
+        String endpoint = "https://verified.example.com/v1/text";
+        var typed = SkillStore.applyConversationFields(safe, java.util.Map.of("service.endpoint", endpoint));
+        assertEquals(endpoint, typed.publicFields().get("service.endpoint"));
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.applyConversationFields(safe,
+                java.util.Map.of("service.model", "fake-model")));
+        assertThrows(IllegalArgumentException.class, () -> SkillStore.applyConversationFields(safe,
+                java.util.Map.of("service.endpoint", "https://verified.example.com/v1/text?key=private")));
+        assertNotNull(store.saveConversationDraft(typed, null, null).pending());
+        SkillStore.Detail pending = videoStore(root).detail("文字接口");
+        assertEquals(endpoint, pending.manifest().servicePrefill().endpoint());
+        assertNull(pending.customConfiguration());
+        assertThrows(AiSkills.CommandUnavailable.class, () -> AiSkills.match(AiSkills.Entry.WORK, "/文字接口 原稿", store));
+
+        JSONObject image = new JSONObject("""
+                {"schemaVersion":4,"name":"封面图片","description":"生成封面","documentation":"输入场景",
+                 "instructions":"生成图片","capabilityId":"image_generation","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"image","trial":{"input":"海边","expectedType":"image"}}
+                """);
+        String imageEndpoint = "https://images.example.com/v1/images/generations";
+        var imageFields = SkillStore.applyConversationFields(SkillStore.prepareModelAuthoredDraft(image.toString()),
+                java.util.Map.of("service.endpoint", imageEndpoint, "service.model", "image-model-1"));
+        assertEquals("image-model-1", imageFields.publicFields().get("service.model"));
+        assertNotNull(store.saveConversationDraft(imageFields, null, null).pending());
+        SkillStore.Detail imagePending = videoStore(root).detail("封面图片");
+        assertEquals(imageEndpoint, imagePending.manifest().servicePrefill().endpoint());
+        assertEquals("image-model-1", imagePending.manifest().servicePrefill().model());
+        assertNull(imagePending.service());
+        assertNull(imagePending.current());
+    }
+
     private static SkillStore videoStore(File root) {
         var vault = new com.douai.module.ai.AiCredentialVault(
                 () -> new javax.crypto.spec.SecretKeySpec(new byte[32], "AES"));

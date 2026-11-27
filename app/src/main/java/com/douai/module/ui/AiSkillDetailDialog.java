@@ -383,12 +383,22 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (manifest.capability() == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE) {
             button(body, "编辑请求与响应映射", "skills.detail.direct_contract.replace", () -> showDirectContract(detail));
         }
-        if (!manifest.usesHttp()) return;
+        if (!manifest.usesHttp()) {
+            String pendingEndpoint = manifest.servicePrefill().endpoint();
+            if (polling && !pendingEndpoint.isEmpty()) {
+                text(body, "草案建议提交地址 " + pendingEndpoint, "skills.detail.custom.endpoint_suggestion");
+            }
+            return;
+        }
         SkillHttpDeclaration declaration = manifest.http();
         SkillStore.CustomConfiguration current = detail.customConfiguration();
         SkillVideoFacts facts = polling ? detail.videoFacts() : null;
+        String proposedEndpoint = manifest.servicePrefill().endpoint();
+        if (proposedEndpoint.isEmpty() && declaration != null) proposedEndpoint = declaration.suggestedEndpoint();
         String savedBase = facts == null || current == null ? "" : facts.apiBaseForEndpoint(current.endpoint());
-        boolean useApiBase = facts != null && facts.needsApiBase() && (current == null || !savedBase.isEmpty());
+        String proposedBase = facts == null || proposedEndpoint.isEmpty() ? "" : facts.apiBaseForEndpoint(proposedEndpoint);
+        boolean useApiBase = facts != null && facts.needsApiBase()
+                && (current == null ? proposedEndpoint.isEmpty() || !proposedBase.isEmpty() : !savedBase.isEmpty());
         section(declaration == null ? "HTTPS 服务" : declaration.label(), "skills.detail.custom");
         String request = declaration == null ? SkillCustomService.REQUEST_FIELD : String.join("、", declaration.request().keySet());
         String response = declaration == null ? SkillCustomService.RESPONSE_FIELD : declaration.responseField();
@@ -409,9 +419,9 @@ final class AiSkillDetailDialog implements AutoCloseable {
                 "skills.detail.custom.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
         if (current != null) endpoint.setText(useApiBase ? savedBase : current.endpoint());
-        else if (declaration != null && !declaration.suggestedEndpoint().isEmpty()) {
+        else if (!proposedEndpoint.isEmpty()) {
             text(body, "草案建议地址，核对后保存。", "skills.detail.custom.endpoint_suggestion");
-            endpoint.setText(declaration.suggestedEndpoint());
+            endpoint.setText(useApiBase ? proposedBase : proposedEndpoint);
         }
         boolean hasCredential = current != null && current.hasCredential();
         String hint = hasCredential ? "更换服务密钥（地址相同且留空时保留）" : "服务密钥（可选）";
@@ -859,9 +869,11 @@ final class AiSkillDetailDialog implements AutoCloseable {
         LinearLayout fields = column();
         fields.setTag("skills.detail.openai");
         body.addView(fields, matchWrap());
-        SkillImageProviderAddress.Form savedAddress =
-                SkillImageProviderAddress.fromSaved(savedOpenAi ? saved.endpoint() : "");
-        AiProviderBase suggested = (saved == null || saved.endpoint().isEmpty())
+        SkillManifest.ServicePrefill prefill = detail.manifest() == null ? new SkillManifest.ServicePrefill("", "")
+                : detail.manifest().servicePrefill();
+        String savedEndpoint = savedOpenAi && !saved.endpoint().isEmpty() ? saved.endpoint() : prefill.endpoint();
+        SkillImageProviderAddress.Form savedAddress = SkillImageProviderAddress.fromSaved(savedEndpoint);
+        AiProviderBase suggested = savedEndpoint.isEmpty()
                 ? availableAiBases().stream().filter(AiProviderBase::selected).findFirst().orElse(null) : null;
         EditText endpoint = input(fields, "API 基础地址", "skills.detail.endpoint",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
@@ -889,6 +901,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (savedOpenAi) {
             modelsEndpoint.setText(saved.modelsEndpoint());
             model.setText(saved.modelName());
+        } else if (!prefill.model().isEmpty()) {
+            model.setText(prefill.model());
         }
         cost.setText(Integer.toString(savedOpenAi ? saved.costUnits() : 0));
         fields.setVisibility(savedMock ? View.GONE : View.VISIBLE);

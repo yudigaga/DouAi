@@ -3251,6 +3251,247 @@ public final class AiTestChatDialogTest {
         output.write(bytes);
     }
 
+    @Test public void workNaturalTonePatchStagesConfigAndPreservesEditorAcrossReentry() throws Exception {
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        work.skillReplies.add("""
+                {"schemaVersion":4,"name":"文字润色","description":"调整文本语气","documentation":"提交待润色的原文",
+                 "instructions":"保留事实，按语气要求润色。","capabilityId":"text_model",
+                 "configFields":[{"key":"tone","label":"语气","type":"enum","required":true,"options":["正式","自然"]}],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"}}
+                """);
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/技能 帮我做一个文本润色技能");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("技能草案 /文字润色"));
+        TestChatMemory.SkillDraft before = work.transcriptMemory.readSkillDraft();
+        assertNotNull(before);
+        assertFalse(before.authoringId().isBlank());
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+
+        work.skillReplies.add("""
+                {"version":1,"updates":[{"field":"config.tone","value":"正式","evidence":"把语气改成正式"}]}
+                """);
+        submit("把语气改成正式");
+        finishOfflineChatTurn();
+        TestChatMemory.SkillDraft changed = work.transcriptMemory.readSkillDraft();
+        assertNotEquals("A validated tone patch should be stored with the working draft", before, changed);
+        assertEquals(before.authoringId(), changed.authoringId());
+        JSONObject patchedDefinition = new JSONObject(changed.definition());
+        assertEquals("文字润色", patchedDefinition.getString("name"));
+        assertEquals("正式", patchedDefinition.getJSONObject("draftValues").getString("tone"));
+        assertEquals(2, work.skillInputs.size());
+        assertNotEquals(SkillAuthoring.DESIGN_INSTRUCTION, work.skillInstructions.get(1));
+        assertTrue(work.prompts.isEmpty());
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(changed, restored.transcriptMemory.readSkillDraft());
+        assertTrue(text("ai.chat.skill_editor").getText().toString().contains("正在编写 /文字润色"));
+        submit("预览草稿");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("语气"));
+        assertTrue(lastAnswer().contains("正式"));
+        assertTrue(restored.skillInputs.isEmpty());
+        assertTrue(restored.prompts.isEmpty());
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+
+        submit("保存技能");
+        finishOfflineChatTurn();
+        SkillStore.Detail saved = store.detail("文字润色");
+        assertEquals(SkillResult.Type.TEXT, saved.outputType());
+        assertEquals("正式", saved.manifestValues().get("tone"));
+        assertNull(saved.customConfiguration());
+        assertTrue(restored.skillInputs.isEmpty());
+        assertTrue(restored.prompts.isEmpty());
+    }
+
+    @Test public void contactTablePatchUsesSelectedChatEvidenceWithoutSavingEarly() throws Exception {
+        FakeSession contact = new FakeSession();
+        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        contact.skillReplies.add("""
+                {"schemaVersion":4,"name":"表格小结","description":"整理表格","documentation":"提供待整理的进度",
+                 "instructions":"按配置提取原文的项目与进度。","capabilityId":"table_model",
+                 "configFields":[{"key":"heading","label":"表头风格","type":"enum","required":true,"options":["简洁","完整"]}],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"table","trial":{"input":"示例","expectedType":"table"}}
+                """);
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/技能 生成表格技能");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("技能草案 /表格小结"));
+        TestChatMemory.SkillDraft original = contact.transcriptMemory.readSkillDraft();
+        String ask = "这个表格的样式说明是什么？";
+        contact.answer = "表头风格：简洁\n简介：把项目和进度分列";
+        submit(ask);
+        finishOfflineChatTurn();
+        assertEquals(contact.answer, lastAnswer());
+
+        contact.skillReplies.add("""
+                {"version":1,"updates":[
+                 {"field":"config.heading","value":"简洁","evidence":"表头风格：简洁"},
+                 {"field":"description","value":"把项目和进度分列","evidence":"简介：把项目和进度分列"}]}
+                """);
+        submit("按上面的资料帮我填写");
+        finishOfflineChatTurn();
+        TestChatMemory.SkillDraft edited = contact.transcriptMemory.readSkillDraft();
+        assertEquals(original.authoringId(), edited.authoringId());
+        JSONObject updated = new JSONObject(edited.definition());
+        assertEquals("表格小结", updated.getString("name"));
+        assertEquals("table", updated.getString("outputType"));
+        assertEquals("简洁", updated.getJSONObject("draftValues").getString("heading"));
+        assertEquals("把项目和进度分列", updated.getString("description"));
+        assertEquals(List.of(ask), contact.prompts);
+        assertEquals(2, contact.skillInputs.size());
+        assertNotEquals(SkillAuthoring.DESIGN_INSTRUCTION, contact.skillInstructions.get(1));
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+        submit("预览草稿");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("把项目和进度分列"));
+        assertTrue(lastAnswer().contains("简洁"));
+        assertEquals(edited, contact.transcriptMemory.readSkillDraft());
+
+        submit("保存技能");
+        finishOfflineChatTurn();
+        SkillStore.Detail saved = store.detail("表格小结");
+        assertEquals(SkillResult.Type.TABLE, saved.outputType());
+        assertEquals("简洁", saved.manifestValues().get("heading"));
+        assertEquals("把项目和进度分列", saved.manifest().description());
+        assertNull(saved.customConfiguration());
+        assertEquals(List.of(ask), contact.prompts);
+        assertEquals(2, contact.skillInputs.size());
+    }
+
+    @Test public void workImageModelPatchSurvivesReentryAsAnUnboundPrefill() throws Exception {
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        work.skillReplies.add("""
+                {"schemaVersion":4,"name":"图片试稿","description":"生成图片","documentation":"输入画面说明",
+                 "instructions":"按提示生成图片。","capabilityId":"image_generation","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"image","trial":{"input":"示例","expectedType":"image"}}
+                """);
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/技能 生成一个生图技能");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("技能草案 /图片试稿"));
+        TestChatMemory.SkillDraft original = work.transcriptMemory.readSkillDraft();
+        work.skillReplies.add("""
+                {"version":1,"updates":[{"field":"service.model","value":"image-fixture-2","evidence":"把模型改成 image-fixture-2"}]}
+                """);
+        submit("把模型改成 image-fixture-2");
+        finishOfflineChatTurn();
+        TestChatMemory.SkillDraft edited = work.transcriptMemory.readSkillDraft();
+        assertEquals(original.authoringId(), edited.authoringId());
+        JSONObject prefill = new JSONObject(edited.definition()).getJSONObject("servicePrefill");
+        assertEquals("image-fixture-2", prefill.getString("model"));
+        assertFalse(prefill.has("endpoint"));
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+
+        FakeSession restored = new FakeSession();
+        restored.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(restored, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(edited, restored.transcriptMemory.readSkillDraft());
+        submit("预览草稿");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("image-fixture-2"));
+        submit("保存技能");
+        finishOfflineChatTurn();
+        SkillStore.Detail saved = store.detail("图片试稿");
+        assertTrue(saved.pending());
+        assertEquals(SkillResult.Type.IMAGE, saved.outputType());
+        assertFalse(saved.canAuthorize());
+        assertNull(saved.service());
+        assertNull(saved.customConfiguration());
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertEquals(2, work.skillInputs.size());
+        assertTrue(work.prompts.isEmpty());
+        assertTrue(restored.skillInputs.isEmpty());
+        assertTrue(restored.prompts.isEmpty());
+    }
+
+    @Test public void contactHttpEndpointPatchMustMatchExplicitUserEvidenceAndNeverBindsTheDraft() throws Exception {
+        FakeSession contact = new FakeSession();
+        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        contact.skillReplies.add("""
+                {"schemaVersion":4,"name":"接口测试","description":"通过服务处理文字","documentation":"输入需要处理的文本",
+                 "instructions":"按声明映射输入。","capabilityId":"custom_service","configFields":[],
+                 "inputs":[{"key":"argument","type":"text","required":true,"maxLength":2000}],
+                 "outputType":"text","trial":{"input":"示例","expectedType":"text"},
+                 "http":{"version":1,"label":"文本接口","request":{"input":"argument"},"response":"text"}}
+                """);
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/技能 帮我做一个自定义接口技能");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("技能草案 /接口测试"));
+        TestChatMemory.SkillDraft original = contact.transcriptMemory.readSkillDraft();
+        String endpoint = "https://confirmed-service.example.com/v1/task";
+        String request = "把服务地址改成 " + endpoint;
+        contact.skillReplies.add("""
+                {"version":1,"updates":[{"field":"service.endpoint","value":"https://invented-service.example.com/v1/task",
+                 "evidence":"把服务地址改成 https://confirmed-service.example.com/v1/task"}]}
+                """);
+        submit(request);
+        finishOfflineChatTurn();
+        assertEquals(original, contact.transcriptMemory.readSkillDraft());
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+
+        contact.skillReplies.add("""
+                {"version":1,"updates":[{"field":"service.endpoint","value":"https://confirmed-service.example.com/v1/task",
+                 "evidence":"把服务地址改成 https://confirmed-service.example.com/v1/task"}]}
+                """);
+        submit(request);
+        finishOfflineChatTurn();
+        TestChatMemory.SkillDraft edited = contact.transcriptMemory.readSkillDraft();
+        assertEquals(original.authoringId(), edited.authoringId());
+        JSONObject updated = new JSONObject(edited.definition());
+        assertEquals("接口测试", updated.getString("name"));
+        assertEquals(endpoint, updated.getJSONObject("servicePrefill").getString("endpoint"));
+        assertEquals("argument", updated.getJSONObject("http").getJSONObject("request").getString("input"));
+        assertTrue(store.selectionCatalog().isEmpty());
+        submit("预览草稿");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains(endpoint));
+        assertFalse(lastAnswer().contains("invented-service"));
+        assertEquals(edited, contact.transcriptMemory.readSkillDraft());
+
+        submit("保存技能");
+        finishOfflineChatTurn();
+        SkillStore.Detail saved = store.detail("接口测试");
+        assertTrue(saved.pending());
+        assertNull(saved.customConfiguration());
+        assertFalse(saved.canAuthorize());
+        assertTrue(store.list().isEmpty());
+        assertTrue(store.selectionCatalog().isEmpty());
+        assertEquals(3, contact.skillInputs.size());
+        assertTrue(contact.prompts.isEmpty());
+    }
+
     @Test public void tableSkillSavesBeforeShowingPreviewAndRestoresWithoutReplay() throws Exception {
         FakeSession work = new FakeSession();
         work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
