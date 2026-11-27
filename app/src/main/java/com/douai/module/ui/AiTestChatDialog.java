@@ -206,6 +206,8 @@ final class AiTestChatDialog extends Dialog {
     private SkillVideoFacts skillDraftFacts;
     private String skillAuthoringId = "";
     private String pendingSkillDraftId = "";
+    private String skillEditorSourceProof = "";
+    private boolean skillEditorReplacesVideo;
     private TestChatMemory.SkillDraft storedSkillDraft;
     private SettingsStore subAgentSettings;
     private final List<ChatImage> draftImages = new ArrayList<>();
@@ -900,13 +902,22 @@ final class AiTestChatDialog extends Dialog {
                 }
                 return;
             }
+            String change = commandText.startsWith("/技能") ? commandText.substring("/技能".length()).trim() : commandText;
+            if (previewingVideoDraft() && change.matches("(?i)^(?:请|帮我)?(?:改用|换用|换成|切换到)\\s*new[\\s-]*api[。！! ]*$")
+                    && images.isEmpty() && documents.isEmpty() && selected.isEmpty()) {
+                if (pendingSkillDraftId.isEmpty() && skillEditorSourceProof.isEmpty()) {
+                    showAuthoringStatus("请先用 /技能 编辑 /技能名 打开要更换接口的已保存技能。");
+                } else {
+                    SkillVideoFacts documented = SkillVideoDocumentation.knownFacts(change);
+                    if (!documented.isComplete()) showAuthoringStatus("未找到完整的接口资料，请提供服务文档。");
+                    else sendAuthoringMaterial(prompt,
+                            new SkillAuthoring.Action(SkillAuthoring.Mode.REPLACE_VIDEO_SOURCE, "", false), documented);
+                }
+                return;
+            }
             String markdownRequirement = AiToolPackages.parseWrite(commandText);
             if (markdownRequirement != null && !existingPackageCommand(commandText)) {
-                if (!images.isEmpty() || !documents.isEmpty() || !selected.isEmpty()) {
-                    showAuthoringStatus("请先移除附件，再编写文档技能。");
-                } else {
-                    writeMarkdownSkill(markdownRequirement);
-                }
+                showAuthoringStatus("请用 /技能 描述需求，或用 /技能 编辑 /技能名 打开已有技能。");
                 return;
             }
             AiToolPackages.Use use = AiToolPackages.parseUse(commandText);
@@ -990,7 +1001,8 @@ final class AiTestChatDialog extends Dialog {
                     : videoSource == null ? SkillAuthoring.match(commandText, editing) : videoSource.action();
             SkillVideoFacts targetedFacts = null;
             SkillAuthoringPatch.Request proposedPatch = selectedMaterial == null ? null : selectedMaterial.fieldPatch();
-            if (editing && material == null && videoSource == null && previousDraft.outputType() == SkillResult.Type.VIDEO) {
+            if (editing && material == null && videoSource == null && previousDraft.outputType() == SkillResult.Type.VIDEO
+                    && (requested == null || requested.mode() != SkillAuthoring.Mode.OPEN)) {
                 String editText = requested != null && requested.mode() == SkillAuthoring.Mode.REVISE ? requested.request()
                         : SkillAuthoring.isCreationCommand(commandText) ? commandText.substring("/技能".length()).trim() : commandText;
                 SkillVideoEdit.Edit edit = SkillVideoEdit.parse(editText);
@@ -1128,10 +1140,9 @@ final class AiTestChatDialog extends Dialog {
                     return;
                 }
                 if (videoSource == null) {
-                    List<String> configured = skillStore.configuredVideoSourceNames();
                     List<VideoReferenceMaterial> supplied = visibleUserVideoMaterials();
-                    if (!configured.isEmpty() || !supplied.isEmpty()) {
-                        chooseGroundedVideoSource(prompt, requested, configured, supplied);
+                    if (!supplied.isEmpty()) {
+                        chooseGroundedVideoSource(prompt, requested, supplied);
                         return;
                     }
                 }
@@ -1141,7 +1152,8 @@ final class AiTestChatDialog extends Dialog {
             if (targetedFacts != null) {
                 authoredFacts = targetedFacts;
             } else if (material != null) {
-                authoredFacts = authoring.mode() == SkillAuthoring.Mode.DESIGN || skillDraftFacts == null
+                authoredFacts = authoring.mode() == SkillAuthoring.Mode.DESIGN
+                        || authoring.mode() == SkillAuthoring.Mode.REPLACE_VIDEO_SOURCE || skillDraftFacts == null
                         ? material : skillDraftFacts.fillMissingFrom(material);
             } else if (videoSource != null) {
                 SkillVideoFacts supplied = SkillVideoFacts.parse(videoSource.notes());
@@ -1342,14 +1354,21 @@ final class AiTestChatDialog extends Dialog {
                 if (authoring != null) {
                     turn.trace.stage("skill_authoring", "input_chars=" + prompt.length());
                     if (!activeSkillStore.enabled()) throw new IllegalStateException("技能已停用");
-                    if (fieldPatch != null) {
+                    if (authoring.mode() == SkillAuthoring.Mode.OPEN) {
+                        turn.openedSkill = activeSkillStore.openConversationDraft(authoring.request());
+                        authored = turn.openedSkill.preview();
+                    } else if (fieldPatch != null) {
                         String raw = askSkillModel(turn, active, SkillAuthoringPatch.INSTRUCTION, fieldPatch.input());
                         turn.checkStopped();
                         Map<String, Object> updates = fieldPatch.read(raw);
                         if (updates.isEmpty()) throw new IllegalArgumentException("没有可核对的字段变更");
                         authored = SkillStore.applyConversationFields(previousDraft, updates);
-                    } else if (authoring.mode() == SkillAuthoring.Mode.SUPPLEMENT) {
-                        authored = SkillStore.prepareAuthoredVideoDraft(previousDraft.definition(), authoredFacts);
+                    } else if (authoring.mode() == SkillAuthoring.Mode.SUPPLEMENT
+                            || authoring.mode() == SkillAuthoring.Mode.REPLACE_VIDEO_SOURCE) {
+                        String definition = authoring.mode() == SkillAuthoring.Mode.REPLACE_VIDEO_SOURCE
+                                ? SkillStore.sanitizeModelAuthoringDefinition(previousDraft.definition())
+                                : previousDraft.definition();
+                        authored = SkillStore.prepareAuthoredVideoDraft(definition, authoredFacts);
                     } else if (!modelAuthoring) {
                         authored = previousDraft;
                     } else {
@@ -1521,6 +1540,7 @@ final class AiTestChatDialog extends Dialog {
 
     private static String authoringProgress(SkillAuthoring.Action action) {
         switch (action.mode()) {
+            case OPEN: return "正在打开技能…";
             case SAVE: return "正在保存技能…";
             case REVISE: return "正在修改技能草案…";
             case FIELD_PATCH: return "正在回填草稿字段…";
@@ -1770,8 +1790,12 @@ final class AiTestChatDialog extends Dialog {
             if (turn.skill != null && turn.skill.localBuiltIn()) {
                 restoreDraft(turn.prompt, Collections.emptyList(), Collections.emptyList());
             }
-            if (failure != null) turn.trace.stage(turn.authoring != null ? "skill_authoring" : "skill_execute",
-                    "error_type=" + failure.getClass().getSimpleName());
+            if (failure != null) {
+                String code = failure instanceof SkillVideoJobs.Failure job ? ";code=" + job.code().name()
+                        : failure instanceof SkillCustomService.Failure service ? ";code=" + service.code().name() : "";
+                turn.trace.stage(turn.authoring != null ? "skill_authoring" : "skill_execute",
+                        "error_type=" + failure.getClass().getSimpleName() + code);
+            }
         } else {
             answer.text = turn.stopRequested ? "已停止" : turn.reading
                     ? "附件读取失败：" + failureDetail(failure) : errorMessage(failure);
@@ -1856,7 +1880,8 @@ final class AiTestChatDialog extends Dialog {
         if (skillDraft == null) return null;
         return new TestChatMemory.SkillDraft(skillDraft.definition(),
                 skillDraftFacts == null ? "" : skillDraftFacts.toJson().toString(),
-                pendingSkillDraftId.isEmpty() ? "" : skillDraft.name(), pendingSkillDraftId, skillAuthoringId);
+                pendingSkillDraftId.isEmpty() ? "" : skillDraft.name(), pendingSkillDraftId, skillAuthoringId,
+                skillEditorSourceProof, skillEditorReplacesVideo);
     }
 
     private record VideoReferenceTarget(String name, SkillStore.Detail saved, SkillStore.DraftPreview preview,
@@ -1995,27 +2020,17 @@ final class AiTestChatDialog extends Dialog {
                 generation, false, material -> sendAuthoringMaterial(prompt, action, selectedVideoFacts(material)));
     }
 
-    private record GroundedVideoSource(String label, String configured, SkillVideoFacts facts) { }
+    private record GroundedVideoSource(String label, SkillVideoFacts facts) { }
 
-    private void chooseGroundedVideoSource(String prompt, SkillAuthoring.Action action, List<String> names,
+    private void chooseGroundedVideoSource(String prompt, SkillAuthoring.Action action,
                                            List<VideoReferenceMaterial> documents) {
         List<GroundedVideoSource> choices = new ArrayList<>();
-        for (String name : names) choices.add(new GroundedVideoSource("已配置 /" + name, name, null));
         for (VideoReferenceMaterial document : documents) {
-            choices.add(new GroundedVideoSource(document.label(), "", document.facts()));
+            choices.add(new GroundedVideoSource(document.label(), document.facts()));
         }
-        if (choices.size() > 1) choices.add(new GroundedVideoSource("先创建待配置草稿", "", SkillVideoFacts.empty()));
+        if (choices.size() > 1) choices.add(new GroundedVideoSource("先创建待配置草稿", SkillVideoFacts.empty()));
         chooseVideoReference("选择视频接口资料", choices, GroundedVideoSource::label,
-                generation, false, source -> {
-                    SkillVideoFacts facts;
-                    try {
-                        facts = source.configured().isEmpty() ? source.facts() : skillStore.videoFactsForSkill(source.configured());
-                    } catch (Exception unavailable) {
-                        showAuthoringStatus("所选视频服务已变化，请重新选择接口资料。");
-                        return;
-                    }
-                    sendAuthoringMaterial(prompt, action, facts);
-                });
+                generation, false, source -> sendAuthoringMaterial(prompt, action, source.facts()));
     }
 
     private static boolean otherDraftTarget(String request) {
@@ -2201,7 +2216,7 @@ final class AiTestChatDialog extends Dialog {
         if (index == 0 || !transcript.get(index - 1).user) return false;
         String userText = transcript.get(index - 1).text;
         SkillAuthoring.Action action = SkillAuthoring.match(userText, true);
-        if (action != null && action.mode() == SkillAuthoring.Mode.DESIGN) {
+        if (action != null && (action.mode() == SkillAuthoring.Mode.DESIGN || action.mode() == SkillAuthoring.Mode.OPEN)) {
             return false;
         }
         try {
@@ -2309,6 +2324,19 @@ final class AiTestChatDialog extends Dialog {
         if (!skillStore.enabled()) throw new IllegalStateException("技能已停用");
         if (draft == null) throw new IllegalStateException("没有可用的技能草案");
         SkillAuthoring.Mode mode = turn.authoring.mode();
+        if (mode == SkillAuthoring.Mode.OPEN) {
+            SkillStore.ConversationDraft opened = turn.openedSkill;
+            if (opened == null) throw new IllegalStateException("无法打开技能");
+            skillDraft = draft;
+            skillDraftFacts = opened.facts();
+            pendingSkillDraftId = opened.pendingId();
+            skillEditorSourceProof = pendingSkillDraftId.isEmpty() ? opened.identity().proof() : "";
+            skillEditorReplacesVideo = false;
+            skillAuthoringId = UUID.randomUUID().toString();
+            turn.editorChanged = true;
+            return "已打开 /" + draft.name() + "。直接说要改什么，完成后用 /技能 帮我内置。\n"
+                    + draftPreviewReply(draft, skillDraftFacts);
+        }
         if (mode == SkillAuthoring.Mode.CANCEL) {
             boolean saved = !pendingSkillDraftId.isEmpty();
             clearAuthoringDraft(turn);
@@ -2316,7 +2344,12 @@ final class AiTestChatDialog extends Dialog {
         }
         if (mode == SkillAuthoring.Mode.PREVIEW) return draftPreviewReply(draft, skillDraftFacts);
         if (mode != SkillAuthoring.Mode.SAVE && !turn.authoring.saveAfter()) {
-            if (mode == SkillAuthoring.Mode.DESIGN) pendingSkillDraftId = "";
+            if (mode == SkillAuthoring.Mode.DESIGN) {
+                pendingSkillDraftId = "";
+                skillEditorSourceProof = "";
+                skillEditorReplacesVideo = false;
+            }
+            if (mode == SkillAuthoring.Mode.REPLACE_VIDEO_SOURCE) skillEditorReplacesVideo = true;
             if (mode == SkillAuthoring.Mode.DESIGN || skillAuthoringId.isEmpty()) skillAuthoringId = UUID.randomUUID().toString();
             skillDraft = draft;
             skillDraftFacts = draft.outputType() == SkillResult.Type.VIDEO ? turn.videoFacts : null;
@@ -2324,7 +2357,10 @@ final class AiTestChatDialog extends Dialog {
             return draftPreviewReply(draft, skillDraftFacts);
         }
         String expected = mode == SkillAuthoring.Mode.DESIGN ? "" : pendingSkillDraftId;
-        SkillStore.SaveResult result = skillStore.saveConversationDraft(draft, turn.videoFacts, expected);
+        SkillStore.DeleteTarget editorSource = mode == SkillAuthoring.Mode.DESIGN || skillEditorSourceProof.isEmpty()
+                ? null : new SkillStore.DeleteTarget(draft.name(), 1, false, skillEditorSourceProof);
+        SkillStore.SaveResult result = skillStore.saveConversationDraft(draft, turn.videoFacts, expected, editorSource,
+                skillEditorReplacesVideo && mode != SkillAuthoring.Mode.DESIGN);
         SkillStore.Installed installed = result.installed();
         if (installed != null) {
             clearAuthoringDraft(turn);
@@ -2337,6 +2373,8 @@ final class AiTestChatDialog extends Dialog {
         skillDraft = draft;
         skillDraftFacts = draft.outputType() == SkillResult.Type.VIDEO ? turn.videoFacts : null;
         pendingSkillDraftId = pending.draftId();
+        skillEditorSourceProof = "";
+        skillEditorReplacesVideo = false;
         turn.editorChanged = true;
         turn.settingsSkillName = pending.name();
         if (draft.outputType() == SkillResult.Type.VIDEO) {
@@ -2370,6 +2408,8 @@ final class AiTestChatDialog extends Dialog {
         skillDraftFacts = null;
         skillAuthoringId = "";
         pendingSkillDraftId = "";
+        skillEditorSourceProof = "";
+        skillEditorReplacesVideo = false;
         turn.editorChanged = true;
     }
 
@@ -2522,6 +2562,7 @@ final class AiTestChatDialog extends Dialog {
         if (failure instanceof SkillManifest.Invalid invalid) return invalid.getMessage();
         if (failure instanceof java.net.SocketTimeoutException) return "技能请求超时，请稍后再试";
         if (action.mode() == SkillAuthoring.Mode.FIELD_PATCH) return "回填失败。请核对资料，或明确填写字段和值。";
+        if (action.mode() == SkillAuthoring.Mode.OPEN) return "无法打开该技能，请核对命令名或检查技能配置";
         if (action.mode() == SkillAuthoring.Mode.SAVE) return "保存技能失败，原草案仍保留";
         return "技能草案处理失败，请检查技能需求与模型设置";
     }
@@ -2571,6 +2612,8 @@ final class AiTestChatDialog extends Dialog {
         skillDraftFacts = null;
         skillAuthoringId = "";
         pendingSkillDraftId = "";
+        skillEditorSourceProof = "";
+        skillEditorReplacesVideo = false;
         storedSkillDraft = null;
         closePickers();
         cancelRestore();
@@ -2737,11 +2780,6 @@ final class AiTestChatDialog extends Dialog {
                     && (("/" + AiToolPackages.COMMAND).startsWith(prefix) || "/工具包".startsWith(prefix))) {
                 commands.add(new AiSkills.Command(AiToolPackages.COMMAND, "打开 Skill 与工具包目录"));
             }
-            if (skillStore != null && skillStore.enabled() && prefix.startsWith("/")
-                    && ("/" + AiToolPackages.WRITE_COMMAND).startsWith(prefix)
-                    && commands.stream().noneMatch(command -> AiToolPackages.WRITE_COMMAND.equals(command.name()))) {
-                commands.add(new AiSkills.Command(AiToolPackages.WRITE_COMMAND, "用 AI 编写 SKILL.md"));
-            }
         } catch (IllegalStateException unavailable) {
             commands = Collections.emptyList();
         }
@@ -2901,58 +2939,6 @@ final class AiTestChatDialog extends Dialog {
         } catch (AiSkills.CommandUnavailable unavailable) {
             return true; // Existing commands keep their configured-state diagnostics.
         }
-    }
-
-    private void writeMarkdownSkill(String requirement) {
-        if (skillStore == null || !skillStore.enabled()) {
-            showAuthoringStatus("请先启用 AI Skills。");
-            return;
-        }
-        if (requirement.isBlank() || requirement.length() > 2000) {
-            showAuthoringStatus("请在 /文档技能 后写明任务，长度不超过 2000 字。");
-            return;
-        }
-        try { SkillAuthoring.rejectEditorCredential(requirement); }
-        catch (IllegalArgumentException invalid) {
-            showAuthoringStatus("请移除需求中的凭据。");
-            return;
-        }
-        Session active = session;
-        int expectedGeneration = generation;
-        int ticket = ++packageDiscoveryGeneration;
-        MarkdownSkillStore store = MarkdownSkillStore.forContext(getContext());
-        showAuthoringStatus("正在编写文档技能…");
-        worker.submit(() -> {
-            MarkdownSkillStore.Preview preview;
-            try {
-                String definition = active.skillModel(AiToolPackages.WRITE_INSTRUCTION, requirement);
-                preview = store.previewDirectory(Map.of("SKILL.md", definition.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-            } catch (Exception invalid) {
-                preview = null;
-            }
-            MarkdownSkillStore.Preview drafted = preview;
-            main.post(() -> {
-                if (disposed || busy || active != session || expectedGeneration != generation
-                        || ticket != packageDiscoveryGeneration) return;
-                if (drafted == null) {
-                    showAuthoringStatus("模型没有返回可安装的 SKILL.md。");
-                    return;
-                }
-                showAuthoringStatus("");
-                if (localMenu != null) localMenu.dismiss();
-                localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("检查 SKILL.md")
-                        .setMessage(drafted.markdown()).setPositiveButton("安装", (dialog, which) -> {
-                            if (localMenu != dialog || disposed || skillStore == null || !skillStore.enabled()) return;
-                            try {
-                                store.install(drafted);
-                                showAuthoringStatus("文档技能已安装。请在 AI Skills 中启用。");
-                            } catch (Exception unavailable) {
-                                showAuthoringStatus("无法安装文档技能，请检查是否重名。");
-                            }
-                        }).setNegativeButton("取消", null).create();
-                localMenu.show();
-            });
-        });
     }
 
     private void usePackage(String prompt, AiToolPackages.Use use) {
@@ -3561,6 +3547,7 @@ final class AiTestChatDialog extends Dialog {
 
     private static final class RequestTurn {
         SkillVideoFacts videoFacts;
+        SkillStore.ConversationDraft openedSkill;
         final DouAiLog.Operation trace = DouAiLog.begin("ai_chat", "send_or_retry");
         final com.douai.module.analytics.LocalAnalytics.FlowOperation analytics;
         final int ticket;
@@ -3921,6 +3908,8 @@ final class AiTestChatDialog extends Dialog {
                     skillDraftFacts = facts;
                     skillAuthoringId = restoredDraft.authoringId();
                     pendingSkillDraftId = restoredDraft.pendingDraftId();
+                    skillEditorSourceProof = restoredDraft.editorSourceProof();
+                    skillEditorReplacesVideo = restoredDraft.replacesVideoContract();
                 }
                 for (Map.Entry<ChatImage, Bitmap> item : decoded.entrySet()) {
                     if (item.getValue() != null) thumbnails.put(item.getKey(), item.getValue());

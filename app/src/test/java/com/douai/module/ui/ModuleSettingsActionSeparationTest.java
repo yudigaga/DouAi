@@ -164,12 +164,14 @@ public final class ModuleSettingsActionSeparationTest {
         assertNull(testChat.findViewWithTag("ai.chat.skill.查询"));
     }
 
-    @Test public void skillsManagerOffersSimulationWithoutAModelConfiguration() {
+    @Test public void skillsManagerGuidesAuthoringToTheSingleChatEditor() {
         assertTrue(option(open("EXTENSION"), "AI Skills").performClick());
         View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
         assertPresent(manager, "skills.enabled");
-        assertPresent(manager, "skills.requirements");
-        assertTrue(manager.findViewWithTag("skills.generate.mock").isEnabled());
+        assertPresent(manager, "skills.author_chat");
+        assertNull(manager.findViewWithTag("skills.requirements"));
+        assertNull(manager.findViewWithTag("skills.generate.mock"));
+        assertNull(manager.findViewWithTag("skills.generate.model"));
         assertNull(manager.findViewWithTag("skills.generate.shared_services"));
         assertNull(manager.findViewWithTag("skills.service.register"));
         assertNull(manager.findViewWithTag("skills.service.mock-orders"));

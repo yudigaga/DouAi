@@ -593,6 +593,8 @@ public final class AiSkillImageProviderTest {
             assertFalse(installed.pending());
             activeMock = installed.service();
             assertEquals(NAME, activeMock.skillName());
+            SkillStore.EditTarget target = setup.editTarget(installed.deleteTarget());
+            setup.saveEdit(target, target.description(), "输入画面主题和构图要求。", null);
 
             page = discovery == null ? new AiSkillDetailDialog(activity, false, NAME, null)
                     : new AiSkillDetailDialog(activity, false, NAME, null, discovery, executor);
@@ -602,11 +604,6 @@ public final class AiSkillImageProviderTest {
             dialog = page.dialog();
             dialog.setOwnerActivity(activity);
             dialog.show();
-            click(dialog, "skills.detail.edit");
-            AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
-            ((EditText) view(editor, "skills.edit.documentation")).setText("输入画面主题和构图要求。");
-            assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
-            ShadowLooper.idleMainLooper();
             assertTrue(store.detail(NAME).canReplace());
             click(dialog, "skills.detail.configure");
             ((Spinner) view(dialog, "skills.detail.adapter")).setSelection(0);

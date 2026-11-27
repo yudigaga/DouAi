@@ -46,16 +46,16 @@ import com.douai.module.ui.miuix.MiuixFormControls;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /** Configuration for one exact skill, shared by manual chats and the Skills list. */
@@ -65,8 +65,12 @@ final class AiSkillDetailDialog implements AutoCloseable {
         List<String> fetch(String name, String draftId, String endpoint, String modelsEndpoint, String bearer) throws Exception;
     }
 
+    @FunctionalInterface
+    interface VideoModelDiscovery {
+        List<String> fetch(SkillStore.Detail expected, String apiBase, String bearer) throws Exception;
+    }
+
     private static final int MAX_KEY_ENTRY = AiCredentialVault.MAX_IMAGE_BEARER_CHARS + 64;
-    private static final int MAX_DIRECT_FIELDS = 7;
     private static final String FETCHING_MODELS = "正在查询模型列表…";
     private final Context context;
     private final boolean miuix;
@@ -74,6 +78,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
     private final Runnable onChanged;
     private final SkillStore store;
     private final ModelDiscovery discovery;
+    private final VideoModelDiscovery videoDiscovery;
     private final ExecutorService discoveryWorker;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final LinearLayout body;
@@ -99,7 +104,13 @@ final class AiSkillDetailDialog implements AutoCloseable {
 
     AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
                         ModelDiscovery discovery, ExecutorService discoveryWorker, SkillStore localStore) {
-        this(context, miuix, exactSkillName, onChanged, discovery, discoveryWorker, null, null, localStore);
+        this(context, miuix, exactSkillName, onChanged, discovery, discoveryWorker, localStore, null);
+    }
+
+    AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
+                        ModelDiscovery discovery, ExecutorService discoveryWorker, SkillStore localStore,
+                        VideoModelDiscovery videoDiscovery) {
+        this(context, miuix, exactSkillName, onChanged, discovery, discoveryWorker, null, null, localStore, videoDiscovery);
     }
 
     static AiSkillDetailDialog preview(Context context, boolean miuix, SkillStore.DraftPreview draft, SkillVideoFacts facts) {
@@ -108,18 +119,20 @@ final class AiSkillDetailDialog implements AutoCloseable {
         SkillStore.DraftPreview validated = draft.outputType() == SkillResult.Type.VIDEO
                 ? SkillStore.prepareAuthoredVideoDraft(draft.definition(), supplied)
                 : SkillStore.validateAuthoredDraft(draft.definition());
-        return new AiSkillDetailDialog(context, miuix, validated.name(), null, null, null, validated, supplied, null);
+        return new AiSkillDetailDialog(context, miuix, validated.name(), null, null, null, validated, supplied, null, null);
     }
 
     private AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
                                 ModelDiscovery discovery, ExecutorService discoveryWorker,
-                                SkillStore.DraftPreview preview, SkillVideoFacts facts, SkillStore localStore) {
+                                SkillStore.DraftPreview preview, SkillVideoFacts facts, SkillStore localStore,
+                                VideoModelDiscovery videoDiscovery) {
         this.context = context;
         this.miuix = miuix;
         name = exactSkillName;
         this.onChanged = onChanged;
         store = preview == null ? localStore == null ? SkillStore.forContext(context) : localStore : null;
         this.discovery = discovery != null ? discovery : store == null ? null : store::discoverImageModels;
+        this.videoDiscovery = videoDiscovery != null ? videoDiscovery : store == null ? null : store::discoverVideoModels;
         this.discoveryWorker = discoveryWorker;
         body = column();
         body.setTag("skills.detail." + name);
@@ -197,7 +210,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (detail.pending()) pendingActions(detail, showImageConfiguration);
         SkillStore.DeleteTarget deleteTarget = detail.deleteTarget();
         if (deleteTarget != null) {
-            button(body, detail.pending() ? "编辑草稿" : "编辑当前配置", "skills.detail.edit", () -> showEdit(deleteTarget));
+            text(body, "在聊天中输入 /技能 编辑 /" + name + " 修改技能或接口。", "skills.detail.edit_in_chat");
             button(body, "删除", "skills.detail.delete", () -> reviewDelete(deleteTarget));
         }
     }
@@ -258,92 +271,6 @@ final class AiSkillDetailDialog implements AutoCloseable {
         showChild(builder("视频接口字段").setView(scroll).setNegativeButton("关闭", null).create());
     }
 
-    private void showEdit(SkillStore.DeleteTarget expected) {
-        cancelModelLookup("editor_opened");
-        SkillStore.EditTarget edit;
-        try { edit = store.editTarget(expected); }
-        catch (Exception failure) {
-            reload("无法打开编辑，请核对当前技能后再试");
-            return;
-        }
-        if (edit == null) {
-            status.setText("此技能暂不可编辑");
-            return;
-        }
-
-        LinearLayout form = column();
-        int padding = dp(16);
-        form.setPadding(padding, 0, padding, padding);
-        TextView command = text(form, "/" + expected.name(), "skills.edit.name");
-        command.setTypeface(null, Typeface.BOLD);
-        command.setAccessibilityHeading(true);
-        int multiline = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
-        String savedDisplayName = edit.manifestDisplayName();
-        String displayNameLabel = "显示名称（可选）";
-        if (savedDisplayName != null && !miuix) text(form, displayNameLabel, "skills.edit.display_name.label");
-        EditText displayName = savedDisplayName == null ? null : input(form, displayNameLabel,
-                "skills.edit.display_name", InputType.TYPE_CLASS_TEXT, 48, false);
-        if (displayName != null) displayName.setText(savedDisplayName);
-        EditText description = input(form, "技能简介", "skills.edit.description", InputType.TYPE_CLASS_TEXT, 100, false);
-        description.setText(edit.description());
-        EditText usage = input(form, "使用说明", "skills.edit.documentation", multiline, 6000, false);
-        usage.setText(edit.documentation());
-        EditText instruction = edit.instructionEditable()
-                ? input(form, "执行指令", "skills.edit.instruction", multiline, 1600, false) : null;
-        if (instruction != null) instruction.setText(edit.instruction());
-        String fieldDefinitions = edit.instructionEditable() ? edit.manifestFieldsJson() : null;
-        EditText declarations = fieldDefinitions == null ? null
-                : input(form, "配置字段声明（高级）", "skills.edit.config_fields", multiline, 16000, false);
-        if (declarations != null) declarations.setText(fieldDefinitions);
-        TextView error = text(form, "", "skills.edit.error");
-        error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        ScrollView scroll = new ScrollView(context);
-        scroll.addView(form);
-        AlertDialog editor = builder("编辑技能").setView(scroll).setNegativeButton("取消", null)
-                .setPositiveButton("保存草稿", null).create();
-        showChild(editor);
-        if (!editor.isShowing()) return;
-        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
-            if (!active() || !editor.isShowing() || confirmation != editor) return;
-            String nextDescription = description.getText().toString();
-            String nextUsage = usage.getText().toString();
-            String nextInstruction = instruction == null ? edit.instruction() : instruction.getText().toString();
-            if (nextDescription.trim().isEmpty() || nextUsage.trim().isEmpty()
-                    || (instruction != null && nextInstruction.trim().isEmpty())) {
-                error.setText("请填写所有编辑字段");
-                return;
-            }
-            saveEdit(editor, error, edit, nextDescription, nextUsage, nextInstruction,
-                    declarations == null ? null : declarations.getText().toString(),
-                    displayName == null ? null : displayName.getText().toString());
-        });
-    }
-
-    private void saveEdit(AlertDialog editor, TextView error, SkillStore.EditTarget expected,
-                          String description, String usage, String instruction, String declarations, String displayName) {
-        SkillStore.Detail updated;
-        try { updated = store.saveEdit(expected, description, usage, instruction, declarations, displayName); }
-        catch (SkillManifest.Invalid invalid) {
-            error.setText(invalid.getMessage());
-            return;
-        }
-        catch (Exception failure) {
-            SkillStore.Detail current;
-            try { current = store.detail(name); }
-            catch (Exception unavailable) { current = null; }
-            if (current != null && expected.identity().equals(current.deleteTarget())) {
-                error.setText("编辑未保存，请检查填写内容后再试");
-                return;
-            }
-            editor.dismiss();
-            render(current, "编辑未保存，请核对当前技能后重试");
-            return;
-        }
-        editor.dismiss();
-        render(updated, "编辑已保存为草稿");
-        if (onChanged != null) onChanged.run();
-    }
-
     private void manifestConfiguration(SkillStore.Detail detail) {
         SkillManifest manifest = detail.manifest();
         if (manifest == null || !manifest.capability().usesModel() || manifest.configFields().isEmpty()) return;
@@ -356,15 +283,9 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private Map<String, Supplier<String>> manifestInputs(SkillStore.Detail detail) {
-        return manifestInputs(detail, null);
-    }
-
-    private Map<String, Supplier<String>> manifestInputs(SkillStore.Detail detail, LinearLayout advanced) {
         Map<String, Supplier<String>> values = new LinkedHashMap<>();
         for (SkillManifest.ConfigField field : detail.manifest().configFields()) {
-            Object value = detail.manifestValues().get(field.key());
-            LinearLayout parent = advanced != null && (!field.required() || value != null) ? advanced : body;
-            values.put(field.key(), manifestInput(parent, field, value));
+            values.put(field.key(), manifestInput(body, field, detail.manifestValues().get(field.key())));
         }
         return values;
     }
@@ -378,322 +299,214 @@ final class AiSkillDetailDialog implements AutoCloseable {
     private void customConfiguration(SkillStore.Detail detail) {
         SkillManifest manifest = detail.manifest();
         if (manifest == null) return;
-        SkillCapabilityRegistry.ExecutionMode mode = manifest.capability().executionMode();
-        boolean polling = mode == SkillCapabilityRegistry.ExecutionMode.POLLING;
-        SkillHttpDeclaration declaration = manifest.http();
+        if (manifest.capability().executionMode() == SkillCapabilityRegistry.ExecutionMode.POLLING) {
+            videoConfiguration(detail);
+        } else if (manifest.usesHttp()) {
+            directConfiguration(detail);
+        }
+    }
+
+    private void directConfiguration(SkillStore.Detail detail) {
+        SkillHttpDeclaration declaration = detail.manifest().http();
+        section(declaration == null ? "HTTPS 服务" : declaration.label(), "skills.detail.custom");
+        describeContract(body, detail);
+        EditText endpoint = input(body, "公网 HTTPS 完整接口地址", "skills.detail.custom.endpoint",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
         SkillStore.CustomConfiguration current = detail.customConfiguration();
-        SkillVideoFacts facts = polling ? detail.videoFacts() : null;
-        String proposedEndpoint = manifest.servicePrefill().endpoint();
-        if (proposedEndpoint.isEmpty() && declaration != null) proposedEndpoint = declaration.suggestedEndpoint();
-        String savedBase = facts == null || current == null ? "" : facts.apiBaseForEndpoint(current.endpoint());
-        String proposedBase = facts == null || proposedEndpoint.isEmpty() ? "" : facts.apiBaseForEndpoint(proposedEndpoint);
-        boolean useApiBase = facts != null && facts.needsApiBase()
-                && (current == null ? proposedEndpoint.isEmpty() || !proposedBase.isEmpty() : !savedBase.isEmpty());
-        boolean simpleVideo = useApiBase && detail.pending() && detail.current() == null
-                && facts.isComplete() && declaration != null && declaration.video() != null;
-        LinearLayout contract = simpleVideo ? column() : body;
-        if (polling || manifest.usesHttp()) {
-            text(contract, "执行方式 · " + mode.label(), "skills.detail.execution_mode");
-            text(contract, "输出类型 · " + detail.outputType().label(), "skills.detail.output_type");
-        }
-        if (polling && detail.pending() && (!manifest.usesHttp() || detail.videoFacts() != null)) {
-            button(contract, "填写接口字段", "skills.detail.video_facts.open", () -> showVideoFacts(detail, false));
-        }
-        if (polling && (detail.current() != null || manifest.http() != null
-                || detail.videoFacts() != null && !detail.videoFacts().isEmpty())) {
-            button(contract, "更换视频接口", "skills.detail.video_contract.replace", () -> showVideoFacts(detail, true));
-        }
-        if (manifest.capability() == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE) {
-            button(body, "编辑请求与响应映射", "skills.detail.direct_contract.replace", () -> showDirectContract(detail));
-        }
-        if (!manifest.usesHttp()) {
-            String pendingEndpoint = manifest.servicePrefill().endpoint();
-            if (polling && !pendingEndpoint.isEmpty()) {
-                text(body, "草案建议提交地址 " + pendingEndpoint, "skills.detail.custom.endpoint_suggestion");
+        if (current != null) endpoint.setText(current.endpoint());
+        else {
+            String proposed = proposedEndpoint(detail.manifest());
+            if (!proposed.isEmpty()) {
+                endpoint.setText(proposed);
+                text(body, "草案建议地址，核对后保存。", "skills.detail.custom.endpoint_suggestion");
             }
+        }
+        EditText bearer = serviceKey(current);
+        saveServiceButton(detail, endpoint, bearer, manifestInputs(detail), false, "");
+        removeServiceKey(body, detail, bearer);
+    }
+
+    private void videoConfiguration(SkillStore.Detail detail) {
+        SkillVideoFacts facts = detail.videoFacts();
+        SkillHttpDeclaration declaration = detail.manifest().http();
+        SkillStore.CustomConfiguration current = detail.customConfiguration();
+        LinearLayout advanced = column();
+        if (declaration != null) describeContract(advanced, detail);
+        if (facts != null) {
+            if (!facts.submitPath().isEmpty()) {
+                text(advanced, "提交 POST " + facts.submitPath(), "skills.detail.custom.submit_path");
+            }
+            button(advanced, "查看接口字段", "skills.detail.video_facts.open", () -> showReadOnlyVideoFacts(facts));
+        }
+        boolean useApiBase = facts != null && facts.needsApiBase();
+        String savedAddress = videoAddressValue(facts, detail.manifest(), current);
+        if (facts == null || !facts.isComplete() || declaration == null || declaration.video() == null
+                || (current != null || !useApiBase) && savedAddress.isEmpty()) {
+            String message = declaration == null ? "请在聊天中补齐接口资料后保存草稿。"
+                    : "此视频接口没有可复用的 API 基础地址配置。请在聊天中核对提交路径后保存草稿。";
+            text(body, message, "skills.detail.video_configuration_in_chat");
+            if (advanced.getChildCount() != 0) addVideoAdvanced(advanced);
             return;
         }
-        section(declaration == null ? "HTTPS 服务" : declaration.label(), "skills.detail.custom");
+
+        section(declaration.label(), "skills.detail.custom");
+        EditText address = input(body, useApiBase ? "公网 HTTPS API 基础地址" : "公网 HTTPS API 地址",
+                "skills.detail.custom.endpoint", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI,
+                2048, false);
+        address.setText(savedAddress);
+        String exactEndpoint = useApiBase ? "" : savedAddress;
+        EditText bearer = serviceKey(current);
+        Map<String, Supplier<String>> values = new LinkedHashMap<>();
+        SkillManifest.ConfigField model = videoModelField(detail.manifest());
+        if (model != null) {
+            values.put(model.key(), manifestInput(body, model, detail.manifestValues().get(model.key())));
+            ModelField picker = videoModelPicker(detail, model, values.get(model.key()));
+            addModelLookup(body, () -> lookupVideoModels(detail, facts, address, bearer, picker, exactEndpoint));
+        }
+        for (SkillManifest.ConfigField field : detail.manifest().configFields()) {
+            if (field.equals(model)) continue;
+            Object value = detail.manifestValues().get(field.key());
+            LinearLayout parent = field.required() && value == null ? body : advanced;
+            values.put(field.key(), manifestInput(parent, field, value));
+        }
+        String[] lastAddress = {resolvedVideoAddress(facts, savedAddress)};
+        watchModelInputs(bearer, address, null, () -> {
+            String candidate = resolvedVideoAddress(facts, fieldValue(address));
+            if (candidate.isEmpty()) return;
+            String previous = lastAddress[0];
+            lastAddress[0] = candidate;
+            if (!previous.isEmpty() && !candidate.equals(previous) && bearer.length() != 0) {
+                bearer.getText().clear();
+                (modelLookupStatus == null ? status : modelLookupStatus).setText("API 地址已变化，请核对密钥");
+            }
+        });
+        saveServiceButton(detail, address, bearer, values, useApiBase, exactEndpoint);
+        removeServiceKey(advanced, detail, bearer);
+        addVideoAdvanced(advanced);
+    }
+
+    private static String videoAddressValue(SkillVideoFacts facts, SkillManifest manifest,
+                                            SkillStore.CustomConfiguration current) {
+        if (facts == null) return "";
+        if (facts.needsApiBase()) {
+            return facts.apiBaseForEndpoint(current == null ? proposedEndpoint(manifest) : current.endpoint());
+        }
+        if (current != null) return current.endpoint();
+        for (SkillVideoFacts.FormField field : facts.formFields()) {
+            if (field.id().equals("submitEndpoint")) return field.value();
+        }
+        return "";
+    }
+
+    private static SkillManifest.ConfigField videoModelField(SkillManifest manifest) {
+        String source = manifest.http().request().get("model");
+        if (source == null || !source.startsWith("config.")) return null;
+        for (SkillManifest.ConfigField field : manifest.configFields()) {
+            if (source.equals("config." + field.key())
+                    && (field.type() == SkillManifest.FieldType.TEXT || field.type() == SkillManifest.FieldType.ENUM)) return field;
+        }
+        return null;
+    }
+
+    private ModelField videoModelPicker(SkillStore.Detail detail, SkillManifest.ConfigField field, Supplier<String> value) {
+        View control = body.findViewWithTag("skills.detail.config." + field.key());
+        Consumer<String> apply = model -> {
+            if (control instanceof EditText edit) edit.setText(model);
+            else if (control instanceof Spinner spinner) spinner.setSelection(field.options().indexOf(model) + 1);
+        };
+        Predicate<String> compatible = model -> {
+            try { return detail.manifest().enteredValues(Map.of(field.key(), model)).containsKey(field.key()); }
+            catch (IllegalArgumentException invalid) { return false; }
+        };
+        String documentedDefault = field.defaultValue() instanceof String name ? name : "";
+        return new ModelField(value, apply, compatible, documentedDefault, field.type() == SkillManifest.FieldType.ENUM);
+    }
+
+    private void lookupVideoModels(SkillStore.Detail detail, SkillVideoFacts facts, EditText address, EditText key,
+                                   ModelField model, String exactEndpoint) {
+        DouAiLog.Operation trace = DouAiLog.begin("model_settings", "video_model_catalogue");
+        String entered = fieldValue(address);
+        String endpoint = resolvedVideoAddress(facts, entered);
+        if (endpoint.isEmpty() || !exactEndpoint.isEmpty() && !exactEndpoint.equals(endpoint)) {
+            modelLookupStatus.setText(facts.needsApiBase() ? "请填写 HTTPS API 基础地址" : "请使用已核对的提交地址");
+            trace.finish(DouAiLog.Outcome.FAILED, "invalid_video_address", "request_queued=false");
+            return;
+        }
+        String bearer = key.getText().toString();
+        queueModelLookup(trace, key, () -> currentDetail(detail), model,
+                () -> videoDiscovery.fetch(detail, entered, bearer));
+    }
+
+    private boolean currentDetail(SkillStore.Detail expected) {
+        try { return expected.deleteTarget().equals(store.detail(name).deleteTarget()); }
+        catch (RuntimeException unavailable) { return false; }
+    }
+
+    private static String resolvedVideoAddress(SkillVideoFacts facts, String entered) {
+        try {
+            return facts != null && facts.needsApiBase() ? facts.resolveApiBase(entered)
+                    : SkillCustomService.validateEndpoint(entered);
+        } catch (IllegalArgumentException | SkillCustomService.Failure invalid) {
+            return "";
+        }
+    }
+
+    private void addVideoAdvanced(LinearLayout advanced) {
+        advanced.setTag("skills.detail.video_advanced.content");
+        advanced.setVisibility(View.GONE);
+        button(body, "高级配置", "skills.detail.video_advanced", () -> advanced.setVisibility(
+                advanced.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
+        body.addView(advanced, matchWrap());
+    }
+
+    private void describeContract(LinearLayout parent, SkillStore.Detail detail) {
+        SkillManifest manifest = detail.manifest();
+        SkillHttpDeclaration declaration = manifest.http();
+        text(parent, "执行方式 · " + manifest.capability().executionMode().label(), "skills.detail.execution_mode");
+        text(parent, "输出类型 · " + detail.outputType().label(), "skills.detail.output_type");
         String request = declaration == null ? SkillCustomService.REQUEST_FIELD : String.join("、", declaration.request().keySet());
         String response = declaration == null ? SkillCustomService.RESPONSE_FIELD : declaration.responseField();
-        text(contract, "请求 POST JSON，发送字段 " + request + "，读取响应字段 " + response + "。",
+        text(parent, "请求 POST JSON，发送字段 " + request + "，读取响应字段 " + response + "。",
                 "skills.detail.custom.contract");
-        if (declaration != null && declaration.video() != null) {
-            SkillHttpDeclaration.Video video = declaration.video();
-            String routes = "查询 " + videoStatusRoute(video)
-                    + (video.downloadPath().isEmpty() ? "\n成片链接字段 " + video.resultUrlField() : "\n下载 GET " + video.downloadPath());
-            if (video.canCancel()) routes += "\n取消 " + video.cancelMethod() + " " + video.cancelPath();
-            text(contract, routes, "skills.detail.custom.video_routes");
-        }
-        if (useApiBase) {
-            String baseHint = "填写与任务接口同源的 HTTPS 主机和可选端口。";
-            text(body, simpleVideo ? baseHint : baseHint + "提交路径 " + facts.submitPath(), "skills.detail.custom.api_base_hint");
-            if (simpleVideo) text(contract, "提交路径 " + facts.submitPath(), "skills.detail.custom.submit_path");
-        }
-        EditText endpoint = input(body, useApiBase ? "公网 HTTPS API 基础地址" : "公网 HTTPS 完整接口地址",
-                "skills.detail.custom.endpoint",
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, 2048, false);
-        if (current != null) endpoint.setText(useApiBase ? savedBase : current.endpoint());
-        else if (!proposedEndpoint.isEmpty()) {
-            text(body, "草案建议地址，核对后保存。", "skills.detail.custom.endpoint_suggestion");
-            endpoint.setText(useApiBase ? proposedBase : proposedEndpoint);
-        }
-        boolean hasCredential = current != null && current.hasCredential();
-        String hint = hasCredential ? "更换服务密钥（地址相同且留空时保留）" : "服务密钥（可选）";
-        EditText bearer = input(body, hint, "skills.detail.custom.credential",
+        if (declaration == null || declaration.video() == null) return;
+        SkillHttpDeclaration.Video video = declaration.video();
+        String routes = "查询 " + videoStatusRoute(video)
+                + (video.downloadPath().isEmpty() ? "\n成片链接字段 " + video.resultUrlField() : "\n下载 GET " + video.downloadPath());
+        if (video.canCancel()) routes += "\n取消 " + video.cancelMethod() + " " + video.cancelPath();
+        text(parent, routes, "skills.detail.custom.video_routes");
+    }
+
+    private static String proposedEndpoint(SkillManifest manifest) {
+        String proposed = manifest.servicePrefill().endpoint();
+        return proposed.isEmpty() && manifest.http() != null ? manifest.http().suggestedEndpoint() : proposed;
+    }
+
+    private EditText serviceKey(SkillStore.CustomConfiguration current) {
+        String label = current != null && current.hasCredential() ? "API 密钥（同一地址留空时保留）" : "API 密钥（可选）";
+        keyInput = input(body, label, "skills.detail.custom.credential",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 2048, true);
-        Map<String, Supplier<String>> values = manifestInputs(detail, simpleVideo ? contract : null);
-        button(body, "保存服务配置", "skills.detail.custom.save", () ->
-                saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false, enteredValues(values), useApiBase));
-        if (useApiBase) {
-            button(contract, "按完整接口地址保存", "skills.detail.custom.save_complete_endpoint", () ->
-                    saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false, enteredValues(values), false));
-        }
-        if (hasCredential) {
-            button(contract, "移除此技能密钥", "skills.detail.custom.remove_credential", () -> review("移除服务密钥",
-                    "确认后生成待启用配置。", "移除密钥",
-                    () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true, null, false)));
-        }
-        if (simpleVideo) {
-            contract.setTag("skills.detail.video_advanced.content");
-            contract.setVisibility(View.GONE);
-            button(body, "高级配置", "skills.detail.video_advanced", () -> contract.setVisibility(
-                    contract.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
-            body.addView(contract, matchWrap());
-        }
+        return keyInput;
     }
 
-    private void showVideoFacts(SkillStore.Detail detail, boolean replacing) {
-        LinearLayout form = column();
-        int padding = dp(16);
-        form.setPadding(padding, 0, padding, padding);
-        text(form, replacing ? "填写新服务接口，保存为草稿后在技能设置核对并启用。"
-                        : "可从文档、请求和响应示例识别已确认字段，再逐项补齐。密钥在服务配置单独填写。",
-                "skills.detail.video_facts.guidance");
-        int multiline = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-        EditText notes = input(form, "接口资料（可选）", "skills.detail.video_facts.input", multiline, 16001, false);
-        notes.setMinLines(2);
-        notes.setGravity(Gravity.TOP | Gravity.START);
-        disableSecretStateTransfer(notes);
-        View noteControl = MiuixFormControls.viewFor(notes);
-        if (noteControl != notes) disableSecretStateTransfer(noteControl);
-        EditText related = input(form, "关联已配置的视频技能命令名（可选）", "skills.detail.video_facts.related",
-                InputType.TYPE_CLASS_TEXT, 25, false);
-        TextView error = text(form, "", "skills.detail.video_facts.error");
-        error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        SkillVideoFacts initial = replacing || detail.videoFacts() == null ? SkillVideoFacts.empty() : detail.videoFacts();
-        SkillVideoFacts[] prefilled = {initial};
-        TextView missing = text(form, videoMissingLabel(initial), "skills.detail.video_facts.missing");
-        Map<String, VideoFactControl> controls = new LinkedHashMap<>();
-        Set<String> edited = new LinkedHashSet<>();
-        boolean[] applying = {false};
-        button(form, "识别资料", "skills.detail.video_facts.prefill", () -> {
-            try {
-                SkillVideoFacts supplied = videoFactSource(notes, related);
-                if (supplied.isEmpty()) {
-                    error.setText("未识别到可预填的字段");
-                    return;
-                }
-                SkillVideoFacts merged = prefilled[0].fillMissingFrom(supplied);
-                applying[0] = true;
-                try {
-                    for (SkillVideoFacts.FormField field : merged.formFields()) {
-                        if (edited.contains(field.id())) continue;
-                        VideoFactControl row = controls.get(field.id());
-                        row.input().setText(field.value());
-                        row.source().setText(videoFactSourceLabel(field));
-                    }
-                } finally {
-                    applying[0] = false;
-                }
-                prefilled[0] = merged;
-                missing.setText(videoMissingLabel(merged));
-                error.setText("已识别资料，请核对字段后保存");
-            } catch (IllegalArgumentException invalid) {
-                error.setText("无法识别资料，请核对接口字段和关联技能名称");
-            }
-        });
-        for (SkillVideoFacts.FormField field : initial.formFields()) {
-            String label = videoFactLabel(field);
-            String tag = "skills.detail.video_facts.field." + field.id();
-            if (!miuix) text(form, label, tag + ".label");
-            text(form, videoFactHelp(field), tag + ".help");
-            int type = field.type() == SkillVideoFacts.FieldType.HTTPS_URL
-                    ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
-                    : field.type() == SkillVideoFacts.FieldType.STATE_MAP ? multiline
-                    : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-            EditText edit = input(form, label, tag, type, 2048, false);
-            edit.setText(field.value());
-            TextView source = text(form, videoFactSourceLabel(field), "skills.detail.video_facts.source." + field.id());
-            controls.put(field.id(), new VideoFactControl(edit, source));
-            edit.addTextChangedListener(new TextWatcher() {
-                @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
-                @Override public void onTextChanged(CharSequence value, int start, int before, int count) { }
-                @Override public void afterTextChanged(Editable value) {
-                    if (applying[0]) return;
-                    edited.add(field.id());
-                    source.setText(value.toString().trim().isEmpty() ? "待填写" : "来源 · 本次填写");
-                }
-            });
-        }
-        ScrollView scroll = new ScrollView(context);
-        scroll.addView(form);
-        AlertDialog editor = builder(replacing ? "更换视频接口" : "视频接口字段").setView(scroll).setNegativeButton("取消", null)
-                .setPositiveButton("保存草稿", null).create();
-        showChild(editor);
-        if (!editor.isShowing()) return;
-        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
-            if (!active() || !editor.isShowing() || confirmation != editor) return;
-            SkillStore.Detail updated;
-            try {
-                SkillVideoFacts supplied = prefilled[0].fillMissingFrom(videoFactSource(notes, related));
-                Map<String, String> entered = new LinkedHashMap<>();
-                for (String id : edited) entered.put(id, fieldValue(controls.get(id).input()));
-                if (supplied.isEmpty() && entered.isEmpty()) {
-                    error.setText("请填写至少一个接口字段");
-                    return;
-                }
-                updated = replacing ? store.replaceVideoContract(detail, supplied.withForm(entered))
-                        : store.saveVideoFactsForm(detail, supplied, entered);
-            } catch (IllegalArgumentException invalid) {
-                error.setText("接口字段无效，请核对方法、路径和字段格式");
-                return;
-            } catch (IllegalStateException stale) {
-                error.setText("草稿已变化，请重新打开技能配置后再试");
-                return;
-            } catch (Exception unavailable) {
-                error.setText("暂时无法保存视频接口资料");
+    private void saveServiceButton(SkillStore.Detail detail, EditText endpoint, EditText bearer,
+                                   Map<String, Supplier<String>> values, boolean useApiBase, String exactEndpoint) {
+        button(body, "保存服务配置", "skills.detail.custom.save", () -> {
+            cancelModelLookup("configuration_save_started");
+            String entered = fieldValue(endpoint);
+            if (!exactEndpoint.isEmpty() && !exactEndpoint.equals(resolvedVideoAddress(null, entered))) {
+                status.setText("请使用已核对的提交地址；更换地址请在聊天中修改接口");
                 return;
             }
-            notes.setText("");
-            editor.dismiss();
-            render(updated, updated.manifest().http() == null ? "资料已保存，请继续补充缺项"
-                    : "接口声明已生成，请核对服务配置");
-            if (onChanged != null) onChanged.run();
+            saveCustomConfiguration(detail, entered, bearer, false, enteredValues(values), useApiBase);
         });
     }
 
-    private record DirectField(EditText name, Spinner source) {}
-
-    private void showDirectContract(SkillStore.Detail detail) {
-        String prefix = "skills.detail.direct_contract";
-        LinearLayout form = column();
-        int padding = dp(16);
-        form.setPadding(padding, 0, padding, padding);
-        text(form, "将请求 JSON 的字段映射到本次文本或技能配置。至少保留一个本次文本字段。",
-                prefix + ".guidance");
-
-        List<String> sources = new ArrayList<>();
-        List<String> labels = new ArrayList<>();
-        sources.add("argument");
-        labels.add("本次文本");
-        for (SkillManifest.ConfigField field : detail.manifest().configFields()) {
-            sources.add("config." + field.key());
-            labels.add(field.label() + " · " + directFieldType(field.type()));
-        }
-        ArrayAdapter<String> choices = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item, labels);
-        choices.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        LinearLayout rows = column();
-        form.addView(rows, matchWrap());
-        List<DirectField> fields = new ArrayList<>();
-        SkillHttpDeclaration current = detail.manifest().http();
-        Map<String, String> request = current == null ? Map.of(SkillCustomService.REQUEST_FIELD, "argument") : current.request();
-        request.forEach((name, source) -> addDirectField(rows, fields, choices, sources, name, source));
-
-        String output = switch (detail.outputType()) {
-            case TEXT -> "文本字符串";
-            case IMAGE -> "Base64 图片字符串";
-            case TABLE -> "含 columns 和 rows 的对象";
-            default -> throw new IllegalArgumentException("此技能没有直接响应字段");
-        };
-        TextView error = text(form, "", prefix + ".error");
-        error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        button(form, "添加请求字段", prefix + ".add", () -> {
-            if (fields.size() >= MAX_DIRECT_FIELDS) error.setText("最多可映射 7 个请求字段");
-            else addDirectField(rows, fields, choices, sources, "", "argument");
-        });
-        text(form, "响应 JSON 顶层字段 · " + output, prefix + ".response_type");
-        EditText response = input(form, "响应字段名", prefix + ".response", InputType.TYPE_CLASS_TEXT, 32, false);
-        response.setText(current == null ? SkillCustomService.RESPONSE_FIELD : current.responseField());
-        ScrollView scroll = new ScrollView(context);
-        scroll.addView(form);
-        AlertDialog editor = builder("请求与响应映射").setView(scroll).setNegativeButton("取消", null)
-                .setPositiveButton("保存草稿", null).create();
-        showChild(editor);
-        if (!editor.isShowing()) return;
-        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
-            if (!active() || !editor.isShowing() || confirmation != editor) return;
-            Map<String, String> mapped = new LinkedHashMap<>();
-            for (DirectField field : fields) {
-                String key = fieldValue(field.name());
-                if (key.isEmpty()) continue;
-                int selected = field.source().getSelectedItemPosition();
-                if (selected < 0 || selected >= sources.size()) {
-                    error.setText("请选择请求字段的取值");
-                    return;
-                }
-                if (mapped.putIfAbsent(key, sources.get(selected)) != null) {
-                    error.setText("请求字段名重复");
-                    return;
-                }
-            }
-            SkillStore.Detail updated;
-            try {
-                updated = store.replaceDirectContract(detail, mapped, fieldValue(response));
-            } catch (IllegalArgumentException invalid) {
-                error.setText("请核对请求和响应的顶层字段及取值");
-                return;
-            } catch (IllegalStateException stale) {
-                error.setText("技能配置已变化，请重新打开设置");
-                return;
-            } catch (Exception unavailable) {
-                error.setText("暂时无法保存接口映射");
-                return;
-            }
-            editor.dismiss();
-            render(updated, updated.pending() ? "接口映射已保存为草稿" : "已核对接口映射");
-            if (onChanged != null) onChanged.run();
-        });
-    }
-
-    private void addDirectField(LinearLayout rows, List<DirectField> fields, ArrayAdapter<String> choices,
-                                List<String> sources, String name, String initialSource) {
-        int index = fields.size();
-        EditText key = input(rows, "请求字段名（留空移除）", "skills.detail.direct_contract.request." + index,
-                InputType.TYPE_CLASS_TEXT, 32, false);
-        key.setText(name);
-        Spinner source = miuix ? MiuixFormControls.spinner(context) : new Spinner(context);
-        source.setTag("skills.detail.direct_contract.source." + index);
-        source.setContentDescription("请求字段取值");
-        source.setAdapter(choices);
-        source.setSelection(sources.indexOf(initialSource));
-        rows.addView(MiuixFormControls.viewFor(source), matchWrap());
-        fields.add(new DirectField(key, source));
-    }
-
-    private static String directFieldType(SkillManifest.FieldType type) {
-        return switch (type) {
-            case TEXT -> "文本";
-            case MULTILINE -> "多行文本";
-            case INTEGER -> "整数";
-            case DECIMAL -> "小数";
-            case BOOLEAN -> "开关";
-            case ENUM -> "选项";
-        };
-    }
-
-    private record VideoFactControl(EditText input, TextView source) {}
-
-    private SkillVideoFacts videoFactSource(EditText notes, EditText related) {
-        SkillVideoFacts supplied = SkillVideoFacts.parse(notes.getText().toString());
-        String command = fieldValue(related);
-        if (command.startsWith("/")) command = command.substring(1);
-        if (command.isEmpty()) return supplied;
-        try {
-            return supplied.fillMissingFrom(store.videoFactsForSkill(command));
-        } catch (Exception unavailable) {
-            throw new IllegalArgumentException("关联的视频技能不可用");
-        }
+    private void removeServiceKey(LinearLayout parent, SkillStore.Detail detail, EditText bearer) {
+        SkillStore.CustomConfiguration current = detail.customConfiguration();
+        if (current == null || !current.hasCredential()) return;
+        button(parent, "移除此技能密钥", "skills.detail.custom.remove_credential", () -> review("移除服务密钥",
+                "确认后生成待启用配置。", "移除密钥",
+                () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true, null, false)));
     }
 
     private static String videoFactSourceLabel(SkillVideoFacts.FormField field) {
@@ -708,26 +521,6 @@ final class AiSkillDetailDialog implements AutoCloseable {
     private static String videoMissingLabel(SkillVideoFacts facts) {
         List<String> missing = facts.missing();
         return missing.isEmpty() ? "接口字段已齐全" : "待补充 " + String.join("、", missing);
-    }
-
-    private static String videoFactHelp(SkillVideoFacts.FormField field) {
-        if ("submitPath".equals(field.id())) return "文档中的 POST 路径，以 / 开头。与完整提交地址任选一项。";
-        if ("submitEncoding".equals(field.id())) return "按接口文档填写。当前执行器只支持 application/json。";
-        if ("statusPath".equals(field.id())) return "查询 GET 路径，含独立的 {id}；三种查询方式只填一种。";
-        if ("statusUrlField".equals(field.id())) return "提交响应中返回查询地址的 JSON 字段。只接受同源 HTTPS 地址或同源路径。";
-        if ("statusPostPath".equals(field.id())) return "查询 POST 的同源固定路径，不含 {id}；任务 ID 通过请求体传入。";
-        if ("statusPostIdField".equals(field.id())) return "查询 POST JSON 请求中接收原任务 ID 的字段名。";
-        if ("resultUrlField".equals(field.id())) return "查询响应中返回成片链接的字段，与下载路径任选一项。";
-        if ("downloadPath".equals(field.id())) return "下载的 GET 路径，含独立的 {id}。查询已返回成片链接时可留空。";
-        return switch (field.type()) {
-            case HTTPS_URL -> "提交任务的 POST 地址，须为完整公网 HTTPS 地址。";
-            case JSON_FIELD -> "提交请求中接收提示词的 JSON 字段名。";
-            case JSON_PATH -> "用点分隔 JSON 对象层级，例如 data.id。";
-            case TASK_PATH -> "以 / 开头的同源路径，含独立的 {id} 路径段。";
-            case STATE_MAP -> "填写文档中的状态对应关系，例如 done=completed。";
-            case CANCEL_METHOD -> "服务支持取消时填 POST 或 DELETE。";
-            case TEXT -> "用于在配置页识别该接口。";
-        };
     }
 
     static String videoStatusRoute(SkillHttpDeclaration.Video video) {
@@ -946,10 +739,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
                 }
             });
         });
-        modelLookupButton = button(fields, "拉取模型列表", "skills.detail.fetch_models", () ->
-                lookupModels(detail, adapter, endpoint, complete, modelsEndpoint, key, model));
-        modelLookupStatus = text(fields, "", "skills.detail.model_status");
-        modelLookupStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        addModelLookup(fields, () -> lookupModels(detail, adapter, endpoint, complete, modelsEndpoint, key, model));
         String[] lastAddress = {resolvedGenerationAddress(endpoint, complete)};
         Runnable addressChanged = () -> {
             String address = resolvedGenerationAddress(endpoint, complete);
@@ -1099,8 +889,15 @@ final class AiSkillDetailDialog implements AutoCloseable {
         return detail.canAuthorize() ? "配置已保存，请授权已保存的服务" : "配置已保存";
     }
 
+    private void addModelLookup(LinearLayout parent, Runnable action) {
+        modelLookupButton = button(parent, "拉取模型", "skills.detail.fetch_models", action);
+        modelLookupStatus = text(parent, "", "skills.detail.model_status");
+        modelLookupStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+    }
+
     private void watchModelInputs(EditText key, EditText endpoint, EditText modelsEndpoint, Runnable addressChanged) {
         for (EditText field : new EditText[]{endpoint, modelsEndpoint, key}) {
+            if (field == null) continue;
             field.addTextChangedListener(new TextWatcher() {
                 @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
                 @Override public void onTextChanged(CharSequence text, int start, int before, int count) {
@@ -1120,10 +917,6 @@ final class AiSkillDetailDialog implements AutoCloseable {
             trace.finish(DouAiLog.Outcome.SKIPPED, "inactive_image_form", "request_queued=false");
             return;
         }
-        if (modelLookup != null) {
-            trace.finish(DouAiLog.Outcome.SKIPPED, "lookup_already_pending", "request_queued=false");
-            return;
-        }
         String generation = generationAddress(endpoint, complete, modelLookupStatus);
         if (generation == null || generation.isEmpty()) {
             if (generation != null) modelLookupStatus.setText("请填写 HTTPS API 基础地址");
@@ -1132,6 +925,23 @@ final class AiSkillDetailDialog implements AutoCloseable {
         }
         String catalogue = fieldValue(modelsEndpoint);
         String bearer = key.getText().toString();
+        ModelField target = new ModelField(() -> fieldValue(model), model::setText, name -> true, "", false);
+        queueModelLookup(trace, key, () -> currentDraft(detail.draftId()), target,
+                () -> discovery.fetch(name, detail.draftId(), generation, catalogue, bearer));
+    }
+
+    private record ModelField(Supplier<String> value, Consumer<String> apply, Predicate<String> compatible,
+                              String documentedDefault, boolean selectMissingSingle) { }
+
+    @FunctionalInterface
+    private interface ModelFetch { List<String> fetch() throws Exception; }
+
+    private void queueModelLookup(DouAiLog.Operation trace, EditText key, BooleanSupplier current, ModelField model,
+                                  ModelFetch fetch) {
+        if (!active() || keyInput != key || modelLookup != null) {
+            trace.finish(DouAiLog.Outcome.SKIPPED, "lookup_unavailable", "request_queued=false");
+            return;
+        }
         long ticket = ++modelLookupGeneration;
         modelLookupStatus.setText(FETCHING_MODELS);
         modelLookupButton.setEnabled(false);
@@ -1142,11 +952,11 @@ final class AiSkillDetailDialog implements AutoCloseable {
             modelLookup = discoveryWorker.submit(trace.wrap(() -> {
                 trace.stage("worker_started", "discovery_only=true");
                 try {
-                    List<String> models = discovery.fetch(name, detail.draftId(), generation, catalogue, bearer);
-                    main.post(trace.wrap(() -> finishModelLookup(trace, ticket, detail.draftId(), key, model, models, null)));
+                    List<String> models = fetch.fetch();
+                    main.post(trace.wrap(() -> finishModelLookup(trace, ticket, key, current, model, models, null)));
                 } catch (Exception failure) {
                     LookupFailure rejected = lookupFailure(failure);
-                    main.post(trace.wrap(() -> finishModelLookup(trace, ticket, detail.draftId(), key, model, List.of(), rejected)));
+                    main.post(trace.wrap(() -> finishModelLookup(trace, ticket, key, current, model, List.of(), rejected)));
                 }
             }));
         } catch (RejectedExecutionException unavailable) {
@@ -1177,8 +987,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
                 DouAiLog.Outcome.FAILED, "lookup_unavailable");
     }
 
-    private void finishModelLookup(DouAiLog.Operation trace, long ticket, String draftId, EditText key, EditText model,
-                                   List<String> models, LookupFailure failure) {
+    private void finishModelLookup(DouAiLog.Operation trace, long ticket, EditText key, BooleanSupplier current,
+                                   ModelField model, List<String> models, LookupFailure failure) {
         if (modelLookupTrace != trace) return;
         modelLookupTrace = null;
         modelLookup = null;
@@ -1187,8 +997,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
             return;
         }
         modelLookupButton.setEnabled(true);
-        if (!currentDraft(draftId)) {
-            modelLookupStatus.setText("草稿状态已变化，请重新打开技能配置");
+        if (!current.getAsBoolean()) {
+            modelLookupStatus.setText("技能配置已变化，请重新打开详情");
             trace.finish(DouAiLog.Outcome.CANCELLED, "stale_draft", "options_presented=false");
             return;
         }
@@ -1197,15 +1007,26 @@ final class AiSkillDetailDialog implements AutoCloseable {
             trace.finish(failure.outcome(), failure.reason(), "options_presented=false");
             return;
         }
-        if (models.isEmpty()) {
-            modelLookupStatus.setText("模型列表为空，可以手动填写模型名称");
+        List<String> available = new ArrayList<>();
+        for (String name : models) {
+            if (model.compatible().test(name) && !available.contains(name)) available.add(name);
+        }
+        if (available.isEmpty()) {
+            modelLookupStatus.setText("没有可选模型，可以手动填写模型名称");
             trace.finish(DouAiLog.Outcome.FAILED, "catalogue_empty", "options_presented=false");
             return;
         }
+        if (model.selectMissingSingle() && available.size() == 1
+                && model.documentedDefault().isEmpty() && model.value().get().isBlank()) {
+            model.apply().accept(available.get(0));
+            modelLookupStatus.setText("已填入可用模型，请保存配置");
+            trace.finish(DouAiLog.Outcome.SUCCESS, "single_model_selected", "model_count=1");
+            return;
+        }
         try {
-            AlertDialog choices = builder("选择模型").setItems(models.toArray(new String[0]), (ignored, which) -> {
-                        if (!currentModelLookup(ticket, key) || !currentDraft(draftId)) return;
-                        model.setText(models.get(which));
+            AlertDialog choices = builder("选择模型").setItems(available.toArray(new String[0]), (ignored, which) -> {
+                        if (!currentModelLookup(ticket, key) || !current.getAsBoolean()) return;
+                        model.apply().accept(available.get(which));
                         modelLookupStatus.setText("已选择模型，请保存配置");
                     }).setNegativeButton("取消", null).create();
             showChild(choices);

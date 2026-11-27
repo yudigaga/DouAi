@@ -280,18 +280,23 @@ public final class SkillVideoJobs {
         Entry intent = claim.entry();
         if (!claim.execute()) return intent.job();
         SkillHttpsTransport.Response response;
+        com.douai.module.diagnostics.DouAiLog.Operation trace = com.douai.module.diagnostics.DouAiLog.current();
         try {
             response = call(scope, intent, access, SkillHttpsTransport.Method.POST, false, binding.endpoint(),
                     payload, deadlineNanos);
         } catch (SkillHttpsTransport.Failure failure) {
+            if (trace != null) trace.stage("video_submit", "transport=" + failure.kind().name()
+                    + ";may_have_sent=" + failure.mayHaveSent());
             if (failure.mayHaveSent()) return finishUnknown(scope, intent);
             return finish(scope, intent, State.FAILED, "", 0, "").job();
         } catch (Failure rejectedLocally) {
             if (rejectedLocally.code() != Code.CLEARED) finish(scope, intent, State.FAILED, "", 0, "");
             throw rejectedLocally;
         } catch (IOException unavailable) {
+            if (trace != null) trace.stage("video_submit", "transport=io_failure;result=unknown");
             return finishUnknown(scope, intent);
         }
+        if (trace != null) trace.stage("video_submit", "http_status=" + response.status());
         if (definiteRefusal(response.status())) return finish(scope, intent, State.FAILED, "", 0, "").job();
         try {
             JSONObject submitted = json(response);

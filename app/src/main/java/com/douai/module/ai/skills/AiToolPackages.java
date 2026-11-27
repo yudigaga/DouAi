@@ -22,12 +22,6 @@ import java.util.regex.Pattern;
 public final class AiToolPackages {
     public static final String COMMAND = "use_package";
     public static final String WRITE_COMMAND = "文档技能";
-    public static final String WRITE_INSTRUCTION = """
-            根据本次需求撰写一个 Operit 风格的文档技能。直接返回完整 SKILL.md，
-            首行 ---，随后用单行 name 和 description 写名称、使用场景，以 --- 结束元数据。
-            在 Markdown 正文写任务步骤、约束和输出。不要附代码围栏包裹整份文档。
-            只提供流程说明，不生成凭据，不要求运行脚本、不访问外部目标。
-            """;
     public static final int MAX_MODEL_INPUT = 160_000;
     public static final String MARKDOWN_INSTRUCTION = """
             处理用户手动选择的文档技能。输入 JSON 的 argument 是用户本次任务，

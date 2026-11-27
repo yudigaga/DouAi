@@ -562,7 +562,7 @@ public class SkillStoreTest {
         assertTrue(reopened.list().isEmpty());
     }
 
-    @Test public void videoFormRetainsOnlyUnchangedBindingsAndRestoresOrdinaryValuesAfterPartialSave() throws Exception {
+    @Test public void videoFormKeepsValuesOnlyUntilTheContractChanges() throws Exception {
         File root = temp.newFolder();
         SkillStore store = videoStore(root);
         String name = "镜头动画";
@@ -601,7 +601,7 @@ public class SkillStoreTest {
         assertEquals("/v2/jobs/{id}", changed.manifest().http().video().statusPath());
         assertEquals("https://other.example.com/v2/submit", changed.manifest().http().suggestedEndpoint());
         assertNull(changed.customConfiguration());
-        assertEquals(8, changed.manifestValues().get("duration"));
+        assertNull(changed.manifestValues().get("duration"));
         SkillStore.Detail partial = store.saveVideoFactsForm(changed, null, java.util.Map.of("statusPath", ""));
         assertNull(partial.manifest().http());
         assertTrue(partial.videoMissing().stream().anyMatch(field -> field.contains("查询 GET")));
@@ -612,7 +612,7 @@ public class SkillStoreTest {
         assertTrue(completed.pending());
         assertNull(completed.customConfiguration());
         assertEquals(current.current(), completed.current());
-        assertEquals(8, completed.manifestValues().get("duration"));
+        assertNull(completed.manifestValues().get("duration"));
         assertFalse(Files.readString(new File(root, "catalog.json").toPath()).contains(pendingKey));
     }
 
@@ -712,6 +712,8 @@ public class SkillStoreTest {
                 pending, "https://video.example.com", "fixture-relative-video-key", false, null));
         assertThrows(IllegalArgumentException.class, () -> store.configureCustomService(
                 pending, "https://different.example.com:8443/v1/videos", ""));
+        assertThrows(IllegalArgumentException.class, () -> store.configureCustomService(
+                pending, "https://video.example.com:8443/v1/legacy-submit", ""));
         assertEquals(pending.deleteTarget(), store.detail(name).deleteTarget());
 
         String base = "https://video.example.com:8443";
@@ -719,8 +721,113 @@ public class SkillStoreTest {
         assertFalse(installed.pending());
         assertEquals(base + "/v1/videos", installed.customConfiguration().endpoint());
         assertTrue(installed.customConfiguration().hasCredential());
+        SkillStore reopened = videoStore(root);
+        SkillStore.Detail active = reopened.detail(name);
+        assertTrue(active.videoFacts().needsApiBase());
+        assertEquals("/v1/videos", active.videoFacts().submitPath());
+        assertEquals(base, active.videoFacts().apiBaseForEndpoint(active.customConfiguration().endpoint()));
+        SkillStore.ConversationDraft open = reopened.openConversationDraft(name);
+        assertEquals(name, open.preview().name());
+        assertEquals("", open.pendingId());
+        assertEquals(active.deleteTarget(), open.identity());
+        assertTrue(open.facts().needsApiBase());
+        assertFalse(open.preview().definition().contains("fixture-relative-video-key"));
         AiSkills.Invocation call = AiSkills.match(AiSkills.Entry.CONTACT, "/镜头动画 海边", store);
         assertEquals(base + "/v1/videos", store.previewCustomService(call).endpoint());
+
+        var edited = SkillStore.validateAuthoredDraft(new JSONObject(open.preview().definition())
+                .put("description", "沿用触发逻辑的新说明").toString());
+        var staged = reopened.saveConversationDraft(edited, open.facts(), "", open.identity());
+        assertNotNull(staged.pending());
+        assertTrue(reopened.detail(name).canReplace());
+        assertEquals(active.customConfiguration(), reopened.detail(name).customConfiguration());
+        assertThrows(IllegalStateException.class, () -> reopened.saveConversationDraft(edited, open.facts(), "", open.identity()));
+
+        SkillStore.ConversationDraft sameSkill = reopened.openConversationDraft(name);
+        SkillVideoFacts switched = sameSkill.facts().withForm(java.util.Map.of("statusPath", "/v2/videos/{id}"));
+        assertThrows(IllegalStateException.class, () -> reopened.saveConversationDraft(sameSkill.preview(), switched,
+                UUID.randomUUID().toString(), sameSkill.identity(), true));
+        var replacement = reopened.saveConversationDraft(sameSkill.preview(), switched, sameSkill.pendingId(),
+                sameSkill.identity(), true);
+        assertNotNull(replacement.pending());
+        SkillStore.Detail migrated = reopened.detail(name);
+        assertNull(migrated.customConfiguration());
+        assertEquals("/v2/videos/{id}", migrated.manifest().http().video().statusPath());
+        assertEquals(active.current(), migrated.current());
+        assertEquals(base + "/v1/videos", reopened.previewCustomService(call).endpoint());
+    }
+
+    @Test public void newlyAuthoredVideoContractDoesNotInheritEitherOldBindingOrModel() throws Exception {
+        File root = temp.newFolder();
+        SkillStore store = videoStore(root);
+        String name = "镜头动画";
+        String oldEndpoint = "https://legacy.example.com/v1/submit";
+        String oldKey = "fixture-old-video-authority";
+        SkillStore.DraftPreview seed = SkillStore.validateAuthoredDraft(videoDraft(name).toString());
+        SkillVideoFacts old = switchVideoFacts("legacy.example.com", "prompt", "视频模型");
+        store.saveAuthoredVideoDraft(seed, old);
+        store.configureCustomService(store.detail(name), oldEndpoint, oldKey, false,
+                java.util.Map.of("model", "legacy-active-model", "duration", "6"));
+        store.saveAuthoredVideoDraft(seed, old);
+        store.configureCustomService(store.detail(name), oldEndpoint, "fixture-old-pending-authority", false,
+                java.util.Map.of("model", "legacy-pending-model", "duration", "8"));
+
+        JSONObject document = switchVideoFacts("new.example.com", "scene", "视频模型").toJson();
+        document.remove("submitEndpoint");
+        document.remove("provenance");
+        document.put("submitPath", "/v1/submit").put("submitEncoding", "application/json");
+        document.getJSONArray("configFields").getJSONObject(0).put("default", "verified-new-model");
+        SkillVideoFacts verified = SkillVideoFacts.fromDocument(document);
+        assertNotNull(store.saveAuthoredVideoDraft(seed, verified).pending());
+
+        SkillStore reopened = videoStore(root);
+        SkillStore.Detail next = reopened.detail(name);
+        assertEquals("verified-new-model", next.manifestValues().get("model"));
+        assertFalse(next.manifestValues().containsKey("duration"));
+        assertNull(next.customConfiguration());
+        assertEquals("argument", next.manifest().http().request().get("scene"));
+        assertEquals(oldEndpoint, reopened.previewCustomService(AiSkills.match(AiSkills.Entry.WORK,
+                "/镜头动画 山谷", reopened)).endpoint());
+        SkillStore.ConversationDraft opened = reopened.openConversationDraft(name);
+        assertEquals(next.draftId(), opened.pendingId());
+        assertEquals("verified-new-model", opened.preview().publicFields().get("config.model"));
+        assertFalse(opened.preview().definition().contains(oldEndpoint));
+        assertFalse(opened.preview().definition().contains(oldKey));
+    }
+
+    @Test public void explicitVideoModelLookupUsesOnlyTheExactSelectedCredentialAndDoesNotSave() throws Exception {
+        File root = temp.newFolder();
+        var endpoints = new java.util.ArrayList<String>();
+        var tokens = new java.util.ArrayList<String>();
+        SkillStore store = videoStore(root, (endpoint, bearer) -> {
+            endpoints.add(endpoint);
+            tokens.add(bearer);
+            return java.util.List.of("listed-model");
+        });
+        String name = "镜头动画";
+        JSONObject document = switchVideoFacts("unused.example.com", "prompt", "视频模型").toJson();
+        document.remove("submitEndpoint");
+        document.remove("provenance");
+        document.put("submitPath", "/v1/videos").put("submitEncoding", "application/json");
+        var seed = SkillStore.validateAuthoredDraft(videoDraft(name).toString());
+        store.saveAuthoredVideoDraft(seed, SkillVideoFacts.fromDocument(document));
+        SkillStore.Detail pending = store.detail(name);
+        var path = new File(root, "catalog.json").toPath();
+        String draft = Files.readString(path);
+        String base = "https://video.example.com";
+        assertEquals(java.util.List.of("listed-model"), store.discoverVideoModels(pending, base, "fixture-typed-key"));
+        assertEquals(draft, Files.readString(path));
+        SkillStore.Detail active = store.configureCustomServiceBase(pending, base, "fixture-installed-key", false,
+                java.util.Map.of("model", "listed-model", "duration", "5"));
+        String installed = Files.readString(path);
+        assertThrows(IllegalStateException.class, () -> store.discoverVideoModels(pending, base, ""));
+        assertThrows(IllegalArgumentException.class, () -> store.discoverVideoModels(active, base + "/v1/old", ""));
+        assertEquals(java.util.List.of("listed-model"), store.discoverVideoModels(active, base + "/v1/videos", ""));
+        assertEquals(java.util.List.of("listed-model"), store.discoverVideoModels(active, "https://different.example.com", ""));
+        assertEquals(java.util.List.of(base + "/v1/videos", base + "/v1/videos",
+                "https://different.example.com/v1/videos"), endpoints);
+        assertEquals(java.util.List.of("fixture-typed-key", "fixture-installed-key", ""), tokens);
+        assertEquals(installed, Files.readString(path));
     }
 
     @Test public void conversationTextSaveKeepsNewInstallationAndExplicitReplacement() throws Exception {
@@ -813,7 +920,7 @@ public class SkillStoreTest {
         assertEquals(active.current(), candidate.current());
         assertEquals(name, candidate.name());
         assertEquals(pending.manifest().instructions(), candidate.manifest().instructions());
-        assertEquals(8, candidate.manifestValues().get("duration"));
+        assertFalse(candidate.manifestValues().containsKey("duration"));
         assertFalse(candidate.manifestValues().containsKey("model"));
         assertNull(candidate.customConfiguration());
         assertEquals(secondEndpoint, candidate.manifest().http().suggestedEndpoint());
@@ -1017,6 +1124,12 @@ public class SkillStoreTest {
     }
 
     private static SkillStore videoStore(File root) {
+        return videoStore(root, (endpoint, bearer) -> {
+            throw new AssertionError("Model listing must be explicitly requested");
+        });
+    }
+
+    private static SkillStore videoStore(File root, SkillStore.VideoModelQuery videoModels) {
         var vault = new com.douai.module.ai.AiCredentialVault(
                 () -> new javax.crypto.spec.SecretKeySpec(new byte[32], "AES"));
         var services = new SkillServices(root, vault, (endpoint, bearer, body, deadline, output) -> {
@@ -1025,7 +1138,7 @@ public class SkillStoreTest {
         var customService = new SkillCustomService(vault, (endpoint, bearer, body, deadline, limit, admission) -> {
             throw new AssertionError("Declaration and local configuration must not use the network");
         }, System::nanoTime);
-        return new SkillStore(root, services, null, customService);
+        return new SkillStore(root, services, null, customService, videoModels);
     }
 
     private static JSONObject videoDraft(String name) throws Exception {

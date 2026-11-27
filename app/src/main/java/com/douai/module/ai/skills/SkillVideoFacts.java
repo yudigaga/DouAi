@@ -767,7 +767,7 @@ public final class SkillVideoFacts {
             throw new IllegalArgumentException("API 基础地址只包含 HTTPS 主机和可选端口");
         }
         String target = endpoint(authority(canonical) + submitPath());
-        checkRelativeEndpointOrigin(target);
+        checkResolvedEndpoint(target);
         return target;
     }
 
@@ -779,8 +779,17 @@ public final class SkillVideoFacts {
         } catch (IllegalArgumentException invalid) { return ""; }
     }
 
-    void checkRelativeEndpointOrigin(String configured) {
-        if (needsApiBase()) checkRouteOrigins(authority(configured));
+    void checkResolvedEndpoint(String configured) {
+        if (!needsApiBase()) return;
+        if (!submitPath().equals(URI.create(configured).getRawPath())) {
+            throw new IllegalArgumentException("完整接口地址必须匹配已核对的提交 POST 路径");
+        }
+        checkRouteOrigins(authority(configured));
+    }
+
+    boolean verifiedDocumentContract() {
+        Fact submit = needsApiBase() ? Fact.SUBMIT_PATH : Fact.SUBMIT;
+        return isComplete() && provenance.get(submit.key) == Source.DOCUMENT;
     }
 
     public boolean supportsSubmissionEncoding() {

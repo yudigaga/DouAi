@@ -17,7 +17,7 @@ import java.util.regex.Pattern;
 
 /** Interprets explicit manual authoring requests and bounds the isolated model's JSON inputs. */
 public final class SkillAuthoring {
-    public enum Mode { DESIGN, REVISE, SAVE, PREVIEW, CANCEL, SUPPLEMENT, FIELD_PATCH }
+    public enum Mode { DESIGN, OPEN, REVISE, SAVE, PREVIEW, CANCEL, SUPPLEMENT, REPLACE_VIDEO_SOURCE, FIELD_PATCH }
 
     public record Action(Mode mode, String request, boolean saveAfter) { }
     public record VideoSource(Action action, String command, String notes, String relatedSkill, boolean visibleMaterial) { }
@@ -79,6 +79,7 @@ public final class SkillAuthoring {
             """;
 
     private static final int MAX_TYPED = 400;
+    private static final Pattern OPEN_SKILL = Pattern.compile("编辑[\\s\\p{Z}]+/?([\\p{L}\\p{N}_-]{1,24})");
     private static final int MAX_MODEL_INPUT = 4000;
     private static final int MAX_DEFINITION = 8192;
     private static final int MAX_DEPTH = 12;
@@ -393,6 +394,10 @@ public final class SkillAuthoring {
         String designText = explicitCommand ? body : sentence;
         if (explicitCommand && !designText.isEmpty()
                 && (!editorSentence(designText) || hasUnclosedQuote(designText))) return null;
+        if (explicitCommand) {
+            Matcher open = OPEN_SKILL.matcher(designText.trim());
+            if (open.matches()) return new Action(Mode.OPEN, open.group(1), false);
+        }
         if (SAVE.matcher(designText).matches()) return new Action(Mode.SAVE, "", false);
 
         Matcher tail = SAVE_TAIL.matcher(designText);

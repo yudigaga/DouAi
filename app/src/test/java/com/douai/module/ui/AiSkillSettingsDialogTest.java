@@ -16,7 +16,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.CompoundButton;
 import android.widget.EditText;
-import android.widget.ListView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
@@ -25,14 +24,10 @@ import androidx.activity.result.contract.ActivityResultContract;
 import androidx.core.app.ActivityOptionsCompat;
 
 import com.douai.module.ai.skills.AiSkills;
-import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
-import com.douai.module.config.AiModelConfig;
-import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.HostSettingsStore;
-import com.douai.module.feature.ChatCompletionClient;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -43,8 +38,6 @@ import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
-import org.robolectric.annotation.Implementation;
-import org.robolectric.annotation.Implements;
 import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
 
@@ -105,7 +98,10 @@ public final class AiSkillSettingsDialogTest {
         reopenManager();
 
         assertTrue(manager.dialog().isShowing());
-        assertNotNull(view("skills.generate.model"));
+        assertNotNull(view("skills.author_chat"));
+        assertNull(manager.dialog().getWindow().getDecorView().findViewWithTag("skills.requirements"));
+        assertNull(manager.dialog().getWindow().getDecorView().findViewWithTag("skills.generate.model"));
+        assertNull(manager.dialog().getWindow().getDecorView().findViewWithTag("skills.generate.mock"));
         assertNotNull(view("skills.status"));
         View root = manager.dialog().getWindow().getDecorView();
         assertFalse(visibleText(root).contains("技能服务"));
@@ -332,7 +328,7 @@ public final class AiSkillSettingsDialogTest {
     }
 
     @Test public void oneWordImageRequirementStaysPendingUntilExplicitConnectAfterAuthorization() throws Exception {
-        enterAndGenerate("生图", "skills.generate.model");
+        saveMockDraft("生图");
         assertEquals(1, store.pending().size());
         assertEquals(SkillResult.Type.IMAGE, store.pending().get(0).outputType());
         assertTrue(store.list().isEmpty());
@@ -356,7 +352,7 @@ public final class AiSkillSettingsDialogTest {
         detail.dismiss();
     }
 
-    @Test public void directHttpImageOnlyOffersGenericSettingsAndCanEditTypedMappings() throws Exception {
+    @Test public void directHttpImageOffersOnlyItsSettingsAndReadOnlyMapping() throws Exception {
         String name = "接口图片";
         String manifest = """
                 {"schemaVersion":4,"name":"接口图片","description":"通过接口返回图片","documentation":"输入提示词。",
@@ -376,25 +372,20 @@ public final class AiSkillSettingsDialogTest {
         assertNotNull(dialogView(detail, "skills.detail.custom.endpoint"));
         assertNull(dialogView(detail, "skills.detail.adapter"));
         assertNull(dialogView(detail, "skills.detail.retry"));
-        assertTrue(dialogView(detail, "skills.detail.direct_contract.replace").performClick());
-        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
-        ((EditText) dialogView(editor, "skills.detail.direct_contract.request.0")).setText("caption");
-        assertTrue(dialogView(editor, "skills.detail.direct_contract.add").performClick());
-        ((EditText) dialogView(editor, "skills.detail.direct_contract.request.1")).setText("width");
-        ((Spinner) dialogView(editor, "skills.detail.direct_contract.source.1")).setSelection(1);
-        ((EditText) dialogView(editor, "skills.detail.direct_contract.response")).setText("encoded");
-        confirm(editor);
+        assertNull(dialogView(detail, "skills.detail.direct_contract.replace"));
+        assertNotNull(dialogView(detail, "skills.detail.config.size"));
+        assertTrue(visibleText(dialogView(detail, "skills.detail.custom.contract")).contains("prompt"));
+        assertTrue(visibleText(dialogView(detail, "skills.detail.edit_in_chat")).contains("/技能 编辑 /" + name));
 
         SkillStore.Detail pending = store.detail(name);
-        assertTrue(pending.pending());
-        assertEquals(SkillResult.Type.IMAGE, pending.outputType());
-        assertEquals(java.util.Map.of("caption", "argument", "width", "config.size"), pending.manifest().http().request());
-        assertEquals("encoded", pending.manifest().http().responseField());
+        assertEquals(initial.deleteTarget(), pending.deleteTarget());
+        assertEquals(java.util.Map.of("prompt", "argument"), pending.manifest().http().request());
+        assertEquals("image", pending.manifest().http().responseField());
         assertNull(pending.customConfiguration());
         assertTrue(store.list().isEmpty());
     }
 
-    @Test public void videoReplacementUsesTheNewFactsWhileCurrentBindingStaysActive() throws Exception {
+    @Test public void documentedAbsoluteVideoCanConfigureOnlyItsExactSubmitAddress() throws Exception {
         String name = "接口视频";
         String definition = """
                 {"schemaVersion":4,"name":"接口视频","description":"通过接口生成视频","documentation":"输入提示词。",
@@ -403,25 +394,32 @@ public final class AiSkillSettingsDialogTest {
                  "outputType":"video","trial":{"input":"样例","expectedType":"video"}}
                 """;
         String firstEndpoint = "https://first-video.example.com/v1/jobs";
-        String revisedEndpoint = "https://second-video.example.com/v2/tasks";
         var prior = com.douai.module.ai.skills.SkillVideoFacts.parse(videoProviderNotes(firstEndpoint, "/v1/jobs/{id}"));
         store.saveAuthoredVideoDraft(SkillStore.prepareAuthoredVideoDraft(definition, prior), prior);
-        SkillStore.Detail active = store.configureCustomService(store.detail(name), firstEndpoint, "");
-        assertNotNull(active.current());
+        SkillStore.Detail pending = store.detail(name);
+        assertTrue(pending.pending());
         reopenManager();
         AlertDialog detail = skillDetail(skillRow(name));
-        assertTrue(dialogView(detail, "skills.detail.video_contract.replace").performClick());
-        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
-        assertTrue(((EditText) dialogView(editor, "skills.detail.video_facts.field.submitEndpoint")).getText().toString().isEmpty());
-        ((EditText) dialogView(editor, "skills.detail.video_facts.input")).setText(videoProviderNotes(revisedEndpoint, "/v2/tasks/{id}"));
-        confirm(editor);
+        assertNull(dialogView(detail, "skills.detail.video_contract.replace"));
+        assertNull(dialogView(detail, "skills.detail.custom.save_complete_endpoint"));
+        EditText endpoint = dialogView(detail, "skills.detail.custom.endpoint");
+        assertNotNull(endpoint);
+        assertTrue(endpoint.getHint().toString().contains("HTTPS API 地址"));
+        assertEquals(firstEndpoint, endpoint.getText().toString());
+        assertNotNull(dialogView(detail, "skills.detail.custom.credential"));
+        assertTrue(visibleText(dialogView(detail, "skills.detail.edit_in_chat")).contains("/技能 编辑 /" + name));
+        assertTrue(dialogView(detail, "skills.detail.video_advanced").performClick());
+        assertTrue(visibleText(dialogView(detail, "skills.detail.custom.video_routes")).contains("/v1/jobs/{id}"));
 
-        SkillStore.Detail changed = store.detail(name);
-        assertTrue(changed.pending());
-        assertEquals(active.current(), changed.current());
-        assertNull(changed.customConfiguration());
-        assertEquals(revisedEndpoint, changed.manifest().http().suggestedEndpoint());
-        assertEquals("/v2/tasks/{id}", changed.manifest().http().video().statusPath());
+        endpoint.setText("https://another.example.com/v1/jobs");
+        assertTrue(dialogView(detail, "skills.detail.custom.save").performClick());
+        assertEquals(pending.deleteTarget(), store.detail(name).deleteTarget());
+
+        endpoint.setText(firstEndpoint);
+        assertTrue(dialogView(detail, "skills.detail.custom.save").performClick());
+        SkillStore.Detail current = store.detail(name);
+        assertFalse(current.pending());
+        assertEquals(firstEndpoint, current.customConfiguration().endpoint());
         var currentCall = AiSkills.match(AiSkills.Entry.WORK, "/接口视频 样例", store);
         assertEquals(firstEndpoint, store.previewCustomService(currentCall).endpoint());
     }
@@ -442,10 +440,13 @@ public final class AiSkillSettingsDialogTest {
             assertFalse(inside(base, advanced));
             assertFalse(inside(dialogView(detail, "skills.detail.custom.credential"), advanced));
             assertFalse(inside(dialogView(detail, "skills.detail.custom.save"), advanced));
+            assertFalse(inside(dialogView(detail, "skills.detail.config.model"), advanced));
+            assertNotNull(dialogView(detail, "skills.detail.fetch_models"));
+            assertNull(dialogView(detail, "skills.detail.video_contract.replace"));
+            assertNull(dialogView(detail, "skills.detail.custom.save_complete_endpoint"));
+            assertNull(dialogView(detail, "skills.detail.edit"));
             for (String tag : List.of("skills.detail.custom.contract", "skills.detail.custom.video_routes",
-                    "skills.detail.video_facts.open", "skills.detail.video_contract.replace", "skills.detail.config.model",
-                    "skills.detail.config.duration", "skills.detail.config.resolution",
-                    "skills.detail.custom.save_complete_endpoint")) {
+                    "skills.detail.video_facts.open", "skills.detail.config.duration", "skills.detail.config.resolution")) {
                 assertTrue(tag, inside(dialogView(detail, tag), advanced));
             }
             View toggle = dialogView(detail, "skills.detail.video_advanced");
@@ -482,6 +483,48 @@ public final class AiSkillSettingsDialogTest {
         assertFalse(inside(model, advanced));
         assertTrue(model.getText().toString().isEmpty());
         assertTrue(inside(dialogView(detail, "skills.detail.config.duration"), advanced));
+    }
+
+    @Test public void explicitVideoModelLookupLetsUserSelectALoneUndocumentedModel() throws Exception {
+        String name = saveRelativeVideoWithDefaults(store, true);
+        SkillStore.Detail original = store.detail(name);
+        var lookups = new java.util.concurrent.atomic.AtomicInteger();
+        var page = new AiSkillDetailDialog(activity, false, name, null, null, new ImmediateExecutor(), store,
+                (expected, base, bearer) -> {
+                    lookups.incrementAndGet();
+                    assertEquals(original.deleteTarget(), expected.deleteTarget());
+                    assertEquals("https://gateway.example.com", base);
+                    assertEquals("", bearer);
+                    return List.of("fixture-video-model");
+                });
+        page.dialog().show();
+        try {
+            AlertDialog detail = page.dialog();
+            EditText base = dialogView(detail, "skills.detail.custom.endpoint");
+            EditText model = dialogView(detail, "skills.detail.config.model");
+            assertEquals(0, lookups.get());
+            assertTrue(model.getText().toString().isEmpty());
+            base.setText("https://gateway.example.com");
+            assertTrue(dialogView(detail, "skills.detail.fetch_models").performClick());
+            ShadowLooper.idleMainLooper();
+            assertEquals(1, lookups.get());
+            assertTrue(model.getText().toString().isEmpty());
+            AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertNotNull(choices.getListView());
+            choices.getListView().performItemClick(null, 0, 0);
+            ShadowLooper.idleMainLooper();
+            assertEquals("fixture-video-model", model.getText().toString());
+            assertEquals(original.deleteTarget(), store.detail(name).deleteTarget());
+            assertNull(store.detail(name).manifestValues().get("model"));
+
+            assertTrue(dialogView(detail, "skills.detail.custom.save").performClick());
+            assertFalse(store.detail(name).pending());
+            assertEquals("fixture-video-model", store.detail(name).manifestValues().get("model"));
+            assertEquals(1, lookups.get());
+        } finally {
+            page.dialog().dismiss();
+            page.close();
+        }
     }
 
     private static String saveRelativeVideoWithDefaults(SkillStore store, boolean missingModel) throws Exception {
@@ -551,8 +594,8 @@ public final class AiSkillSettingsDialogTest {
         detail.dismiss();
     }
 
-    @Test public void pendingListOpensTheExactSkillConfiguration() {
-        enterAndGenerate("生图", "skills.generate.mock");
+    @Test public void pendingListOpensTheExactSkillConfiguration() throws Exception {
+        saveMockDraft("生图");
         String name = store.pending().get(0).name();
         assertTrue(view(skillRow(name)).performClick());
         AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
@@ -564,8 +607,8 @@ public final class AiSkillSettingsDialogTest {
         detail.dismiss();
     }
 
-    @Test public void configurationMasksKeyAndRequiresAuthorizationToConnectMock() {
-        enterAndGenerate("生图", "skills.generate.mock");
+    @Test public void configurationMasksKeyAndRequiresAuthorizationToConnectMock() throws Exception {
+        saveMockDraft("生图");
         String name = store.pending().get(0).name();
         assertTrue(view(skillRow(name)).performClick());
         AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
@@ -592,77 +635,10 @@ public final class AiSkillSettingsDialogTest {
         detail.dismiss();
     }
 
-    @Test public void regeneratingTheSameSkillRequiresConfirmationBeforeReplacingVersion() {
-        enterAndGenerate("提取摘要", "skills.generate.mock");
-        assertEquals(1, store.list().get(0).version());
-
-        enterAndGenerate("提取摘要", "skills.generate.mock");
-        assertEquals(1, store.list().get(0).version());
-        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
-        TextView message = review.findViewById(android.R.id.message);
-        assertNotNull(message);
-        assertTrue(message.getText().toString().contains("v1"));
-        assertFalse(message.getText().toString().contains("回退"));
-        assertTrue(review.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
-        ShadowLooper.idleMainLooper();
-        assertEquals(1, store.list().get(0).version());
-
-        enterAndGenerate("提取摘要", "skills.generate.mock");
-        confirm((AlertDialog) ShadowDialog.getLatestDialog());
-        assertEquals(2, store.list().get(0).version());
-    }
-
-    @Test @Config(shadows = PolishingModelShadow.class)
-    public void selectedModelAuthorsAPolishingSkillThatCanBeEditedEnabledAndRun() throws Exception {
-        String requirement = "把口语句子润色成简洁的正式表达";
-        var provider = AiModelConfig.fromJson(new JSONObject().put("id", "fixture-polishing")
-                .put("name", "离线润色模型").put("modelName", "fixture-text")
-                .put("apiEndpoint", "http://no-network.invalid/v1").put("allowInsecureHttp", true));
-        new AiModelSettings(List.of(provider), provider.id).save(new HostSettingsStore(activity));
-        PolishingModelShadow.instruction = null;
-        PolishingModelShadow.input = null;
-        PolishingModelShadow.selectedId = null;
-        enterAndGenerate(requirement, "skills.generate.model");
-        AlertDialog chooser = (AlertDialog) ShadowDialog.getLatestDialog();
-        ListView choices = chooser.getListView();
-        assertNotNull(choices);
-        assertTrue(choices.performItemClick(choices, 0, choices.getItemIdAtPosition(0)));
-        ShadowLooper.idleMainLooper();
-
-        assertEquals(provider.id, PolishingModelShadow.selectedId);
-        assertEquals(SkillAuthoring.DESIGN_INSTRUCTION, PolishingModelShadow.instruction);
-        JSONObject modelInput = new JSONObject(PolishingModelShadow.input);
-        assertEquals(1, modelInput.length());
-        assertEquals(requirement, modelInput.getString("requirement"));
-        assertFalse(modelInput.has("registeredServices"));
-        assertEquals("句子润色", store.list().get(0).name());
-        assertEquals("保留事实，提高表达流畅度。", activeInstruction("句子润色"));
-
-        AlertDialog detail = skillDetail(skillRow("句子润色"));
-        AlertDialog editor = requestEdit(detail);
-        assertEquals("保留事实，提高表达流畅度。", editField(editor, "instruction").getText().toString());
-        editField(editor, "instruction").setText("改写为一句正式通知。");
-        confirm(editor);
-        assertTrue(store.detail("句子润色").canReplace());
-        assertEquals("保留事实，提高表达流畅度。", activeInstruction("句子润色"));
-
-        assertTrue(dialogView(detail, "skills.detail.replace").performClick());
-        confirm((AlertDialog) ShadowDialog.getLatestDialog());
-        var call = AiSkills.match(AiSkills.Entry.WORK, "/句子润色 通知发出去了", store);
-        assertNotNull(call);
-        assertEquals(new SkillResult.Text("通知已发布。"), AiSkills.executeResult(call, store, (instruction, input) -> {
-            assertEquals("改写为一句正式通知。", instruction);
-            assertEquals("通知发出去了", input);
-            return "通知已发布。";
-        }));
-        detail.dismiss();
-    }
-
     @Test public void cancellingThenConfirmingDeleteCoversOnlyTheNamedSkillAndDraft() throws Exception {
-        enterAndGenerate("提取摘要", "skills.generate.mock");
+        saveMockDraft("提取摘要");
         String name = store.list().get(0).name();
-        enterAndGenerate("提取摘要", "skills.generate.mock");
-        confirm((AlertDialog) ShadowDialog.getLatestDialog());
+        saveMockDraft("提取摘要");
         String image = SkillStore.mockDraft("生图");
         assertNotNull(store.saveGenerated(new JSONObject(image).put("name", name).toString(), null).pending());
         assertNotNull(store.saveGenerated(new JSONObject(image).put("name", "另一技能").toString(), null).pending());
@@ -687,8 +663,8 @@ public final class AiSkillSettingsDialogTest {
         detail.dismiss();
     }
 
-    @Test public void thePendingDraftCanBeDeletedWithoutAnInstalledVersion() {
-        enterAndGenerate("生图", "skills.generate.mock");
+    @Test public void thePendingDraftCanBeDeletedWithoutAnInstalledVersion() throws Exception {
+        saveMockDraft("生图");
         String name = store.pending().get(0).name();
         String tag = skillRow(name);
         AlertDialog detail = skillDetail(tag);
@@ -704,7 +680,7 @@ public final class AiSkillSettingsDialogTest {
     }
 
     @Test public void staleDeleteConfirmationReloadsTheNewCurrentVersionWithoutDeletingIt() throws Exception {
-        enterAndGenerate("提取摘要", "skills.generate.mock");
+        saveMockDraft("提取摘要");
         String name = store.list().get(0).name();
         AlertDialog detail = skillDetail(skillRow(name));
         AlertDialog review = requestDeletion(detail);
@@ -721,7 +697,7 @@ public final class AiSkillSettingsDialogTest {
     }
 
     @Test public void staleDetailRetryCannotActivateAnIdenticalDraftRecreatedAfterDeletion() throws Exception {
-        enterAndGenerate("生图", "skills.generate.mock");
+        saveMockDraft("生图");
         SkillStore.Pending original = store.pending().get(0);
         String name = original.name();
         String definition = store.pendingDefinition(name);
@@ -742,18 +718,13 @@ public final class AiSkillSettingsDialogTest {
         staleDetail.dismiss();
     }
 
-    @Test public void cancellingSkillEditKeepsTheInstalledIdentityAndDoesNotCreateADraft() throws Exception {
+    @Test public void settingsDirectsSkillEditsToChatWithoutWritingDrafts() throws Exception {
         String name = "整理稿件";
         installTextSkill(name, "保持段落结构");
         SkillStore.DeleteTarget before = store.detail(name).deleteTarget();
         AlertDialog detail = directSkillDetail(name);
-        AlertDialog editor = requestEdit(detail);
-        TextView command = dialogView(editor, "skills.edit.name");
-        assertEquals("/" + name, command.getText().toString());
-        assertFalse(command instanceof EditText);
-        editField(editor, "instruction").setText("将结果缩短为两段");
-        assertTrue(editor.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
-        ShadowLooper.idleMainLooper();
+        assertNull(dialogView(detail, "skills.detail.edit"));
+        assertTrue(visibleText(dialogView(detail, "skills.detail.edit_in_chat")).contains("/技能 编辑 /" + name));
 
         assertEquals(before, store.detail(name).deleteTarget());
         assertTrue(store.pending().isEmpty());
@@ -764,12 +735,9 @@ public final class AiSkillSettingsDialogTest {
     @Test public void savingSkillEditStagesTheNewRuleUntilConfirmationWithoutRestoreControls() throws Exception {
         String name = "整理稿件";
         installTextSkill(name, "保持段落结构");
+        SkillStore.EditTarget draftTarget = store.editTarget(store.detail(name).deleteTarget());
+        store.saveEdit(draftTarget, "改写成提纲", "输入原稿。\n每段返回一个条目。", "每段写一个条目");
         AlertDialog detail = directSkillDetail(name);
-        AlertDialog editor = requestEdit(detail);
-        editField(editor, "description").setText("改写成提纲");
-        editField(editor, "documentation").setText("输入原稿。\n每段返回一个条目。");
-        editField(editor, "instruction").setText("每段写一个条目");
-        confirm(editor);
 
         assertTrue(store.detail(name).canReplace());
         assertEquals("保持段落结构", activeInstruction(name));
@@ -852,11 +820,9 @@ public final class AiSkillSettingsDialogTest {
         services.authorize(mock, 0);
         String source = SkillStore.mockDraft("生图");
         String name = store.saveGenerated(source, store.previewGenerated(source)).installed().name();
+        SkillStore.EditTarget target = store.editTarget(store.detail(name).deleteTarget());
+        store.saveEdit(target, target.description(), "输入想要的画面描述。", null);
         AlertDialog detail = directSkillDetail(name);
-        AlertDialog editor = requestEdit(detail);
-        assertNull(dialogView(editor, "skills.edit.instruction"));
-        editField(editor, "documentation").setText("输入想要的画面描述。");
-        confirm(editor);
 
         assertTrue(store.detail(name).canReplace());
         assertTrue(dialogView(detail, "skills.detail.configure").performClick());
@@ -865,23 +831,6 @@ public final class AiSkillSettingsDialogTest {
         assertTrue(key.getTransformationMethod() instanceof PasswordTransformationMethod);
         assertEquals(0, key.length());
         assertNotNull(dialogView(detail, "skills.detail.replace"));
-        detail.dismiss();
-    }
-
-    @Test public void aStaleSkillEditorCannotOverwriteAConcurrentSavedDraft() throws Exception {
-        String name = "整理稿件";
-        installTextSkill(name, "保持段落结构");
-        AlertDialog detail = directSkillDetail(name);
-        AlertDialog editor = requestEdit(detail);
-        SkillStore.EditTarget concurrent = store.editTarget(store.detail(name).deleteTarget());
-        SkillStore.Detail newer = store.saveEdit(concurrent, "并发保存的草稿", "更新后的说明。", "根据标题整理");
-        editField(editor, "description").setText("过期编辑内容");
-        confirm(editor);
-
-        assertEquals(newer.draftId(), store.detail(name).draftId());
-        assertEquals("并发保存的草稿", new JSONObject(store.pendingDefinition(name)).getString("description"));
-        assertTrue(detailStatus(detail).contains("编辑未保存"));
-        assertEquals("保持段落结构", activeInstruction(name));
         detail.dismiss();
     }
 
@@ -921,23 +870,12 @@ public final class AiSkillSettingsDialogTest {
         return page.dialog();
     }
 
-    private static AlertDialog requestEdit(AlertDialog detail) {
-        assertTrue(dialogView(detail, "skills.detail.edit").performClick());
-        return (AlertDialog) ShadowDialog.getLatestDialog();
-    }
-
     private static void assertNoRestore(Dialog page) {
         View decor = page.getWindow().getDecorView();
         assertNull(decor.findViewWithTag("skills.detail.history"));
         assertNull(decor.findViewWithTag("skills.detail.rollback"));
         assertFalse(visibleText(decor).contains("版本与恢复"));
         assertFalse(visibleText(decor).contains("回退上一版本"));
-    }
-
-    private static EditText editField(AlertDialog editor, String field) {
-        EditText input = dialogView(editor, "skills.edit." + field);
-        assertNotNull(input);
-        return input;
     }
 
     private static <T extends View> T dialogView(AlertDialog dialog, String tag) {
@@ -968,10 +906,10 @@ public final class AiSkillSettingsDialogTest {
         return status.getText().toString();
     }
 
-    private void enterAndGenerate(String requirements, String tag) {
-        ((EditText) view("skills.requirements")).setText(requirements);
-        assertTrue(view(tag).performClick());
-        ShadowLooper.idleMainLooper();
+    private void saveMockDraft(String requirements) throws Exception {
+        String draft = SkillStore.mockDraft(requirements);
+        store.saveGenerated(draft, store.previewGenerated(draft));
+        reopenManager();
     }
 
     private static String skillRow(String name) { return "skills.row." + name; }
@@ -1028,18 +966,5 @@ public final class AiSkillSettingsDialogTest {
         @Override public void execute(Runnable task) { task.run(); }
     }
 
-    @Implements(ChatCompletionClient.IsolatedTextRequest.class)
-    public static final class PolishingModelShadow {
-        static String instruction;
-        static String input;
-        static String selectedId;
 
-        @Implementation protected String execute(AiModelSettings models, String modelId, String system, String prompt,
-                                                 long deadline, int maxTokens) throws Exception {
-            selectedId = modelId;
-            instruction = system;
-            input = prompt;
-            return textSkillDefinition("句子润色", "保留事实，提高表达流畅度。");
-        }
-    }
 }

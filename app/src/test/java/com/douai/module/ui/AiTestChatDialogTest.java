@@ -843,30 +843,14 @@ public final class AiTestChatDialogTest {
     private static final String WEEKLY_REFERENCE = "Keep the source dates and group work by project.";
     private static final String OTHER_REFERENCE = "Unrequested reference content must stay local.";
 
-    @Test public void writingMarkdownInChatRequiresReviewBeforeInstalling() throws Exception {
+    @Test public void formerMarkdownCommandPointsToUnifiedSkillEditor() {
         dialog.enableSkills(AiSkills.Entry.WORK);
         FakeSession session = sessions.get(0);
-        session.skillReplies.add("""
-                ---
-                name: meeting-notes
-                description: 整理会议记录。
-                ---
-                先列出已确认事项，再列出待办。
-                """);
-        var markdown = com.douai.module.ai.skills.MarkdownSkillStore.forContext(activity);
         submit("/文档技能 帮我写一个会议记录技能");
-        worker.runNext();
-        ShadowLooper.idleMainLooper();
-        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
-        assertTrue(review.isShowing());
-        assertTrue(markdown.list().isEmpty());
-        assertTrue(review.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
-        ShadowLooper.idleMainLooper();
-        assertEquals(List.of("meeting-notes"), markdown.list().stream().map(
-                com.douai.module.ai.skills.MarkdownSkillStore.Entry::name).toList());
-        assertFalse(markdown.list().get(0).enabled());
-        assertEquals(List.of(com.douai.module.ai.skills.AiToolPackages.WRITE_INSTRUCTION), session.skillInstructions);
+        assertTrue(text("ai.chat.state").getText().toString().contains("/技能 描述需求"));
+        assertTrue(session.skillInputs.isEmpty());
         assertTrue(session.prompts.isEmpty());
+        assertTrue(worker.tasks.isEmpty());
     }
 
     @Test public void workPackageDirectoryIsLocalAndSelectedMarkdownReadsOnlyOneReference() throws Exception {
@@ -2325,16 +2309,14 @@ public final class AiTestChatDialogTest {
         settings = openChatSkillSettings("电影片段");
         assertEquals(original.draftId(), SkillStore.forContext(activity).detail("电影片段").draftId());
 
-        body = settings.getWindow().getDecorView();
-        assertTrue(body.findViewWithTag("skills.detail.video_facts.open").performClick());
-        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
-        EditText notes = editor.getWindow().getDecorView().findViewWithTag("skills.detail.video_facts.input");
-        assertNotNull(notes);
-        assertNull(editor.getWindow().getDecorView().findViewWithTag("skills.detail.video_declaration.input"));
-        notes.setText("状态字段: data.status");
-        assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        settings.dismiss();
         ShadowLooper.idleMainLooper();
-        assertFalse(editor.isShowing());
+        submit("/技能 编辑 /电影片段");
+        finishOfflineChatTurn();
+        submit("状态字段: data.status");
+        finishOfflineChatTurn();
+        submit("/技能 帮我内置");
+        finishOfflineChatTurn();
         SkillStore.Detail ready = SkillStore.forContext(activity).detail("电影片段");
         assertEquals(original.name(), ready.name());
         assertTrue(ready.pending());
@@ -2342,6 +2324,9 @@ public final class AiTestChatDialogTest {
         assertEquals("data.id", ready.manifest().http().responseField());
         assertEquals("data.status", ready.manifest().http().video().stateField());
         assertEquals(List.of("电影片段"), store.pending().stream().map(SkillStore.Pending::name).toList());
+
+        settings = openChatSkillSettings("电影片段");
+        body = settings.getWindow().getDecorView();
 
         EditText endpoint = body.findViewWithTag("skills.detail.custom.endpoint");
         assertNotNull(endpoint);
@@ -2575,100 +2560,37 @@ public final class AiTestChatDialogTest {
                 session.transcriptMemory.conversationKey())).isEmpty());
     }
 
-    @Test public void pollingVideoFieldFormKeepsEditsAndRecognizedFieldsAcrossReopen() throws Exception {
-        FakeSession model = new FakeSession();
-        model.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
-        model.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "轮询视频").toString());
-        reopen(model, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
-        historyWorker.runAllOnThread();
-        ShadowLooper.idleMainLooper();
-        submit("""
-                /技能 生成一个轮询视频技能并内置
-                接口资料：
-                提交: POST https://video-api.example.com/v1/jobs
-                提示词字段: prompt
-                提交响应ID: {"data":{"id":"fixture-task"}}
-                查询: GET /v1/jobs/{id}
-                查询响应ID: data.id
-                """.trim());
-        worker.runNext();
-        ShadowLooper.idleMainLooper();
-        historyWorker.runAllOnThread();
-        ShadowLooper.idleMainLooper();
+    @Test public void oneEditorReplacesPendingVideoFactsAcrossReopen() throws Exception {
+        FakeSession first = createVideoFromNotes(AiSkills.Entry.CONTACT, true);
         SkillStore store = SkillStore.forContext(activity);
-        assertTrue(store.detail("轮询视频").pending());
-        assertTrue(store.selectionCatalog().isEmpty());
+        SkillStore.Detail before = store.detail("电影片段");
+        assertTrue(before.pending());
+        assertEquals("data.id", before.manifest().http().responseField());
 
-        AlertDialog settings = openChatSkillSettings("轮询视频");
-        View detail = settings.getWindow().getDecorView();
-        assertTrue(((TextView) detail.findViewWithTag("skills.detail.execution_mode")).getText().toString().contains("异步轮询"));
-        assertTrue(detail.findViewWithTag("skills.detail.video_facts.open").performClick());
-        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
-        View form = editor.getWindow().getDecorView();
-        EditText state = form.findViewWithTag("skills.detail.video_facts.field.stateField");
-        assertNotNull(state);
-        assertEquals("", state.getText().toString());
-        state.setText("data.progress");
-        ((EditText) form.findViewWithTag("skills.detail.video_facts.input"))
-                .setText("状态字段: data.overridden\n查询结果字段: data.media");
-        assertTrue(form.findViewWithTag("skills.detail.video_facts.prefill").performClick());
-        ShadowLooper.idleMainLooper();
-        assertEquals("data.progress", state.getText().toString());
-        assertEquals("data.media",
-                ((EditText) form.findViewWithTag("skills.detail.video_facts.field.resultUrlField")).getText().toString());
-        assertTrue(((TextView) form.findViewWithTag("skills.detail.video_facts.source.resultUrlField"))
-                .getText().toString().contains("文档"));
-        assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
-        ShadowLooper.idleMainLooper();
-        assertFalse(editor.isShowing());
-        assertTrue(store.detail("轮询视频").pending());
-        assertNull(store.detail("轮询视频").manifest().http());
-        settings.dismiss();
-        ShadowLooper.idleMainLooper();
+        submit("/技能 编辑 /电影片段");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("已打开 /电影片段"));
+        submit("改用 New API");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("grok-imagine-video-1.5-lite"));
+        assertEquals(before.draftId(), store.detail("电影片段").draftId());
 
-        settings = openChatSkillSettings("轮询视频");
-        detail = settings.getWindow().getDecorView();
-        assertTrue(detail.findViewWithTag("skills.detail.video_facts.open").performClick());
-        editor = (AlertDialog) ShadowDialog.getLatestDialog();
-        form = editor.getWindow().getDecorView();
-        assertEquals("data.progress",
-                ((EditText) form.findViewWithTag("skills.detail.video_facts.field.stateField")).getText().toString());
-        assertEquals("data.media",
-                ((EditText) form.findViewWithTag("skills.detail.video_facts.field.resultUrlField")).getText().toString());
-        ((EditText) form.findViewWithTag("skills.detail.video_facts.field.states")).setText("working=running,done=completed");
-        assertTrue(editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        FakeSession resumed = new FakeSession();
+        resumed.transcriptMemory = first.transcriptMemory;
+        reopen(resumed, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT);
+        historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
-        assertFalse(editor.isShowing());
-        SkillStore.Detail prepared = store.detail("轮询视频");
-        assertTrue(prepared.pending());
-        assertEquals("data.media", prepared.manifest().http().video().resultUrlField());
-        assertTrue(store.selectionCatalog().isEmpty());
-        assertTrue(detail.findViewWithTag("skills.detail.custom.save").performClick());
-        ShadowLooper.idleMainLooper();
-        assertNotNull(AiSkills.match(AiSkills.Entry.WORK, "/轮询视频 海边", store));
-
-        settings.dismiss();
-        ShadowLooper.idleMainLooper();
-        for (String prompt : List.of("/轮询视频 海边", "请调用 /轮询视频 海边", "帮我生成一段海边视频")) {
-            if (prompt.startsWith("帮我")) model.skillReplies.add("{\"name\":\"轮询视频\",\"argument\":\"海边\"}");
-            submit(prompt);
-            if (prompt.startsWith("帮我")) {
-                worker.runNext();
-                ShadowLooper.idleMainLooper();
-            }
-            AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
-            assertTrue(review.isShowing());
-            var shadow = org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(review);
-            String disclosure = String.valueOf(shadow.getMessage());
-            assertTrue(disclosure.contains("POST https://video-api.example.com/v1/jobs"));
-            assertTrue(disclosure.contains("成片链接字段 data.media"));
-            assertFalse(disclosure.contains("取消任务时"));
-            assertTrue(review.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
-            ShadowLooper.idleMainLooper();
-            assertTrue(worker.tasks.isEmpty());
-        }
-        assertTrue(SkillVideoJobs.forContext(activity).list(new SkillVideoJobs.Scope(AiSkills.Entry.WORK,
-                model.transcriptMemory.conversationKey())).isEmpty());
+        assertTrue(resumed.transcriptMemory.readSkillDraft().replacesVideoContract());
+        submit("/技能 帮我内置");
+        finishOfflineChatTurn();
+        SkillStore.Detail changed = store.detail("电影片段");
+        assertTrue(changed.pending());
+        assertFalse(before.draftId().equals(changed.draftId()));
+        assertEquals("/v1/videos", changed.videoFacts().submitPath());
+        assertEquals("id", changed.manifest().http().responseField());
+        assertEquals("grok-imagine-video-1.5-lite", changed.manifestValues().get("model"));
+        assertNull(changed.customConfiguration());
+        assertTrue(resumed.skillInputs.isEmpty());
     }
 
     private FakeSession createVideoFromNotes(AiSkills.Entry entry, boolean status) throws Exception {
@@ -2801,15 +2723,8 @@ public final class AiTestChatDialogTest {
 
         SkillStore.Installed current = store.detail("同轮视频").current();
         AiSkills.Invocation oldInvocation = AiSkills.match(AiSkills.Entry.WORK, "/同轮视频 海上日出", store);
-        AlertDialog settings = openChatSkillSettings("同轮视频");
-        View settingsBody = settings.getWindow().getDecorView();
-        assertTrue(settingsBody.findViewWithTag("skills.detail.video_contract.replace").performClick());
-        AlertDialog replacement = (AlertDialog) ShadowDialog.getLatestDialog();
-        View replacementBody = replacement.getWindow().getDecorView();
-        EditText notes = replacementBody.findViewWithTag("skills.detail.video_facts.input");
-        assertEquals("", notes.getText().toString());
         String newEndpoint = "https://video-swap.example.com/v2/create";
-        notes.setText("""
+        store.replaceVideoContract(store.detail("同轮视频"), SkillVideoFacts.parseSupplement("""
                 提交: POST https://video-swap.example.com/v2/create
                 提交请求编码: application/json
                 提示词字段: text_prompt
@@ -2819,10 +2734,7 @@ public final class AiTestChatDialogTest {
                 状态字段: data.task.status
                 状态映射: processing=running,complete=completed,failed=failed
                 成品地址字段: data.artifact.url
-                """);
-        assertTrue(replacement.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
-        ShadowLooper.idleMainLooper();
-        assertFalse(replacement.isShowing());
+                """));
         SkillStore.Detail staged = store.detail("同轮视频");
         assertTrue(staged.pending());
         assertEquals(current, staged.current());
@@ -2830,8 +2742,6 @@ public final class AiTestChatDialogTest {
         assertEquals("data.task.id", staged.manifest().http().responseField());
         assertNull(staged.customConfiguration());
         assertEquals(oldInvocation, AiSkills.match(AiSkills.Entry.WORK, "/同轮视频 海上日出", store));
-        settings.dismiss();
-        ShadowLooper.idleMainLooper();
 
         submit("/同轮视频 海上日出");
         AlertDialog former = (AlertDialog) ShadowDialog.getLatestDialog();
@@ -2887,7 +2797,7 @@ public final class AiTestChatDialogTest {
         finishOfflineChatTurn();
         submit("/技能 帮我内置");
         finishOfflineChatTurn();
-        configurePreviewedVideo("切换视频", alphaEndpoint, "完整接口地址");
+        configurePreviewedVideo("切换视频", alphaEndpoint, "API 地址");
         SkillStore store = SkillStore.forContext(activity);
 
         submit("/切换视频 海上日出");
@@ -2904,12 +2814,7 @@ public final class AiTestChatDialogTest {
         assertEquals(1, alphaSubmits.get());
         assertEquals(0, alphaReads.get());
 
-        AlertDialog settings = openChatSkillSettings("切换视频");
-        View detail = settings.getWindow().getDecorView();
-        assertTrue(detail.findViewWithTag("skills.detail.video_contract.replace").performClick());
-        AlertDialog replacement = (AlertDialog) ShadowDialog.getLatestDialog();
-        EditText notes = replacement.getWindow().getDecorView().findViewWithTag("skills.detail.video_facts.input");
-        notes.setText("""
+        SkillStore.Detail replacement = store.replaceVideoContract(store.detail("切换视频"), SkillVideoFacts.parseSupplement("""
                 提交: POST https://video-beta.example.com/v1/create
                 提交请求编码: application/json
                 提示词字段: text_prompt
@@ -2919,25 +2824,15 @@ public final class AiTestChatDialogTest {
                 状态字段: data.status
                 状态映射: ready=completed
                 下载: GET /media/{id}
-                """);
-        assertTrue(replacement.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
-        ShadowLooper.idleMainLooper();
-        assertTrue(store.detail("切换视频").pending());
-        EditText address = detail.findViewWithTag("skills.detail.custom.endpoint");
-        address.setText(betaEndpoint);
-        assertTrue(detail.findViewWithTag("skills.detail.custom.save").performClick());
-        ShadowLooper.idleMainLooper();
-        assertTrue(store.detail("切换视频").canReplace());
-        assertTrue(detail.findViewWithTag("skills.detail.replace").performClick());
-        AlertDialog enable = (AlertDialog) ShadowDialog.getLatestDialog();
-        assertTrue(enable.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
-        ShadowLooper.idleMainLooper();
+                """));
+        assertTrue(replacement.pending());
+        SkillStore.Detail configured = store.configureCustomService(replacement, betaEndpoint, "");
+        assertTrue(configured.canReplace());
+        store.activateReplacement(configured);
         assertFalse(store.detail("切换视频").pending());
         assertEquals(betaEndpoint, store.detail("切换视频").customConfiguration().endpoint());
         assertEquals("data.status_url", store.detail("切换视频").manifest().http().video().statusUrlField());
         assertEquals(first, alpha.list(workScope).get(0));
-        settings.dismiss();
-        ShadowLooper.idleMainLooper();
 
         FakeSession resumedWork = new FakeSession();
         resumedWork.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
@@ -3028,11 +2923,11 @@ public final class AiTestChatDialogTest {
     }
 
     @Test public void uniqueConfiguredVideoSourcePrefillsFreshContactDraftWithoutSharingBinding() throws Exception {
-        assertConfiguredVideoSourcePrefillsFreshDraft(AiSkills.Entry.CONTACT, "/技能 帮我做个生成视频的技能");
+        assertConfiguredVideoSourcePrefillsFreshDraft(AiSkills.Entry.CONTACT, "/技能 帮我做个生成视频的技能\n沿用技能：已配置来源");
     }
 
     @Test public void workNaturalVideoCreationReusesOnlyTrustedConfiguredFields() throws Exception {
-        assertConfiguredVideoSourcePrefillsFreshDraft(AiSkills.Entry.WORK, "帮我写一个生成视频的技能");
+        assertConfiguredVideoSourcePrefillsFreshDraft(AiSkills.Entry.WORK, "帮我写一个生成视频的技能\n沿用技能：已配置来源");
     }
 
     private void assertConfiguredVideoSourcePrefillsFreshDraft(AiSkills.Entry entry, String create) throws Exception {
@@ -3551,7 +3446,7 @@ public final class AiTestChatDialogTest {
         assertEquals("data.task.id", draft.manifest().http().responseField());
         assertEquals("/tasks/{id}", draft.manifest().http().video().statusPath());
         assertEquals("data.artifact.url", draft.manifest().http().video().resultUrlField());
-        configurePreviewedVideo("引用视频", endpoint, "完整接口地址");
+        configurePreviewedVideo("引用视频", endpoint, "API 地址");
 
         contact.skillReplies.add("{\"name\":\"引用视频\",\"argument\":\"远山晚霞\"}");
         submit("帮我生成一段远山晚霞视频");

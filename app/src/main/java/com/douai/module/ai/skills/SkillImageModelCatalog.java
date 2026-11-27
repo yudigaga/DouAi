@@ -25,7 +25,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-/** One user-requested catalogue GET for an OpenAI-compatible image service. */
+/** One user-requested OpenAI-compatible model catalogue GET. */
 public final class SkillImageModelCatalog {
     private static final int MAX_RESPONSE_BYTES = 256 * 1024;
     private static final int MAX_ROWS = 4096;
@@ -116,10 +116,23 @@ public final class SkillImageModelCatalog {
     public List<String> fetch(String resolvedModelsEndpoint, String bearer) throws Failure {
         URI catalog = endpoint(resolvedModelsEndpoint);
         if (!AiCredentialVault.validImageBearer(bearer)) throw failure(Code.CREDENTIAL_REQUIRED);
+        return fetch(catalog, bearer);
+    }
+
+    /** The video caller already scoped the optional credential and resolved its same-origin catalogue. */
+    List<String> fetchVideoCatalogue(String resolvedModelsEndpoint, String bearer) throws Failure {
+        URI catalog = endpoint(resolvedModelsEndpoint);
+        if (bearer == null || !bearer.isEmpty() && !AiCredentialVault.validBearer(bearer)) {
+            throw failure(Code.CREDENTIAL_REQUIRED);
+        }
+        return fetch(catalog, bearer);
+    }
+
+    private List<String> fetch(URI catalog, String bearer) throws Failure {
         if (AiCredentialVault.imageEndpointContainsCredential(catalog.toString(), bearer)) throw failure(Code.INVALID_ENDPOINT);
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("Accept", "application/json");
-        headers.put("Authorization", "Bearer " + bearer);
+        if (!bearer.isEmpty()) headers.put("Authorization", "Bearer " + bearer);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(DEADLINE_SECONDS);
         DouAiLog.Operation trace = DouAiLog.current();
         Reply reply;

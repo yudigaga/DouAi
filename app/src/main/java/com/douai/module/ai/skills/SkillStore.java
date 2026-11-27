@@ -92,6 +92,7 @@ public final class SkillStore {
                               String displayName) {}
     public record SettingsSnapshot(boolean enabled, List<SettingsRow> rows) {}
     public record SaveResult(Installed installed, Pending pending) {}
+    public record ConversationDraft(DraftPreview preview, SkillVideoFacts facts, String pendingId, DeleteTarget identity) {}
     public record DraftPreview(String name, String description, SkillResult.Type outputType,
                                String instruction, String definition, String capabilityId) {
         public DraftPreview(String name, String description, SkillResult.Type outputType, String instruction,
@@ -185,12 +186,14 @@ public final class SkillStore {
                               SkillServices.Service service, String instruction, int schemaVersion,
                               SkillManifest manifest, Map<String, Object> values) {}
     private interface StateAction<T> { T run(JSONObject state) throws Exception; }
+    @FunctionalInterface interface VideoModelQuery { List<String> fetch(String endpoint, String bearer) throws IOException; }
     private final File directory;
     private final Path directoryKey;
     private final File catalog;
     private final SkillServices services;
     private final SkillCustomService customService;
     private final McpRegistry mcp;
+    private final VideoModelQuery videoModels;
     private boolean cleanupChecked;
 
     private static final class DeletionObserver implements AutoCloseable {
@@ -232,12 +235,18 @@ public final class SkillStore {
     }
 
     SkillStore(File directory, SkillServices services, McpRegistry mcp, SkillCustomService customService) {
+        this(directory, services, mcp, customService, SkillVideoModelCatalog::fetch);
+    }
+
+    SkillStore(File directory, SkillServices services, McpRegistry mcp, SkillCustomService customService,
+               VideoModelQuery videoModels) {
         this.directory = directory;
         this.directoryKey = canonical(directory);
         this.catalog = new File(directory, "catalog.json");
         this.services = services;
         this.mcp = mcp;
         this.customService = customService;
+        this.videoModels = videoModels;
     }
 
     McpRegistry mcp() { return mcp; }
@@ -556,20 +565,28 @@ public final class SkillStore {
             EditSource source = contractEditSource(state, expected);
             Draft previous = parse(source.definition().toString());
             if (previous.outputType() != SkillResult.Type.VIDEO) throw new IllegalArgumentException("此技能没有视频接口");
-            DraftPreview prepared = prepareAuthoredVideoDraft(source.definition().toString(), replacement);
-            Draft updated = parseAuthored(prepared.definition());
-            Map<String, Object> values = compatibleVideoReplacementValues(previous.manifest(), source.values(), updated.manifest());
-            SkillCustomService.Binding active = readCustomBinding(state.getJSONObject("skills").optJSONObject(previous.name()));
-            SkillCustomService.Binding pending = readCustomBinding(source.pending());
-            verifyVideoSubmitOmitsCredential(active, replacement);
-            if (!Objects.equals(active, pending)) verifyVideoSubmitOmitsCredential(pending, replacement);
-            verifyContractOmitsPriorCredentials(active, pending, publicFacts, SkillManifest.valuesJson(values));
-            JSONObject entry = stageEdit(state, source, updated, prepared.definition(), values);
-            saveGroundedVideoFacts(entry, replacement);
-            entry.put(VIDEO_CONTRACT_REPLACEMENT, true);
-            entry.remove(VIDEO_DRAFT_CONFIG);
-            return advancePending(state, entry, updated, null, true);
+            return stageVideoReplacement(state, source, previous, source.definition().toString(), replacement);
         });
+    }
+
+    private Detail stageVideoReplacement(JSONObject state, EditSource source, Draft previous,
+                                         String raw, SkillVideoFacts replacement) throws Exception {
+        JSONObject definition = SkillAuthoring.readObject(raw, DRAFT_LIMIT);
+        definition.remove(SkillManifest.DRAFT_VALUES);
+        definition.remove(SkillManifest.SERVICE_PREFILL);
+        DraftPreview prepared = prepareAuthoredVideoDraft(definition.toString(), replacement);
+        Draft updated = parseAuthored(prepared.definition());
+        Map<String, Object> values = authoredVideoDefaults(updated);
+        SkillCustomService.Binding active = readCustomBinding(state.getJSONObject("skills").optJSONObject(previous.name()));
+        SkillCustomService.Binding pending = readCustomBinding(source.pending());
+        verifyVideoSubmitOmitsCredential(active, replacement);
+        if (!Objects.equals(active, pending)) verifyVideoSubmitOmitsCredential(pending, replacement);
+        verifyContractOmitsPriorCredentials(active, pending, replacement.toJson(), SkillManifest.valuesJson(values));
+        JSONObject entry = stageEdit(state, source, updated, prepared.definition(), values);
+        saveGroundedVideoFacts(entry, replacement);
+        entry.put(VIDEO_CONTRACT_REPLACEMENT, true);
+        entry.remove(VIDEO_DRAFT_CONFIG);
+        return advancePending(state, entry, updated, null, true);
     }
 
     public Detail replaceDirectContract(Detail expected, Map<String, String> request, String responseField) throws Exception {
@@ -620,17 +637,6 @@ public final class SkillStore {
             throw new IllegalStateException("技能接口配置已变化，请重新打开");
         }
         return source;
-    }
-
-    private static Map<String, Object> compatibleVideoReplacementValues(SkillManifest previous,
-                                                                      Map<String, Object> saved, SkillManifest updated) {
-        Map<String, Object> retained = new LinkedHashMap<>();
-        for (SkillManifest.ConfigField field : updated.configFields()) {
-            if (previous.configFields().contains(field) && saved.containsKey(field.key())) {
-                retained.put(field.key(), saved.get(field.key()));
-            }
-        }
-        return updated.retainValues(previous, retained);
     }
 
     private void verifyContractOmitsPriorCredentials(SkillCustomService.Binding active, SkillCustomService.Binding pending,
@@ -714,9 +720,10 @@ public final class SkillStore {
             Draft updated = parseAuthored(prepared.definition());
             SkillHttpDeclaration oldHttp = previous.manifest().http();
             SkillHttpDeclaration nextHttp = updated.manifest().http();
-            boolean retainBinding = binding != null && sameEndpoint && sameVideoWire(oldHttp, nextHttp)
+            boolean retainBinding = binding != null && sameEndpoint && sameVideoContract(previous.manifest(), updated.manifest())
                     && videoBindingMatchesDraft(state, source.pending(), previous);
-            JSONObject entry = stageEdit(state, source, updated, prepared.definition(), videoValues(state, updated));
+            JSONObject entry = stageEdit(state, source, updated, prepared.definition(), sameEndpoint
+                    ? videoValues(state, updated) : authoredVideoDefaults(updated));
             entry.put(VIDEO_FACTS, updatedFacts.toJson());
             if (!retainBinding) entry.put(CUSTOM_BINDING, JSONObject.NULL);
             if (nextHttp != null) entry.remove(VIDEO_DRAFT_CONFIG);
@@ -746,6 +753,12 @@ public final class SkillStore {
     private static boolean sameVideoWire(SkillHttpDeclaration first, SkillHttpDeclaration second) {
         return first != null && second != null && first.request().equals(second.request())
                 && first.responseField().equals(second.responseField()) && sameVideoRoutes(first.video(), second.video());
+    }
+
+    private static boolean sameVideoContract(SkillManifest first, SkillManifest second) {
+        return first != null && second != null && sameVideoWire(first.http(), second.http())
+                && first.configFields().equals(second.configFields())
+                && first.http().suggestedEndpoint().equals(second.http().suggestedEndpoint());
     }
 
     private static boolean sameVideoRoutes(SkillHttpDeclaration.Video first, SkillHttpDeclaration.Video second) {
@@ -804,6 +817,30 @@ public final class SkillStore {
 
     private static SkillVideoFacts pendingVideoFacts(JSONObject entry) throws JSONException {
         return entry == null || !entry.has(VIDEO_FACTS) ? null : SkillVideoFacts.fromJson(entry.getJSONObject(VIDEO_FACTS));
+    }
+
+    private static SkillVideoFacts revisionVideoFacts(JSONObject revision, SkillManifest manifest,
+                                                       SkillCustomService.Binding binding) throws JSONException {
+        if (manifest == null || manifest.outputType() != SkillResult.Type.VIDEO || manifest.http() == null) return null;
+        SkillVideoFacts facts = pendingVideoFacts(revision);
+        if (facts == null) {
+            String endpoint = binding == null ? manifest.http().suggestedEndpoint() : binding.endpoint();
+            return SkillVideoFacts.fromDeclaration(manifest, endpoint, SkillVideoFacts.Source.STORED);
+        }
+        if (!facts.isComplete() || !sameVideoWire(manifest.http(),
+                SkillHttpDeclaration.parse(facts.declaration(), SkillResult.Type.VIDEO, manifest.configFields()))) {
+            throw new IllegalStateException("视频技能的接口资料与当前声明不一致");
+        }
+        if (binding != null) facts.checkResolvedEndpoint(binding.endpoint());
+        return facts;
+    }
+
+    private SkillVideoFacts configurationVideoFacts(JSONObject state, Draft draft, JSONObject pending) throws Exception {
+        if (draft.outputType() != SkillResult.Type.VIDEO) return null;
+        SkillCustomService.Binding binding = pendingCustomBinding(state, draft, pending);
+        if (pending != null) return videoFormSeed(draft, pending, binding);
+        JSONObject installed = state.getJSONObject("skills").optJSONObject(draft.name());
+        return installed == null ? null : revisionVideoFacts(activeRevision(installed), draft.manifest(), binding);
     }
 
     private static String pendingVideoReason(JSONObject entry) throws JSONException {
@@ -929,6 +966,48 @@ public final class SkillStore {
         return configureCustomService(expected, apiBase, bearer, clearBearer, entered, true);
     }
 
+    public List<String> discoverVideoModels(Detail expected, String address, String typedBearer) throws Exception {
+        if (expected == null || expected.manifest() == null || expected.outputType() != SkillResult.Type.VIDEO
+                || !expected.manifest().usesHttp()) throw new IllegalArgumentException("请选择已核对接口的视频技能");
+        String entered = SkillCustomService.validateEndpoint(address);
+        String typed = typedBearer == null ? "" : typedBearer.trim();
+        VideoModelAccess target = locked(state -> {
+            EditSource source = contractEditSource(state, expected);
+            Draft draft = parse(source.definition().toString());
+            SkillVideoFacts facts = configurationVideoFacts(state, draft, source.pending());
+            String endpoint = facts != null && facts.needsApiBase()
+                    && "/".equals(java.net.URI.create(entered).getRawPath()) ? facts.resolveApiBase(entered) : entered;
+            if (facts != null) {
+                facts.checkResolvedEndpoint(endpoint);
+                if (source.pending() != null && source.pending().optBoolean(VIDEO_CONTRACT_REPLACEMENT)) {
+                    verifyReplacementRouteOrigin(facts, endpoint);
+                }
+            }
+            SkillCustomService.Binding binding = pendingCustomBinding(state, draft, source.pending());
+            if (binding != null && !endpoint.equals(binding.endpoint())) {
+                customService.verifyEndpointOmitsCredential(binding, endpoint);
+            }
+            String token = !typed.isEmpty() ? typed : binding != null && endpoint.equals(binding.endpoint())
+                    ? customService.credential(binding) : "";
+            return new VideoModelAccess(endpoint, token);
+        });
+        List<String> result = videoModels.fetch(target.endpoint, target.bearer);
+        return locked(state -> {
+            contractEditSource(state, expected);
+            return result;
+        });
+    }
+
+    private static final class VideoModelAccess {
+        private final String endpoint;
+        private final String bearer;
+
+        private VideoModelAccess(String endpoint, String bearer) {
+            this.endpoint = endpoint;
+            this.bearer = bearer;
+        }
+    }
+
     private Detail configureCustomService(Detail expected, String address, String bearer, boolean clearBearer,
                                           Map<String, String> entered, boolean resolveBase) throws Exception {
         if (expected == null || expected.manifest() == null || expected.deleteTarget() == null
@@ -942,7 +1021,7 @@ public final class SkillStore {
             if (!usesHttp(draft) || !expected.manifest().equals(draft.manifest())) {
                 throw new IllegalStateException("技能或服务变化，请重新打开设置");
             }
-            SkillVideoFacts facts = draft.outputType() == SkillResult.Type.VIDEO ? pendingVideoFacts(source.pending()) : null;
+            SkillVideoFacts facts = configurationVideoFacts(state, draft, source.pending());
             requireSupportedVideoEncoding(facts);
             if (resolveBase && (facts == null || !facts.needsApiBase())) throw new IllegalArgumentException(NEEDS_API_BASE);
             String target = address == null || address.trim().isEmpty() ? "" : resolveBase
@@ -951,7 +1030,7 @@ public final class SkillStore {
                 throw new IllegalArgumentException(resolveBase ? NEEDS_API_BASE : NEEDS_CUSTOM_SERVICE);
             }
             if (facts != null && !target.isEmpty()) {
-                facts.checkRelativeEndpointOrigin(target);
+                facts.checkResolvedEndpoint(target);
                 if (source.pending() != null && source.pending().optBoolean(VIDEO_CONTRACT_REPLACEMENT)) {
                     verifyReplacementRouteOrigin(facts, target);
                 }
@@ -982,7 +1061,7 @@ public final class SkillStore {
     private static void verifyReplacementRouteOrigin(SkillVideoFacts facts, String target) {
         java.net.URI configured = java.net.URI.create(target);
         JSONObject documented = facts.toJson();
-        for (String field : List.of("statusPath", "cancelPath", "downloadPath")) {
+        for (String field : List.of("statusPath", "statusPostPath", "cancelPath", "downloadPath")) {
             String route = documented.optString(field);
             if (!route.startsWith("https://")) continue;
             java.net.URI origin = java.net.URI.create(route.substring(0, route.indexOf('/', 8)));
@@ -1194,12 +1273,20 @@ public final class SkillStore {
         }
     }
 
-    private static SkillCustomService.Binding pendingCustomBinding(JSONObject state, Draft draft, JSONObject entry)
+    private SkillCustomService.Binding pendingCustomBinding(JSONObject state, Draft draft, JSONObject entry)
             throws Exception {
         if (!usesHttp(draft)) return null;
         if (entry != null && entry.has(CUSTOM_BINDING) && entry.isNull(CUSTOM_BINDING)) return null;
         SkillCustomService.Binding configured = readCustomBinding(entry);
-        if (configured == null) configured = readCustomBinding(state.getJSONObject("skills").optJSONObject(draft.name()));
+        JSONObject installed = state.getJSONObject("skills").optJSONObject(draft.name());
+        if (draft.outputType() == SkillResult.Type.VIDEO) {
+            if (configured != null && !sameVideoContract(parse(entry.getString("definition")).manifest(), draft.manifest())) return null;
+            if (configured == null && installed != null) {
+                SkillManifest active = readExecution(revisionDirectory(activeRevision(installed))).manifest();
+                if (!sameVideoContract(active, draft.manifest())) return null;
+            }
+        }
+        if (configured == null) configured = readCustomBinding(installed);
         if (configured != null && !configured.skillId().equals(manifestSkillId(state, draft.name(), entry))) {
             throw new IllegalStateException("技能服务与当前技能不匹配");
         }
@@ -1214,7 +1301,15 @@ public final class SkillStore {
 
     private JSONObject stageEdit(JSONObject state, EditSource source, Draft draft, String json,
                                  Map<String, Object> values) throws Exception {
-        return stageDraft(state, source.pending(), source.retainedService(), draft, json, values);
+        JSONObject staged = stageDraft(state, source.pending(), source.retainedService(), draft, json, values);
+        if (source.pending() == null && draft.outputType() == SkillResult.Type.VIDEO) {
+            Draft previous = parse(source.definition().toString());
+            if (sameVideoContract(previous.manifest(), draft.manifest())) {
+                SkillVideoFacts facts = configurationVideoFacts(state, previous, null);
+                if (facts != null) staged.put(VIDEO_FACTS, facts.toJson());
+            }
+        }
+        return staged;
     }
 
     private JSONObject stageDraft(JSONObject state, JSONObject entry, SkillServices.Service retainedService,
@@ -1412,10 +1507,25 @@ public final class SkillStore {
 
     public SaveResult saveConversationDraft(DraftPreview preview, SkillVideoFacts facts, String expectedPendingId)
             throws Exception {
+        return saveConversationDraft(preview, facts, expectedPendingId, null);
+    }
+
+    public SaveResult saveConversationDraft(DraftPreview preview, SkillVideoFacts facts, String expectedPendingId,
+                                            DeleteTarget exactEditorSource) throws Exception {
+        return saveConversationDraft(preview, facts, expectedPendingId, exactEditorSource, false);
+    }
+
+    public SaveResult saveConversationDraft(DraftPreview preview, SkillVideoFacts facts, String expectedPendingId,
+                                            DeleteTarget exactEditorSource, boolean replaceVideoFacts) throws Exception {
         if (preview == null) throw invalidDraft();
         Draft draft = parseAuthored(preview.definition());
         if (!draft.preview(preview.definition()).equals(preview)) throw invalidDraft();
+        if (replaceVideoFacts && (draft.outputType() != SkillResult.Type.VIDEO || facts == null || !facts.isComplete())) {
+            throw new IllegalArgumentException("更换视频接口需要完整且已核对的资料");
+        }
         if (expectedPendingId == null || expectedPendingId.isEmpty()) {
+            if (exactEditorSource != null) return stageInstalledConversationDraft(preview, draft, facts, exactEditorSource, replaceVideoFacts);
+            if (replaceVideoFacts) throw new IllegalStateException("请选择要更换接口的现有视频技能");
             return draft.outputType() == SkillResult.Type.VIDEO ? saveAuthoredVideoDraft(preview, facts, true)
                     : saveGenerated(draft, preview.definition(), null, SaveMode.CONVERSATION, null, true);
         }
@@ -1430,9 +1540,11 @@ public final class SkillStore {
             EditSource source = editSource(state, deleteTarget(name, installed, pending));
             Draft previous = parse(source.definition().toString());
             if (previous.outputType() != draft.outputType()) throw invalidDraft();
-            verifyConversationPrefill(state, draft);
+            if (!replaceVideoFacts) verifyConversationPrefill(state, draft);
             Detail staged;
-            if (draft.outputType() == SkillResult.Type.VIDEO) {
+            if (replaceVideoFacts) {
+                staged = stageVideoReplacement(state, source, previous, preview.definition(), facts);
+            } else if (draft.outputType() == SkillResult.Type.VIDEO) {
                 staged = stageConversationVideo(state, source, previous, preview, facts);
             } else {
                 SkillHttpDeclaration oldHttp = previous.manifest() == null ? null : previous.manifest().http();
@@ -1447,10 +1559,40 @@ public final class SkillStore {
         });
     }
 
+    private SaveResult stageInstalledConversationDraft(DraftPreview preview, Draft draft, SkillVideoFacts facts,
+                                                        DeleteTarget expected, boolean replaceVideoFacts) throws Exception {
+        if (!draft.name().equals(expected.name()) || expected.hasDraft()) throw invalidDraft();
+        return locked(state -> {
+            if (!state.getBoolean("enabled")) throw new IllegalStateException("Skills 已停用");
+            EditSource source = editSource(state, expected);
+            Draft previous = parse(source.definition().toString());
+            if (previous.outputType() != draft.outputType()) throw invalidDraft();
+            if (!replaceVideoFacts) verifyConversationPrefill(state, draft);
+            Detail staged;
+            if (replaceVideoFacts) {
+                staged = stageVideoReplacement(state, source, previous, preview.definition(), facts);
+            } else if (draft.outputType() == SkillResult.Type.VIDEO) {
+                staged = stageConversationVideo(state, source, previous, preview, facts);
+            } else {
+                Map<String, Object> values = draft.manifest() == null ? Collections.emptyMap()
+                        : draft.manifest().applyDraftValues(draft.manifest().retainValues(previous.manifest(), source.values()));
+                JSONObject entry = stageEdit(state, source, draft, preview.definition(), values);
+                SkillHttpDeclaration oldHttp = previous.manifest() == null ? null : previous.manifest().http();
+                SkillHttpDeclaration nextHttp = draft.manifest() == null ? null : draft.manifest().http();
+                if (usesHttp(previous) != usesHttp(draft) || !Objects.equals(oldHttp, nextHttp)) {
+                    entry.put(CUSTOM_BINDING, JSONObject.NULL);
+                }
+                staged = advancePending(state, entry, draft, null, true);
+            }
+            return new SaveResult(null, new Pending(staged.name(), staged.outputType(), staged.reason(), staged.draftId()));
+        });
+    }
+
     private Detail stageConversationVideo(JSONObject state, EditSource source, Draft previous,
                                           DraftPreview preview, SkillVideoFacts facts) throws Exception {
         SkillCustomService.Binding binding = pendingCustomBinding(state, previous, source.pending());
-        SkillVideoFacts original = videoFormSeed(previous, source.pending(), binding);
+        SkillVideoFacts original = configurationVideoFacts(state, previous, source.pending());
+        if (original == null) original = SkillVideoFacts.empty();
         requireMatchingVideoEncoding(previous.manifest().http() != null, original, facts);
         SkillVideoFacts combined = original;
         if (facts != null) {
@@ -1471,11 +1613,14 @@ public final class SkillStore {
         Draft updated = parseAuthored(prepared.definition());
         SkillHttpDeclaration oldHttp = previous.manifest().http();
         SkillHttpDeclaration nextHttp = updated.manifest().http();
-        boolean retainBinding = binding != null && sameEndpoint && sameVideoWire(oldHttp, nextHttp)
+        boolean retainBinding = binding != null && sameEndpoint && sameVideoContract(previous.manifest(), updated.manifest())
+                && (source.pending() != null || original.verifiedDocumentContract())
                 && videoBindingMatchesDraft(state, source.pending(), previous);
-        JSONObject entry = stageEdit(state, source, updated, prepared.definition(), videoValues(state, updated));
+        JSONObject entry = stageEdit(state, source, updated, prepared.definition(), sameEndpoint
+                ? videoValues(state, updated) : authoredVideoDefaults(updated));
         entry.put(VIDEO_FACTS, combined.toJson());
         if (!retainBinding) entry.put(CUSTOM_BINDING, JSONObject.NULL);
+        else if (source.pending() == null) entry.put(CUSTOM_BINDING, customRecord(binding));
         if (nextHttp != null) entry.remove(VIDEO_DRAFT_CONFIG);
         else if (oldHttp != null) retainVideoDraftConfig(entry, previous.manifest(), source.values());
         return advancePending(state, entry, updated, null, true);
@@ -1548,7 +1693,7 @@ public final class SkillStore {
                 requireMatchingVideoEncoding(usesHttp(parse(old.getString("definition"))), previous, facts);
                 if (usesHttp(draft)) requireSupportedVideoEncoding(previous);
             }
-            Map<String, Object> values = videoValues(state, draft);
+            Map<String, Object> values = explicitVideoValues(state, draft, facts);
             JSONObject entry = new JSONObject().put("skillId", manifestSkillId(state, draft.name(), old));
             drafts.put(draft.name(), entry);
             stageDraft(state, entry, null, draft, prepared.definition(), values);
@@ -1668,6 +1813,40 @@ public final class SkillStore {
 
     public Detail detail(String name) {
         return read(state -> detail(state, name));
+    }
+
+    public ConversationDraft openConversationDraft(String name) throws Exception {
+        if (name == null || !NAME.matcher(name).matches()) throw invalidDraft();
+        requireRegistrableName(name);
+        return locked(state -> {
+            JSONObject installed = state.getJSONObject("skills").optJSONObject(name);
+            JSONObject pending = state.getJSONObject("drafts").optJSONObject(name);
+            if (installed == null && pending == null) throw new IllegalStateException("技能或待配置草稿不存在");
+            DeleteTarget identity = deleteTarget(name, installed, pending);
+            EditSource source = editSource(state, identity);
+            Draft saved = parse(source.definition().toString());
+            JSONObject definition = source.definition();
+            if (saved.manifest() != null && !source.values().isEmpty()) {
+                definition.put(SkillManifest.DRAFT_VALUES, SkillManifest.valuesJson(source.values()));
+            } else if (saved.schemaVersion() == 2 && saved.outputType() == SkillResult.Type.IMAGE) {
+                definition = conversationImageManifest(saved);
+            } else if (saved.schemaVersion() < AUTHORED_SCHEMA) {
+                throw new IllegalStateException("此旧版技能需要在聊天中重新编写");
+            }
+            DraftPreview preview = validateAuthoredDraft(definition.toString());
+            SkillVideoFacts facts = configurationVideoFacts(state, saved, pending);
+            return new ConversationDraft(preview, facts, pending == null ? "" : draftIdentity(name, pending), identity);
+        });
+    }
+
+    private static JSONObject conversationImageManifest(Draft image) throws JSONException {
+        return new JSONObject().put("schemaVersion", MANIFEST_SCHEMA).put("name", image.name())
+                .put("description", image.description()).put("documentation", image.documentation())
+                .put("instructions", "根据本次输入的描述生成图片").put("capabilityId", "image_generation")
+                .put("configFields", new JSONArray()).put("inputs", new JSONArray().put(new JSONObject()
+                        .put("key", "argument").put("type", "text").put("required", true).put("maxLength", image.maxInput())))
+                .put("outputType", "image").put("trial", new JSONObject().put("input", image.trialInput())
+                        .put("expectedType", "image"));
     }
 
     public Detail saveConfiguration(String name, String draftId, SkillServices.Adapter adapter, String endpoint,
@@ -1842,10 +2021,11 @@ public final class SkillStore {
             if (current == null) throw new IllegalStateException("技能不存在");
             String reason = current.configurationRequired().isEmpty() ? enabled ? "已启用" : "已停用"
                     : current.configurationRequired();
+            SkillCustomService.Binding binding = readCustomBinding(installed);
             return new Detail(name, current.outputType(), "", reason, Collections.emptyList(),
                     currentService, false, false, version, enabled, deletion,
                     current, currentService, skillsEnabled, null, active.manifest(), active.values(),
-                    customConfiguration(readCustomBinding(installed)), null);
+                    customConfiguration(binding), revisionVideoFacts(activeRevision(installed), active.manifest(), binding));
         }
         Draft draft = parse(entry.getString("definition"));
         DraftStatus pending = draftStatus(state, draft, entry, version);
@@ -2005,8 +2185,12 @@ public final class SkillStore {
     public Preview previewGenerated(String json) throws Exception {
         Draft draft = parse(json);
         requireRegistrableName(draft.name());
-        return locked(state -> preview(state, draft, pendingService(state, draft, matchingDraft(state, draft, json)),
-                proposedManifestValues(state, draft)));
+        return locked(state -> {
+            JSONObject exactDraft = matchingDraft(state, draft, json);
+            boolean freshVideo = draft.outputType() == SkillResult.Type.VIDEO && exactDraft == null;
+            return preview(state, draft, pendingService(state, draft, exactDraft), freshVideo
+                    ? authoredVideoDefaults(draft) : proposedManifestValues(state, draft), freshVideo);
+        });
     }
 
     public Installed installGenerated(String json) throws Exception {
@@ -2066,9 +2250,11 @@ public final class SkillStore {
             if (draft.outputType() == SkillResult.Type.VIDEO && usesHttp(draft)) {
                 requireSupportedVideoEncoding(pendingVideoFacts(state.getJSONObject("drafts").optJSONObject(draft.name())));
             }
-            SkillServices.Service service = pendingService(state, draft, matchingDraft(state, draft, json));
-            Map<String, Object> values = proposedManifestValues(state, draft);
-            Preview current = preview(state, draft, service, values);
+            JSONObject exactDraft = matchingDraft(state, draft, json);
+            boolean freshVideo = draft.outputType() == SkillResult.Type.VIDEO && exactDraft == null;
+            SkillServices.Service service = pendingService(state, draft, exactDraft);
+            Map<String, Object> values = freshVideo ? authoredVideoDefaults(draft) : proposedManifestValues(state, draft);
+            Preview current = preview(state, draft, service, values, freshVideo);
             if (confirmation != null && !current.equals(confirmation)) {
                 throw new IllegalStateException("技能版本或服务已变化，请重新预览并确认");
             }
@@ -2103,9 +2289,11 @@ public final class SkillStore {
         JSONObject entry = drafts.optJSONObject(draft.name());
         if (entry == null || !json.equals(entry.optString("definition"))) {
             String skillId = draft.manifest() == null ? null : manifestSkillId(state, draft.name(), entry);
-            SkillCustomService.Binding retained = pendingCustomBinding(state, draft, entry);
+            boolean video = draft.outputType() == SkillResult.Type.VIDEO;
+            SkillCustomService.Binding retained = video ? null : pendingCustomBinding(state, draft, entry);
             entry = new JSONObject().put("definition", json).put("draftId", UUID.randomUUID().toString());
             if (skillId != null) entry.put("skillId", skillId);
+            if (video) entry.put(CUSTOM_BINDING, JSONObject.NULL);
             if (retained != null) entry.put(CUSTOM_BINDING, customRecord(retained));
             drafts.put(draft.name(), entry);
         }
@@ -2141,6 +2329,22 @@ public final class SkillStore {
         return manifest.applyDraftValues(manifest.readValues(null));
     }
 
+    private static Map<String, Object> authoredVideoDefaults(Draft draft) {
+        return draft.manifest().applyDraftValues(draft.manifest().readValues(null));
+    }
+
+    private Map<String, Object> explicitVideoValues(JSONObject state, Draft draft, SkillVideoFacts facts) throws Exception {
+        if (!facts.isEmpty()) {
+            SkillVideoFacts approved = reusableVideoFacts(state, draft.name());
+            if (approved != null && approved.toJson().toString().equals(facts.toJson().toString())) {
+                JSONObject owner = state.getJSONObject("skills").getJSONObject(draft.name());
+                Executable current = readExecution(revisionDirectory(activeRevision(owner)));
+                return draft.manifest().applyDraftValues(draft.manifest().retainValues(current.manifest(), current.values()));
+            }
+        }
+        return authoredVideoDefaults(draft);
+    }
+
     private Map<String, Object> videoValues(JSONObject state, Draft draft) throws Exception {
         SkillManifest manifest = draft.manifest();
         if (manifest.configFields().isEmpty()) return manifest.readValues(null);
@@ -2152,6 +2356,9 @@ public final class SkillStore {
             }
             JSONObject retained = pending.optJSONObject(VIDEO_DRAFT_CONFIG);
             if (retained != null) return manifest.applyDraftValues(restoreVideoDraftConfig(manifest, retained));
+            // An incomplete draft without retained values is authoritative. Falling through to the
+            // installed revision would restore the old model/parameters after an interface change.
+            return manifest.applyDraftValues(manifest.readValues(null));
         }
         JSONObject installed = state.getJSONObject("skills").optJSONObject(draft.name());
         if (installed != null) {
@@ -2342,14 +2549,19 @@ public final class SkillStore {
 
     private Preview preview(JSONObject state, Draft draft, SkillServices.Service service, Map<String, Object> values)
             throws Exception {
+        return preview(state, draft, service, values, false);
+    }
+
+    private Preview preview(JSONObject state, Draft draft, SkillServices.Service service, Map<String, Object> values,
+                            boolean unboundVideo) throws Exception {
         JSONObject existing = state.getJSONObject("skills").optJSONObject(draft.name());
         int previous = existing == null ? 0 : activeRevision(existing).getInt("version");
         JSONObject existingDraft = state.getJSONObject("drafts").optJSONObject(draft.name());
         String pending = missingManifestValues(draft, values) ? NEEDS_MANIFEST_VALUES
                 : "unconfigured".equals(draft.kind()) ? NEEDS_OPERATION
                 : draft.outputType() == SkillResult.Type.VIDEO && !usesHttp(draft) ? pendingVideoReason(existingDraft)
-                : usesHttp(draft) && pendingCustomBinding(state, draft, existingDraft) == null
-                ? missingServiceAddress(draft, existingDraft)
+                : usesHttp(draft) && (unboundVideo || pendingCustomBinding(state, draft, existingDraft) == null)
+                ? missingServiceAddress(draft, unboundVideo ? null : existingDraft)
                 : "service".equals(draft.kind()) && service == null && draft.outputType() == SkillResult.Type.IMAGE ? NEEDS_IMAGE_SERVICE : "";
         boolean reviewTextService = draft.outputType() == SkillResult.Type.TEXT && service != null
                 && !SkillServices.MOCK_ORDERS.equals(service.id());
@@ -2382,6 +2594,11 @@ public final class SkillStore {
                 .put("description", draft.description()).put("outputType", draft.outputType().wireName())
                 .put("kind", draft.kind())
                 .put("serviceLabel", service == null ? "" : service.label());
+        if (draft.outputType() == SkillResult.Type.VIDEO) {
+            JSONObject pending = state.getJSONObject("drafts").optJSONObject(draft.name());
+            SkillVideoFacts facts = revisionVideoFacts(pending, draft.manifest(), custom);
+            if (facts != null) revision.put(VIDEO_FACTS, facts.toJson());
+        }
         if (draft.manifest() != null && draft.manifest().http() != null) revision.put("httpVersion", 1);
         if (draft.manifest() != null && !draft.name().equals(draft.manifest().displayName())) {
             revision.put("displayName", draft.manifest().displayName());
