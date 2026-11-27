@@ -1696,10 +1696,15 @@ final class AiTestChatDialog extends Dialog {
                 failure = cannotComplete;
             }
         }
+        boolean clearedMismatchedEditor = !turn.stopRequested && failure instanceof OutputMismatch mismatch
+                && turn.authoring != null && turn.authoring.mode() == SkillAuthoring.Mode.DESIGN
+                && skillDraft != null && skillDraft.outputType() != mismatch.expected;
+        if (clearedMismatchedEditor) clearAuthoringDraft(turn);
         HistorySave history = HistorySave.NOT_REQUESTED;
-        if (turn.manualSkill() && !turn.stopRequested && failure == null) {
-            if (turn.transcriptMemory != null && turn.transcriptMemory.historyEnabled()) {
-                saveSkillTranscript(turn, reply, generatedImage, artifact);
+        if (turn.manualSkill() && !turn.stopRequested && (failure == null || clearedMismatchedEditor)) {
+            if (turn.transcriptMemory != null && turn.transcriptMemory.historyEnabled()
+                    && (failure == null || storedSkillDraft != null)) {
+                saveSkillTranscript(turn, reply, generatedImage, artifact, failure);
                 return;
             }
             if (turn.transcriptUnavailable) history = HistorySave.UNCONFIRMED;
@@ -1823,7 +1828,8 @@ final class AiTestChatDialog extends Dialog {
                         + ";history=" + history.name());
     }
 
-    private void saveSkillTranscript(RequestTurn turn, String reply, ChatImage generatedImage, SkillResult artifact) {
+    private void saveSkillTranscript(RequestTurn turn, String reply, ChatImage generatedImage, SkillResult artifact,
+                                     Exception failure) {
         TestChatMemory memory = turn.transcriptMemory;
         turn.savingHistory = true;
         request = null;
@@ -1838,9 +1844,9 @@ final class AiTestChatDialog extends Dialog {
         TestChatMemory.SkillDraft expectedDraft = storedSkillDraft;
         TestChatMemory.SkillDraft nextDraft = turn.editorChanged ? authoringSnapshot() : expectedDraft;
         try {
-            TestChatMemory.Turn saved = TestChatMemory.Turn.displayedSkill(turn.prompt, savedAnswer,
+            TestChatMemory.Turn saved = failure == null ? TestChatMemory.Turn.displayedSkill(turn.prompt, savedAnswer,
                     generatedImage == null ? Collections.emptyList() : Collections.singletonList(generatedImage),
-                    turn.settingsSkillName, artifact);
+                    turn.settingsSkillName, artifact) : null;
             historyWorker.execute(() -> {
                 if (turn.discardHistory) return;
                 HistorySave result;
@@ -1849,7 +1855,8 @@ final class AiTestChatDialog extends Dialog {
                     if (turn.editorChanged) {
                         draftWritten = memory.writeSkillDraft(turn.transcriptEpoch, expectedDraft, nextDraft);
                     }
-                    result = memory.append(turn.transcriptEpoch, saved) ? HistorySave.SAVED : HistorySave.UNCONFIRMED;
+                    boolean written = saved == null ? draftWritten : memory.append(turn.transcriptEpoch, saved);
+                    result = written ? HistorySave.SAVED : HistorySave.UNCONFIRMED;
                     if (result == HistorySave.SAVED && artifact instanceof SkillResult.Video video && turn.videoScope != null) {
                         try { skillVideoJobs.markLinked(turn.videoScope, video.requestId()); }
                         catch (SkillVideoJobs.Failure ignored) { /* Reopen can link the journal and existing row. */ }
@@ -1859,21 +1866,25 @@ final class AiTestChatDialog extends Dialog {
                 }
                 boolean storedDraft = draftWritten;
                 boolean written = result == HistorySave.SAVED;
-                DouAiLog.event("ai_chat", "skill_history_write", written ? "saved" : "not_saved", "scope=local_display");
+                DouAiLog.event("ai_chat", saved == null ? "skill_draft_write" : "skill_history_write",
+                        written ? "saved" : "not_saved", "scope=local_display");
                 main.post(turn.trace.wrap(() -> {
                     if (!isCurrentTurn(turn)) return;
                     if (turn.editorChanged && storedDraft) storedSkillDraft = nextDraft;
-                    showRequestResult(turn, reply, generatedImage, artifact, null,
-                            written ? HistorySave.SAVED : HistorySave.UNCONFIRMED);
-                    if (!storedDraft) {
-                        state.setText("技能编写进度暂未保存到本机，重开前请先核对当前草稿。");
-                        updateSend();
-                    }
+                    showRequestResult(turn, reply, generatedImage, artifact, failure, saved == null
+                            ? HistorySave.NOT_REQUESTED : written ? HistorySave.SAVED : HistorySave.UNCONFIRMED);
+                    if (!storedDraft) showDraftPersistenceWarning();
                 }));
             });
         } catch (RuntimeException unavailable) {
-            showRequestResult(turn, reply, generatedImage, artifact, null, HistorySave.UNCONFIRMED);
+            showRequestResult(turn, reply, generatedImage, artifact, failure, HistorySave.UNCONFIRMED);
+            if (turn.editorChanged) showDraftPersistenceWarning();
         }
+    }
+
+    private void showDraftPersistenceWarning() {
+        state.setText("技能编写进度暂未保存到本机，重开前请先核对当前草稿。");
+        updateSend();
     }
 
     private TestChatMemory.SkillDraft authoringSnapshot() {
@@ -2312,7 +2323,7 @@ final class AiTestChatDialog extends Dialog {
         String reply = "已保存待配置草稿 /" + saved.name() + "\n" + saved.reason()
                 + (turn.editorChanged ? DRAFT_CONTINUATION : "");
         if (turn.transcriptMemory != null && turn.transcriptMemory.historyEnabled()) {
-            saveSkillTranscript(turn, reply, null, null);
+            saveSkillTranscript(turn, reply, null, null, null);
         } else {
             showRequestResult(turn, reply, null, null, null,
                     turn.transcriptUnavailable ? HistorySave.UNCONFIRMED

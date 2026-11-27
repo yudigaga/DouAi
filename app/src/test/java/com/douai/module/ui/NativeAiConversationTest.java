@@ -34,6 +34,7 @@ import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.ai.skills.SkillStoreTest;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.HostSettingsStore;
@@ -187,7 +188,11 @@ public final class NativeAiConversationTest {
         android.app.AlertDialog review = (android.app.AlertDialog) ShadowDialog.getLatestDialog();
         assertTrue(review.getButton(android.app.AlertDialog.BUTTON_POSITIVE).performClick());
         ShadowLooper.idleMainLooper();
-        assertFalse(SkillStore.forContext(activity).detail("生图").pending());
+        SkillStore store = SkillStore.forContext(activity);
+        assertFalse(store.detail("生图").pending());
+        assertEquals(1, store.list().size());
+        assertEquals(1, store.detail("生图").current().version());
+        assertTrue(store.pending().isEmpty());
         detailDialog.dismiss();
 
         submit("/生图 白猫");
@@ -271,12 +276,11 @@ public final class NativeAiConversationTest {
     }
 
     @Test public void explicitPluralImageRequestNeverInstallsATextDraftInContact() throws Exception {
-        dialog.enableSkills(AiSkills.Entry.CONTACT);
-        String textDraft = """
-                {"schemaVersion":3,"name":"模拟技能","description":"返回文本","documentation":"输入待摘要文本。",
-                "execution":{"kind":"summary","outputType":"text","maxInput":2000},
-                "trial":{"input":"示例","expectedType":"text"}}
-                """;
+        var serviceCalls = new java.util.concurrent.atomic.AtomicInteger();
+        SkillStore store = SkillStoreTest.authoringStore(new java.io.File(activity.getNoBackupFilesDir(),
+                "contact-authoring"), serviceCalls);
+        dialog.enableSkills(AiSkills.Entry.CONTACT, null, store);
+        String textDraft = summaryDraft();
         session.skillModelReplies.add(textDraft);
         submit("帮我写一个文本摘要 Skill");
         worker.runNext();
@@ -289,8 +293,8 @@ public final class NativeAiConversationTest {
         ShadowLooper.idleMainLooper();
 
         assertTrue(renderedText(3).contains("图片"));
-        assertTrue(SkillStore.forContext(activity).list().isEmpty());
-        assertTrue(SkillStore.forContext(activity).pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+        assertTrue(store.pending().isEmpty());
         assertEquals("image",new JSONObject(session.skillModelInputs.get(1)).getString("requiredOutputType"));
         assertEquals(2,session.skillModelInputs.size());
         assertNull(row(3).findViewWithTag("ai.chat.skill.settings.模拟技能"));
@@ -298,9 +302,81 @@ public final class NativeAiConversationTest {
         submit("帮我内置");
         worker.runNext();
         ShadowLooper.idleMainLooper();
+        assertEquals(messageCount() < 6 ? "" : renderedText(4) + " → " + renderedText(5), List.of(), store.list());
         assertEquals(4,messageCount());
-        assertTrue(SkillStore.forContext(activity).list().isEmpty());
+        assertTrue(visibleStatus().contains("当前没有可保存的技能草案"));
+        assertFalse(renderedText(3).contains("仍在编写"));
+        assertTrue(store.pending().isEmpty());
+        assertTrue(session.skillModelReplies.isEmpty());
+        assertEquals(2, session.skillModelInputs.size());
         assertTrue(session.prompts.isEmpty());
+        assertEquals(0, serviceCalls.get());
+    }
+
+    @Test public void rejectedImageDesignCannotRestoreTheOldTextDraftOnReopen() throws Exception {
+        var serviceCalls = new java.util.concurrent.atomic.AtomicInteger();
+        SkillStore store = SkillStoreTest.authoringStore(new java.io.File(activity.getNoBackupFilesDir(),
+                "contact-authoring"), serviceCalls);
+        dialog.dismiss();
+        FakeSession first = new FakeSession();
+        first.transcriptMemory = TestChatMemory.messageConversation(activity, nativeContactConfiguration());
+        open(first, null, ChatImageLoader::thumbnail, true);
+        dialog.enableSkills(AiSkills.Entry.CONTACT, null, store);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        first.skillModelReplies.add(summaryDraft());
+        submit("帮我写一个文本摘要 Skill");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(first.transcriptMemory.readSkillDraft());
+
+        first.skillModelReplies.add(summaryDraft());
+        submit("帮我写一个生图 skills 并内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(renderedText(3).contains("图片"));
+        assertNull(first.transcriptMemory.readSkillDraft());
+        assertTrue(store.pending().isEmpty());
+        assertTrue(store.list().isEmpty());
+
+        dialog.dismiss();
+        FakeSession reopened = new FakeSession();
+        reopened.transcriptMemory = TestChatMemory.messageConversation(activity, nativeContactConfiguration());
+        open(reopened, null, ChatImageLoader::thumbnail, true);
+        dialog.enableSkills(AiSkills.Entry.CONTACT, null, store);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        int rows = messageCount();
+        submit("帮我内置");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(rows, messageCount());
+        assertTrue(visibleStatus().contains("当前没有可保存的技能草案"));
+        assertTrue(store.list().isEmpty());
+        assertTrue(store.pending().isEmpty());
+        assertEquals(2, first.skillModelInputs.size());
+        assertTrue(first.prompts.isEmpty());
+        assertTrue(reopened.skillModelInputs.isEmpty());
+        assertTrue(reopened.prompts.isEmpty());
+        assertEquals(0, serviceCalls.get());
+    }
+
+    private String visibleStatus() {
+        android.widget.TextView state = nativeViews.root.findViewWithTag("ai.chat.state");
+        return state.getText().toString();
+    }
+
+    private static String summaryDraft() {
+        return """
+                {"schemaVersion":3,"name":"模拟技能","description":"返回文本","documentation":"输入待摘要文本。",
+                 "execution":{"kind":"summary","outputType":"text","maxInput":2000},
+                 "trial":{"input":"示例","expectedType":"text"}}
+                """;
     }
 
     @Test public void aQuotedPluralImageRequestAndItsModelEchoRemainOrdinaryContactChat() {

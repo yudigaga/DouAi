@@ -1130,13 +1130,28 @@ public class SkillStoreTest {
     }
 
     private static SkillStore videoStore(File root, SkillStore.VideoModelQuery videoModels) {
+        return observedStore(root, videoModels, () -> {
+            throw new AssertionError("Declaration and local configuration must not use the network");
+        });
+    }
+
+    public static SkillStore authoringStore(File root, java.util.concurrent.atomic.AtomicInteger serviceCalls) {
+        return observedStore(root, (endpoint, bearer) -> {
+            serviceCalls.incrementAndGet();
+            throw new AssertionError("Skill authoring must not query models");
+        }, () -> serviceCalls.incrementAndGet());
+    }
+
+    private static SkillStore observedStore(File root, SkillStore.VideoModelQuery videoModels, Runnable onServiceCall) {
         var vault = new com.douai.module.ai.AiCredentialVault(
                 () -> new javax.crypto.spec.SecretKeySpec(new byte[32], "AES"));
         var services = new SkillServices(root, vault, (endpoint, bearer, body, deadline, output) -> {
-            throw new AssertionError("Declaration and local configuration must not use the network");
+            onServiceCall.run();
+            throw new AssertionError("Unexpected image or text service call");
         });
         var customService = new SkillCustomService(vault, (endpoint, bearer, body, deadline, limit, admission) -> {
-            throw new AssertionError("Declaration and local configuration must not use the network");
+            onServiceCall.run();
+            throw new AssertionError("Unexpected custom service call");
         }, System::nanoTime);
         return new SkillStore(root, services, null, customService, videoModels);
     }
