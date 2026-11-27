@@ -292,6 +292,12 @@ public final class SkillVideoFacts {
         return decode(stored, Source.STORED);
     }
 
+    static SkillVideoFacts fromDocument(JSONObject documented) {
+        return decode(documented, Source.DOCUMENT);
+    }
+
+    public String label() { return facts.getOrDefault(Fact.LABEL, ""); }
+
     private static SkillVideoFacts decode(JSONObject stored, Source defaultSource) {
         if (stored == null || stored.length() == 0) return empty();
         JSONObject object = strict(stored.toString());

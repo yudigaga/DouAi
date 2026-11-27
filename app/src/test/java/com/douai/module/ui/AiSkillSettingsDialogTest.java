@@ -426,6 +426,88 @@ public final class AiSkillSettingsDialogTest {
         assertEquals(firstEndpoint, store.previewCustomService(currentCall).endpoint());
     }
 
+    @Test public void completeRelativeVideoStartsWithBaseAndKeyAndPreservesHiddenDefaults() throws Exception {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        SkillStore local = com.douai.module.ai.skills.SkillCustomServiceTest.chatFixture(activity, calls);
+        String name = saveRelativeVideoWithDefaults(local, false);
+        var page = new AiSkillDetailDialog(activity, false, name, null, null, new ImmediateExecutor(), local);
+        page.dialog().show();
+        try {
+            AlertDialog detail = page.dialog();
+            View advanced = dialogView(detail, "skills.detail.video_advanced.content");
+            assertNotNull(advanced);
+            assertEquals(View.GONE, advanced.getVisibility());
+            EditText base = (EditText) dialogView(detail, "skills.detail.custom.endpoint");
+            assertTrue(base.getHint().toString().contains("API 基础地址"));
+            assertFalse(inside(base, advanced));
+            assertFalse(inside(dialogView(detail, "skills.detail.custom.credential"), advanced));
+            assertFalse(inside(dialogView(detail, "skills.detail.custom.save"), advanced));
+            for (String tag : List.of("skills.detail.custom.contract", "skills.detail.custom.video_routes",
+                    "skills.detail.video_facts.open", "skills.detail.video_contract.replace", "skills.detail.config.model",
+                    "skills.detail.config.duration", "skills.detail.config.resolution",
+                    "skills.detail.custom.save_complete_endpoint")) {
+                assertTrue(tag, inside(dialogView(detail, tag), advanced));
+            }
+            View toggle = dialogView(detail, "skills.detail.video_advanced");
+            assertTrue(toggle.performClick());
+            assertEquals(View.VISIBLE, advanced.getVisibility());
+            assertTrue(toggle.performClick());
+            assertEquals(View.GONE, advanced.getVisibility());
+            assertEquals(0, calls.get());
+
+            base.setText("https://gateway.example.com");
+            assertTrue(dialogView(detail, "skills.detail.custom.save").performClick());
+            SkillStore.Detail enabled = local.detail(name);
+            assertFalse(enabled.pending());
+            assertEquals("https://gateway.example.com/v1/videos", enabled.customConfiguration().endpoint());
+            assertEquals("grok-imagine-video-1.5-lite", enabled.manifestValues().get("model"));
+            assertEquals(5, enabled.manifestValues().get("duration"));
+            assertEquals("480p", enabled.manifestValues().get("resolution"));
+            assertEquals(0, calls.get());
+        } finally {
+            page.dialog().dismiss();
+            page.close();
+        }
+    }
+
+    @Test public void genuinelyMissingRequiredVideoFieldRemainsOnTheMainForm() throws Exception {
+        String name = saveRelativeVideoWithDefaults(store, true);
+        reopenManager();
+        AlertDialog detail = skillDetail(skillRow(name));
+        View advanced = dialogView(detail, "skills.detail.video_advanced.content");
+        EditText model = (EditText) dialogView(detail, "skills.detail.config.model");
+        assertNotNull(advanced);
+        assertNotNull(model);
+        assertEquals(View.GONE, advanced.getVisibility());
+        assertFalse(inside(model, advanced));
+        assertTrue(model.getText().toString().isEmpty());
+        assertTrue(inside(dialogView(detail, "skills.detail.config.duration"), advanced));
+    }
+
+    private static String saveRelativeVideoWithDefaults(SkillStore store, boolean missingModel) throws Exception {
+        JSONObject definition;
+        try (var input = AiSkillSettingsDialogTest.class.getResourceAsStream("/skill-import/new-api-text-to-video.json")) {
+            assertNotNull(input);
+            definition = new JSONObject(new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+        if (missingModel) definition.getJSONArray("configFields").getJSONObject(0).remove("default");
+        var source = com.douai.module.ai.skills.SkillManifest.parse(definition.toString());
+        var facts = com.douai.module.ai.skills.SkillVideoFacts.fromDeclaration(source, "",
+                com.douai.module.ai.skills.SkillVideoFacts.Source.STORED)
+                .withForm(java.util.Map.of("submitPath", "/v1/videos"));
+        var preview = SkillStore.prepareAuthoredVideoDraft(definition.toString(), facts);
+        assertNotNull(store.saveConversationDraft(preview, facts, null).pending());
+        return source.name();
+    }
+
+    private static boolean inside(View child, View ancestor) {
+        if (child == null || ancestor == null) return false;
+        for (android.view.ViewParent parent = child.getParent(); parent != null; parent = parent.getParent()) {
+            if (parent == ancestor) return true;
+        }
+        return false;
+    }
+
     private static String videoProviderNotes(String endpoint, String status) {
         return """
                 提交: POST %s

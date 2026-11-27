@@ -79,7 +79,7 @@ final class SkillHttpsTransport {
 
     enum Kind { ENDPOINT, REQUEST, ADDRESS, DEADLINE, CANCELLED, ADMISSION, TRANSPORT, RESPONSE_LIMIT }
     enum Method { POST, GET, DELETE }
-    private enum Format { JSON, MP4, IMAGE_RESULT, TEXT_RESULT }
+    private enum Format { JSON, MP4, IMAGE_RESULT, TEXT_RESULT, OPENAPI_DOCUMENT }
     private enum Dispatch { READY, SENT, CLOSED }
 
     static final class Failure extends IOException {
@@ -124,6 +124,11 @@ final class SkillHttpsTransport {
                         Admission admission) throws Failure {
         return exchange(Method.GET, false, exactEndpoint, bearer, null, deadlineNanos, maxResponseBytes,
                 admission, Dns.SYSTEM, SkillHttpsTransport::isPublicAddress, null, null);
+    }
+
+    static Response getDocumentation(String exactEndpoint, long deadlineNanos, int maxResponseBytes) throws Failure {
+        return exchange(Method.GET, Format.OPENAPI_DOCUMENT, false, exactEndpoint, "", null, deadlineNanos,
+                maxResponseBytes, () -> {}, Dns.SYSTEM, SkillHttpsTransport::isPublicAddress, null, null);
     }
 
     static Response delete(String exactEndpoint, String bearer, long deadlineNanos, int maxResponseBytes,
@@ -190,6 +195,7 @@ final class SkillHttpsTransport {
                     case MP4 -> "video/mp4";
                     case IMAGE_RESULT -> "image/png, image/jpeg, image/webp, image/gif, application/json";
                     case TEXT_RESULT -> "application/json, text/plain";
+                    case OPENAPI_DOCUMENT -> "application/json, application/vnd.oai.openapi+json, text/plain";
                     case JSON -> "application/json";
                 })
                 .header("Accept-Encoding", "identity")
@@ -369,7 +375,8 @@ final class SkillHttpsTransport {
         String contentType = typeHeaders.size() == 1 ? responseType(typeHeaders.get(0), format) : "";
         if (format != Format.JSON) {
             List<String> encodings = response.headers().values("Content-Encoding");
-            if (status == 206 || format == Format.MP4 && status != 200 || contentType.isEmpty()
+            if (status == 206 || (format == Format.MP4 || format == Format.OPENAPI_DOCUMENT) && status != 200
+                    || contentType.isEmpty()
                     || !encodings.isEmpty() && (encodings.size() != 1 || !encodings.get(0).equalsIgnoreCase("identity"))) {
                 return new Response(status, "", new byte[0]);
             }
@@ -388,7 +395,7 @@ final class SkillHttpsTransport {
         int parameters = header.indexOf(';');
         String bare = (parameters < 0 ? header : header.substring(0, parameters)).trim().toLowerCase(Locale.ROOT);
         if (format == Format.MP4) return bare.equals("video/mp4") ? bare : "";
-        if (format == Format.TEXT_RESULT && bare.equals("text/plain")) return bare;
+        if ((format == Format.TEXT_RESULT || format == Format.OPENAPI_DOCUMENT) && bare.equals("text/plain")) return bare;
         if (format == Format.IMAGE_RESULT && (bare.equals("image/png") || bare.equals("image/jpeg")
                 || bare.equals("image/webp") || bare.equals("image/gif"))) return bare;
         return bare.equals("application/json") || bare.matches("application/[a-z0-9._-]+\\+json")

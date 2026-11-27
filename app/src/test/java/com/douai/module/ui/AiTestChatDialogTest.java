@@ -1539,6 +1539,107 @@ public final class AiTestChatDialogTest {
         assertNaturalVideoInterfaceFillPreviewsSettingsAndInstallsSameDraft(AiSkills.Entry.WORK, "接口需要帮我填好");
     }
 
+    @Test public void workWritesNewApiVideoWithDocumentedFieldsAndDefaults() throws Exception {
+        assertWritesNewApiVideoFromDocumentation(AiSkills.Entry.WORK);
+    }
+
+    @Test public void contactWritesNewApiVideoWithDocumentedFieldsAndDefaults() throws Exception {
+        assertWritesNewApiVideoFromDocumentation(AiSkills.Entry.CONTACT);
+    }
+
+    private void assertWritesNewApiVideoFromDocumentation(AiSkills.Entry entry) throws Exception {
+        FakeSession first = new FakeSession();
+        first.transcriptMemory = entry == AiSkills.Entry.CONTACT
+                ? TestChatMemory.messageConversation(activity, restoreConfiguration())
+                : new TestChatMemory(activity, restoreConfiguration());
+        first.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "AI编写视频").toString());
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(first, ChatImageLoader::thumbnail, entry, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit("/技能 帮我写一个 New API 生视频的技能，只留地址和密钥");
+        finishOfflineChatTurn();
+        assertTrue(lastAnswer().contains("接口声明已校验"));
+        assertTrue(lastAnswer().contains("grok-imagine-video-1.5-lite"));
+        assertTrue(first.prompts.isEmpty());
+        assertTrue(first.skillDocumentReads.isEmpty());
+        assertEquals(1, first.skillInputs.size());
+        SkillStore store = SkillStore.forContext(activity);
+        assertTrue(store.pending().isEmpty());
+        var original = first.transcriptMemory.readSkillDraft();
+        assertNotNull(original);
+
+        FakeSession reopened = new FakeSession();
+        reopened.transcriptMemory = first.transcriptMemory;
+        reopen(reopened, ChatImageLoader::thumbnail, entry, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertNotNull(findView("ai.chat.skill.draft_settings.AI编写视频"));
+        assertEquals(original, reopened.transcriptMemory.readSkillDraft());
+        submit("/技能 帮我内置");
+        finishOfflineChatTurn();
+        assertTrue(reopened.skillInputs.isEmpty());
+        assertEquals(1, store.pending().size());
+        var saved = store.detail("AI编写视频");
+        assertTrue(saved.pending());
+        assertNull(saved.customConfiguration());
+        assertEquals("/v1/videos", saved.videoFacts().submitPath());
+        assertEquals("/v1/videos/{id}", saved.manifest().http().video().statusPath());
+        assertEquals("/v1/videos/{id}/content", saved.manifest().http().video().downloadPath());
+        assertEquals("id", saved.manifest().http().responseField());
+        assertEquals("grok-imagine-video-1.5-lite", saved.manifestValues().get("model"));
+        assertEquals(5, saved.manifestValues().get("duration"));
+        assertEquals("480p", saved.manifestValues().get("resolution"));
+        configurePreviewedVideo("AI编写视频", "https://gateway.example.com", "API 基础地址");
+        submit("/AI编写视频 雨后街景");
+        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(videoReviewText(review).contains("POST https://gateway.example.com/v1/videos"));
+        assertTrue(videoReviewText(review).contains("\"model\":\"grok-imagine-video-1.5-lite\""));
+        assertTrue(review.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        assertEquals(0, submits.get());
+    }
+
+    @Test public void videoAuthoringReadsAnotherProvidersOpenApiOnlyAfterConfirmation() throws Exception {
+        FakeSession session = new FakeSession();
+        session.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        session.skillReplies.add(new JSONObject(videoDraftWithoutProvider()).put("name", "另一个视频").toString());
+        session.skillOpenApi = com.douai.module.ai.skills.SkillOpenApiVideoTest.documentedVideoFixture();
+        AtomicInteger submits = new AtomicInteger();
+        SkillVideoJobs jobs = SkillVideoJobsTest.chatFixture(activity, submits);
+        reopen(session, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, null, jobs);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        String link = "https://docs.example.com/video/openapi.json";
+        String request = "/技能 帮我做个视频生成技能，按文档 " + link;
+        submit(request);
+        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(videoReviewText(review).contains(link));
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(review.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        assertTrue(session.skillDocumentReads.isEmpty());
+
+        submit(request);
+        review = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(review.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of(link), session.skillDocumentReads);
+        assertEquals(text("ai.chat.state").getText().toString(), 1, session.skillInputs.size());
+        assertFalse(session.skillInputs.get(0).contains(link));
+        assertTrue(lastAnswer().contains("接口声明已校验"));
+        assertEquals(0, submits.get());
+        var facts = new JSONObject(session.transcriptMemory.readSkillDraft().videoFacts());
+        assertEquals("/render/jobs", facts.getString("submitPath"));
+        assertEquals("/render/jobs/{id}/file", facts.getString("downloadPath"));
+    }
+
     @Test public void contactNaturalVideoInterfaceFillPreviewsSettingsAndInstallsSameDraft() throws Exception {
         assertNaturalVideoInterfaceFillPreviewsSettingsAndInstallsSameDraft(AiSkills.Entry.CONTACT, "就按你发的填写");
     }
@@ -5247,10 +5348,12 @@ public final class AiTestChatDialogTest {
         final List<String> prompts = new ArrayList<>();
         final List<String> skillInstructions = new ArrayList<>();
         final List<String> skillInputs = new ArrayList<>();
+        final List<String> skillDocumentReads = new ArrayList<>();
         final Queue<String> skillReplies = new ArrayDeque<>();
         final List<List<ChatImage>> images = new ArrayList<>();
         final List<String> documents = new ArrayList<>();
         String answer = "模型回复";
+        String skillOpenApi;
         Exception failure;
         int cancelCount;
         List<TestChatMemory.Turn> saved = Collections.emptyList();
@@ -5276,6 +5379,12 @@ public final class AiTestChatDialogTest {
             skillInputs.add(input);
             if (skillReplies.isEmpty()) throw new AssertionError("Unexpected isolated skill model call");
             return skillReplies.remove();
+        }
+
+        @Override public String readSkillDocumentation(String endpoint, long deadlineNanos) {
+            skillDocumentReads.add(endpoint);
+            if (skillOpenApi == null) throw new AssertionError("Unexpected documentation request");
+            return skillOpenApi;
         }
 
         @Override public String reply(String message, List<ChatImage> attachments, String document) throws Exception {

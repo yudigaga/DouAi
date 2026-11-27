@@ -1,0 +1,26 @@
+{
+  "references": [
+    "https://docs.newapi.pro/en/docs/guide/feature-guide/user/log",
+    "https://github.com/QuantumNous/new-api/blob/81c1fd20efade39a5d5692c8018dfef4cfb30e1d/plugins/tasks/xai/plugin.js",
+    "https://github.com/QuantumNous/new-api/blob/81c1fd20efade39a5d5692c8018dfef4cfb30e1d/model/task.go",
+    "https://docs.x.ai/developers/model-capabilities/video/generation"
+  ],
+  "facts": {
+    "version": 1,
+    "label": "New API xAI 视频渠道",
+    "submitPath": "/v1/videos",
+    "submitEncoding": "application/json",
+    "submitIdField": "id",
+    "statusPath": "/v1/videos/{id}",
+    "statusIdField": "id",
+    "stateField": "status",
+    "downloadPath": "/v1/videos/{id}/content",
+    "states": {"queued": "queued", "in_progress": "running", "completed": "completed", "failed": "failed"},
+    "request": {"prompt": "argument", "model": "config.model", "duration": "config.duration", "resolution": "config.resolution"},
+    "configFields": [
+      {"key": "model", "label": "视频模型", "type": "text", "required": true, "default": "grok-imagine-video-1.5-lite"},
+      {"key": "duration", "label": "时长（秒）", "type": "integer", "required": true, "min": 1, "max": 15, "default": 5},
+      {"key": "resolution", "label": "分辨率", "type": "enum", "required": true, "options": ["480p", "720p"], "default": "480p"}
+    ]
+  }
+}

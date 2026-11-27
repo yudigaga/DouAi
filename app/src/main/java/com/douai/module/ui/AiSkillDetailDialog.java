@@ -94,7 +94,12 @@ final class AiSkillDetailDialog implements AutoCloseable {
 
     AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
                         ModelDiscovery discovery, ExecutorService discoveryWorker) {
-        this(context, miuix, exactSkillName, onChanged, discovery, discoveryWorker, null, null);
+        this(context, miuix, exactSkillName, onChanged, discovery, discoveryWorker, null);
+    }
+
+    AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
+                        ModelDiscovery discovery, ExecutorService discoveryWorker, SkillStore localStore) {
+        this(context, miuix, exactSkillName, onChanged, discovery, discoveryWorker, null, null, localStore);
     }
 
     static AiSkillDetailDialog preview(Context context, boolean miuix, SkillStore.DraftPreview draft, SkillVideoFacts facts) {
@@ -103,17 +108,17 @@ final class AiSkillDetailDialog implements AutoCloseable {
         SkillStore.DraftPreview validated = draft.outputType() == SkillResult.Type.VIDEO
                 ? SkillStore.prepareAuthoredVideoDraft(draft.definition(), supplied)
                 : SkillStore.validateAuthoredDraft(draft.definition());
-        return new AiSkillDetailDialog(context, miuix, validated.name(), null, null, null, validated, supplied);
+        return new AiSkillDetailDialog(context, miuix, validated.name(), null, null, null, validated, supplied, null);
     }
 
     private AiSkillDetailDialog(Context context, boolean miuix, String exactSkillName, Runnable onChanged,
                                 ModelDiscovery discovery, ExecutorService discoveryWorker,
-                                SkillStore.DraftPreview preview, SkillVideoFacts facts) {
+                                SkillStore.DraftPreview preview, SkillVideoFacts facts, SkillStore localStore) {
         this.context = context;
         this.miuix = miuix;
         name = exactSkillName;
         this.onChanged = onChanged;
-        store = preview == null ? SkillStore.forContext(context) : null;
+        store = preview == null ? localStore == null ? SkillStore.forContext(context) : localStore : null;
         this.discovery = discovery != null ? discovery : store == null ? null : store::discoverImageModels;
         this.discoveryWorker = discoveryWorker;
         body = column();
@@ -351,9 +356,15 @@ final class AiSkillDetailDialog implements AutoCloseable {
     }
 
     private Map<String, Supplier<String>> manifestInputs(SkillStore.Detail detail) {
+        return manifestInputs(detail, null);
+    }
+
+    private Map<String, Supplier<String>> manifestInputs(SkillStore.Detail detail, LinearLayout advanced) {
         Map<String, Supplier<String>> values = new LinkedHashMap<>();
         for (SkillManifest.ConfigField field : detail.manifest().configFields()) {
-            values.put(field.key(), manifestInput(field, detail.manifestValues().get(field.key())));
+            Object value = detail.manifestValues().get(field.key());
+            LinearLayout parent = advanced != null && (!field.required() || value != null) ? advanced : body;
+            values.put(field.key(), manifestInput(parent, field, value));
         }
         return values;
     }
@@ -369,16 +380,28 @@ final class AiSkillDetailDialog implements AutoCloseable {
         if (manifest == null) return;
         SkillCapabilityRegistry.ExecutionMode mode = manifest.capability().executionMode();
         boolean polling = mode == SkillCapabilityRegistry.ExecutionMode.POLLING;
+        SkillHttpDeclaration declaration = manifest.http();
+        SkillStore.CustomConfiguration current = detail.customConfiguration();
+        SkillVideoFacts facts = polling ? detail.videoFacts() : null;
+        String proposedEndpoint = manifest.servicePrefill().endpoint();
+        if (proposedEndpoint.isEmpty() && declaration != null) proposedEndpoint = declaration.suggestedEndpoint();
+        String savedBase = facts == null || current == null ? "" : facts.apiBaseForEndpoint(current.endpoint());
+        String proposedBase = facts == null || proposedEndpoint.isEmpty() ? "" : facts.apiBaseForEndpoint(proposedEndpoint);
+        boolean useApiBase = facts != null && facts.needsApiBase()
+                && (current == null ? proposedEndpoint.isEmpty() || !proposedBase.isEmpty() : !savedBase.isEmpty());
+        boolean simpleVideo = useApiBase && detail.pending() && detail.current() == null
+                && facts.isComplete() && declaration != null && declaration.video() != null;
+        LinearLayout contract = simpleVideo ? column() : body;
         if (polling || manifest.usesHttp()) {
-            text(body, "执行方式 · " + mode.label(), "skills.detail.execution_mode");
-            text(body, "输出类型 · " + detail.outputType().label(), "skills.detail.output_type");
+            text(contract, "执行方式 · " + mode.label(), "skills.detail.execution_mode");
+            text(contract, "输出类型 · " + detail.outputType().label(), "skills.detail.output_type");
         }
         if (polling && detail.pending() && (!manifest.usesHttp() || detail.videoFacts() != null)) {
-            button(body, "填写接口字段", "skills.detail.video_facts.open", () -> showVideoFacts(detail, false));
+            button(contract, "填写接口字段", "skills.detail.video_facts.open", () -> showVideoFacts(detail, false));
         }
         if (polling && (detail.current() != null || manifest.http() != null
                 || detail.videoFacts() != null && !detail.videoFacts().isEmpty())) {
-            button(body, "更换视频接口", "skills.detail.video_contract.replace", () -> showVideoFacts(detail, true));
+            button(contract, "更换视频接口", "skills.detail.video_contract.replace", () -> showVideoFacts(detail, true));
         }
         if (manifest.capability() == SkillCapabilityRegistry.Capability.CUSTOM_SERVICE) {
             button(body, "编辑请求与响应映射", "skills.detail.direct_contract.replace", () -> showDirectContract(detail));
@@ -390,30 +413,22 @@ final class AiSkillDetailDialog implements AutoCloseable {
             }
             return;
         }
-        SkillHttpDeclaration declaration = manifest.http();
-        SkillStore.CustomConfiguration current = detail.customConfiguration();
-        SkillVideoFacts facts = polling ? detail.videoFacts() : null;
-        String proposedEndpoint = manifest.servicePrefill().endpoint();
-        if (proposedEndpoint.isEmpty() && declaration != null) proposedEndpoint = declaration.suggestedEndpoint();
-        String savedBase = facts == null || current == null ? "" : facts.apiBaseForEndpoint(current.endpoint());
-        String proposedBase = facts == null || proposedEndpoint.isEmpty() ? "" : facts.apiBaseForEndpoint(proposedEndpoint);
-        boolean useApiBase = facts != null && facts.needsApiBase()
-                && (current == null ? proposedEndpoint.isEmpty() || !proposedBase.isEmpty() : !savedBase.isEmpty());
         section(declaration == null ? "HTTPS 服务" : declaration.label(), "skills.detail.custom");
         String request = declaration == null ? SkillCustomService.REQUEST_FIELD : String.join("、", declaration.request().keySet());
         String response = declaration == null ? SkillCustomService.RESPONSE_FIELD : declaration.responseField();
-        text(body, "请求 POST JSON，发送字段 " + request + "，读取响应字段 " + response + "。",
+        text(contract, "请求 POST JSON，发送字段 " + request + "，读取响应字段 " + response + "。",
                 "skills.detail.custom.contract");
         if (declaration != null && declaration.video() != null) {
             SkillHttpDeclaration.Video video = declaration.video();
             String routes = "查询 " + videoStatusRoute(video)
                     + (video.downloadPath().isEmpty() ? "\n成片链接字段 " + video.resultUrlField() : "\n下载 GET " + video.downloadPath());
             if (video.canCancel()) routes += "\n取消 " + video.cancelMethod() + " " + video.cancelPath();
-            text(body, routes, "skills.detail.custom.video_routes");
+            text(contract, routes, "skills.detail.custom.video_routes");
         }
         if (useApiBase) {
-            text(body, "填写与任务接口同源的 HTTPS 主机和可选端口。提交路径 " + facts.submitPath(),
-                    "skills.detail.custom.api_base_hint");
+            String baseHint = "填写与任务接口同源的 HTTPS 主机和可选端口。";
+            text(body, simpleVideo ? baseHint : baseHint + "提交路径 " + facts.submitPath(), "skills.detail.custom.api_base_hint");
+            if (simpleVideo) text(contract, "提交路径 " + facts.submitPath(), "skills.detail.custom.submit_path");
         }
         EditText endpoint = input(body, useApiBase ? "公网 HTTPS API 基础地址" : "公网 HTTPS 完整接口地址",
                 "skills.detail.custom.endpoint",
@@ -427,17 +442,24 @@ final class AiSkillDetailDialog implements AutoCloseable {
         String hint = hasCredential ? "更换服务密钥（地址相同且留空时保留）" : "服务密钥（可选）";
         EditText bearer = input(body, hint, "skills.detail.custom.credential",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD, 2048, true);
-        Map<String, Supplier<String>> values = manifestInputs(detail);
+        Map<String, Supplier<String>> values = manifestInputs(detail, simpleVideo ? contract : null);
         button(body, "保存服务配置", "skills.detail.custom.save", () ->
                 saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false, enteredValues(values), useApiBase));
         if (useApiBase) {
-            button(body, "按完整接口地址保存", "skills.detail.custom.save_complete_endpoint", () ->
+            button(contract, "按完整接口地址保存", "skills.detail.custom.save_complete_endpoint", () ->
                     saveCustomConfiguration(detail, fieldValue(endpoint), bearer, false, enteredValues(values), false));
         }
         if (hasCredential) {
-            button(body, "移除此技能密钥", "skills.detail.custom.remove_credential", () -> review("移除服务密钥",
+            button(contract, "移除此技能密钥", "skills.detail.custom.remove_credential", () -> review("移除服务密钥",
                     "确认后生成待启用配置。", "移除密钥",
                     () -> saveCustomConfiguration(detail, current.endpoint(), bearer, true, null, false)));
+        }
+        if (simpleVideo) {
+            contract.setTag("skills.detail.video_advanced.content");
+            contract.setVisibility(View.GONE);
+            button(body, "高级配置", "skills.detail.video_advanced", () -> contract.setVisibility(
+                    contract.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
+            body.addView(contract, matchWrap());
         }
     }
 
@@ -740,19 +762,19 @@ final class AiSkillDetailDialog implements AutoCloseable {
         }
     }
 
-    private Supplier<String> manifestInput(SkillManifest.ConfigField field, Object value) {
+    private Supplier<String> manifestInput(LinearLayout parent, SkillManifest.ConfigField field, Object value) {
         String tag = "skills.detail.config." + field.key();
         String label = field.label() + (field.required() ? "（必填）" : "");
         String current = value == null ? "" : value instanceof BigDecimal decimal
                 ? decimal.toPlainString() : value.toString();
         if (field.description() != null && !field.description().isEmpty()) {
-            text(body, field.description(), tag + ".description");
+            text(parent, field.description(), tag + ".description");
         }
         return switch (field.type()) {
-            case BOOLEAN -> manifestChoice(label, tag, current, List.of("true", "false"), List.of("是", "否"));
-            case ENUM -> manifestChoice(label, tag, current, field.options(), field.options());
+            case BOOLEAN -> manifestChoice(parent, label, tag, current, List.of("true", "false"), List.of("是", "否"));
+            case ENUM -> manifestChoice(parent, label, tag, current, field.options(), field.options());
             case TEXT, MULTILINE, INTEGER, DECIMAL -> {
-                if (!miuix) text(body, label, tag + ".label");
+                if (!miuix) text(parent, label, tag + ".label");
                 int type = switch (field.type()) {
                     case MULTILINE -> InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
                     case INTEGER -> InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED;
@@ -761,16 +783,16 @@ final class AiSkillDetailDialog implements AutoCloseable {
                     default -> InputType.TYPE_CLASS_TEXT;
                 };
                 Integer limit = field.maxLength();
-                EditText input = input(body, label, tag, type, limit == null || limit <= 0 ? 16000 : limit, false);
+                EditText input = input(parent, label, tag, type, limit == null || limit <= 0 ? 16000 : limit, false);
                 input.setText(current);
                 yield () -> input.getText().toString();
             }
         };
     }
 
-    private Supplier<String> manifestChoice(String label, String tag, String current,
+    private Supplier<String> manifestChoice(LinearLayout parent, String label, String tag, String current,
                                             List<String> values, List<String> labels) {
-        text(body, label, tag + ".label");
+        text(parent, label, tag + ".label");
         Spinner spinner = miuix ? MiuixFormControls.spinner(context) : new Spinner(context);
         spinner.setTag(tag);
         spinner.setContentDescription(label);
@@ -781,7 +803,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinner.setAdapter(adapter);
         spinner.setSelection(values.indexOf(current) + 1);
-        body.addView(MiuixFormControls.viewFor(spinner), matchWrap());
+        parent.addView(MiuixFormControls.viewFor(spinner), matchWrap());
         return () -> {
             int position = spinner.getSelectedItemPosition();
             return position <= 0 ? "" : values.get(position - 1);

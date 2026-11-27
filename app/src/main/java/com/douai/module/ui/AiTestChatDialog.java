@@ -58,6 +58,9 @@ import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSubAgents;
 import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillAuthoringPatch;
+import com.douai.module.ai.skills.SkillDocumentationClient;
+import com.douai.module.ai.skills.SkillOpenApiVideo;
+import com.douai.module.ai.skills.SkillVideoDocumentation;
 import com.douai.module.ai.skills.SkillCapabilityRegistry;
 import com.douai.module.ai.skills.SkillCustomService;
 import com.douai.module.ai.skills.SkillHttpDeclaration;
@@ -115,6 +118,9 @@ final class AiTestChatDialog extends Dialog {
             throw new IllegalStateException("当前模型不支持技能请求");
         }
         default String packageModel(String system, String input) throws Exception { return skillModel(system, input); }
+        default String readSkillDocumentation(String endpoint, long deadlineNanos) throws Exception {
+            return SkillDocumentationClient.read(endpoint, deadlineNanos);
+        }
         default String reply(String message, List<ChatImage> images, String document) throws Exception {
             return reply(message, images);
         }
@@ -237,6 +243,7 @@ final class AiTestChatDialog extends Dialog {
     private int thumbnailGeneration;
     private boolean restoreStarted;
     private boolean busy;
+    private Future<?> videoDocumentTask;
     private boolean disposed;
     private MiuixChatEditorSurface miuixSurface;
     private final HostNativeChatViews nativeViews;
@@ -870,6 +877,7 @@ final class AiTestChatDialog extends Dialog {
                 || (commandText.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) {
             DouAiLog.event("ai_chat", "eligibility", disposed ? "closed" : busy ? "busy" : "empty_input", ""); return;
         }
+        if (videoDocumentTask != null) return;
         if (skillEntry != null && restoreLoad != null) {
             try {
                 TestChatMemory memory = session.transcriptMemory();
@@ -880,6 +888,18 @@ final class AiTestChatDialog extends Dialog {
             } catch (RuntimeException unavailable) { /* A session without a local transcript can still reply. */ }
         }
         if (selectedPackage == null && selectedMaterial == null && choice == null && retryAnswer == null && skillEntry != null) {
+            String supplement = videoDocumentationCommand(commandText);
+            if (supplement != null) {
+                if (!previewingVideoDraft() || skillStore == null || !skillStore.enabled()) {
+                    showAuthoringStatus("请先在当前会话打开一份视频技能草稿");
+                } else if (images.isEmpty() && documents.isEmpty() && selected.isEmpty()) {
+                    confirmOpenApiVideo(prompt, new SkillAuthoring.Action(SkillAuthoring.Mode.SUPPLEMENT, "", false),
+                            supplement);
+                } else {
+                    showAuthoringStatus("请移除附件，再读取接口文档");
+                }
+                return;
+            }
             String markdownRequirement = AiToolPackages.parseWrite(commandText);
             if (markdownRequirement != null && !existingPackageCommand(commandText)) {
                 if (!images.isEmpty() || !documents.isEmpty() || !selected.isEmpty()) {
@@ -1084,6 +1104,25 @@ final class AiTestChatDialog extends Dialog {
             if (canAuthor && selectedMaterial == null && requested.mode() == SkillAuthoring.Mode.DESIGN
                     && SkillAuthoring.explicitOutput(requested.request()) == SkillResult.Type.VIDEO
                     && images.isEmpty() && documents.isEmpty() && selected.isEmpty()) {
+                if (videoSource == null) {
+                    String documentLink;
+                    try { documentLink = SkillVideoDocumentation.openApiLink(requested.request()); }
+                    catch (IllegalArgumentException invalid) {
+                        showAuthoringStatus(invalid.getMessage());
+                        return;
+                    }
+                    if (!documentLink.isEmpty()) {
+                        var action = new SkillAuthoring.Action(SkillAuthoring.Mode.DESIGN,
+                                requested.request().replace(documentLink, "").trim(), requested.saveAfter());
+                        confirmOpenApiVideo(prompt, action, documentLink);
+                        return;
+                    }
+                    SkillVideoFacts documented = SkillVideoDocumentation.knownFacts(requested.request());
+                    if (!documented.isEmpty()) {
+                        sendAuthoringMaterial(prompt, requested, documented);
+                        return;
+                    }
+                }
                 if (videoSource != null && videoSource.visibleMaterial()) {
                     chooseVisibleVideoSource(prompt, requested);
                     return;
@@ -1844,6 +1883,63 @@ final class AiTestChatDialog extends Dialog {
         sendMessage(prompt, List.of(), List.of(), null, null, null, false, new AuthoringMaterial(action, facts));
     }
 
+    private static String videoDocumentationCommand(String command) {
+        String prefix = "/技能";
+        if (!command.startsWith(prefix)) return null;
+        String argument = command.substring(prefix.length()).trim();
+        String verb = "读取接口文档";
+        if (argument.equals(verb)) return "";
+        if (!argument.startsWith(verb + " ")) return null;
+        return argument.substring(verb.length()).trim();
+    }
+
+    private void confirmOpenApiVideo(String prompt, SkillAuthoring.Action action, String link) {
+        final String endpoint;
+        try {
+            SkillAuthoring.rejectEditorCredential(prompt);
+            endpoint = SkillDocumentationClient.normalize(link);
+        } catch (IllegalArgumentException invalid) {
+            showAuthoringStatus("请提供公开 HTTPS OpenAPI JSON 直链，密钥请在技能设置填写");
+            return;
+        }
+        SkillStore.DraftPreview expectedDraft = skillDraft;
+        int expectedGeneration = generation;
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("读取接口文档")
+                .setMessage(endpoint + "\n只读取公开文档，不会访问视频生成接口。")
+                .setNegativeButton("取消", null).setPositiveButton("读取文档", (dialog, which) -> {
+                    if (dialog == localMenu && !disposed && !busy && videoDocumentTask == null && generation == expectedGeneration
+                            && skillDraft == expectedDraft) loadOpenApiVideo(prompt, action, endpoint);
+                }).create();
+        localMenu.show();
+    }
+
+    private void loadOpenApiVideo(String prompt, SkillAuthoring.Action action, String endpoint) {
+        Session active = session;
+        SkillStore.DraftPreview expectedDraft = skillDraft;
+        int expectedGeneration = generation;
+        videoDocumentTask = worker.submit(() -> {
+            SkillVideoFacts parsed;
+            try {
+                String document = active.readSkillDocumentation(endpoint, System.nanoTime() + TimeUnit.SECONDS.toNanos(10));
+                parsed = SkillOpenApiVideo.read(document);
+            } catch (Exception unavailable) {
+                parsed = null;
+            }
+            SkillVideoFacts result = parsed;
+            main.post(() -> {
+                if (disposed || generation != expectedGeneration) return;
+                videoDocumentTask = null;
+                updateSend();
+                if (skillDraft != expectedDraft || !skillStore.enabled()) return;
+                if (result == null) showAuthoringStatus("未能读取所选文档。请核对 JSON 直链，或贴提交和查询的示例。");
+                else if (result.isEmpty()) showAuthoringStatus("文档中未找到一套可核对的视频提交、状态和成片接口。请补充对应示例。");
+                else sendAuthoringMaterial(prompt, action, result);
+            });
+        });
+        showAuthoringStatus("正在读取接口文档…");
+    }
+
     private record DraftFieldSource(String label, SkillAuthoringPatch.Request patch) { }
 
     private static SkillManifest authoringManifest(SkillStore.DraftPreview preview) {
@@ -2244,7 +2340,7 @@ final class AiTestChatDialog extends Dialog {
         turn.editorChanged = true;
         turn.settingsSkillName = pending.name();
         if (draft.outputType() == SkillResult.Type.VIDEO) {
-            String status = videoDraftStatus(skillDraftFacts);
+            String status = videoDraftStatus(skillDraftFacts, draft);
             if (skillDraftFacts != null && skillDraftFacts.isComplete()) {
                 try {
                     SkillStore.Detail detail = skillStore.detail(pending.name());
@@ -2279,9 +2375,10 @@ final class AiTestChatDialog extends Dialog {
 
     private static String draftPreviewReply(SkillStore.DraftPreview draft, SkillVideoFacts facts) {
         String instruction = TextUtils.isEmpty(draft.instruction()) ? "" : "\n指令 " + draft.instruction();
+        String source = facts != null && !facts.label().isEmpty() ? "\n接口资料 " + facts.label() : "";
         return "技能草案 /" + draft.name() + " · " + draft.outputType().label() + " · 尚未保存\n"
-                + draft.description() + instruction + previewFilledFields(draft)
-                + (draft.outputType() == SkillResult.Type.VIDEO ? "\n" + videoDraftStatus(facts) : "")
+                + draft.description() + instruction + source + previewFilledFields(draft)
+                + (draft.outputType() == SkillResult.Type.VIDEO ? "\n" + videoDraftStatus(facts, draft) : "")
                 + (facts != null && facts.minimumPollSeconds() != 0
                 ? "\n最短轮询间隔 " + facts.minimumPollSeconds() + " 秒，长任务会逐步退避。" : "")
                 + DRAFT_CONTINUATION;
@@ -2289,12 +2386,13 @@ final class AiTestChatDialog extends Dialog {
 
     private static String previewFilledFields(SkillStore.DraftPreview draft) {
         Map<String, Object> values = draft.publicFields();
-        if (values.isEmpty()) return "";
+        if (values.isEmpty() && draft.outputType() != SkillResult.Type.VIDEO) return "";
         StringBuilder summary = new StringBuilder();
         SkillManifest manifest = authoringManifest(draft);
         if (manifest != null) {
             for (SkillManifest.ConfigField field : manifest.configFields()) {
                 Object value = values.get("config." + field.key());
+                if (value == null && draft.outputType() == SkillResult.Type.VIDEO) value = field.defaultValue();
                 if (value != null) summary.append('\n').append(field.label()).append(" · ").append(value);
             }
         }
@@ -2334,6 +2432,20 @@ final class AiTestChatDialog extends Dialog {
         }
         String address = facts.needsApiBase() ? "API 基础地址" : "HTTPS 接口地址";
         return "接口声明已校验。内置后在技能设置填写" + address + "和所需凭据，再确认启用。";
+    }
+
+    private static String videoDraftStatus(SkillVideoFacts facts, SkillStore.DraftPreview draft) {
+        String status = videoDraftStatus(facts);
+        SkillManifest manifest = facts != null && facts.isComplete() ? authoringManifest(draft) : null;
+        if (manifest == null) return status;
+        Map<String, Object> values = draft.publicFields();
+        List<String> missing = new ArrayList<>();
+        for (SkillManifest.ConfigField field : manifest.configFields()) {
+            if (field.required() && field.defaultValue() == null && !values.containsKey("config." + field.key())) {
+                missing.add(field.label());
+            }
+        }
+        return missing.isEmpty() ? status : status + "\n文档未给出默认值，还需填写 " + String.join("、", missing) + "。";
     }
 
     private static final class OutputMismatch extends IllegalArgumentException {
@@ -2502,6 +2614,10 @@ final class AiTestChatDialog extends Dialog {
         if (pending != null) pending.trace.finish(DouAiLog.Outcome.CANCELLED, "conversation_closed_or_cleared",
                 savingHistory ? "provider_result=completed" : "provider_result=unknown");
         ++generation;
+        if (videoDocumentTask != null) {
+            videoDocumentTask.cancel(true);
+            videoDocumentTask = null;
+        }
         if (request != null) request.cancel(true);
         if (cancelSession) session.cancel();
         searchVideoCards.cancelPending();
@@ -2589,7 +2705,7 @@ final class AiTestChatDialog extends Dialog {
         String sendLabel = savingHistory ? "正在保存历史" : writingDraft ? "正在保存草稿" : busy ? "停止请求" : "发送";
         send.setContentDescription(sendLabel);
         send.setTooltipText(sendLabel);
-        send.setEnabled(!disposed && (busy ? !savingHistory && !writingDraft && !pending.stopRequested
+        send.setEnabled(!disposed && videoDocumentTask == null && (busy ? !savingHistory && !writingDraft && !pending.stopRequested
                 : hasContent));
         send.setAlpha(send.isEnabled() ? 1f : 0.4f);
         attach.setEnabled(!disposed && !busy && draftPending.size() < 4
@@ -2606,7 +2722,7 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void updateSkillMenu() {
-        if (skillEntry == null || disposed || busy || !draftImages.isEmpty()
+        if (skillEntry == null || disposed || busy || videoDocumentTask != null || !draftImages.isEmpty()
                 || !draftDocuments.isEmpty() || !draftPending.isEmpty()) {
             skillMenu.setVisibility(View.GONE);
             return;

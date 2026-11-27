@@ -48,7 +48,8 @@ public final class SkillAuthoring {
             生成视频使用 capabilityId: "video_task"，outputType: "video"。HTTPS 输入最大 2000 字。
             自定义 HTTPS 能力支持可选 http 声明，键为 version（整数 1）、label、可选 suggestedEndpoint、
             request（对象，键为 JSON 请求字段，值为 argument 或 config.字段名）、response（JSON 响应字段名）。
-            视频只需生成名称、说明和输入定义。DouAi 从用户提供的资料在本机生成视频接口声明和配置字段。
+            视频只需生成名称、说明和输入定义。DouAi 从已核对的接口资料在本机生成视频接口声明和配置字段。
+            用户要求只留地址和密钥时，请说明配置入口，由应用保留资料中可核对的接口字段和默认值。
             在视频技能的模型输出中省略 http，并使用空的 configFields，保留视频输出类型。
             自动轮询与下载限用户已确认提交的原任务 ID。未指定收件人时，自动发送或回传指在发起任务的
             DouAi 会话显示结果。请求中的自动发送不能替代外部提交审核或授权给新收件人。
