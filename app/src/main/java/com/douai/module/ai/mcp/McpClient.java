@@ -443,6 +443,12 @@ public final class McpClient {
         }
     }
 
+    static JSONObject verifiedInputSchema(String raw, boolean modern) throws Failure {
+        JSONObject schema = parseObject(raw, Kind.SCHEMA);
+        validateSchema(schema, null, modern, new LinkedHashMap<>(), new HashSet<>(), 0, false);
+        return schema;
+    }
+
     /** Validates the supported local schema subset before admission; never resolves references. */
     private static void validateSchema(JSONObject schema, Object value, boolean modern, Map<String, String> headers,
                                        Set<String> headerNames, int depth, boolean property) throws Failure {

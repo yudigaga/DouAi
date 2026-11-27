@@ -3,13 +3,26 @@ package com.douai.module.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.Intent;
+import android.content.pm.ProviderInfo;
+import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.net.Uri;
+import android.provider.DocumentsContract;
 import android.text.method.PasswordTransformationMethod;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.ListView;
 import android.widget.Spinner;
 import android.widget.TextView;
+
+import androidx.activity.result.ActivityResultRegistry;
+import androidx.activity.result.contract.ActivityResultContract;
+import androidx.core.app.ActivityOptionsCompat;
 
 import com.douai.module.ai.skills.AiSkills;
 import com.douai.module.ai.skills.SkillAuthoring;
@@ -36,6 +49,9 @@ import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
 
 import java.io.File;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -43,6 +59,8 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.Assert.*;
 
@@ -98,6 +116,165 @@ public final class AiSkillSettingsDialogTest {
         assertFalse(visibleText(root).contains("共享接口设置"));
         assertEquals(existing, services.find(existing.id()));
         assertTrue(services.isAuthorized(existing));
+    }
+
+    @Test public void markdownPasteRequiresPreviewBeforeImportAndCanReadToggleAndDelete() {
+        assertTrue(view("skills.markdown.manage").performClick());
+        AlertDialog page = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(page.isShowing());
+        assertTrue(dialogView(page, "skills.markdown.paste").performClick());
+        AlertDialog paste = (AlertDialog) ShadowDialog.getLatestDialog();
+        String markdown = """
+                ---
+                name: field-notes
+                description: Organize local notes.
+                ---
+
+                ## Steps
+                Group related observations.
+                """;
+        ((EditText) dialogView(paste, "skills.markdown.paste.input")).setText(markdown);
+        confirm(paste);
+        AlertDialog preview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(preview.isShowing());
+        assertTrue(visibleText(dialogView(preview, "skills.markdown.preview.body")).contains("Group related observations."));
+        assertNull(dialogView(page, "skills.markdown.row.field-notes"));
+        confirm(preview);
+        View row = dialogView(page, "skills.markdown.row.field-notes");
+        assertNotNull(row);
+        assertTrue(visibleText(row).contains("已停用"));
+        assertTrue(row.performClick());
+        AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
+        CompoundButton enabled = (CompoundButton) dialogView(detail, "skills.markdown.enabled");
+        assertFalse(enabled.isChecked());
+        enabled.performClick();
+        ShadowLooper.idleMainLooper();
+        assertTrue(visibleText(dialogView(page, "skills.markdown.row.field-notes")).contains("已启用"));
+        assertTrue(dialogView(detail, "skills.markdown.file.SKILL.md").performClick());
+        ShadowLooper.idleMainLooper();
+        AlertDialog file = (AlertDialog) ShadowDialog.getLatestDialog();
+        TextView body = (TextView) dialogView(file, "skills.markdown.preview.body");
+        assertEquals(markdown, body.getText().toString());
+        assertTrue(body.isTextSelectable());
+        file.dismiss();
+        ShadowLooper.idleMainLooper();
+        assertTrue(dialogView(detail, "skills.markdown.delete").performClick());
+        AlertDialog delete = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNotNull(dialogView(page, "skills.markdown.row.field-notes"));
+        confirm(delete);
+        assertNull(dialogView(page, "skills.markdown.row.field-notes"));
+        page.dismiss();
+    }
+
+    @Test public void markdownDirectoryAndZipGoThroughTransientHostDocumentSelection() throws Exception {
+        activity.finish();
+        MarkdownPickerActivity host = Robolectric.buildActivity(MarkdownPickerActivity.class).setup().get();
+        activity = host;
+        reopenManager();
+        assertTrue(view("skills.markdown.manage").performClick());
+        AlertDialog page = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(dialogView(page, "skills.markdown.zip").performClick());
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, host.registry.intent.getAction());
+        assertTrue(List.of(host.registry.intent.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)).contains("application/zip"));
+        assertEquals(0, host.registry.intent.getFlags() & Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        Uri zip = Uri.parse("content://markdown-archive/skill.zip");
+        ByteArrayOutputStream zipBytes = new ByteArrayOutputStream();
+        try (ZipOutputStream stream = new ZipOutputStream(zipBytes)) {
+            stream.putNextEntry(new ZipEntry("inside/SKILL.md"));
+            stream.write(markdownFixture("from-archive"));
+            stream.closeEntry();
+            stream.putNextEntry(new ZipEntry("inside/references/notes.md"));
+            stream.write("Archive reference".getBytes(StandardCharsets.UTF_8));
+            stream.closeEntry();
+        }
+        var resolver = org.robolectric.shadow.api.Shadow
+                .<org.robolectric.shadows.ShadowContentResolver>extract(host.getContentResolver());
+        resolver.registerInputStream(zip, new ByteArrayInputStream(zipBytes.toByteArray()));
+        host.registry.dispatchResult(host.registry.code, Activity.RESULT_OK, new Intent().setData(zip));
+        ShadowLooper.idleMainLooper();
+        AlertDialog archivePreview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(visibleText(dialogView(archivePreview, "skills.markdown.preview.files")).contains("references/notes.md"));
+        assertNull(dialogView(page, "skills.markdown.row.from-archive"));
+        confirm(archivePreview);
+        assertNotNull(dialogView(page, "skills.markdown.row.from-archive"));
+
+        Uri tree = DocumentsContract.buildTreeDocumentUri("markdown-tree", "root");
+        ProviderInfo info = new ProviderInfo();
+        info.authority = tree.getAuthority();
+        MarkdownDirectoryFixture provider = new MarkdownDirectoryFixture();
+        provider.attachInfo(host, info);
+        org.robolectric.shadows.ShadowContentResolver.registerProviderInternal(info.authority, provider);
+        resolver.registerInputStream(DocumentsContract.buildDocumentUriUsingTree(tree, "skill"),
+                new ByteArrayInputStream(markdownFixture("from-folder")));
+        resolver.registerInputStream(DocumentsContract.buildDocumentUriUsingTree(tree, "notes"),
+                new ByteArrayInputStream("Folder reference".getBytes(StandardCharsets.UTF_8)));
+        assertTrue(dialogView(page, "skills.markdown.directory").performClick());
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT_TREE, host.registry.intent.getAction());
+        assertEquals(Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                host.registry.intent.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        assertEquals(0, host.registry.intent.getFlags()
+                & (Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION));
+        host.registry.dispatchResult(host.registry.code, Activity.RESULT_OK, new Intent().setData(tree));
+        ShadowLooper.idleMainLooper();
+        AlertDialog folderPreview = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(visibleText(dialogView(folderPreview, "skills.markdown.preview.files")).contains("references/notes.md"));
+        assertNull(dialogView(page, "skills.markdown.row.from-folder"));
+        confirm(folderPreview);
+        View folder = dialogView(page, "skills.markdown.row.from-folder");
+        assertTrue(visibleText(folder).contains("已停用"));
+        assertTrue(folder.performClick());
+        AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(dialogView(detail, "skills.markdown.file.references/notes.md").performClick());
+        ShadowLooper.idleMainLooper();
+        AlertDialog notes = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals("Folder reference", ((TextView) dialogView(notes, "skills.markdown.preview.body")).getText().toString());
+        notes.dismiss();
+        detail.dismiss();
+        page.dismiss();
+    }
+
+    private static byte[] markdownFixture(String name) {
+        return ("---\nname: " + name + "\ndescription: Organize notes.\n---\n\n## Steps\nRead the notes.\n")
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    public static final class MarkdownPickerActivity extends Activity {
+        final MarkdownPickerRegistry registry = new MarkdownPickerRegistry();
+        public ActivityResultRegistry getActivityResultRegistry() { return registry; }
+    }
+
+    private static final class MarkdownPickerRegistry extends ActivityResultRegistry {
+        int code;
+        Intent intent;
+
+        @Override public <I, O> void onLaunch(int request, ActivityResultContract<I, O> contract, I input,
+                                              ActivityOptionsCompat options) {
+            code = request;
+            intent = (Intent) input;
+        }
+    }
+
+    public static final class MarkdownDirectoryFixture extends ContentProvider {
+        @Override public boolean onCreate() { return true; }
+
+        @Override public Cursor query(Uri uri, String[] projection, String selection, String[] arguments, String order) {
+            MatrixCursor rows = new MatrixCursor(projection);
+            String parent = DocumentsContract.getDocumentId(uri);
+            if ("root".equals(parent)) {
+                rows.addRow(new String[]{"skill", "SKILL.md", "text/markdown"});
+                rows.addRow(new String[]{"references", "references", DocumentsContract.Document.MIME_TYPE_DIR});
+            } else if ("references".equals(parent)) {
+                rows.addRow(new String[]{"notes", "notes.md", "text/markdown"});
+            }
+            return rows;
+        }
+
+        @Override public String getType(Uri uri) { return "text/markdown"; }
+        @Override public Uri insert(Uri uri, ContentValues values) { throw new UnsupportedOperationException(); }
+        @Override public int delete(Uri uri, String selection, String[] arguments) { throw new UnsupportedOperationException(); }
+        @Override public int update(Uri uri, ContentValues values, String selection, String[] arguments) {
+            throw new UnsupportedOperationException();
+        }
     }
 
     @Test public void oneWordImageRequirementStaysPendingUntilExplicitConnectAfterAuthorization() throws Exception {

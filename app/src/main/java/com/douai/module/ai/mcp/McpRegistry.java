@@ -27,9 +27,12 @@ import java.nio.file.StandardOpenOption;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -37,6 +40,45 @@ import java.util.regex.Pattern;
 public final class McpRegistry {
     public record Service(String id, String label, String endpoint, String protocol) {}
     public record Binding(String alias, String serviceId, String toolName) {}
+
+    /** Public directory fields with a private proof of the locally selected authorization. */
+    public static final class PackageEntry {
+        private final String name;
+        private final String description;
+        private final String grant;
+
+        private PackageEntry(Registered registered) {
+            name = registered.service().id();
+            description = packageText(registered.service().label());
+            grant = registered.grant();
+        }
+
+        public String name() { return name; }
+        public String description() { return description; }
+    }
+
+    /** The tool definition returned by a particular authorized package activation. */
+    public static final class PackageTool {
+        private final String serviceId;
+        private final String grant;
+        private final McpClient.Tool tool;
+        private final boolean modern;
+
+        private PackageTool(Registered registered, McpClient.Tool tool) {
+            serviceId = registered.service().id();
+            grant = registered.grant();
+            this.tool = tool;
+            modern = McpClient.MODERN.equals(registered.service().protocol());
+        }
+
+        public String name() { return tool.name(); }
+        public String title() { return packageText(tool.title()); }
+        public String description() { return packageText(tool.description()); }
+
+        /** An empty string means the schema cannot safely be offered to the model. */
+        public String parameterSummary() { return summarizeParameters(tool.inputSchema(), modern); }
+    }
+
     public record ImportPreview(List<Service> services, List<Binding> bindings) {
         public ImportPreview {
             services = Collections.unmodifiableList(new ArrayList<>(services));
@@ -77,6 +119,13 @@ public final class McpRegistry {
     private static final Pattern ID = Pattern.compile("[a-z0-9][a-z0-9_-]{0,47}");
     private static final Pattern ALIAS = Pattern.compile("mcp-[a-z0-9][a-z0-9_-]{0,23}");
     private static final Pattern TOOL = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
+    private static final Pattern PRIVATE_METADATA = Pattern.compile("(?i)[a-z][a-z0-9+.-]*://|"
+            + "(?:authorization|api[ _-]*key|[ _-]*token|password|密钥|凭据)\\s*[:=：]|\\bbearer\\s+");
+    private static final Pattern PARAMETER_NAME = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_.-]{0,63}");
+    private static final Pattern PRIVATE_PARAMETER = Pattern.compile("(?i)api[._-]*key|access[._-]*key|private[._-]*key"
+            + "|client[._-]*key|signing[._-]*key|session[._-]*id|password|passwd|passphrase|secret|credential"
+            + "|authorization|^(?:auth|pin)$|bearer|cookie|token$|密钥|凭据|令牌|密码|口令|授权");
+    private static final int MAX_PARAMETER_SUMMARY = 1200;
     private static final int VERSION = 1;
     private static final int MAX_SERVICES = 30;
     private static final int MAX_BINDINGS = 100;
@@ -134,6 +183,25 @@ public final class McpRegistry {
         return result;
     }
 
+    /** Reads only the locally authorized directory. No discover or credential access occurs here. */
+    public List<PackageEntry> packageCatalog() throws Failure {
+        List<PackageEntry> result = new ArrayList<>();
+        for (Registered registered : read().services().values()) {
+            if (!registered.grant().isEmpty()) result.add(new PackageEntry(registered));
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    /** Discovers tool metadata for the particular authorization selected from the directory. */
+    public List<PackageTool> activatePackage(PackageEntry expected, long deadlineNanos) throws Failure {
+        ensureTime(deadlineNanos);
+        Registered snapshot = admittedPackage(expected);
+        List<McpClient.Tool> discovered = discover(snapshot, deadlineNanos);
+        List<PackageTool> result = new ArrayList<>();
+        for (McpClient.Tool tool : discovered) result.add(new PackageTool(snapshot, tool));
+        return Collections.unmodifiableList(result);
+    }
+
     public boolean isAuthorized(Service expected) throws Failure {
         Registered current = expected == null ? null : read().services().get(expected.id());
         return current != null && sameTarget(expected, current.service()) && !current.grant().isEmpty();
@@ -181,8 +249,14 @@ public final class McpRegistry {
 
     public List<McpClient.Tool> discover(Service expected, long deadlineNanos) throws Failure {
         ensureTime(deadlineNanos);
-        Registered snapshot = authorized(read(), expected);
+        return discover(authorized(read(), expected), deadlineNanos);
+    }
+
+    private List<McpClient.Tool> discover(Registered snapshot, long deadlineNanos) throws Failure {
+        Service expected = snapshot.service();
         String token = decrypt(snapshot);
+        ensureTime(deadlineNanos);
+        requireSameGrant(snapshot, authorized(read(), expected));
         List<McpClient.Tool> discovered;
         try {
             discovered = rpc.discover(snapshot.service().endpoint(), snapshot.service().protocol(), token, deadlineNanos);
@@ -204,6 +278,45 @@ public final class McpRegistry {
             });
         });
         return Collections.unmodifiableList(new ArrayList<>(verified.values()));
+    }
+
+    private static String packageText(String value) {
+        return PRIVATE_METADATA.matcher(value).find() ? "" : value;
+    }
+
+    private static String summarizeParameters(String raw, boolean modern) {
+        try {
+            JSONObject schema = McpClient.verifiedInputSchema(raw, modern);
+            if (schema.has("x-mcp-header")) return "";
+            Set<String> required = new HashSet<>();
+            JSONArray declaredRequired = schema.optJSONArray("required");
+            if (declaredRequired != null) {
+                for (int i = 0; i < declaredRequired.length(); i++) required.add(declaredRequired.getString(i));
+            }
+            JSONObject summary = new JSONObject();
+            JSONObject properties = schema.optJSONObject("properties");
+            if (properties != null) {
+                for (Iterator<String> keys = properties.keys(); keys.hasNext();) {
+                    String name = keys.next();
+                    JSONObject field = properties.getJSONObject(name);
+                    String type = field.getString("type");
+                    if (!scalarParameter(type) || field.has("x-mcp-header")
+                            || !PARAMETER_NAME.matcher(name).matches() || PRIVATE_PARAMETER.matcher(name).find()) continue;
+                    summary.put(name, new JSONObject().put("type", type).put("required", required.remove(name)));
+                }
+            }
+            String result = summary.toString();
+            return required.isEmpty() && !tooLarge(result, MAX_PARAMETER_SUMMARY) ? result : "";
+        } catch (McpClient.Failure | org.json.JSONException invalid) {
+            return "";
+        }
+    }
+
+    private static boolean scalarParameter(String type) {
+        return switch (type) {
+            case "string", "boolean", "number", "integer" -> true;
+            default -> false;
+        };
     }
 
     public void bind(Service expected, McpClient.Tool tool, String alias) throws Failure {
@@ -284,28 +397,46 @@ public final class McpRegistry {
 
     public String execute(Binding expected, String arguments, long deadlineNanos) throws Failure {
         validate(expected);
-        JSONObject input;
-        try { input = strictObject(arguments, MAX_ARGUMENT); }
-        catch (Exception invalid) { throw error(Code.INVALID, "工具参数必须是 16 KiB 以内的 JSON 对象"); }
+        JSONObject input = toolArguments(arguments);
         ensureTime(deadlineNanos);
         Execution snapshot = admitted(read(), expected);
         Registered registered = snapshot.registered();
+        return call(registered, snapshot.tool(), arguments, input, deadlineNanos, () -> {
+            Execution next = admitted(read(), expected);
+            requireSameGrant(registered, next.registered());
+            if (!next.tool().equals(snapshot.tool())) throw reviewTool();
+        });
+    }
+
+    /** Executes the exact tool selected in the current package after per-call user confirmation. */
+    public String executePackageTool(PackageEntry entry, PackageTool selected, String arguments, long deadlineNanos)
+            throws Failure {
+        JSONObject input = toolArguments(arguments);
+        ensureTime(deadlineNanos);
+        Registered snapshot = admittedPackage(entry);
+        McpClient.Tool tool = admittedPackageTool(snapshot, selected);
+        return call(snapshot, tool, arguments, input, deadlineNanos, () -> {
+            Registered current = admittedPackage(entry);
+            requireSameGrant(snapshot, current);
+            admittedPackageTool(current, selected);
+        });
+    }
+
+    private String call(Registered registered, McpClient.Tool tool, String arguments, JSONObject input,
+                        long deadlineNanos, McpClient.Admission recheck) throws Failure {
         Service service = registered.service();
         String token = decrypt(registered);
         rejectSecret(token, arguments, input.toString());
+        McpClient.Admission admission = () -> {
+            ensureTime(deadlineNanos);
+            recheck.check();
+        };
         String result;
         try {
-            result = rpc.call(service.endpoint(), service.protocol(), token, snapshot.tool(), input,
-                    deadlineNanos, () -> {
-                        ensureTime(deadlineNanos);
-                        Execution next = admitted(read(), expected);
-                        requireSameGrant(registered, next.registered());
-                        if (!next.tool().equals(snapshot.tool())) {
-                            throw error(Code.REVIEW_TOOL, "工具定义已变化，请重新发现并确认");
-                        }
-                    });
+            admission.check();
+            result = rpc.call(service.endpoint(), service.protocol(), token, tool, input, deadlineNanos, admission);
         } catch (McpClient.Failure failure) {
-            if (failure.kind() == McpClient.Kind.TOOL_CHANGED) disarmChangedTool(snapshot);
+            if (failure.kind() == McpClient.Kind.TOOL_CHANGED) disarmChangedTool(registered, tool);
             throw remote(failure);
         } catch (IOException | RuntimeException failure) {
             throw remote(failure);
@@ -315,18 +446,42 @@ public final class McpRegistry {
         return result;
     }
 
-    private void disarmChangedTool(Execution snapshot) throws Failure {
-        Service expected = snapshot.registered().service();
+    private Registered admittedPackage(PackageEntry expected) throws Failure {
+        Registered snapshot = expected == null ? null : read().services().get(expected.name());
+        if (snapshot == null || !snapshot.grant().equals(expected.grant)) {
+            throw error(Code.CONFIRMATION_REQUIRED, "MCP 服务授权已变化，请重新选择");
+        }
+        return snapshot;
+    }
+
+    private static McpClient.Tool admittedPackageTool(Registered registered, PackageTool selected) throws Failure {
+        if (selected == null || !registered.service().id().equals(selected.serviceId)
+                || !registered.grant().equals(selected.grant)
+                || !selected.tool.equals(registered.tools().get(selected.name()))) throw reviewTool();
+        return selected.tool;
+    }
+
+    private static JSONObject toolArguments(String arguments) throws Failure {
+        try { return strictObject(arguments, MAX_ARGUMENT); }
+        catch (Exception invalid) { throw error(Code.INVALID, "工具参数必须是 16 KiB 以内的 JSON 对象"); }
+    }
+
+    private static Failure reviewTool() {
+        return error(Code.REVIEW_TOOL, "工具定义已变化，请重新发现并确认");
+    }
+
+    private void disarmChangedTool(Registered snapshot, McpClient.Tool tool) throws Failure {
+        Service expected = snapshot.service();
         edit(state -> {
             Registered current = state.services().get(expected.id());
             if (current == null || !sameTarget(expected, current.service())
-                    || !current.grant().equals(snapshot.registered().grant())
-                    || !snapshot.tool().equals(current.tools().get(snapshot.tool().name()))) return;
+                    || !current.grant().equals(snapshot.grant())
+                    || !tool.equals(current.tools().get(tool.name()))) return;
             Map<String, McpClient.Tool> tools = new LinkedHashMap<>(current.tools());
-            tools.remove(snapshot.tool().name());
+            tools.remove(tool.name());
             state.services().put(expected.id(), new Registered(current.service(), current.ciphertext(), current.grant(), tools));
             state.bindings().replaceAll((alias, bound) ->
-                    bound.binding().serviceId().equals(expected.id()) && bound.binding().toolName().equals(snapshot.tool().name())
+                    bound.binding().serviceId().equals(expected.id()) && bound.binding().toolName().equals(tool.name())
                             ? new Bound(bound.binding(), "") : bound);
         });
     }

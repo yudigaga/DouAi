@@ -102,12 +102,20 @@ public final class ChatCompletionClient {
         /** Uses an application-owned instruction and the parent's absolute System.nanoTime() deadline. */
         public String execute(AiModelSettings settings, String modelId, String systemInstruction,
                               String userText, long parentDeadlineNanos, int maxOutputTokens) throws Exception {
+            return execute(settings, modelId, systemInstruction, userText, parentDeadlineNanos, maxOutputTokens,
+                    MAX_REPLY_CHARS);
+        }
+
+        public String execute(AiModelSettings settings, String modelId, String systemInstruction,
+                              String userText, long parentDeadlineNanos, int maxOutputTokens, int maxInputChars)
+                throws Exception {
             if (!started.compareAndSet(false, true)) throw new IllegalStateException("模型请求已经使用");
             if (cancelledBeforeStart.get() || Thread.currentThread().isInterrupted()) throw cancelled();
             long startedNanos = System.nanoTime();
             if (parentDeadlineNanos - startedNanos <= 0) throw new SocketTimeoutException("AI request deadline exceeded");
             if (systemInstruction == null || systemInstruction.trim().isEmpty() || systemInstruction.length() > MAX_REPLY_CHARS
-                    || userText == null || userText.trim().isEmpty() || userText.length() > MAX_REPLY_CHARS
+                    || maxInputChars < 1 || maxInputChars > 160_000
+                    || userText == null || userText.trim().isEmpty() || userText.length() > maxInputChars
                     || maxOutputTokens < 1 || maxOutputTokens > 131072) {
                 throw new IllegalArgumentException("AI 扩展请求的输入或预算无效");
             }

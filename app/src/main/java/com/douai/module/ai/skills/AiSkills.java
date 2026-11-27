@@ -26,6 +26,8 @@ public final class AiSkills {
             if (!settings.isEmpty()) throw new IllegalStateException("当前入口无法执行带配置参数的技能");
             return run(instruction, input);
         }
+
+        default String runPackage(String instruction, String input) throws Exception { return run(instruction, input); }
     }
 
     public record Command(String name, String description, SkillResult.Type outputType, boolean requiresReview) {
@@ -43,12 +45,27 @@ public final class AiSkills {
     }
 
     public record Invocation(Command command, String argument, int version,
-                             McpRegistry.Binding mcpBinding, boolean delegated, String revisionId) {
+                             McpRegistry.Binding mcpBinding, boolean delegated, String revisionId,
+                             AiToolPackages.Call packageCall) {
+        public Invocation(Command command, String argument, int version, McpRegistry.Binding mcpBinding,
+                          boolean delegated, String revisionId) {
+            this(command, argument, version, mcpBinding, delegated, revisionId, null);
+        }
         public Invocation(Command command, String argument, int version, McpRegistry.Binding mcpBinding, boolean delegated) {
             this(command, argument, version, mcpBinding, delegated, "");
         }
         Invocation(Command command, String argument) { this(command, argument, 0, null, false); }
-        public boolean localBuiltIn() { return version == 0 && mcpBinding == null && !delegated; }
+        public boolean localBuiltIn() { return version == 0 && mcpBinding == null && !delegated && packageCall == null; }
+    }
+
+    static Invocation packageInvocation(Command command, String argument, AiToolPackages.Call operation) {
+        return new Invocation(command, argument, 0, null, false, "", operation);
+    }
+
+    public static List<Command> builtInTools(Entry entry) {
+        List<Command> result = new ArrayList<>();
+        for (Skill skill : BUILT_INS) if (skill.entries().contains(entry)) result.add(skill.command());
+        return List.copyOf(result);
     }
 
     private interface Action {
@@ -194,8 +211,9 @@ public final class AiSkills {
     }
 
     public static SkillResult executeResult(Invocation call, SkillStore store, TextExecutor textExecutor) throws Exception {
-        if (CREATION_COMMAND_NAME.equals(call.command().name())) throw new IllegalStateException("请通过 /技能 创建技能");
         if (store != null && !store.enabled()) throw new IllegalStateException("技能已停用");
+        if (call.packageCall() != null) return call.packageCall().execute(textExecutor);
+        if (CREATION_COMMAND_NAME.equals(call.command().name())) throw new IllegalStateException("请通过 /技能 创建技能");
         if (call.mcpBinding() != null) {
             if (store == null || store.mcp() == null) throw new IllegalStateException("MCP 绑定不可用");
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);

@@ -52,6 +52,9 @@ import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.Accessibilit
 import com.douai.module.ai.mcp.McpClient;
 import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.AiToolPackages;
+import com.douai.module.ai.skills.MarkdownSkillStore;
+import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSubAgents;
 import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillAuthoringPatch;
@@ -111,6 +114,7 @@ final class AiTestChatDialog extends Dialog {
         default String skillModel(String system, String input) throws Exception {
             throw new IllegalStateException("当前模型不支持技能请求");
         }
+        default String packageModel(String system, String input) throws Exception { return skillModel(system, input); }
         default String reply(String message, List<ChatImage> images, String document) throws Exception {
             return reply(message, images);
         }
@@ -209,6 +213,7 @@ final class AiTestChatDialog extends Dialog {
     private Dialog attachmentMenu;
     private Dialog memoryDialog;
     private Dialog localMenu;
+    private int packageDiscoveryGeneration;
     private Dialog skillDetails;
     private AlertDialog customReviewDialog;
     private AiChatImagePreview imagePreview;
@@ -283,11 +288,17 @@ final class AiTestChatDialog extends Dialog {
                     return client().reply(messageContact ? "message-contact" : "model-test", message, images, snapshot);
                 }
                 @Override public String skillModel(String system, String input) throws Exception {
+                    return askIsolated(system, input, 4000);
+                }
+                @Override public String packageModel(String system, String input) throws Exception {
+                    return askIsolated(system, input, AiToolPackages.MAX_MODEL_INPUT);
+                }
+                private String askIsolated(String system, String input, int maxInput) throws Exception {
                     ChatCompletionClient.IsolatedTextRequest isolated = new ChatCompletionClient.IsolatedTextRequest(true);
                     activeSkillRequest = isolated;
                     try {
                         return isolated.execute(snapshot, config.id, system, input,
-                                System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048);
+                                System.nanoTime() + TimeUnit.SECONDS.toNanos(45), 2048, maxInput);
                     } finally {
                         activeSkillRequest = null;
                     }
@@ -847,6 +858,12 @@ final class AiTestChatDialog extends Dialog {
     private void sendMessage(String prompt, List<ChatImage> images, List<Document> documents, ChatMessage retryAnswer,
                              SkillStore.CustomCall approvedService, SkillSelection.Choice choice, boolean selectionDone,
                              AuthoringMaterial selectedMaterial) {
+        sendMessage(prompt, images, documents, retryAnswer, approvedService, choice, selectionDone, selectedMaterial, null);
+    }
+
+    private void sendMessage(String prompt, List<ChatImage> images, List<Document> documents, ChatMessage retryAnswer,
+                             SkillStore.CustomCall approvedService, SkillSelection.Choice choice, boolean selectionDone,
+                             AuthoringMaterial selectedMaterial, AiSkills.Invocation selectedPackage) {
         String commandText = prompt.trim();
         List<PendingAttachment> selected = new ArrayList<>(retryAnswer == null ? draftPending : retryAnswer.retryPending);
         if (disposed || busy
@@ -861,6 +878,26 @@ final class AiTestChatDialog extends Dialog {
                     return;
                 }
             } catch (RuntimeException unavailable) { /* A session without a local transcript can still reply. */ }
+        }
+        if (selectedPackage == null && selectedMaterial == null && choice == null && retryAnswer == null && skillEntry != null) {
+            String markdownRequirement = AiToolPackages.parseWrite(commandText);
+            if (markdownRequirement != null && !existingPackageCommand(commandText)) {
+                if (!images.isEmpty() || !documents.isEmpty() || !selected.isEmpty()) {
+                    showAuthoringStatus("请先移除附件，再编写文档技能。");
+                } else {
+                    writeMarkdownSkill(markdownRequirement);
+                }
+                return;
+            }
+            AiToolPackages.Use use = AiToolPackages.parseUse(commandText);
+            if (use != null && !existingUnqualifiedInvocation(commandText, use)) {
+                if (!images.isEmpty() || !documents.isEmpty() || !selected.isEmpty()) {
+                    showAuthoringStatus("请先移除附件，再选用工具包。");
+                } else {
+                    usePackage(prompt, use);
+                }
+                return;
+            }
         }
         boolean installReference = SkillAuthoring.isReferencedVideoInstall(commandText);
         boolean currentVideoOnly = SkillAuthoring.fillsCurrentVideoDraftOnly(commandText);
@@ -898,8 +935,10 @@ final class AiTestChatDialog extends Dialog {
         AiSubAgents.Selection subAgent = AiSubAgents.read(selectedSettings);
         SkillSelection.Choice resolved = choice;
         try {
-            videoSource = skillStore != null && retryAnswer == null ? SkillAuthoring.videoSource(commandText) : null;
-            boolean editing = skillEntry != null && retryAnswer == null && previousDraft != null && approvedService == null;
+            videoSource = skillStore != null && retryAnswer == null && selectedPackage == null
+                    ? SkillAuthoring.videoSource(commandText) : null;
+            boolean editing = skillEntry != null && retryAnswer == null && previousDraft != null && approvedService == null
+                    && selectedPackage == null;
             SkillVideoFacts material = selectedMaterial == null ? null : selectedMaterial.facts();
             if (editing && material == null) {
                 try { SkillAuthoring.rejectEditorCredential(commandText); }
@@ -925,7 +964,7 @@ final class AiTestChatDialog extends Dialog {
                     return;
                 }
             }
-            SkillAuthoring.Action requested = skillStore == null || retryAnswer != null ? null
+            SkillAuthoring.Action requested = skillStore == null || retryAnswer != null || selectedPackage != null ? null
                     : selectedMaterial != null ? selectedMaterial.action()
                     : material != null ? new SkillAuthoring.Action(SkillAuthoring.Mode.SUPPLEMENT, "", false)
                     : videoSource == null ? SkillAuthoring.match(commandText, editing) : videoSource.action();
@@ -1031,7 +1070,8 @@ final class AiTestChatDialog extends Dialog {
                     return;
                 }
             }
-            boolean creationCommand = skillEntry != null && retryAnswer == null && SkillAuthoring.isCreationCommand(commandText);
+            boolean creationCommand = skillEntry != null && retryAnswer == null && selectedPackage == null
+                    && SkillAuthoring.isCreationCommand(commandText);
             boolean canAuthor = (creationCommand || requested != null) && skillStore != null && skillStore.enabled();
             if ((creationCommand || videoSource != null) && (!canAuthor || requested == null
                     || requested.mode() == SkillAuthoring.Mode.DESIGN && requested.request().isEmpty())) {
@@ -1084,14 +1124,16 @@ final class AiTestChatDialog extends Dialog {
             } else {
                 authoredFacts = SkillVideoFacts.empty();
             }
-            AiSkills.Invocation slash = authoring != null || skillEntry == null || retryAnswer != null
+            AiSkills.Invocation slash = selectedPackage != null ? selectedPackage
+                    : authoring != null || skillEntry == null || retryAnswer != null
                     ? null : AiSkills.match(skillEntry, commandText, skillStore, subAgent.enabled());
             boolean named = SkillSelection.couldBeNamed(commandText);
             if (!selectionDone && approvedService == null && resolved == null && authoring == null && slash == null
                     && retryAnswer == null && skillEntry != null && skillStore != null
                     && images.isEmpty() && documents.isEmpty() && selected.isEmpty()
                     && (named || SkillSelection.looksLikeTask(commandText)) && skillStore.enabled()) {
-                List<SkillSelection.Candidate> catalog = skillStore.selectionCatalog();
+                List<SkillSelection.Candidate> catalog = new ArrayList<>(skillStore.selectionCatalog());
+                catalog.addAll(toolPackages().modelCandidates());
                 if (named) {
                     SkillSelection.Named local = SkillSelection.named(commandText, catalog, skillStore.unavailableSelectionNames());
                     if (local.kind() == SkillSelection.NamedKind.SELECTED) {
@@ -1113,6 +1155,11 @@ final class AiTestChatDialog extends Dialog {
                         return;
                     }
                 }
+            }
+            if (resolved != null && resolved.candidate().packageItem() != null
+                    && resolved.candidate().packageItem().kind() == AiToolPackages.Kind.MCP) {
+                confirmMcpActivation(resolved.candidate().packageItem(), resolved.argument());
+                return;
             }
             skill = resolved == null ? slash : rematchSkillChoice(resolved);
             if (resolved != null && skill == null) {
@@ -1173,7 +1220,7 @@ final class AiTestChatDialog extends Dialog {
             return;
         }
         if (skill != null && skill.command().requiresReview() && approvedService == null) {
-            showCustomServiceReview(skill, prompt, resolved);
+            showCustomServiceReview(skill, prompt, resolved, selectedPackage);
             return;
         }
         if (approvedService != null && (skill == null || !skill.command().requiresReview())) {
@@ -1319,6 +1366,15 @@ final class AiTestChatDialog extends Dialog {
                                 return askSkillModel(turn, active, system,
                                         SkillAuthoring.textInput(instruction, input, settings));
                             }
+
+                            @Override public String runPackage(String instruction, String input) throws Exception {
+                                synchronized (turn) {
+                                    turn.checkStopped();
+                                    turn.usingSkillModel = true;
+                                }
+                                try { return active.packageModel(instruction, input); }
+                                finally { turn.usingSkillModel = false; }
+                            }
                         });
                         if (result instanceof SkillResult.Image image) {
                             generatedImage = image.image();
@@ -1365,6 +1421,9 @@ final class AiTestChatDialog extends Dialog {
     private AiSkills.Invocation rematchSkillChoice(SkillSelection.Choice choice) {
         if (skillEntry == null || skillStore == null) return null;
         SkillSelection.Candidate candidate = choice.candidate();
+        if (candidate.packageItem() != null && candidate.packageItem().kind() == AiToolPackages.Kind.MARKDOWN) {
+            return toolPackages().markdownInvocation(candidate.packageItem(), choice.argument());
+        }
         AiSkills.Invocation current;
         try {
             current = AiSkills.match(skillEntry, "/" + candidate.name() + " " + choice.argument(), skillStore);
@@ -2289,7 +2348,8 @@ final class AiTestChatDialog extends Dialog {
 
     private static final class ServiceCapabilityMismatch extends IllegalArgumentException { }
 
-    private void showCustomServiceReview(AiSkills.Invocation invocation, String prompt, SkillSelection.Choice choice) {
+    private void showCustomServiceReview(AiSkills.Invocation invocation, String prompt, SkillSelection.Choice choice,
+                                         AiSkills.Invocation selectedPackage) {
         if (customReviewDialog != null) return;
         SkillStore store = skillStore;
         SkillStore.CustomReview review;
@@ -2327,7 +2387,8 @@ final class AiTestChatDialog extends Dialog {
                     SkillStore.CustomCall confirmation = store.approveCustomService(review);
                     approved[0] = true;
                     child.dismiss();
-                    sendMessage(prompt, Collections.emptyList(), Collections.emptyList(), null, confirmation, choice, true);
+                    sendMessage(prompt, Collections.emptyList(), Collections.emptyList(), null, confirmation, choice, true,
+                            null, selectedPackage);
                 } catch (Exception stale) {
                     child.dismiss();
                     state.setText("本次确认已失效，请重新核对后调用");
@@ -2552,8 +2613,19 @@ final class AiTestChatDialog extends Dialog {
         }
         List<AiSkills.Command> commands;
         try {
-            commands = AiSkills.commands(skillEntry, input.getText().toString(), skillStore,
-                    AiSubAgents.read(subAgentSettings).enabled());
+            String text = input.getText().toString();
+            commands = new ArrayList<>(AiSkills.commands(skillEntry, text, skillStore,
+                    AiSubAgents.read(subAgentSettings).enabled()));
+            String prefix = text.trim();
+            if (skillStore != null && skillStore.enabled() && prefix.startsWith("/")
+                    && (("/" + AiToolPackages.COMMAND).startsWith(prefix) || "/工具包".startsWith(prefix))) {
+                commands.add(new AiSkills.Command(AiToolPackages.COMMAND, "打开 Skill 与工具包目录"));
+            }
+            if (skillStore != null && skillStore.enabled() && prefix.startsWith("/")
+                    && ("/" + AiToolPackages.WRITE_COMMAND).startsWith(prefix)
+                    && commands.stream().noneMatch(command -> AiToolPackages.WRITE_COMMAND.equals(command.name()))) {
+                commands.add(new AiSkills.Command(AiToolPackages.WRITE_COMMAND, "用 AI 编写 SKILL.md"));
+            }
         } catch (IllegalStateException unavailable) {
             commands = Collections.emptyList();
         }
@@ -2569,6 +2641,10 @@ final class AiTestChatDialog extends Dialog {
                 option.setContentDescription(slash + "，" + command.description());
                 option.setTooltipText(command.description());
                 option.setOnClickListener(ignored -> {
+                    if (AiToolPackages.COMMAND.equals(command.name())) {
+                        usePackage("", new AiToolPackages.Use("", ""));
+                        return;
+                    }
                     input.setText(slash + " ");
                     input.setSelection(input.length());
                     input.requestFocus();
@@ -2681,12 +2757,308 @@ final class AiTestChatDialog extends Dialog {
     private void showLocalTools() {
         if (disposed) return;
         if (localMenu != null) localMenu.dismiss();
+        String[] items = skillEntry == null ? new String[]{"添加附件", "联系人设置"}
+                : new String[]{"添加附件", "联系人设置", "Skill 与工具包"};
         localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("聊天工具")
-                .setItems(new String[]{"添加附件", "联系人设置"}, (child, which) -> {
+                .setItems(items, (child, which) -> {
                     if (which == 0) chooseAttachment();
-                    else showConversationActions();
+                    else if (which == 1) showConversationActions();
+                    else usePackage("", new AiToolPackages.Use("", ""));
                 }).setNegativeButton("取消", null).create();
         localMenu.show();
+    }
+
+    private AiToolPackages toolPackages() {
+        return new AiToolPackages(skillStore, MarkdownSkillStore.forContext(getContext()));
+    }
+
+    private boolean existingUnqualifiedInvocation(String prompt, AiToolPackages.Use use) {
+        if (skillStore == null || use.packageName().isEmpty() || use.packageName().contains(":")
+                || "tools".equals(use.packageName())) return false;
+        return existingPackageCommand(prompt);
+    }
+
+    private boolean existingPackageCommand(String prompt) {
+        if (skillStore == null || skillEntry == null) return false;
+        try {
+            return AiSkills.match(skillEntry, prompt, skillStore) != null;
+        } catch (AiSkills.CommandUnavailable unavailable) {
+            return true; // Existing commands keep their configured-state diagnostics.
+        }
+    }
+
+    private void writeMarkdownSkill(String requirement) {
+        if (skillStore == null || !skillStore.enabled()) {
+            showAuthoringStatus("请先启用 AI Skills。");
+            return;
+        }
+        if (requirement.isBlank() || requirement.length() > 2000) {
+            showAuthoringStatus("请在 /文档技能 后写明任务，长度不超过 2000 字。");
+            return;
+        }
+        try { SkillAuthoring.rejectEditorCredential(requirement); }
+        catch (IllegalArgumentException invalid) {
+            showAuthoringStatus("请移除需求中的凭据。");
+            return;
+        }
+        Session active = session;
+        int expectedGeneration = generation;
+        int ticket = ++packageDiscoveryGeneration;
+        MarkdownSkillStore store = MarkdownSkillStore.forContext(getContext());
+        showAuthoringStatus("正在编写文档技能…");
+        worker.submit(() -> {
+            MarkdownSkillStore.Preview preview;
+            try {
+                String definition = active.skillModel(AiToolPackages.WRITE_INSTRUCTION, requirement);
+                preview = store.previewDirectory(Map.of("SKILL.md", definition.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            } catch (Exception invalid) {
+                preview = null;
+            }
+            MarkdownSkillStore.Preview drafted = preview;
+            main.post(() -> {
+                if (disposed || busy || active != session || expectedGeneration != generation
+                        || ticket != packageDiscoveryGeneration) return;
+                if (drafted == null) {
+                    showAuthoringStatus("模型没有返回可安装的 SKILL.md。");
+                    return;
+                }
+                showAuthoringStatus("");
+                if (localMenu != null) localMenu.dismiss();
+                localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("检查 SKILL.md")
+                        .setMessage(drafted.markdown()).setPositiveButton("安装", (dialog, which) -> {
+                            if (localMenu != dialog || disposed || skillStore == null || !skillStore.enabled()) return;
+                            try {
+                                store.install(drafted);
+                                showAuthoringStatus("文档技能已安装。请在 AI Skills 中启用。");
+                            } catch (Exception unavailable) {
+                                showAuthoringStatus("无法安装文档技能，请检查是否重名。");
+                            }
+                        }).setNegativeButton("取消", null).create();
+                localMenu.show();
+            });
+        });
+    }
+
+    private void usePackage(String prompt, AiToolPackages.Use use) {
+        if (skillStore == null || !skillStore.enabled()) {
+            showAuthoringStatus("请先启用 AI Skills。");
+            return;
+        }
+        AiToolPackages packages = toolPackages();
+        List<AiToolPackages.Item> available = packages.catalog();
+        if (use.packageName().isEmpty()) {
+            showPackageDirectory(available, "");
+            return;
+        }
+        List<AiToolPackages.Item> matches = available.stream()
+                .filter(item -> item.id().equals(use.packageName()) || item.name().equals(use.packageName()))
+                .collect(java.util.stream.Collectors.toList());
+        if (matches.isEmpty()) {
+            showAuthoringStatus("工具包不可用。发送 /use_package 查看已启用的包。");
+        } else if (matches.size() > 1) {
+            showPackageDirectory(matches, use.argument());
+        } else {
+            selectPackage(matches.get(0), use.argument(), prompt);
+        }
+    }
+
+    private void showPackageDirectory(List<AiToolPackages.Item> items, String argument) {
+        if (disposed || busy) return;
+        if (items.isEmpty()) {
+            showAuthoringStatus("当前没有可用工具包。");
+            return;
+        }
+        String[] labels = items.stream().map(item -> item.id() + " · " + item.name()
+                + (item.description().isBlank() ? "" : "\n" + item.description())).toArray(String[]::new);
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("Skill 与工具包")
+                .setItems(labels, (menu, position) -> {
+                    if (localMenu == menu && !disposed && !busy) selectPackage(items.get(position), argument, "");
+                }).setNegativeButton("关闭", null).create();
+        localMenu.show();
+    }
+
+    private void selectPackage(AiToolPackages.Item item, String argument, String prompt) {
+        switch (item.kind()) {
+            case MARKDOWN -> {
+                if (argument.isBlank()) {
+                    pastePackageCommand("/" + AiToolPackages.COMMAND + " " + item.id() + " ");
+                } else {
+                    try {
+                        AiSkills.Invocation invocation = toolPackages().markdownInvocation(item, argument);
+                        sendPackageInvocation(prompt.isEmpty() ? "/" + AiToolPackages.COMMAND + " " + item.id() + " " + argument
+                                : prompt, invocation);
+                    } catch (IllegalArgumentException | IllegalStateException unavailable) {
+                        showAuthoringStatus("文档技能不可用，或任务超过输入范围。");
+                    }
+                }
+            }
+            case STRUCTURED -> {
+                String command = "/" + item.name() + " " + argument;
+                if (argument.isBlank()) {
+                    pastePackageCommand("/" + AiToolPackages.COMMAND + " " + item.id() + " ");
+                } else {
+                    try {
+                        AiSkills.Invocation invocation = AiSkills.match(skillEntry, command, skillStore);
+                        if (invocation == null) throw new IllegalArgumentException();
+                        sendPackageInvocation(prompt.isEmpty() ? command : prompt, invocation);
+                    } catch (IllegalArgumentException | IllegalStateException unavailable) {
+                        showAuthoringStatus("技能不可用，或配置已变化。");
+                    }
+                }
+            }
+            case BUILTIN -> showBuiltInTools(argument);
+            case MCP -> confirmMcpActivation(item, argument);
+        }
+    }
+
+    private void pastePackageCommand(String command) {
+        input.setText(command);
+        input.setSelection(input.length());
+        input.requestFocus();
+    }
+
+    private void showBuiltInTools(String argument) {
+        List<AiSkills.Command> tools = AiSkills.builtInTools(skillEntry);
+        String[] labels = tools.stream().map(tool -> tool.name() + " · " + tool.description()).toArray(String[]::new);
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("DouAi 自带工具")
+                .setItems(labels, (menu, which) -> {
+                    if (localMenu == menu && !disposed && !busy) {
+                        pastePackageCommand("/" + tools.get(which).name() + " " + argument);
+                    }
+                }).setNegativeButton("取消", null).create();
+        localMenu.show();
+    }
+
+    private void confirmMcpActivation(AiToolPackages.Item item, String argument) {
+        if (disposed || busy) return;
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("加载 MCP 工具")
+                .setMessage("连接已授权服务「" + item.name() + "」读取工具目录。实际调用另行确认。")
+                .setPositiveButton("加载", (dialog, which) -> {
+                    if (localMenu == dialog && !disposed && !busy) discoverMcpPackage(item, argument);
+                }).setNegativeButton("取消", null).create();
+        localMenu.show();
+    }
+
+    private void discoverMcpPackage(AiToolPackages.Item item, String argument) {
+        AiToolPackages packages = toolPackages();
+        SkillStore activeStore = skillStore;
+        int expectedGeneration = generation;
+        int discoveryTicket = ++packageDiscoveryGeneration;
+        showAuthoringStatus("正在读取 MCP 工具目录…");
+        worker.submit(() -> {
+            List<McpRegistry.PackageTool> tools;
+            try {
+                tools = packages.activateMcp(item, System.nanoTime() + TimeUnit.SECONDS.toNanos(20));
+            } catch (Exception unavailable) {
+                tools = null;
+            }
+            List<McpRegistry.PackageTool> discovered = tools;
+            main.post(() -> {
+                if (disposed || busy || generation != expectedGeneration || discoveryTicket != packageDiscoveryGeneration
+                        || activeStore != skillStore) return;
+                if (discovered == null) {
+                    showAuthoringStatus("MCP 服务不可用，或授权已变化。");
+                } else if (discovered.isEmpty()) {
+                    showAuthoringStatus("该 MCP 服务没有可用工具。");
+                } else {
+                    showAuthoringStatus("");
+                    showMcpPackageTools(item, discovered, argument);
+                }
+            });
+        });
+    }
+
+    private void showMcpPackageTools(AiToolPackages.Item item, List<McpRegistry.PackageTool> tools, String argument) {
+        AiToolPackages.ToolRequest suggestion = argument.trim().startsWith("{") ? null
+                : AiToolPackages.suggestTool(argument, tools);
+        List<String> labels = new ArrayList<>();
+        if (suggestion != null) labels.add("请 AI 建议工具并填写参数");
+        for (McpRegistry.PackageTool tool : tools) labels.add(tool.name()
+                + (tool.description().isBlank() ? "" : "\n" + tool.description()));
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle(item.name() + " · MCP 工具")
+                .setItems(labels.toArray(new String[0]), (menu, which) -> {
+                    if (localMenu != menu || disposed || busy) return;
+                    if (suggestion != null && which == 0) {
+                        suggestMcpPackageTool(item, tools, suggestion);
+                    } else {
+                        showMcpToolArguments(item, tools.get(suggestion == null ? which : which - 1), argument);
+                    }
+                }).setNegativeButton("关闭", null).create();
+        localMenu.show();
+    }
+
+    private void suggestMcpPackageTool(AiToolPackages.Item item, List<McpRegistry.PackageTool> tools,
+                                       AiToolPackages.ToolRequest request) {
+        SkillStore activeStore = skillStore;
+        Session active = session;
+        int expectedGeneration = generation;
+        int ticket = ++packageDiscoveryGeneration;
+        showAuthoringStatus("正在建议 MCP 调用参数…");
+        worker.submit(() -> {
+            AiToolPackages.ToolSuggestion answer;
+            try { answer = request.read(active.skillModel(AiToolPackages.TOOL_INSTRUCTION, request.input())); }
+            catch (Exception unavailable) { answer = null; }
+            AiToolPackages.ToolSuggestion proposed = answer;
+            main.post(() -> {
+                if (disposed || busy || generation != expectedGeneration || skillStore != activeStore
+                        || session != active || ticket != packageDiscoveryGeneration) return;
+                if (proposed == null) {
+                    showAuthoringStatus("没有可核对的模型建议，请直接选择工具。");
+                    showMcpPackageTools(item, tools, "");
+                } else {
+                    showAuthoringStatus("");
+                    confirmMcpTool(item, proposed.tool(), proposed.arguments());
+                }
+            });
+        });
+    }
+
+    private void showMcpToolArguments(AiToolPackages.Item item, McpRegistry.PackageTool tool, String argument) {
+        EditText parameters = new EditText(getContext());
+        parameters.setTag("ai.chat.package.mcp.arguments");
+        parameters.setHint("JSON 参数");
+        parameters.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        parameters.setMinLines(3);
+        parameters.setText(argument.trim().startsWith("{") ? argument : "{}");
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle(tool.name() + " · JSON 参数")
+                .setView(parameters)
+                .setPositiveButton("继续", (dialog, which) -> {
+                    if (localMenu == dialog && !disposed && !busy) confirmMcpTool(item, tool, parameters.getText().toString().trim());
+                }).setNegativeButton("取消", null).create();
+        localMenu.show();
+    }
+
+    private void confirmMcpTool(AiToolPackages.Item item, McpRegistry.PackageTool tool, String arguments) {
+        try {
+            if (arguments.length() > 4096) throw new IllegalArgumentException();
+            SkillAuthoring.rejectEditorCredential(arguments);
+            new org.json.JSONObject(arguments);
+        } catch (Exception invalid) {
+            showAuthoringStatus("请输入有效的 JSON 对象，参数中不要包含凭据。");
+            return;
+        }
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("确认本次 MCP 调用")
+                .setMessage(item.name() + " / " + tool.name() + "\n" + arguments)
+                .setPositiveButton("确认调用", (dialog, which) -> {
+                    if (localMenu != dialog || disposed || busy) return;
+                    try {
+                        sendPackageInvocation("调用 " + item.name() + " / " + tool.name() + "\n" + arguments,
+                                toolPackages().mcpInvocation(item, tool, arguments));
+                    } catch (IllegalArgumentException | IllegalStateException unavailable) {
+                        showAuthoringStatus("MCP 服务或工具已变化，请重新选择。");
+                    }
+                }).setNegativeButton("取消", null).create();
+        localMenu.show();
+    }
+
+    private void sendPackageInvocation(String prompt, AiSkills.Invocation invocation) {
+        sendMessage(prompt, List.of(), List.of(), null, null, null, true, null, invocation);
     }
 
     private void showEmojiChoices() {

@@ -29,6 +29,9 @@ import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.douai.module.ai.skills.AiSkills;
+import com.douai.module.ai.skills.AiToolPackages;
+import com.douai.module.ai.skills.MarkdownSkillStore;
+import com.douai.module.ai.mcp.McpRegistryTest;
 import com.douai.module.ai.skills.SkillAuthoring;
 import com.douai.module.ai.skills.SkillManifest;
 import com.douai.module.ai.skills.SkillCustomServiceTest;
@@ -36,6 +39,7 @@ import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillSelection;
 import com.douai.module.ai.skills.SkillServices;
 import com.douai.module.ai.skills.SkillStore;
+import com.douai.module.ai.skills.SkillStoreTest;
 import com.douai.module.ai.skills.SkillVideoFacts;
 import com.douai.module.ai.skills.SkillVideoJobs;
 import com.douai.module.ai.skills.SkillVideoJobsTest;
@@ -825,6 +829,284 @@ public final class AiTestChatDialogTest {
         services.authorize(services.find(SkillServices.MOCK_IMAGE), 0);
         SkillStore.forContext(activity).installGenerated(SkillStore.mockDraft("生图"));
         return services;
+    }
+
+    private static final String WEEKLY_MARKDOWN = """
+            ---
+            name: weekly-summary
+            description: Summarize weekly progress.
+            ---
+
+            ## Steps
+            Group only the supplied progress under this week's heading.
+            """;
+    private static final String WEEKLY_REFERENCE = "Keep the source dates and group work by project.";
+    private static final String OTHER_REFERENCE = "Unrequested reference content must stay local.";
+
+    @Test public void writingMarkdownInChatRequiresReviewBeforeInstalling() throws Exception {
+        dialog.enableSkills(AiSkills.Entry.WORK);
+        FakeSession session = sessions.get(0);
+        session.skillReplies.add("""
+                ---
+                name: meeting-notes
+                description: 整理会议记录。
+                ---
+                先列出已确认事项，再列出待办。
+                """);
+        var markdown = com.douai.module.ai.skills.MarkdownSkillStore.forContext(activity);
+        submit("/文档技能 帮我写一个会议记录技能");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        AlertDialog review = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(review.isShowing());
+        assertTrue(markdown.list().isEmpty());
+        assertTrue(review.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of("meeting-notes"), markdown.list().stream().map(
+                com.douai.module.ai.skills.MarkdownSkillStore.Entry::name).toList());
+        assertFalse(markdown.list().get(0).enabled());
+        assertEquals(List.of(com.douai.module.ai.skills.AiToolPackages.WRITE_INSTRUCTION), session.skillInstructions);
+        assertTrue(session.prompts.isEmpty());
+    }
+
+    @Test public void workPackageDirectoryIsLocalAndSelectedMarkdownReadsOnlyOneReference() throws Exception {
+        installWeeklyMarkdown();
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit("/use_package");
+        AlertDialog catalog = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(catalog.isShowing());
+        assertTrue(packageItem(catalog, "md:weekly-summary") >= 0);
+        assertTrue(packageItem(catalog, "tools") >= 0);
+        assertFalse(String.valueOf(catalog.getListView().getAdapter().getItem(packageItem(catalog, "md:weekly-summary")))
+                .contains("Group only the supplied progress"));
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(work.skillInputs.isEmpty());
+        assertTrue(work.prompts.isEmpty());
+        assertEquals(0, messageCount());
+        catalog.dismiss();
+        ShadowLooper.idleMainLooper();
+
+        submit("/use_package tools");
+        AlertDialog tools = (AlertDialog) ShadowDialog.getLatestDialog();
+        int summary = packageItem(tools, "摘要");
+        assertTrue(summary >= 0);
+        org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(tools).clickOnItem(summary);
+        ShadowLooper.idleMainLooper();
+        assertEquals("/摘要 ", input.getText().toString());
+        assertTrue(worker.tasks.isEmpty());
+        assertTrue(work.skillInputs.isEmpty());
+        assertTrue(work.prompts.isEmpty());
+
+        work.skillReplies.add("{\"read_skill_file\":\"references/note.md\"}");
+        work.skillReplies.add("本周已完成第一阶段。");
+        String task = "整理第一阶段工作";
+        submit("/use_package md:weekly-summary " + task);
+        finishOfflineChatTurn();
+        assertEquals(List.of(AiToolPackages.MARKDOWN_INSTRUCTION, AiToolPackages.MARKDOWN_INSTRUCTION),
+                work.skillInstructions);
+        assertTrue(work.prompts.isEmpty());
+        assertEquals(2, work.skillInputs.size());
+        JSONObject first = new JSONObject(work.skillInputs.get(0));
+        assertEquals(task, first.getString("argument"));
+        assertEquals(WEEKLY_MARKDOWN, first.getString("skill"));
+        assertFalse(first.has("reference"));
+        assertFalse(work.skillInputs.get(0).contains(WEEKLY_REFERENCE));
+        JSONObject second = new JSONObject(work.skillInputs.get(1));
+        assertEquals(WEEKLY_MARKDOWN, second.getString("skill"));
+        assertEquals("references/note.md", second.getJSONObject("reference").getString("path"));
+        assertEquals(WEEKLY_REFERENCE, second.getJSONObject("reference").getString("text"));
+        assertFalse(work.skillInputs.get(1).contains(OTHER_REFERENCE));
+        assertEquals("本周已完成第一阶段。", lastAnswer());
+    }
+
+    @Test public void contactDirectlyNamesAnEnabledMarkdownPackageWithoutOrdinaryModelRouting() throws Exception {
+        installWeeklyMarkdown();
+        FakeSession contact = new FakeSession();
+        contact.transcriptMemory = TestChatMemory.messageConversation(activity, restoreConfiguration());
+        contact.skillReplies.add("本周记录已整理。");
+        reopen(contact, ChatImageLoader::thumbnail, AiSkills.Entry.CONTACT);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        String task = "整理联系人周报";
+        submit("用「weekly-summary」处理 " + task);
+        finishOfflineChatTurn();
+        assertEquals(List.of(AiToolPackages.MARKDOWN_INSTRUCTION), contact.skillInstructions);
+        assertTrue(contact.prompts.isEmpty());
+        JSONObject loaded = new JSONObject(contact.skillInputs.get(0));
+        assertEquals(task, loaded.getString("argument"));
+        assertEquals(WEEKLY_MARKDOWN, loaded.getString("skill"));
+        assertFalse(loaded.has("reference"));
+        assertFalse(contact.skillInputs.get(0).contains(WEEKLY_REFERENCE));
+        assertFalse(contact.skillInputs.get(0).contains(OTHER_REFERENCE));
+        assertEquals("本周记录已整理。", lastAnswer());
+    }
+
+    @Test public void automaticPackageSelectionSeesMetadataBeforeItLoadsTheSelectedMarkdown() throws Exception {
+        installWeeklyMarkdown();
+        SkillStore structured = SkillStore.forContext(activity);
+        MarkdownSkillStore markdown = MarkdownSkillStore.forContext(activity);
+        SkillSelection.Candidate weekly = new AiToolPackages(structured, markdown).modelCandidates().stream()
+                .filter(candidate -> "weekly-summary".equals(candidate.displayName())).findFirst().orElseThrow();
+        String task = "帮我整理这周项目进度";
+        String argument = "这周项目进度";
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        work.skillReplies.add(new JSONObject().put("name", weekly.name()).put("argument", argument).toString());
+        work.skillReplies.add("这周项目进度已归纳。");
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, structured);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        submit(task);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of(SkillSelection.INSTRUCTION), work.skillInstructions);
+        String routed = work.skillInputs.get(0);
+        JSONObject routingInput = new JSONObject(routed);
+        assertEquals(task, routingInput.getString("task"));
+        JSONObject listed = routingInput.getJSONArray("skills").getJSONObject(0);
+        assertEquals(weekly.name(), listed.getString("name"));
+        assertEquals("weekly-summary", listed.getString("displayName"));
+        assertEquals("MARKDOWN", listed.getString("packageType"));
+        assertFalse(routed.contains("Group only the supplied progress"));
+        assertFalse(routed.contains("references/note.md"));
+        assertFalse(routed.contains(WEEKLY_REFERENCE));
+
+        finishOfflineChatTurn();
+        assertEquals(List.of(SkillSelection.INSTRUCTION, AiToolPackages.MARKDOWN_INSTRUCTION), work.skillInstructions);
+        JSONObject selected = new JSONObject(work.skillInputs.get(1));
+        assertEquals(argument, selected.getString("argument"));
+        assertEquals(WEEKLY_MARKDOWN, selected.getString("skill"));
+        assertFalse(selected.has("reference"));
+        assertEquals("这周项目进度已归纳。", lastAnswer());
+        assertTrue(work.prompts.isEmpty());
+    }
+
+    @Test public void mcpPackageSuggestsVerifiedArgumentsBeforeCalling() throws Exception {
+        AtomicInteger discoveries = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        SkillStore packages = SkillStoreTest.chatPackageStore(activity,
+                McpRegistryTest.chatPackageRegistry(activity, discoveries, calls));
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        work.skillReplies.add("{\"tool_name\":\"inspect\",\"arguments\":{\"input\":\"样例\"}}");
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, packages);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/use_package mcp:fixture 检查样例");
+        AlertDialog activation = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals(0, discoveries.get());
+        assertTrue(activation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        AlertDialog tools = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals("请 AI 建议工具并填写参数", tools.getListView().getAdapter().getItem(0));
+        assertEquals(1, discoveries.get());
+        assertEquals(0, calls.get());
+        org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(tools).clickOnItem(0);
+        ShadowLooper.idleMainLooper();
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(List.of(com.douai.module.ai.skills.AiToolPackages.TOOL_INSTRUCTION), work.skillInstructions);
+        assertTrue(work.skillInputs.get(0).contains("\"input\":{\"type\":\"string\",\"required\":true}"));
+        assertEquals(0, calls.get());
+        AlertDialog proposed = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals("确认调用", proposed.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertTrue(proposed.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, calls.get());
+        assertEquals("MCP 离线结果", lastAnswer());
+        assertTrue(work.prompts.isEmpty());
+    }
+
+    @Test public void explicitMcpPackageRequiresSeparateLoadAndToolCallConsent() throws Exception {
+        AtomicInteger discoveries = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        SkillStore packages = SkillStoreTest.chatPackageStore(activity,
+                McpRegistryTest.chatPackageRegistry(activity, discoveries, calls));
+        FakeSession work = new FakeSession();
+        work.transcriptMemory = new TestChatMemory(activity, restoreConfiguration());
+        reopen(work, ChatImageLoader::thumbnail, AiSkills.Entry.WORK, packages);
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        submit("/use_package mcp:fixture");
+        AlertDialog activation = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(activation.isShowing());
+        assertEquals("加载", activation.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertEquals(0, discoveries.get());
+        assertEquals(0, calls.get());
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals(0, messageCount());
+
+        assertTrue(activation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        AlertDialog tools = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(tools.isShowing());
+        assertEquals(1, tools.getListView().getAdapter().getCount());
+        assertTrue(String.valueOf(tools.getListView().getAdapter().getItem(0)).startsWith("inspect"));
+        assertEquals(1, discoveries.get());
+        assertEquals(0, calls.get());
+        assertEquals(0, messageCount());
+        org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(tools).clickOnItem(0);
+        ShadowLooper.idleMainLooper();
+
+        AlertDialog arguments = (AlertDialog) ShadowDialog.getLatestDialog();
+        EditText json = arguments.getWindow().getDecorView().findViewWithTag("ai.chat.package.mcp.arguments");
+        assertNotNull(json);
+        assertEquals("继续", arguments.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        String provided = "{\"input\":\"样例\"}";
+        json.setText(provided);
+        assertTrue(arguments.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(confirmation.isShowing());
+        assertEquals("确认调用", confirmation.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        var warning = org.robolectric.shadow.api.Shadow.<org.robolectric.shadows.ShadowAlertDialog>extract(confirmation);
+        assertTrue(String.valueOf(warning.getMessage()).contains("inspect"));
+        assertTrue(String.valueOf(warning.getMessage()).contains(provided));
+        assertEquals(1, discoveries.get());
+        assertEquals(0, calls.get());
+        assertTrue(worker.tasks.isEmpty());
+        assertEquals(0, messageCount());
+
+        assertTrue(confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        finishOfflineChatTurn();
+        assertEquals("MCP 离线结果", lastAnswer());
+        assertEquals(1, discoveries.get());
+        assertEquals(1, calls.get());
+        assertTrue(work.skillInputs.isEmpty());
+        assertTrue(work.prompts.isEmpty());
+    }
+
+    private void installWeeklyMarkdown() throws Exception {
+        MarkdownSkillStore markdown = MarkdownSkillStore.forContext(activity);
+        MarkdownSkillStore.Entry imported = markdown.install(markdown.previewDirectory(java.util.Map.of(
+                "SKILL.md", WEEKLY_MARKDOWN.getBytes(StandardCharsets.UTF_8),
+                "references/note.md", WEEKLY_REFERENCE.getBytes(StandardCharsets.UTF_8),
+                "references/extra.txt", OTHER_REFERENCE.getBytes(StandardCharsets.UTF_8))));
+        assertFalse(imported.enabled());
+        assertTrue(markdown.setEnabled(imported, true).enabled());
+    }
+
+    private static int packageItem(AlertDialog dialog, String prefix) {
+        var items = dialog.getListView().getAdapter();
+        for (int index = 0; index < items.getCount(); index++) {
+            if (String.valueOf(items.getItem(index)).startsWith(prefix + " ·")) return index;
+        }
+        return -1;
     }
 
     @Test public void namedWorkSkillSkipsRoutingAndContactCanSelectTheSameInstalledSkill() throws Exception {

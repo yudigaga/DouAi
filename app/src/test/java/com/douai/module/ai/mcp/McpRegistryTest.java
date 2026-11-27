@@ -1,5 +1,7 @@
 package com.douai.module.ai.mcp;
 
+import android.content.Context;
+
 import com.douai.module.ai.AiCredentialVault;
 
 import org.json.JSONObject;
@@ -11,9 +13,12 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -30,6 +35,31 @@ public final class McpRegistryTest {
             new McpRegistry.Binding("mcp-order", "orders", "check");
 
     @Rule public final TemporaryFolder files = new TemporaryFolder();
+
+    public static McpRegistry chatPackageRegistry(Context context, AtomicInteger discoveries, AtomicInteger calls)
+            throws Exception {
+        Context app = context.getApplicationContext();
+        Context owner = app == null ? context : app;
+        SecretKey key = KeyGenerator.getInstance("AES").generateKey();
+        FakeRpc rpc = new FakeRpc();
+        rpc.tool = new McpClient.Tool("inspect", "检查输入", "检查一段用户提供的文字", """
+                {"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}
+                """.trim(), "fixture-inspect-v1");
+        rpc.duringDiscovery = discoveries::incrementAndGet;
+        rpc.onCall = args -> {
+            assertEquals(1, args.length());
+            assertTrue(args.opt("input") instanceof String input && !input.trim().isEmpty());
+            calls.incrementAndGet();
+        };
+        rpc.reply = "MCP 离线结果";
+        var directory = Files.createTempDirectory(owner.getNoBackupFilesDir().toPath(), "mcp-chat-fixture-").toFile();
+        McpRegistry registry = new McpRegistry(directory, new AiCredentialVault(() -> key), rpc);
+        McpRegistry.Service fixture = new McpRegistry.Service("fixture", "测试 MCP 服务",
+                "https://mcp-fixture.example.test/v1/mcp", McpClient.MODERN);
+        registry.register(fixture, SECRET);
+        registry.authorize(fixture);
+        return registry;
+    }
 
     @Test public void previewDoesNotChangeTheRegistryAndImportClearsSameEndpointGrantAndCredentials() throws Exception {
         Fixture fixture = new Fixture();
@@ -113,6 +143,168 @@ public final class McpRegistryTest {
         assertTrue(fixture.registry.activeBindings().isEmpty());
     }
 
+    @Test public void packageDirectoryIsLocalAndActivationOnlyDiscoversMetadata() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(ORDERS, SECRET);
+        assertTrue(fixture.registry.packageCatalog().isEmpty());
+        fixture.registry.authorize(ORDERS);
+
+        List<McpRegistry.PackageEntry> catalog = fixture.registry.packageCatalog();
+        assertEquals(1, catalog.size());
+        McpRegistry.PackageEntry entry = catalog.get(0);
+        assertEquals("orders", entry.name());
+        assertEquals("订单", entry.description());
+        assertTrue(fixture.rpc.tokens.isEmpty());
+
+        McpRegistry.PackageTool tool = fixture.registry.activatePackage(entry, deadline()).get(0);
+        assertEquals("check", tool.name());
+        assertEquals("订单状态", tool.title());
+        assertEquals("查询订单状态", tool.description());
+        assertEquals(List.of(SECRET), fixture.rpc.tokens);
+        assertEquals(0, fixture.rpc.calls);
+        assertTrue(fixture.registry.bindings().isEmpty());
+    }
+
+    @Test public void oldPackageEntryDoesNotAcquireAReplacementGrant() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(ORDERS, SECRET);
+        fixture.registry.authorize(ORDERS);
+        McpRegistry.PackageEntry oldEntry = fixture.registry.packageCatalog().get(0);
+
+        fixture.registry.revoke(ORDERS);
+        assertTrue(fixture.registry.packageCatalog().isEmpty());
+        fixture.registry.authorize(ORDERS);
+        McpRegistry.Failure stale = assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.activatePackage(oldEntry, deadline()));
+        assertEquals(McpRegistry.Code.CONFIRMATION_REQUIRED, stale.code());
+        assertTrue(fixture.rpc.tokens.isEmpty());
+
+        McpRegistry.PackageEntry current = fixture.registry.packageCatalog().get(0);
+        fixture.rpc.duringDiscovery = () -> fixture.registry.revoke(ORDERS);
+        McpRegistry.Failure revoked = assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.activatePackage(current, deadline()));
+        assertEquals(McpRegistry.Code.CONFIRMATION_REQUIRED, revoked.code());
+        assertEquals(0, fixture.rpc.calls);
+        assertTrue(fixture.registry.packageCatalog().isEmpty());
+    }
+
+    @Test public void packageMetadataOmitsAddressesAndRejectsCredentialEcho() throws Exception {
+        Fixture fixture = new Fixture();
+        McpRegistry.Service labelled = new McpRegistry.Service(ORDERS.id(), "订单 " + ORDERS.endpoint(),
+                ORDERS.endpoint(), ORDERS.protocol());
+        fixture.registry.register(labelled, SECRET);
+        fixture.registry.authorize(labelled);
+        McpRegistry.PackageEntry entry = fixture.registry.packageCatalog().get(0);
+        assertEquals("", entry.description());
+
+        fixture.rpc.tool = new McpClient.Tool("check", "订单状态", "查询 " + ORDERS.endpoint(),
+                "{\"type\":\"object\"}", "reviewed");
+        McpRegistry.PackageTool metadata = fixture.registry.activatePackage(entry, deadline()).get(0);
+        assertEquals("订单状态", metadata.title());
+        assertEquals("", metadata.description());
+
+        fixture.rpc.tool = new McpClient.Tool("check", "订单状态", SECRET, "{\"type\":\"object\"}", "reviewed");
+        McpRegistry.Failure echoed = assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.activatePackage(entry, deadline()));
+        assertEquals(McpRegistry.Code.CREDENTIAL, echoed.code());
+        assertFalse(echoed.getMessage().contains(SECRET));
+    }
+
+    @Test public void explicitlySelectedPackageToolUsesCurrentScopeWithoutBindingAnAlias() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(ORDERS, SECRET);
+        fixture.registry.authorize(ORDERS);
+        McpRegistry.PackageEntry orders = fixture.registry.packageCatalog().get(0);
+        McpRegistry.PackageTool tool = fixture.registry.activatePackage(orders, deadline()).get(0);
+        McpRegistry.Service otherService = new McpRegistry.Service("other", "另一个服务", ORDERS.endpoint() + "-other",
+                ORDERS.protocol());
+        fixture.registry.register(otherService, "");
+        fixture.registry.authorize(otherService);
+        McpRegistry.PackageEntry other = fixture.registry.packageCatalog().get(1);
+
+        assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.executePackageTool(orders, null, "{}", deadline()));
+        assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.executePackageTool(null, tool, "{}", deadline()));
+        assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.executePackageTool(other, tool, "{}", deadline()));
+        assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.executePackageTool(orders, tool, "[]", deadline()));
+        assertEquals(0, fixture.rpc.calls);
+        assertEquals(List.of(SECRET), fixture.rpc.tokens);
+
+        assertEquals("已发货", fixture.registry.executePackageTool(orders, tool, "{\"id\":1}", deadline()));
+        assertEquals(1, fixture.rpc.calls);
+        assertEquals(1, fixture.rpc.calledArguments.getInt("id"));
+        assertEquals(List.of(SECRET, SECRET), fixture.rpc.tokens);
+        assertTrue(fixture.registry.bindings().isEmpty());
+    }
+
+    @Test public void directPackageToolRechecksDefinitionAndAuthorizationBeforeDispatch() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(ORDERS, SECRET);
+        fixture.registry.authorize(ORDERS);
+        McpRegistry.PackageEntry entry = fixture.registry.packageCatalog().get(0);
+        McpRegistry.PackageTool stale = fixture.registry.activatePackage(entry, deadline()).get(0);
+        fixture.rpc.tool = tool("changed");
+        McpRegistry.PackageTool current = fixture.registry.activatePackage(entry, deadline()).get(0);
+        McpRegistry.Failure changed = assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.executePackageTool(entry, stale, "{\"id\":1}", deadline()));
+        assertEquals(McpRegistry.Code.REVIEW_TOOL, changed.code());
+        assertEquals(0, fixture.rpc.calls);
+
+        fixture.rpc.beforeAdmission = () -> fixture.registry.revoke(ORDERS);
+        McpRegistry.Failure revoked = assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.executePackageTool(entry, current, "{\"id\":1}", deadline()));
+        assertEquals(McpRegistry.Code.CONFIRMATION_REQUIRED, revoked.code());
+        assertEquals(0, fixture.rpc.calls);
+        assertEquals(List.of(SECRET, SECRET), fixture.rpc.tokens);
+    }
+
+    @Test public void modelParameterSummaryPublishesOnlyVerifiedNamesTypesAndRequiredFlags() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(ORDERS, SECRET);
+        fixture.registry.authorize(ORDERS);
+        McpRegistry.PackageEntry entry = fixture.registry.packageCatalog().get(0);
+        fixture.rpc.tool = new McpClient.Tool("check", "订单状态", "查询", """
+                {"type":"object","properties":{
+                  "input":{"type":"string","description":"内部说明","default":"内部默认值"},
+                  "maxTokens":{"type":"integer"},
+                  "options":{"type":"object","properties":{"privateKey":{"type":"string"}}},
+                  "apiKey":{"type":"string","default":"fake-credential"},
+                  "route":{"type":"string","x-mcp-header":"Control"}
+                },"required":["input"]}
+                """, "parameters-v1");
+        String summary = fixture.registry.activatePackage(entry, deadline()).get(0).parameterSummary();
+        JSONObject parameters = new JSONObject(summary);
+        assertEquals(2, parameters.length());
+        assertEquals("string", parameters.getJSONObject("input").getString("type"));
+        assertTrue(parameters.getJSONObject("input").getBoolean("required"));
+        assertEquals("integer", parameters.getJSONObject("maxTokens").getString("type"));
+        assertFalse(parameters.getJSONObject("maxTokens").getBoolean("required"));
+        for (String privateValue : List.of("apiKey", "options", "privateKey", "route", "Control", "内部说明", "内部默认值", "fake-credential")) {
+            assertFalse(summary.contains(privateValue));
+        }
+        assertEquals(0, fixture.rpc.calls);
+    }
+
+    @Test public void modelParameterSummaryRejectsUnsupportedAndHiddenRequiredArguments() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(ORDERS, SECRET);
+        fixture.registry.authorize(ORDERS);
+        McpRegistry.PackageEntry entry = fixture.registry.packageCatalog().get(0);
+        for (String definition : List.of(
+                "{\"type\":\"object\",\"properties\":{\"input\":{\"$ref\":\"https://example.test/schema\"}}}",
+                "{\"type\":\"object\",\"properties\":{\"accessToken\":{\"type\":\"string\"}},\"required\":[\"accessToken\"]}",
+                "{\"type\":\"object\",\"properties\":{\"options\":{\"type\":\"object\"}},\"required\":[\"options\"]}",
+                "{\"type\":\"object\",\"properties\":{\"route\":{\"type\":\"string\",\"x-mcp-header\":\"Routing\"}},\"required\":[\"route\"]}")) {
+            fixture.rpc.tool = new McpClient.Tool("check", "订单状态", "查询", definition, "parameters-invalid");
+            assertEquals("", fixture.registry.activatePackage(entry, deadline()).get(0).parameterSummary());
+        }
+        fixture.rpc.tool = tool("no-parameters");
+        assertEquals("{}", fixture.registry.activatePackage(entry, deadline()).get(0).parameterSummary());
+    }
+
     private static long deadline() { return System.nanoTime() + TimeUnit.SECONDS.toNanos(5); }
 
     private static McpClient.Tool tool(String fingerprint) {
@@ -139,10 +331,16 @@ public final class McpRegistryTest {
         final List<String> tokens = new ArrayList<>();
         McpClient.Tool tool = tool("original");
         McpClient.Admission beforeAdmission = () -> {};
+        McpClient.Admission duringDiscovery = () -> {};
+        Consumer<JSONObject> onCall = ignored -> {};
+        String reply = "已发货";
         int calls;
+        JSONObject calledArguments;
 
-        @Override public List<McpClient.Tool> discover(String endpoint, String protocol, String bearer, long deadline) {
+        @Override public List<McpClient.Tool> discover(String endpoint, String protocol, String bearer, long deadline)
+                throws IOException {
             tokens.add(bearer);
+            duringDiscovery.check();
             return List.of(tool);
         }
 
@@ -152,7 +350,9 @@ public final class McpRegistryTest {
             admission.check();
             tokens.add(bearer);
             calls++;
-            return "已发货";
+            calledArguments = args;
+            onCall.accept(args);
+            return reply;
         }
     }
 }

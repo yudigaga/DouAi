@@ -1,5 +1,9 @@
 package com.douai.module.ai.skills;
 
+import android.content.Context;
+
+import com.douai.module.ai.mcp.McpRegistry;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Rule;
@@ -25,6 +29,13 @@ import static org.junit.Assert.assertTrue;
 @Config(sdk = 34)
 public class SkillStoreTest {
     @Rule public TemporaryFolder temp = new TemporaryFolder();
+
+    public static SkillStore chatPackageStore(Context context, McpRegistry registry) {
+        Context app = context.getApplicationContext();
+        Context owner = app == null ? context : app;
+        return new SkillStore(new File(owner.getNoBackupFilesDir(), "douai-ai/skills"),
+                SkillServices.forContext(owner), registry, SkillCustomService.forDevice());
+    }
 
     @Test public void videoDeclarationPromotesOnlyTheCurrentDraftToEndpointConfiguration() throws Exception {
         File root = temp.newFolder();

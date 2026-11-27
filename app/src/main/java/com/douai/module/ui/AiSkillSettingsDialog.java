@@ -56,6 +56,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     private Future<?> generationTask;
     private boolean busy;
     private boolean closed;
+    private AiMarkdownSkillSettingsDialog markdown;
 
     AiSkillSettingsDialog(Context context, SettingsStore settings, boolean miuix,
                           BiConsumer<Dialog, Runnable> presenter) {
@@ -83,6 +84,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         section(content, "自定义技能");
         skillRows = column();
         content.addView(skillRows, matchWrap());
+        addSkillRow(content, "Markdown 技能", "导入并管理 SKILL.md", "skills.markdown.manage", this::showMarkdown);
 
         section(content, "生成或更新技能");
         requirements = input(content, "描述想要的技能，例如生图", "skills.requirements",
@@ -99,6 +101,16 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     }
 
     AlertDialog dialog() { return dialog; }
+
+    private void showMarkdown() {
+        if (!active() || busy || markdown != null) return;
+        AiMarkdownSkillSettingsDialog page = new AiMarkdownSkillSettingsDialog(context, miuix, presenter, worker);
+        markdown = page;
+        presenter.accept(page.dialog(), () -> {
+            page.close();
+            if (markdown == page) markdown = null;
+        });
+    }
 
     private void changeEnabled(CompoundButton control, boolean value) {
         try { store.setEnabled(value); }
@@ -249,11 +261,11 @@ final class AiSkillSettingsDialog implements AutoCloseable {
                 summary = title + "\n" + summary;
                 title = skill.displayName();
             }
-            addSkillRow(title, summary, "skills.row." + name, () -> showSkillDetail(name));
+            addSkillRow(skillRows, title, summary, "skills.row." + name, () -> showSkillDetail(name));
         }
     }
 
-    private void addSkillRow(String title, String summary, String tag, Runnable action) {
+    private void addSkillRow(LinearLayout parent, String title, String summary, String tag, Runnable action) {
         View row;
         if (miuix) {
             row = new MiuixSettingsViews.Option(context, title, summary, null, true, action).getView();
@@ -271,7 +283,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
             row = item;
         }
         row.setTag(tag);
-        skillRows.addView(row, matchWrap());
+        parent.addView(row, matchWrap());
     }
 
     static String installedState(SkillStore.Installed current, boolean enabled) {
@@ -379,6 +391,11 @@ final class AiSkillSettingsDialog implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        if (markdown != null) {
+            markdown.close();
+            markdown.dialog().dismiss();
+            markdown = null;
+        }
         if (generation != null) generation.cancel();
         if (generationTask != null) generationTask.cancel(true);
         worker.shutdownNow();
