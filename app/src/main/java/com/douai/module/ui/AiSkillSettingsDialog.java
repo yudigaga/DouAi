@@ -19,6 +19,7 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import com.douai.module.R;
 import com.douai.module.ai.skills.SkillResult;
 import com.douai.module.ai.skills.SkillStore;
 import com.douai.module.config.SettingsStore;
@@ -73,7 +74,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
         LinearLayout content = form();
         CompoundButton enabled = miuix ? MiuixFormControls.checkbox(context, "启用 Skills", store.enabled())
                 : new Switch(context);
-        enabled.setText("启用 Skills");
+        enabled.setText(ModuleUiStrings.get(context, R.string.skills_enabled_label, "启用 Skills"));
         enabled.setTag("skills.enabled");
         enabled.setChecked(store.enabled());
         enabled.setOnCheckedChangeListener(this::changeEnabled);
@@ -205,7 +206,7 @@ final class AiSkillSettingsDialog implements AutoCloseable {
             control.setOnCheckedChangeListener(null);
             control.setChecked(!value);
             control.setOnCheckedChangeListener(this::changeEnabled);
-            status.setText("暂时无法保存 Skills 开关");
+            status.setText(ModuleUiStrings.get(context, R.string.skills_enabled_save_failed, "暂时无法保存 Skills 开关"));
             return;
         }
         try { refreshSkillRows(); }

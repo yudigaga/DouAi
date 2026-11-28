@@ -18,6 +18,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.WindowManager;
 import android.view.WindowInsets;
 import android.widget.EditText;
@@ -439,7 +440,11 @@ public final class AiTestChatDialogTest {
         assertTrue(restoredThumbnail.getDrawable() instanceof BitmapDrawable);
         Dialog restoredPreview = openGeneratedImagePreview(restoredThumbnail);
         assertNotSame(firstPreview, restoredPreview);
-        restoredPreview.dismiss();
+        ImageView restoredPicture = previewContent(restoredPreview).findViewWithTag("ai.chat.image_preview_image");
+        assertTrue(restoredPicture.performAccessibilityAction(
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK.getId(), null));
+        ShadowLooper.idleMainLooper();
+        assertFalse(restoredPreview.isShowing());
         assertTrue(restored.prompts.isEmpty());
         assertTrue(restored.skillInputs.isEmpty());
         assertEquals(1, restored.transcriptMemory.readTranscript().size());

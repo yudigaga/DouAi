@@ -29,6 +29,7 @@ import com.douai.module.feature.ChatImageLoader;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.BooleanSupplier;
 
 /** A read-only view over the image already available to the local conversation. */
 final class AiChatImagePreview extends Dialog {
@@ -128,6 +129,7 @@ final class AiChatImagePreview extends Dialog {
         private boolean moved;
         private boolean multiTouch;
         private long blankTapTime = -1;
+        private BooleanSupplier pendingClick;
 
         ZoomImageView(Context context) {
             super(context);
@@ -138,7 +140,7 @@ final class AiChatImagePreview extends Dialog {
                 @Override public boolean onDown(MotionEvent event) { return true; }
 
                 @Override public boolean onSingleTapUp(MotionEvent event) {
-                    if (downInBlank && !moved && !imageContains(event.getX(), event.getY())) {
+                    if (pendingClick != null) {
                         blankTapTime = event.getDownTime();
                     }
                     return true;
@@ -146,8 +148,9 @@ final class AiChatImagePreview extends Dialog {
 
                 @Override public boolean onSingleTapConfirmed(MotionEvent event) {
                     if (multiTouch || blankTapTime != event.getDownTime()) return false;
-                    blankTapTime = -1;
-                    return performClick();
+                    BooleanSupplier click = pendingClick;
+                    clearPendingTap();
+                    return click != null && click.getAsBoolean();
                 }
 
                 @Override public boolean onDoubleTap(MotionEvent event) { return true; }
@@ -201,18 +204,22 @@ final class AiChatImagePreview extends Dialog {
             fit();
         }
 
+        @Override public boolean performClick() {
+            return super.performClick();
+        }
+
         @Override public boolean onTouchEvent(MotionEvent event) {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 multiTouch = false;
                 moved = false;
-                blankTapTime = -1;
+                clearPendingTap();
                 downX = event.getX();
                 downY = event.getY();
                 downInBlank = !imageContains(downX, downY);
             } else if (!multiTouch && event.getPointerCount() > 1) {
                 multiTouch = true;
-                blankTapTime = -1;
+                clearPendingTap();
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
                 try { gestures.onTouchEvent(cancel); }
@@ -222,11 +229,22 @@ final class AiChatImagePreview extends Dialog {
                 float dy = event.getY() - downY;
                 moved |= dx * dx + dy * dy > touchSlopSquared;
             } else if (action == MotionEvent.ACTION_CANCEL) {
-                blankTapTime = -1;
+                clearPendingTap();
             }
             scaleGestures.onTouchEvent(event);
-            if (!multiTouch) gestures.onTouchEvent(event);
+            if (!multiTouch) {
+                if (action == MotionEvent.ACTION_UP && downInBlank && !moved && !imageContains(event.getX(), event.getY())) {
+                    // GestureDetector confirms this tap only after ruling out a double tap.
+                    pendingClick = () -> performClick();
+                }
+                gestures.onTouchEvent(event);
+            }
             return true;
+        }
+
+        private void clearPendingTap() {
+            blankTapTime = -1;
+            pendingClick = null;
         }
 
         private boolean canScale() { return getDrawable() != null && fitScale > 0f; }

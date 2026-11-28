@@ -49,6 +49,7 @@ import android.widget.Toast;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat;
 
+import com.douai.module.R;
 import com.douai.module.ai.mcp.McpClient;
 import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ai.skills.AiSkills;
@@ -2810,7 +2811,7 @@ final class AiTestChatDialog extends Dialog {
                         usePackage("", new AiToolPackages.Use("", ""));
                         return;
                     }
-                    input.setText(slash + " ");
+                    input.setText(ModuleUiStrings.get(getContext(), R.string.ai_chat_slash_command_input, "%1$s ", slash));
                     input.setSelection(input.length());
                     input.requestFocus();
                 });
@@ -3494,7 +3495,7 @@ final class AiTestChatDialog extends Dialog {
         }
         Button export = new Button(getContext());
         export.setAllCaps(false);
-        export.setText("导出 CSV");
+        export.setText(ModuleUiStrings.get(getContext(), R.string.ai_chat_table_export_csv, "导出 CSV"));
         export.setTag("ai.chat.table.export");
         export.setOnClickListener(ignored -> exportTable(table));
         container.addView(export, wrap());
@@ -3535,7 +3536,9 @@ final class AiTestChatDialog extends Dialog {
                 });
             });
         });
-        if (csvPicker == null) state.setText("无法打开 CSV 文件选择器");
+        if (csvPicker == null) {
+            state.setText(ModuleUiStrings.get(getContext(), R.string.ai_chat_csv_picker_unavailable, "无法打开 CSV 文件选择器"));
+        }
     }
 
     private Activity ownerActivity() {

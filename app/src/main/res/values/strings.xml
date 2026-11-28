@@ -16,4 +16,16 @@
     <string name="fish_catalog_public_title">单说话人音色 · 公开音色</string>
     <string name="fish_catalog_self_title">单说话人音色 · 我的音色</string>
     <string name="breeze_catalog_title">Breeze Blue 音色 · %1$s</string>
+    <string name="skills_video_api_address_changed">API 地址已变化，请核对密钥</string>
+    <string name="skills_image_no_ai_base">暂无可选的 HTTPS AI 基础地址，可手动填写</string>
+    <string name="skills_image_enter_api_base">请填写 HTTPS API 基础地址</string>
+    <string name="skills_models_found">已获取 %1$d 个模型</string>
+    <string name="skills_enabled_label">启用 Skills</string>
+    <string name="skills_enabled_save_failed">暂时无法保存 Skills 开关</string>
+    <string name="ai_chat_slash_command_input" translatable="false">"%1$s "</string>
+    <string name="ai_chat_table_export_csv">导出 CSV</string>
+    <string name="ai_chat_csv_picker_unavailable">无法打开 CSV 文件选择器</string>
+    <string name="mcp_tools_discovered">已发现 %1$d 个工具</string>
+    <string name="mcp_alias_prefix" translatable="false">mcp-</string>
+    <string name="mcp_export_completed">已导出 MCP JSON</string>
 </resources>

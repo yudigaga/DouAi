@@ -18,6 +18,7 @@ import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
+import com.douai.module.R;
 import com.douai.module.ai.mcp.McpClient;
 import com.douai.module.ai.mcp.McpRegistry;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
@@ -243,7 +244,7 @@ final class McpSettingsDialog implements AutoCloseable {
             status.setText("此服务没有可展示的工具");
             return;
         }
-        status.setText("已发现 " + tools.size() + " 个工具");
+        status.setText(ModuleUiStrings.get(context, R.string.mcp_tools_discovered, "已发现 %1$d 个工具", tools.size()));
         McpClient.Tool[] selected = {null};
         String[] labels = tools.stream().map(tool -> {
             String name = shown(tool.name());
@@ -266,7 +267,7 @@ final class McpSettingsDialog implements AutoCloseable {
         if (!description.isEmpty()) text(body, description);
         text(body, "调用时在命令后输入 JSON 对象，空参数可用 {}。");
         EditText alias = input(body, "命令名（以 mcp- 开头）", "mcp.binding.alias", 48, false);
-        alias.setText("mcp-");
+        alias.setText(ModuleUiStrings.get(context, R.string.mcp_alias_prefix, "mcp-"));
         alias.setSelection(alias.length());
         TextView error = text(body, "");
         AlertDialog editor = builder("绑定手动命令").setView(scroll(body))
@@ -301,7 +302,8 @@ final class McpSettingsDialog implements AutoCloseable {
                     if (uri == null) { status.setText("已取消文件选择"); return; }
                     if (export) {
                         run(() -> { write(uri, exportJson); return true; },
-                                "正在写入 MCP JSON…", saved -> status.setText("已导出 MCP JSON"));
+                                "正在写入 MCP JSON…", saved -> status.setText(
+                                        ModuleUiStrings.get(context, R.string.mcp_export_completed, "已导出 MCP JSON")));
                     } else {
                         run(() -> registry.previewImport(read(uri)), "正在读取导入预览…", this::showImport);
                     }

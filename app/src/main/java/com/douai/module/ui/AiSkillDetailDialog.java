@@ -25,6 +25,7 @@ import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
+import com.douai.module.R;
 import com.douai.module.ai.AiCredentialVault;
 import com.douai.module.ai.skills.SkillImageModelCatalog;
 import com.douai.module.ai.skills.SkillImageProviderAddress;
@@ -377,7 +378,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
             lastAddress[0] = candidate;
             if (!previous.isEmpty() && !candidate.equals(previous) && bearer.length() != 0) {
                 bearer.getText().clear();
-                (modelLookupStatus == null ? status : modelLookupStatus).setText("API 地址已变化，请核对密钥");
+                (modelLookupStatus == null ? status : modelLookupStatus).setText(ModuleUiStrings.get(context,
+                        R.string.skills_video_api_address_changed, "API 地址已变化，请核对密钥"));
             }
         });
         saveServiceButton(detail, address, bearer, values, useApiBase, exactEndpoint);
@@ -719,7 +721,7 @@ final class AiSkillDetailDialog implements AutoCloseable {
         } else if (!prefill.model().isEmpty()) {
             model.setText(prefill.model());
         }
-        cost.setText(Integer.toString(savedOpenAi ? saved.costUnits() : 0));
+        cost.setText(String.format(Locale.ROOT, "%d", savedOpenAi ? saved.costUnits() : 0));
         fields.setVisibility(savedMock ? View.GONE : View.VISIBLE);
         adapter.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View row, int position, long id) {
@@ -811,7 +813,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
         cancelModelLookup("ai_provider_picker_opened");
         List<AiProviderBase> bases = availableAiBases();
         if (bases.isEmpty()) {
-            modelLookupStatus.setText("暂无可选的 HTTPS AI 基础地址，可手动填写");
+            modelLookupStatus.setText(ModuleUiStrings.get(context, R.string.skills_image_no_ai_base,
+                    "暂无可选的 HTTPS AI 基础地址，可手动填写"));
             return;
         }
         String[] labels = bases.stream().map(base -> base.label() + " · " + base.address()).toArray(String[]::new);
@@ -919,7 +922,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
         }
         String generation = generationAddress(endpoint, complete, modelLookupStatus);
         if (generation == null || generation.isEmpty()) {
-            if (generation != null) modelLookupStatus.setText("请填写 HTTPS API 基础地址");
+            if (generation != null) modelLookupStatus.setText(ModuleUiStrings.get(context,
+                    R.string.skills_image_enter_api_base, "请填写 HTTPS API 基础地址"));
             trace.finish(DouAiLog.Outcome.FAILED, "invalid_generation_address", "request_queued=false");
             return;
         }
@@ -1030,7 +1034,8 @@ final class AiSkillDetailDialog implements AutoCloseable {
                         modelLookupStatus.setText("已选择模型，请保存配置");
                     }).setNegativeButton("取消", null).create();
             showChild(choices);
-            modelLookupStatus.setText("已获取 " + models.size() + " 个模型");
+            modelLookupStatus.setText(ModuleUiStrings.get(context, R.string.skills_models_found,
+                    "已获取 %1$d 个模型", models.size()));
             trace.finish(DouAiLog.Outcome.SUCCESS, "options_presented", "model_count=" + models.size());
         } catch (RuntimeException | LinkageError unavailable) {
             modelLookupStatus.setText("无法打开模型选择，可以手动填写模型名称");
