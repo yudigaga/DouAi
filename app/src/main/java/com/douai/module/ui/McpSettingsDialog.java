@@ -108,6 +108,7 @@ final class McpSettingsDialog implements AutoCloseable {
                 } else {
                     button(serviceRows, "授权并发现工具", tag + ".authorize", () -> authorize(service));
                 }
+                button(serviceRows, "删除服务", tag + ".delete", () -> reviewDeletion(service));
             }
             if (bindings.isEmpty()) text(bindingRows, "暂无绑定的手动命令");
             for (McpRegistry.Binding binding : bindings) {
@@ -199,6 +200,37 @@ final class McpSettingsDialog implements AutoCloseable {
         } catch (Exception failure) {
             refresh(failureText(failure, "暂时无法撤销授权"));
         }
+    }
+
+    private void reviewDeletion(McpRegistry.Service service) {
+        if (!idle()) return;
+        McpRegistry.DeleteTarget expected;
+        try {
+            expected = registry.prepareDelete(service);
+        } catch (McpRegistry.Failure failure) {
+            refresh(deletionFailure(failure));
+            return;
+        }
+        AlertDialog confirmation = builder("删除 MCP 服务")
+                .setMessage(target(service) + "\n\n将删除此服务的本机设置、授权、密钥、工具目录和关联斜杠命令。"
+                        + "\n此操作不会向远端发送请求。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("确认删除", (ignored, which) -> {
+                    if (!idle()) return;
+                    try {
+                        registry.delete(expected);
+                        refresh("已删除服务及本机配置");
+                    } catch (McpRegistry.Failure failure) {
+                        refresh(deletionFailure(failure));
+                    }
+                }).create();
+        presenter.accept(confirmation, null);
+    }
+
+    private static String deletionFailure(McpRegistry.Failure failure) {
+        return failure.code() == McpRegistry.Code.CONFIRMATION_REQUIRED
+                ? "服务配置或状态已变化，请重新核对后再删除"
+                : "暂时无法删除服务，请检查本机配置";
     }
 
     private void discover(McpRegistry.Service service) {

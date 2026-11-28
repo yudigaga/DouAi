@@ -41,6 +41,34 @@ public final class McpRegistry {
     public record Service(String id, String label, String endpoint, String protocol) {}
     public record Binding(String alias, String serviceId, String toolName) {}
 
+    public static final class DeleteTarget {
+        private final Path registry;
+        private final Service service;
+        private final String revision;
+        private final String grant;
+
+        private DeleteTarget(Path registry, Registered current) {
+            this.registry = registry;
+            service = current.service();
+            revision = current.revision();
+            grant = current.grant();
+        }
+    }
+
+    public static final class BindingSelection {
+        private final Path registry;
+        private final Bound bound;
+        private final String grant;
+
+        private BindingSelection(Path registry, Bound bound, Registered current) {
+            this.registry = registry;
+            this.bound = bound;
+            grant = current.grant();
+        }
+
+        public Binding binding() { return bound.binding(); }
+    }
+
     /** Public directory fields with a private proof of the locally selected authorization. */
     public static final class PackageEntry {
         private final String name;
@@ -106,7 +134,8 @@ public final class McpRegistry {
                     long deadline, McpClient.Admission admission) throws IOException;
     }
 
-    private record Registered(Service service, String ciphertext, String grant, Map<String, McpClient.Tool> tools) {}
+    private record Registered(Service service, String ciphertext, String grant, Map<String, McpClient.Tool> tools,
+                              String revision) {}
     private record Bound(Binding binding, String fingerprint) {}
     private record Execution(Registered registered, Bound bound, McpClient.Tool tool) {}
     private record State(LinkedHashMap<String, Registered> services, LinkedHashMap<String, Bound> bindings) {
@@ -115,6 +144,7 @@ public final class McpRegistry {
     private interface Edit { void apply(State state) throws Exception; }
 
     private static final Object WRITE_LOCK = new Object();
+    private static final String REGISTRATION_REVISION = "registrationRevision";
     private static final AiCredentialVault.Scope SCOPE = AiCredentialVault.Scope.MCP_SERVER;
     private static final Pattern ID = Pattern.compile("[a-z0-9][a-z0-9_-]{0,47}");
     private static final Pattern ALIAS = Pattern.compile("mcp-[a-z0-9][a-z0-9_-]{0,23}");
@@ -157,7 +187,7 @@ public final class McpRegistry {
     }
 
     McpRegistry(File directory, AiCredentialVault credentials, Rpc rpc) {
-        file = directory.toPath().resolve("mcp-registry.json");
+        file = directory.toPath().resolve("mcp-registry.json").toAbsolutePath().normalize();
         this.credentials = credentials;
         this.rpc = rpc;
     }
@@ -181,6 +211,33 @@ public final class McpRegistry {
             if (available(state, item)) result.add(item.binding());
         }
         return result;
+    }
+
+    /** Takes a stable snapshot even for a currently disarmed alias. */
+    public BindingSelection selectBinding(String alias) throws Failure {
+        if (alias == null) return null;
+        State state = read();
+        Bound bound = state.bindings().get(alias);
+        return bound == null ? null : new BindingSelection(file, bound, state.services().get(bound.binding().serviceId()));
+    }
+
+    public DeleteTarget prepareDelete(Service expected) throws Failure {
+        Registered current = expected == null ? null : read().services().get(expected.id());
+        if (current == null || !current.service().equals(expected)) throw deleteChanged();
+        return new DeleteTarget(file, current);
+    }
+
+    /** Removes the exact confirmed registration and its aliases in one local edit. */
+    public void delete(DeleteTarget expected) throws Failure {
+        if (expected == null || !file.equals(expected.registry)) throw deleteChanged();
+        edit(state -> {
+            String id = expected.service.id();
+            Registered current = state.services().get(id);
+            if (current == null || !current.service().equals(expected.service) || !current.revision().equals(expected.revision)
+                    || !current.grant().equals(expected.grant)) throw deleteChanged();
+            state.services().remove(id);
+            state.bindings().values().removeIf(bound -> id.equals(bound.binding().serviceId()));
+        });
     }
 
     /** Reads only the locally authorized directory. No discover or credential access occurs here. */
@@ -223,10 +280,11 @@ public final class McpRegistry {
             } else if (!ciphertext.isEmpty() && !before.service().label().equals(service.label())) {
                 rejectSecret(decrypt(before), service.label());
             }
+            String revision = UUID.randomUUID().toString();
             if (before != null && sameTarget(service, before.service()) && token.isEmpty()) {
-                state.services().put(service.id(), new Registered(service, ciphertext, before.grant(), before.tools()));
+                state.services().put(service.id(), new Registered(service, ciphertext, before.grant(), before.tools(), revision));
             } else {
-                storeDisarmed(state, service, ciphertext);
+                storeDisarmed(state, service, ciphertext, revision);
             }
         });
     }
@@ -236,14 +294,14 @@ public final class McpRegistry {
             Registered service = current(state, expected);
             if (!service.grant().isEmpty()) return;
             state.services().put(expected.id(), new Registered(service.service(), service.ciphertext(),
-                    UUID.randomUUID().toString(), Collections.emptyMap()));
+                    UUID.randomUUID().toString(), Collections.emptyMap(), service.revision()));
         });
     }
 
     public void revoke(Service expected) throws Failure {
         edit(state -> {
             Registered service = current(state, expected);
-            storeDisarmed(state, service.service(), service.ciphertext());
+            storeDisarmed(state, service.service(), service.ciphertext(), service.revision());
         });
     }
 
@@ -269,7 +327,7 @@ public final class McpRegistry {
             Registered current = authorized(state, expected);
             requireSameGrant(snapshot, current);
             state.services().put(expected.id(), new Registered(current.service(), current.ciphertext(),
-                    current.grant(), verified));
+                    current.grant(), verified, current.revision()));
             state.bindings().replaceAll((alias, bound) -> {
                 if (!expected.id().equals(bound.binding().serviceId())) return bound;
                 McpClient.Tool tool = verified.get(bound.binding().toolName());
@@ -384,7 +442,7 @@ public final class McpRegistry {
     public void applyImport(ImportPreview expected) throws Failure {
         verifyPreview(expected);
         edit(state -> {
-            for (Service service : expected.services()) storeDisarmed(state, service, "");
+            for (Service service : expected.services()) storeDisarmed(state, service, "", UUID.randomUUID().toString());
             for (Binding binding : expected.bindings()) {
                 Bound prior = state.bindings().get(binding.alias());
                 if (prior != null && !prior.binding().serviceId().equals(binding.serviceId())) {
@@ -406,6 +464,16 @@ public final class McpRegistry {
             requireSameGrant(registered, next.registered());
             if (!next.tool().equals(snapshot.tool())) throw reviewTool();
         });
+    }
+
+    /** Runs a manual command only against the binding and grant selected in that turn. */
+    public String executeSelected(BindingSelection expected, String arguments, long deadlineNanos) throws Failure {
+        if (expected == null || !file.equals(expected.registry)) throw reviewTool();
+        JSONObject input = toolArguments(arguments);
+        ensureTime(deadlineNanos);
+        Execution snapshot = admittedSelection(read(), expected);
+        return call(snapshot.registered(), snapshot.tool(), arguments, input, deadlineNanos,
+                () -> admittedSelection(read(), expected));
     }
 
     /** Executes the exact tool selected in the current package after per-call user confirmation. */
@@ -479,15 +547,16 @@ public final class McpRegistry {
                     || !tool.equals(current.tools().get(tool.name()))) return;
             Map<String, McpClient.Tool> tools = new LinkedHashMap<>(current.tools());
             tools.remove(tool.name());
-            state.services().put(expected.id(), new Registered(current.service(), current.ciphertext(), current.grant(), tools));
+            state.services().put(expected.id(), new Registered(current.service(), current.ciphertext(), current.grant(), tools,
+                    current.revision()));
             state.bindings().replaceAll((alias, bound) ->
                     bound.binding().serviceId().equals(expected.id()) && bound.binding().toolName().equals(tool.name())
                             ? new Bound(bound.binding(), "") : bound);
         });
     }
 
-    private static void storeDisarmed(State state, Service service, String ciphertext) {
-        state.services().put(service.id(), new Registered(service, ciphertext, "", Collections.emptyMap()));
+    private static void storeDisarmed(State state, Service service, String ciphertext, String revision) {
+        state.services().put(service.id(), new Registered(service, ciphertext, "", Collections.emptyMap(), revision));
         state.bindings().replaceAll((alias, bound) ->
                 service.id().equals(bound.binding().serviceId()) ? new Bound(bound.binding(), "") : bound);
     }
@@ -507,6 +576,18 @@ public final class McpRegistry {
         }
         Registered service = state.services().get(expected.serviceId());
         return new Execution(service, bound, service.tools().get(expected.toolName()));
+    }
+
+    private static Execution admittedSelection(State state, BindingSelection expected) throws Failure {
+        Execution current = admitted(state, expected.binding());
+        if (!current.bound().equals(expected.bound) || !current.registered().grant().equals(expected.grant)) {
+            throw reviewTool();
+        }
+        return current;
+    }
+
+    private static Failure deleteChanged() {
+        return error(Code.CONFIRMATION_REQUIRED, "服务配置或状态已变化，请重新核对后再删除");
     }
 
     private static Registered current(State state, Service expected) throws Failure {
@@ -627,11 +708,14 @@ public final class McpRegistry {
                 String ciphertext = text(item, "ciphertext");
                 String grant = text(item, "grant");
                 if (ciphertext.length() > 4096 || grant.length() > 36) throw new IOException();
+                String revision = item.has(REGISTRATION_REVISION) ? text(item, REGISTRATION_REVISION) : "";
+                if (item.has(REGISTRATION_REVISION) && !UUID.fromString(revision).toString().equals(revision)) throw new IOException();
                 JSONArray raw = item.getJSONArray("tools");
                 if (raw.length() > MAX_TOOLS) throw new IOException();
                 List<McpClient.Tool> tools = new ArrayList<>();
                 for (int j = 0; j < raw.length(); j++) tools.add(toolFrom(raw.getJSONObject(j)));
-                if (state.services().put(service.id(), new Registered(service, ciphertext, grant, verifiedTools(tools, ""))) != null) {
+                if (state.services().put(service.id(), new Registered(service, ciphertext, grant, verifiedTools(tools, ""),
+                        revision)) != null) {
                     throw new IOException();
                 }
             }
@@ -694,8 +778,10 @@ public final class McpRegistry {
                 tools.put(new JSONObject().put("name", tool.name()).put("title", tool.title())
                         .put("description", tool.description()).put("schema", tool.inputSchema()).put("fingerprint", tool.fingerprint()));
             }
-            services.put(serviceJson(item.service()).put("ciphertext", item.ciphertext())
-                    .put("grant", item.grant()).put("tools", tools));
+            JSONObject row = serviceJson(item.service()).put("ciphertext", item.ciphertext())
+                    .put("grant", item.grant()).put("tools", tools);
+            if (!item.revision().isEmpty()) row.put(REGISTRATION_REVISION, item.revision());
+            services.put(row);
         }
         JSONArray bindings = new JSONArray();
         for (Bound item : state.bindings().values()) bindings.put(bindingJson(item.binding()).put("fingerprint", item.fingerprint()));

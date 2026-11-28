@@ -296,6 +296,86 @@ public final class ModuleSettingsActionSeparationTest {
         assertFalse(registry.isAuthorized(service));
     }
 
+    @Test public void mcpDeleteIsSeparateFromRevokeAndNeedsExplicitConfirmation() throws Exception {
+        McpRegistry registry = McpRegistry.forContext(activity);
+        McpRegistry.Service authorized = new McpRegistry.Service("active-fixture", "已授权工具",
+                "https://active.example.test/mcp", McpClient.MODERN);
+        McpRegistry.Service draft = new McpRegistry.Service("draft-fixture", "待授权工具",
+                "https://draft.example.test/mcp", McpClient.LEGACY);
+        registry.register(authorized, "");
+        registry.register(draft, "");
+        registry.authorize(authorized);
+        View manager = openMcpSettings();
+        assertPresent(manager, "mcp.service.active-fixture.revoke");
+        assertPresent(manager, "mcp.service.draft-fixture.authorize");
+
+        AlertDialog cancel = requestMcpDeletion(manager, authorized.id());
+        TextView message = cancel.findViewById(android.R.id.message);
+        assertNotNull(message);
+        for (String part : List.of(authorized.label(), authorized.endpoint(), "本机设置", "密钥", "工具目录",
+                "关联斜杠命令", "不会向远端发送请求")) {
+            assertTrue(part, message.getText().toString().contains(part));
+        }
+        assertTrue(cancel.getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertTrue(registry.services().containsAll(List.of(authorized, draft)));
+        assertTrue(registry.isAuthorized(authorized));
+
+        confirmMcpDeletion(requestMcpDeletion(manager, draft.id()));
+        assertEquals(List.of(authorized), registry.services());
+        assertNull(manager.findViewWithTag("mcp.service.draft-fixture.delete"));
+        assertPresent(manager, "mcp.service.active-fixture.revoke");
+
+        confirmMcpDeletion(requestMcpDeletion(manager, authorized.id()));
+        assertTrue(registry.services().isEmpty());
+        assertNull(manager.findViewWithTag("mcp.service.active-fixture.revoke"));
+        assertNull(manager.findViewWithTag("mcp.service.active-fixture.delete"));
+    }
+
+    @Test public void mcpStaleDeleteRefreshesTheNewServiceInsteadOfRemovingIt() throws Exception {
+        McpRegistry registry = McpRegistry.forContext(activity);
+        McpRegistry.Service original = new McpRegistry.Service("replace-fixture", "原服务",
+                "https://original.example.test/mcp", McpClient.LEGACY);
+        registry.register(original, "");
+        View manager = openMcpSettings();
+        AlertDialog stale = requestMcpDeletion(manager, original.id());
+
+        McpRegistry.Service replacement = new McpRegistry.Service(original.id(), "已更新的服务",
+                "https://replacement.example.test/mcp", McpClient.MODERN);
+        registry.register(replacement, "");
+        registry.authorize(replacement);
+        confirmMcpDeletion(stale);
+
+        assertEquals(List.of(replacement), registry.services());
+        assertTrue(registry.isAuthorized(replacement));
+        TextView status = manager.findViewWithTag("mcp.status");
+        assertTrue(status.getText().toString().contains("变化"));
+        assertPresent(manager, "mcp.service.replace-fixture.revoke");
+        assertNull(manager.findViewWithTag("mcp.service.replace-fixture.authorize"));
+        AlertDialog updated = requestMcpDeletion(manager, replacement.id());
+        TextView message = updated.findViewById(android.R.id.message);
+        assertTrue(message.getText().toString().contains(replacement.endpoint()));
+    }
+
+    private View openMcpSettings() {
+        assertTrue(option(open("EXTENSION"), "在线 MCP").performClick());
+        return ShadowDialog.getLatestDialog().getWindow().getDecorView();
+    }
+
+    private static AlertDialog requestMcpDeletion(View manager, String serviceId) {
+        String tag = "mcp.service." + serviceId + ".delete";
+        View delete = manager.findViewWithTag(tag);
+        assertNotNull(tag, delete);
+        assertTrue(delete.performClick());
+        return (AlertDialog) ShadowDialog.getLatestDialog();
+    }
+
+    private static void confirmMcpDeletion(AlertDialog confirmation) {
+        assertEquals("确认删除", confirmation.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertTrue(confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+    }
+
     private View open(String category) {
         View row=home.findViewWithTag("settings.category."+category);
         assertNotNull(category,row);

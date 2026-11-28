@@ -45,17 +45,18 @@ public final class AiSkills {
     }
 
     public record Invocation(Command command, String argument, int version,
-                             McpRegistry.Binding mcpBinding, boolean delegated, String revisionId,
+                             McpRegistry.BindingSelection mcpSelection, boolean delegated, String revisionId,
                              AiToolPackages.Call packageCall) {
-        public Invocation(Command command, String argument, int version, McpRegistry.Binding mcpBinding,
+        public Invocation(Command command, String argument, int version, McpRegistry.BindingSelection mcpSelection,
                           boolean delegated, String revisionId) {
-            this(command, argument, version, mcpBinding, delegated, revisionId, null);
+            this(command, argument, version, mcpSelection, delegated, revisionId, null);
         }
-        public Invocation(Command command, String argument, int version, McpRegistry.Binding mcpBinding, boolean delegated) {
-            this(command, argument, version, mcpBinding, delegated, "");
+        public Invocation(Command command, String argument, int version, McpRegistry.BindingSelection mcpSelection,
+                          boolean delegated) {
+            this(command, argument, version, mcpSelection, delegated, "");
         }
         Invocation(Command command, String argument) { this(command, argument, 0, null, false); }
-        public boolean localBuiltIn() { return version == 0 && mcpBinding == null && !delegated && packageCall == null; }
+        public boolean localBuiltIn() { return version == 0 && mcpSelection == null && !delegated && packageCall == null; }
     }
 
     static Invocation packageInvocation(Command command, String argument, AiToolPackages.Call operation) {
@@ -171,10 +172,9 @@ public final class AiSkills {
             if (unavailableReason != null) throw new CommandUnavailable(unavailableReason);
             if (store.mcp() != null && matcher.group(1).startsWith("mcp-")) {
                 try {
-                    for (McpRegistry.Binding binding : store.mcp().bindings()) {
-                        if (binding.alias().equals(matcher.group(1))) {
-                            return new Invocation(mcpCommand(binding), argument, 0, binding, false);
-                        }
+                    McpRegistry.BindingSelection selection = store.mcp().selectBinding(matcher.group(1));
+                    if (selection != null) {
+                        return new Invocation(mcpCommand(selection.binding()), argument, 0, selection, false);
                     }
                 } catch (Exception unavailable) {
                     throw new CommandUnavailable("MCP 绑定无法读取");
@@ -214,10 +214,10 @@ public final class AiSkills {
         if (store != null && !store.enabled()) throw new IllegalStateException("技能已停用");
         if (call.packageCall() != null) return call.packageCall().execute(textExecutor);
         if (CREATION_COMMAND_NAME.equals(call.command().name())) throw new IllegalStateException("请通过 /技能 创建技能");
-        if (call.mcpBinding() != null) {
+        if (call.mcpSelection() != null) {
             if (store == null || store.mcp() == null) throw new IllegalStateException("MCP 绑定不可用");
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            return new SkillResult.Text(store.mcp().execute(call.mcpBinding(), call.argument(), deadline));
+            return new SkillResult.Text(store.mcp().executeSelected(call.mcpSelection(), call.argument(), deadline));
         }
         if (call.localBuiltIn()) return new SkillResult.Text(execute(call));
         if (store == null) throw new IllegalStateException("技能不可用");

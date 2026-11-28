@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -305,6 +306,118 @@ public final class McpRegistryTest {
         assertEquals("{}", fixture.registry.activatePackage(entry, deadline()).get(0).parameterSummary());
     }
 
+    @Test public void deletingAuthorizedServiceIsLocalAndPreservesUnrelatedServiceAndBinding() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.bind();
+        var other = new McpRegistry.Service("other", "别的服务", "https://other.example.test/mcp", McpClient.LEGACY);
+        var otherBinding = new McpRegistry.Binding("mcp-other", other.id(), CHECK.toolName());
+        fixture.registry.register(other, "");
+        fixture.registry.authorize(other);
+        fixture.registry.bind(other, fixture.registry.discover(other, deadline()).get(0), otherBinding.alias());
+
+        fixture.vaultAvailable.set(false);
+        var target = fixture.registry.prepareDelete(ORDERS);
+        fixture.registry.delete(target);
+        assertEquals(List.of(other), fixture.registry.services());
+        assertEquals(List.of(otherBinding), fixture.registry.bindings());
+        assertEquals(List.of(otherBinding), fixture.registry.activeBindings());
+        assertTrue(fixture.registry.isAuthorized(other));
+        assertNull(fixture.registry.selectBinding(CHECK.alias()));
+        assertEquals(List.of(SECRET, ""), fixture.rpc.tokens);
+        assertEquals(0, fixture.rpc.calls);
+        String stored = Files.readString(fixture.directory.toPath().resolve("mcp-registry.json"));
+        assertFalse(stored.contains(ORDERS.endpoint()));
+        assertFalse(stored.contains(CHECK.alias()));
+        assertFalse(fixture.registry.exportJson().contains("registrationRevision"));
+        assertEquals(McpRegistry.Code.CONFIRMATION_REQUIRED,
+                assertThrows(McpRegistry.Failure.class, () -> fixture.registry.delete(target)).code());
+    }
+
+    @Test public void staleDeleteCannotRemoveRenamedIdenticallyResavedOrImportedService() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(ORDERS, "");
+        var beforeLabel = fixture.registry.prepareDelete(ORDERS);
+        var renamed = new McpRegistry.Service(ORDERS.id(), "新名称", ORDERS.endpoint(), ORDERS.protocol());
+        fixture.registry.register(renamed, "");
+        assertEquals(McpRegistry.Code.CONFIRMATION_REQUIRED,
+                assertThrows(McpRegistry.Failure.class, () -> fixture.registry.delete(beforeLabel)).code());
+        assertThrows(McpRegistry.Failure.class, () -> fixture.registry.prepareDelete(ORDERS));
+
+        var beforeIdenticalWrite = fixture.registry.prepareDelete(renamed);
+        fixture.registry.register(renamed, "");
+        assertThrows(McpRegistry.Failure.class, () -> fixture.registry.delete(beforeIdenticalWrite));
+        var beforeImport = fixture.registry.prepareDelete(renamed);
+        fixture.registry.applyImport(fixture.registry.previewImport(fixture.registry.exportJson()));
+        assertThrows(McpRegistry.Failure.class, () -> fixture.registry.delete(beforeImport));
+        assertEquals(List.of(renamed), fixture.registry.services());
+        assertFalse(fixture.registry.isAuthorized(renamed));
+        fixture.registry.delete(fixture.registry.prepareDelete(renamed));
+        assertTrue(fixture.registry.services().isEmpty());
+        assertTrue(fixture.rpc.tokens.isEmpty());
+        assertEquals(0, fixture.rpc.calls);
+    }
+
+    @Test public void rebuildingSameServiceAndAliasDoesNotAuthorizeOldSelections() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.bind();
+        McpRegistry.BindingSelection manual = fixture.registry.selectBinding(CHECK.alias());
+        assertNotNull(manual);
+        assertEquals(CHECK, manual.binding());
+        McpRegistry.PackageEntry entry = fixture.registry.packageCatalog().get(0);
+        McpRegistry.PackageTool packageTool = fixture.registry.activatePackage(entry, deadline()).get(0);
+
+        fixture.registry.delete(fixture.registry.prepareDelete(ORDERS));
+        fixture.bind();
+        int discoveryCount = fixture.rpc.tokens.size();
+        assertThrows(McpRegistry.Failure.class, () -> fixture.registry.executeSelected(manual, "{}", deadline()));
+        assertThrows(McpRegistry.Failure.class, () -> fixture.registry.activatePackage(entry, deadline()));
+        assertThrows(McpRegistry.Failure.class,
+                () -> fixture.registry.executePackageTool(entry, packageTool, "{}", deadline()));
+        assertEquals(discoveryCount, fixture.rpc.tokens.size());
+        assertEquals(0, fixture.rpc.calls);
+        assertEquals("已发货", fixture.registry.executeSelected(fixture.registry.selectBinding(CHECK.alias()), "{}", deadline()));
+        assertEquals(1, fixture.rpc.calls);
+    }
+
+    @Test public void selectedBindingRechecksTheSameRegistrationAtToolAdmission() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.bind();
+        McpRegistry.BindingSelection selected = fixture.registry.selectBinding(CHECK.alias());
+        fixture.rpc.beforeAdmission = () -> {
+            fixture.registry.delete(fixture.registry.prepareDelete(ORDERS));
+            try { fixture.bind(); } catch (Exception unavailable) { throw new IOException(unavailable); }
+        };
+
+        assertThrows(McpRegistry.Failure.class, () -> fixture.registry.executeSelected(selected, "{}", deadline()));
+        assertEquals(List.of(CHECK), fixture.registry.activeBindings());
+        assertEquals(0, fixture.rpc.calls);
+    }
+
+    @Test public void relabellingAServiceDoesNotChangeItsSelectedBindingGrant() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.bind();
+        McpRegistry.BindingSelection selected = fixture.registry.selectBinding(CHECK.alias());
+        var renamed = new McpRegistry.Service(ORDERS.id(), "新名称", ORDERS.endpoint(), ORDERS.protocol());
+        fixture.registry.register(renamed, "");
+
+        assertEquals("已发货", fixture.registry.executeSelected(selected, "{}", deadline()));
+        assertEquals(1, fixture.rpc.calls);
+    }
+
+    @Test public void legacyRecordWithoutRegistrationRevisionStillSupportsLocalDeletion() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.bind();
+        var file = fixture.directory.toPath().resolve("mcp-registry.json");
+        JSONObject document = new JSONObject(Files.readString(file));
+        assertNotNull(document.getJSONArray("services").getJSONObject(0).remove("registrationRevision"));
+        Files.writeString(file, document.toString());
+        assertEquals(CHECK, fixture.registry.selectBinding(CHECK.alias()).binding());
+        fixture.registry.delete(fixture.registry.prepareDelete(ORDERS));
+        assertTrue(fixture.registry.services().isEmpty());
+        assertTrue(fixture.registry.bindings().isEmpty());
+        assertEquals(List.of(SECRET), fixture.rpc.tokens);
+    }
+
     private static long deadline() { return System.nanoTime() + TimeUnit.SECONDS.toNanos(5); }
 
     private static McpClient.Tool tool(String fingerprint) {
@@ -313,11 +426,17 @@ public final class McpRegistryTest {
 
     private final class Fixture {
         final FakeRpc rpc = new FakeRpc();
+        final java.io.File directory;
         final McpRegistry registry;
+        final AtomicBoolean vaultAvailable = new AtomicBoolean(true);
 
         Fixture() throws Exception {
             SecretKey key = KeyGenerator.getInstance("AES").generateKey();
-            registry = new McpRegistry(files.newFolder(), new AiCredentialVault(() -> key), rpc);
+            directory = files.newFolder();
+            registry = new McpRegistry(directory, new AiCredentialVault(() -> {
+                if (!vaultAvailable.get()) throw new AssertionError("No credential access expected");
+                return key;
+            }), rpc);
         }
 
         void bind() throws Exception {
