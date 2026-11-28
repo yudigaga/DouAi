@@ -152,8 +152,12 @@ public final class ModuleSettingsReferenceTest {
         };
         for (String[] reference : references) {
             View page = openCategory(reference[0]);
+            List<String> titles = settingTitles(page);
             assertEquals(reference[0], Arrays.asList(Arrays.copyOfRange(reference, 1, reference.length)),
-                    settingTitles(page));
+                    titles);
+            for (String title : titles) {
+                assertFalse("Help entry for " + reference[0] + " → " + title, HelpContent.search(title).isEmpty());
+            }
             assertEquals(reference[0] + " must open editors from a single row", 0,
                     collect(page, EditText.class).size());
             screen.dismissChildPages();

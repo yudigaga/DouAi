@@ -10,6 +10,8 @@ import android.widget.TextView;
 
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
+import com.douai.module.config.SidebarSettings;
+import com.douai.module.feature.FeedGestureToolsHook;
 
 import org.junit.After;
 import org.junit.Before;
@@ -192,6 +194,15 @@ public final class HelpDialogTest {
         assertFalse(automation.contains("从回复历史或评论历史查看"));
         assertTrue(autoReply.contains("从侧边栏的“回复历史”查看"));
         assertFalse(autoReply.contains("自动回复 → 发送与记录 → 回复历史记录"));
+    }
+
+    @Test public void sidebarAndGestureLabelsAreSearchableInOfflineHelp() {
+        for (SidebarSettings.Entry entry : SidebarSettings.ENTRIES) {
+            assertFalse("Sidebar help for " + entry.id + " · " + entry.title, HelpContent.search(entry.title).isEmpty());
+        }
+        for (String label : FeedGestureToolsHook.ACTION_LABELS) {
+            if (!"无".equals(label)) assertFalse("Gesture help for " + label, HelpContent.search(label).isEmpty());
+        }
     }
 
     @Test public void closingSettingsDismissesTheAboutAndHelpBranch() {
